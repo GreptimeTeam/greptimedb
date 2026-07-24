@@ -23,6 +23,7 @@ use arrow::datatypes::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit};
+use chrono::NaiveDateTime;
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -46,7 +47,10 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, ConvertSqlValueSnafu, DataFusionSnafu, NotSupportedSnafu, Result};
+use crate::error::{
+    self, ConvertSqlValueSnafu, DataFusionSnafu, InternalSnafu, NotSupportedSnafu, Result,
+    TimestampOverflowSnafu,
+};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -174,6 +178,20 @@ struct PrecisionTimestamp<'a> {
     datetime: chrono::NaiveDateTime,
 }
 
+struct StagedTimestamp {
+    datetime: Option<NaiveDateTime>,
+    formatted: String,
+}
+
+impl StagedTimestamp {
+    fn new() -> Self {
+        Self {
+            datetime: None,
+            formatted: String::with_capacity(32),
+        }
+    }
+}
+
 impl<'a> ToMysqlValue for PrecisionTimestamp<'a> {
     fn to_mysql_text<W: std::io::Write>(&self, w: &mut W) -> io::Result<()> {
         self.formatted.to_mysql_text(w)
@@ -209,10 +227,59 @@ impl MysqlResultWriter {
     ) -> Result<()> {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
-        // Reusable buffer for timestamp formatting — avoids one heap allocation per
-        // timestamp value per row.  Cleared and refilled in the Timestamp arm below.
-        let mut format_buf = String::new();
+        let timestamp_indexes = record_batch
+            .columns()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                matches!(column.data_type(), DataType::Timestamp(_, _)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let mut staged_timestamps = Vec::with_capacity(timestamp_indexes.len());
+        staged_timestamps.resize_with(timestamp_indexes.len(), StagedTimestamp::new);
         for i in 0..record_batch.num_rows() {
+            if !timestamp_indexes.is_empty() {
+                for (slot, &column_index) in timestamp_indexes.iter().enumerate() {
+                    let column =
+                        record_batch
+                            .columns()
+                            .get(column_index)
+                            .context(InternalSnafu {
+                                err_msg: "timestamp column index is invalid",
+                            })?;
+                    let staged_timestamp =
+                        staged_timestamps.get_mut(slot).context(InternalSnafu {
+                            err_msg: "timestamp staging slot is missing",
+                        })?;
+                    staged_timestamp.datetime = None;
+                    staged_timestamp.formatted.clear();
+                    if !column.is_null(i) {
+                        let timestamp = datatypes::arrow_array::timestamp_array_value(column, i);
+                        let datetime = timestamp
+                            .to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
+                            .context(TimestampOverflowSnafu {
+                                error: format!(
+                                    "timestamp {} overflow with unit {}",
+                                    timestamp.value(),
+                                    timestamp.unit()
+                                ),
+                            })?;
+                        write!(
+                            &mut staged_timestamp.formatted,
+                            "{}",
+                            datetime.format("%Y-%m-%d %H:%M:%S%.f")
+                        )
+                        .map_err(|_| {
+                            InternalSnafu {
+                                err_msg: "timestamp formatting failed",
+                            }
+                            .build()
+                        })?;
+                        staged_timestamp.datetime = Some(datetime);
+                    }
+                }
+            }
+
             for (j, column) in record_batch.columns().iter().enumerate() {
                 if column.is_null(i) {
                     row_writer.write_col(None::<u8>)?;
@@ -286,28 +353,24 @@ impl MysqlResultWriter {
                         row_writer.write_col(v.to_chrono_date())?;
                     }
                     DataType::Timestamp(_, _) => {
-                        let v = datatypes::arrow_array::timestamp_array_value(column, i);
-                        // Reuse `format_buf` to avoid a per-row heap allocation.
-                        // This mirrors what `Timestamp::as_formatted_string` does
-                        // internally, but writes directly into our pre-allocated buffer.
-                        format_buf.clear();
-                        if let Some(datetime) =
-                            v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
-                        {
-                            let _ = write!(
-                                &mut format_buf,
-                                "{}",
-                                datetime.format("%Y-%m-%d %H:%M:%S%.f")
-                            );
-                            row_writer.write_col(PrecisionTimestamp {
-                                formatted: &format_buf,
-                                datetime,
+                        let slot =
+                            timestamp_indexes
+                                .binary_search(&j)
+                                .ok()
+                                .context(InternalSnafu {
+                                    err_msg: "timestamp column has no staging slot",
+                                })?;
+                        let staged_timestamp =
+                            staged_timestamps.get(slot).context(InternalSnafu {
+                                err_msg: "timestamp staging slot is missing",
                             })?;
-                        } else {
-                            let _ =
-                                write!(&mut format_buf, "[Timestamp{}: {}]", v.unit(), v.value());
-                            row_writer.write_col(&*format_buf)?;
-                        }
+                        let datetime = staged_timestamp.datetime.context(InternalSnafu {
+                            err_msg: "timestamp staging value is missing",
+                        })?;
+                        row_writer.write_col(PrecisionTimestamp {
+                            formatted: staged_timestamp.formatted.as_str(),
+                            datetime,
+                        })?;
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
                         IntervalUnit::YearMonth => {

@@ -21,9 +21,11 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_time::Timestamp;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
+use datatypes::vectors::{Int32Vector, TimestampMicrosecondVector, TimestampSecondVector};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
 use servers::error::Result;
@@ -420,6 +422,309 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
         assert_eq!(expected, &actual.values);
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_out_of_range_timestamp_fails_closed() -> Result<()> {
+    let timestamp = i64::MAX;
+    assert!(
+        Timestamp::new_second(timestamp)
+            .to_chrono_datetime_with_timezone(None)
+            .is_none(),
+        "the target value must be outside Chrono's timestamp range"
+    );
+
+    let (table, schema) = timestamp_table("out_of_range_timestamp", Some(timestamp));
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "out_of_range_timestamp").await;
+    assert_timestamp_overflow(result);
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_out_of_range_timestamp_fails_closed() -> Result<()> {
+    let timestamp = i64::MAX;
+    assert!(
+        Timestamp::new_second(timestamp)
+            .to_chrono_datetime_with_timezone(None)
+            .is_none(),
+        "the target value must be outside Chrono's timestamp range"
+    );
+
+    let (table, schema) = timestamp_table("out_of_range_timestamp", Some(timestamp));
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "out_of_range_timestamp").await;
+    assert_timestamp_overflow(result);
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_timestamp_controls() -> Result<()> {
+    let (table, _) = timestamp_table("in_range_timestamp", Some(0));
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "in_range_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![
+            Value::from(b"7".to_vec()),
+            Value::from(b"1970-01-01 00:00:00".to_vec())
+        ],
+        rows[0].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (table, _) = timestamp_table("null_timestamp", None);
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "null_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![Value::from(b"7".to_vec()), Value::Null],
+        rows[0].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_timestamp_controls() -> Result<()> {
+    let (table, _) = timestamp_table("in_range_timestamp", Some(0));
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "in_range_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 0)),
+        rows[0].as_ref(1)
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (table, _) = timestamp_table("null_timestamp", None);
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "null_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[0].as_ref(1));
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_timestamp_precision_slot_isolation() -> Result<()> {
+    let (result, health_check) = query_mysql_text_protocol(
+        precision_timestamp_table("precision_timestamps"),
+        "SELECT id, ts_a, ts_b FROM precision_timestamps".to_string(),
+    )
+    .await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![
+            Value::from(b"7".to_vec()),
+            Value::from(b"1970-01-01 00:00:00.123456".to_vec()),
+            Value::Null,
+        ],
+        rows[0].values
+    );
+    assert_eq!(
+        vec![
+            Value::from(b"8".to_vec()),
+            Value::Null,
+            Value::from(b"1970-01-01 00:00:00.987654".to_vec()),
+        ],
+        rows[1].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (result, health_check) = query_mysql_binary_protocol(
+        precision_timestamp_table("precision_timestamps"),
+        "SELECT id, ts_a, ts_b FROM precision_timestamps".to_string(),
+    )
+    .await;
+    let rows = result.unwrap();
+    assert_eq!(2, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 123_456)),
+        rows[0].as_ref(1)
+    );
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[0].as_ref(2));
+    assert_eq!(Some(&mysql_async::Value::Int(8)), rows[1].as_ref(0));
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[1].as_ref(1));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 987_654)),
+        rows[1].as_ref(2)
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+fn timestamp_table(table_name: &str, timestamp: Option<i64>) -> (TableRef, Arc<Schema>) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "id",
+            datatypes::prelude::ConcreteDataType::int32_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "ts",
+            datatypes::prelude::ConcreteDataType::timestamp_second_datatype(),
+            true,
+        ),
+    ]));
+    let recordbatch = RecordBatch::new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Vector::from_values(vec![7])) as VectorRef,
+            Arc::new(TimestampSecondVector::from(vec![timestamp])) as VectorRef,
+        ],
+    )
+    .unwrap();
+
+    (MemTable::table(table_name, recordbatch), schema)
+}
+
+fn precision_timestamp_table(table_name: &str) -> TableRef {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "id",
+            datatypes::prelude::ConcreteDataType::int32_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "ts_a",
+            datatypes::prelude::ConcreteDataType::timestamp_microsecond_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            "ts_b",
+            datatypes::prelude::ConcreteDataType::timestamp_microsecond_datatype(),
+            true,
+        ),
+    ]));
+    let recordbatch = RecordBatch::new(
+        schema,
+        vec![
+            Arc::new(Int32Vector::from_values(vec![7, 8])) as VectorRef,
+            Arc::new(TimestampMicrosecondVector::from(vec![Some(123_456), None])) as VectorRef,
+            Arc::new(TimestampMicrosecondVector::from(vec![None, Some(987_654)])) as VectorRef,
+        ],
+    )
+    .unwrap();
+
+    MemTable::table(table_name, recordbatch)
+}
+
+async fn query_timestamp_with_mysql_text_protocol(
+    table: TableRef,
+    table_name: &str,
+) -> (
+    mysql_async::Result<Vec<MysqlTextRow>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    query_mysql_text_protocol(table, format!("SELECT id, ts FROM {table_name}")).await
+}
+
+async fn query_mysql_text_protocol(
+    table: TableRef,
+    query: String,
+) -> (
+    mysql_async::Result<Vec<MysqlTextRow>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    let mut mysql_server = create_mysql_server(table, Default::default()).unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    let result = match connection.query_iter(query).await {
+        Ok(mut result) => result.collect::<MysqlTextRow>().await,
+        Err(error) => Err(error),
+    };
+    let health_check = connection.query_first("SELECT 1").await;
+
+    mysql_server.shutdown().await.unwrap();
+    (result, health_check)
+}
+
+async fn query_timestamp_with_mysql_binary_protocol(
+    table: TableRef,
+    table_name: &str,
+) -> (
+    mysql_async::Result<Vec<Row>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    query_mysql_binary_protocol(table, format!("SELECT id, ts FROM {table_name}")).await
+}
+
+async fn query_mysql_binary_protocol(
+    table: TableRef,
+    query: String,
+) -> (
+    mysql_async::Result<Vec<Row>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    let mut mysql_server = create_mysql_server(table, Default::default()).unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    let result = match connection.prep(query).await {
+        Ok(statement) => connection.exec(statement, ()).await,
+        Err(error) => Err(error),
+    };
+    let health_check = connection.query_first("SELECT 1").await;
+
+    mysql_server.shutdown().await.unwrap();
+    (result, health_check)
+}
+
+fn assert_timestamp_overflow<T>(result: mysql_async::Result<T>) {
+    match result {
+        Err(mysql_async::Error::Server(error)) => {
+            assert_eq!(1210, error.code, "expected ER_WRONG_ARGUMENTS");
+            assert!(
+                error.message.contains("Timestamp overflow"),
+                "expected timestamp overflow marker, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("9223372036854775807"),
+                "expected raw timestamp value, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("Second"),
+                "expected timestamp unit, got: {}",
+                error.message
+            );
+        }
+        Err(error) => panic!("expected a MySQL server timestamp overflow error, got: {error}"),
+        Ok(_) => panic!("out-of-range timestamp must fail closed instead of returning a row"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
