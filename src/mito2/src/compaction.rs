@@ -553,16 +553,20 @@ impl CompactionScheduler {
     }
 
     /// Add ddl request to pending queue.
-    ///
-    /// # Panics
-    /// Panics if region didn't request compaction.
     pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
         debug!(
             "Added pending DDL request for region: {}, ddl: {:?}",
             request.region_id, request.request
         );
-        let status = self.region_status.get_mut(&request.region_id).unwrap();
-        status.queue_ddl(request);
+        if let Some(status) = self.region_status.get_mut(&request.region_id) {
+            // The first queued DDL fences later regular triggers from creating more follow-ups.
+            status.pending_ddl_requests.push(request);
+        } else {
+            warn!(
+                "Failed to add pending DDL request for region: {}, ddl: {:?}, region is not compacting",
+                request.region_id, request.request
+            );
+        }
     }
 
     #[cfg(test)]
@@ -1424,11 +1428,6 @@ impl CompactionStatus {
     fn can_retain_regular_followup(&self) -> bool {
         matches!(self.phase, Some(CompactionPhase::Picking { .. }))
             && self.pending_ddl_requests.is_empty()
-    }
-
-    fn queue_ddl(&mut self, request: SenderDdlRequest) {
-        // The first queued DDL fences later regular triggers from creating more follow-ups.
-        self.pending_ddl_requests.push(request);
     }
 
     /// Merge the waiter to the pending compaction.
