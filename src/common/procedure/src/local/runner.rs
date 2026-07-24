@@ -754,7 +754,10 @@ impl Runner {
             ProcedureState::Done { .. } => Some(EventTrigger::Succeeded),
             ProcedureState::Failed { .. } => Some(EventTrigger::Failed),
             ProcedureState::Poisoned { .. } => Some(EventTrigger::Poisoned),
-            _ => None,
+            ProcedureState::Running => None,
+            // We don't record the prepare rollback state.
+            // The final result will be recorded as ProcedureState::Failed or ProcedureState::Succeeded.
+            ProcedureState::PrepareRollback { .. } => None,
         };
         self.meta.set_state(state);
         if let Some(trigger) = trigger {
