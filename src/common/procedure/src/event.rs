@@ -15,17 +15,21 @@
 use std::any::Any;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::Result;
+use common_event_recorder::event_table::{
+    PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
+    procedure_event_column_schemas,
+};
 use common_time::timestamp::{TimeUnit, Timestamp};
 
 use crate::{EventTrigger, ProcedureId, ProcedureState};
 
-pub const EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME: &str = "procedure_id";
-pub const EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME: &str = "procedure_state";
-pub const EVENTS_TABLE_PROCEDURE_ERROR_COLUMN_NAME: &str = "procedure_error";
-pub const EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME: &str = "procedure_trigger";
+pub const EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME: &str = PROCEDURE_ID_COLUMN.name();
+pub const EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME: &str = PROCEDURE_STATE_COLUMN.name();
+pub const EVENTS_TABLE_PROCEDURE_ERROR_COLUMN_NAME: &str = PROCEDURE_ERROR_COLUMN.name();
+pub const EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME: &str = PROCEDURE_TRIGGER_COLUMN.name();
 
 /// `ProcedureEvent` represents an event emitted by a procedure during its execution lifecycle.
 #[derive(Debug)]
@@ -73,32 +77,7 @@ impl Event for ProcedureEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        let mut schema = vec![
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PROCEDURE_ERROR_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-        ];
+        let mut schema = procedure_event_column_schemas();
         schema.append(&mut self.internal_event.extra_schema());
         schema
     }
@@ -140,11 +119,15 @@ impl Event for ProcedureEvent {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+    use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
     use common_event_recorder::Event;
 
-    use crate::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
+    use crate::{Error, EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 
     #[derive(Debug)]
     struct TestEvent;
@@ -171,6 +154,9 @@ mod tests {
                 Row {
                     values: vec![ValueData::StringValue("test_event2".to_string()).into()],
                 },
+                Row {
+                    values: vec![Value { value_data: None }],
+                },
             ])
         }
 
@@ -180,7 +166,79 @@ mod tests {
     }
 
     #[test]
-    fn test_procedure_event_extra_rows() {
+    fn procedure_event_extra_rows_preserve_envelope_values_and_internal_nulls() {
+        let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let procedure_event = ProcedureEvent::new(
+            procedure_id,
+            Box::new(TestEvent {}),
+            ProcedureState::Running,
+            EventTrigger::Submitted,
+        );
+
+        let procedure_event_extra_rows = procedure_event.extra_rows().unwrap();
+        assert_eq!(
+            procedure_event_extra_rows,
+            vec![
+                Row {
+                    values: vec![
+                        ValueData::StringValue(procedure_id.to_string()).into(),
+                        ValueData::StringValue("Running".to_string()).into(),
+                        ValueData::StringValue(String::new()).into(),
+                        ValueData::StringValue("Submitted".to_string()).into(),
+                        ValueData::StringValue("test_event1".to_string()).into(),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        ValueData::StringValue(procedure_id.to_string()).into(),
+                        ValueData::StringValue("Running".to_string()).into(),
+                        ValueData::StringValue(String::new()).into(),
+                        ValueData::StringValue("Submitted".to_string()).into(),
+                        ValueData::StringValue("test_event2".to_string()).into(),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        ValueData::StringValue(procedure_id.to_string()).into(),
+                        ValueData::StringValue("Running".to_string()).into(),
+                        ValueData::StringValue(String::new()).into(),
+                        ValueData::StringValue("Submitted".to_string()).into(),
+                        Value { value_data: None },
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn procedure_event_extra_rows_include_error_for_failed_state() {
+        let error = Arc::new(Error::external(MockError::new(StatusCode::Unexpected)));
+        let procedure_event = ProcedureEvent::new(
+            ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            Box::new(TestEvent {}),
+            ProcedureState::failed(error.clone()),
+            EventTrigger::Failed,
+        );
+
+        let procedure_event_extra_rows = procedure_event.extra_rows().unwrap();
+
+        assert_eq!(procedure_event_extra_rows.len(), 3);
+        assert_eq!(
+            procedure_event_extra_rows[0].values[1],
+            ValueData::StringValue("Failed".to_string()).into()
+        );
+        assert_eq!(
+            procedure_event_extra_rows[0].values[2],
+            ValueData::StringValue(format!("{error:?}")).into()
+        );
+        assert_eq!(
+            procedure_event_extra_rows[0].values[3],
+            ValueData::StringValue("Failed".to_string()).into()
+        );
+    }
+
+    #[test]
+    fn test_procedure_event_extra_schema() {
         let procedure_event = ProcedureEvent::new(
             ProcedureId::random(),
             Box::new(TestEvent {}),
@@ -188,21 +246,21 @@ mod tests {
             EventTrigger::Submitted,
         );
 
-        let procedure_event_extra_rows = procedure_event.extra_rows().unwrap();
-        assert_eq!(procedure_event_extra_rows.len(), 2);
-        assert_eq!(procedure_event_extra_rows[0].values.len(), 5);
         assert_eq!(
-            procedure_event_extra_rows[0].values[3],
-            ValueData::StringValue("Submitted".to_string()).into()
-        );
-        assert_eq!(
-            procedure_event_extra_rows[0].values[4],
-            ValueData::StringValue("test_event1".to_string()).into()
-        );
-        assert_eq!(procedure_event_extra_rows[1].values.len(), 5);
-        assert_eq!(
-            procedure_event_extra_rows[1].values[4],
-            ValueData::StringValue("test_event2".to_string()).into()
+            procedure_event.extra_schema(),
+            [
+                "procedure_id",
+                "procedure_state",
+                "procedure_error",
+                "procedure_trigger",
+                "test_event_column",
+            ]
+            .map(|column_name| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            })
         );
     }
 

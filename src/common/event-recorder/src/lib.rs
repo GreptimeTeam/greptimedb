@@ -15,6 +15,10 @@
 #![feature(duration_constructors)]
 
 pub mod error;
+pub mod event_table;
 pub mod recorder;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use recorder::*;

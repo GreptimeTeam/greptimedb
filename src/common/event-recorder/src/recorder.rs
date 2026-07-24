@@ -18,12 +18,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-};
+use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
 use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
@@ -38,16 +34,17 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{MismatchedSchemaSnafu, Result};
+use crate::event_table::{PAYLOAD_COLUMN, TIMESTAMP_COLUMN, TYPE_COLUMN, base_column_schemas};
 
 /// The default table name for storing the events.
 pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
 
 /// The column name for the event type.
-pub const EVENTS_TABLE_TYPE_COLUMN_NAME: &str = "type";
+pub const EVENTS_TABLE_TYPE_COLUMN_NAME: &str = TYPE_COLUMN.name();
 /// The column name for the event payload.
-pub const EVENTS_TABLE_PAYLOAD_COLUMN_NAME: &str = "payload";
+pub const EVENTS_TABLE_PAYLOAD_COLUMN_NAME: &str = PAYLOAD_COLUMN.name();
 /// The column name for the event timestamp.
-pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = TIMESTAMP_COLUMN.name();
 
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
@@ -131,31 +128,10 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
 
     // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
     let event = &events[0];
-    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + event.extra_schema().len());
-    schema.extend(vec![
-        ColumnSchema {
-            column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Tag.into(),
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Binary as i32,
-            semantic_type: SemanticType::Field as i32,
-            datatype_extension: Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-            }),
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            ..Default::default()
-        },
-    ]);
-    schema.extend(event.extra_schema());
+    let extra_schema = event.extra_schema();
+    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + extra_schema.len());
+    schema.extend(base_column_schemas());
+    schema.extend(extra_schema);
 
     let mut rows: Vec<Row> = Vec::with_capacity(events.len());
     for event in events {

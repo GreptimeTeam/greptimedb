@@ -15,10 +15,13 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
+use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
+use common_event_recorder::event_table::{
+    CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, column_schemas, nullable_string,
+};
 use serde::Serialize;
 use snafu::ResultExt;
 
@@ -27,9 +30,6 @@ use crate::rpc::ddl::{AlterDatabaseKind, SetDatabaseOption, UnsetDatabaseOption}
 pub(crate) const CREATE_DATABASE_EVENT_TYPE: &str = "create_database";
 pub(crate) const ALTER_DATABASE_EVENT_TYPE: &str = "alter_database";
 pub(crate) const DROP_DATABASE_EVENT_TYPE: &str = "drop_database";
-pub(crate) const CATALOG_NAME_COLUMN: &str = "catalog_name";
-pub(crate) const SCHEMA_NAME_COLUMN: &str = "schema_name";
-
 const PAYLOAD_VERSION: u8 = 1;
 const TTL_OPTION_NAME: &str = "ttl";
 
@@ -220,34 +220,22 @@ impl Event for DatabaseDdlEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        [CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN]
-            .into_iter()
-            .map(|column_name| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
-            .collect()
+        column_schemas([
+            &EVENT_TABLE_CATALOG_NAME_COLUMN,
+            &EVENT_TABLE_SCHEMA_NAME_COLUMN,
+        ])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
         Ok(vec![Row {
             values: vec![
-                nullable_string(&self.catalog_name),
-                nullable_string(&self.schema_name),
+                nullable_string(self.catalog_name.as_deref()),
+                nullable_string(self.schema_name.as_deref()),
             ],
         }])
     }
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-fn nullable_string(value: &Option<String>) -> Value {
-    match value {
-        Some(value) => ValueData::StringValue(value.clone()).into(),
-        None => Value { value_data: None },
     }
 }

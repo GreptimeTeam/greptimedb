@@ -14,13 +14,22 @@
 
 use std::collections::HashMap;
 
-use api::v1::Value;
 use api::v1::value::ValueData;
+use api::v1::{Row, Value};
 use common_event_recorder::Event;
+use common_event_recorder::event_table::{
+    CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN,
+    PROCEDURE_ERROR_COLUMN as EVENT_TABLE_PROCEDURE_ERROR_COLUMN,
+    PROCEDURE_ID_COLUMN as EVENT_TABLE_PROCEDURE_ID_COLUMN,
+    PROCEDURE_STATE_COLUMN as EVENT_TABLE_PROCEDURE_STATE_COLUMN,
+    PROCEDURE_TRIGGER_COLUMN as EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN,
+};
+use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 
 use crate::ddl::event::{
-    ALTER_DATABASE_EVENT_TYPE, CATALOG_NAME_COLUMN, CREATE_DATABASE_EVENT_TYPE,
-    DROP_DATABASE_EVENT_TYPE, DatabaseDdlEvent, SCHEMA_NAME_COLUMN,
+    ALTER_DATABASE_EVENT_TYPE, CREATE_DATABASE_EVENT_TYPE, DROP_DATABASE_EVENT_TYPE,
+    DatabaseDdlEvent,
 };
 use crate::rpc::ddl::{
     AlterDatabaseKind, SetDatabaseOption, SetDatabaseOptions, UnsetDatabaseOption,
@@ -97,6 +106,12 @@ fn test_alter_database_set_and_unset_event_contracts() {
             UnsetDatabaseOption::Other("compaction.type".to_string()),
         ])),
     );
+    assert_event_locator(
+        &unset,
+        ALTER_DATABASE_EVENT_TYPE,
+        Some("greptime"),
+        Some("metrics"),
+    );
     assert_eq!(
         unset.json_payload().unwrap(),
         serde_json::json!({
@@ -138,16 +153,52 @@ fn test_database_lifecycle_events_have_fixed_schema_and_null_intent() {
     ] {
         assert_event_locator(&event, event_type, None, None);
         assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-        assert_eq!(
-            event.extra_rows().unwrap().remove(0).values,
-            vec![Value { value_data: None }, Value { value_data: None }]
-        );
     }
 
     assert_eq!(
         DatabaseDdlEvent::create_lifecycle().extra_schema(),
         DatabaseDdlEvent::create_submitted("c", "s", false, &HashMap::new()).extra_schema()
     );
+}
+
+#[test]
+fn test_database_events_preserve_procedure_envelope_contract() {
+    let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let submitted = ProcedureEvent::new(
+        procedure_id,
+        Box::new(DatabaseDdlEvent::create_submitted(
+            "greptime",
+            "metrics",
+            false,
+            &HashMap::new(),
+        )),
+        ProcedureState::Running,
+        EventTrigger::Submitted,
+    );
+    let lifecycle = ProcedureEvent::new(
+        procedure_id,
+        Box::new(DatabaseDdlEvent::create_lifecycle()),
+        ProcedureState::Done { output: None },
+        EventTrigger::Succeeded,
+    );
+
+    assert_procedure_event_contract(
+        &submitted,
+        CREATE_DATABASE_EVENT_TYPE,
+        "Running",
+        "Submitted",
+        Some("greptime"),
+        Some("metrics"),
+    );
+    assert_procedure_event_contract(
+        &lifecycle,
+        CREATE_DATABASE_EVENT_TYPE,
+        "Done",
+        "Succeeded",
+        None,
+        None,
+    );
+    assert_eq!(lifecycle.json_payload().unwrap(), serde_json::Value::Null);
 }
 
 fn assert_event_locator(
@@ -157,18 +208,73 @@ fn assert_event_locator(
     schema_name: Option<&str>,
 ) {
     assert_eq!(event.event_type(), event_type);
-    let schema = event.extra_schema();
-    assert_eq!(schema.len(), 2);
-    assert_eq!(schema[0].column_name, CATALOG_NAME_COLUMN);
-    assert_eq!(schema[1].column_name, SCHEMA_NAME_COLUMN);
-
-    let row = event.extra_rows().unwrap().remove(0);
     assert_eq!(
-        row.values[0].value_data,
-        catalog_name.map(|value| ValueData::StringValue(value.to_string()))
+        event.extra_schema(),
+        vec![
+            EVENT_TABLE_CATALOG_NAME_COLUMN.column_schema(),
+            EVENT_TABLE_SCHEMA_NAME_COLUMN.column_schema(),
+        ]
     );
     assert_eq!(
-        row.values[1].value_data,
-        schema_name.map(|value| ValueData::StringValue(value.to_string()))
+        event.extra_rows().unwrap(),
+        vec![Row {
+            values: vec![
+                Value {
+                    value_data: catalog_name.map(|value| ValueData::StringValue(value.to_string())),
+                },
+                Value {
+                    value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
+                },
+            ],
+        }]
+    );
+}
+
+fn assert_procedure_event_contract(
+    event: &ProcedureEvent,
+    event_type: &str,
+    procedure_state: &str,
+    procedure_trigger: &str,
+    catalog_name: Option<&str>,
+    schema_name: Option<&str>,
+) {
+    assert_eq!(event.event_type(), event_type);
+    assert_eq!(
+        event.extra_schema(),
+        vec![
+            EVENT_TABLE_PROCEDURE_ID_COLUMN.column_schema(),
+            EVENT_TABLE_PROCEDURE_STATE_COLUMN.column_schema(),
+            EVENT_TABLE_PROCEDURE_ERROR_COLUMN.column_schema(),
+            EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN.column_schema(),
+            EVENT_TABLE_CATALOG_NAME_COLUMN.column_schema(),
+            EVENT_TABLE_SCHEMA_NAME_COLUMN.column_schema(),
+        ]
+    );
+    assert_eq!(
+        event.extra_rows().unwrap(),
+        vec![Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::StringValue(
+                        "00000000-0000-0000-0000-000000000001".to_string(),
+                    )),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue(procedure_state.to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue(String::new())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue(procedure_trigger.to_string())),
+                },
+                Value {
+                    value_data: catalog_name.map(|value| ValueData::StringValue(value.to_string())),
+                },
+                Value {
+                    value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
+                },
+            ],
+        }]
     );
 }
