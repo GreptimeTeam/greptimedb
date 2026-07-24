@@ -145,14 +145,10 @@ impl MetricEngineInner {
         mut request: ScanRequest,
     ) -> Result<ScanRequest> {
         // transform projection
-        let physical_projection = match request.projection_input.as_ref() {
-            Some(projection_input) => {
-                self.transform_projection(
-                    physical_region_id,
-                    logical_region_id,
-                    &projection_input.projection,
-                )
-                .await?
+        let physical_projection = match request.projection.as_ref() {
+            Some(projection) => {
+                self.transform_projection(physical_region_id, logical_region_id, projection)
+                    .await?
             }
             None => {
                 self.default_projection(physical_region_id, logical_region_id)
@@ -160,10 +156,9 @@ impl MetricEngineInner {
             }
         };
 
-        // Rewrite the top-level projection from logical-region schema indices to
-        // physical-region schema indices. `nested_paths` are left unchanged because
-        // they are expressed by column name rather than schema index.
-        request.projection_input.get_or_insert_default().projection = physical_projection;
+        // Rewrite the projection from logical-region schema indices to
+        // physical-region schema indices.
+        request.projection = Some(physical_projection);
 
         request
             .filters
@@ -373,9 +368,9 @@ mod test {
             .unwrap();
 
         // check explicit projection
-        let projection_input = Some(vec![0, 1, 2, 3, 4, 5, 6].into());
+        let projection = Some(vec![0, 1, 2, 3, 4, 5, 6]);
         let scan_req = ScanRequest {
-            projection_input,
+            projection,
             filters: vec![],
             ..Default::default()
         };
@@ -388,7 +383,7 @@ mod test {
             .unwrap();
 
         assert_eq!(
-            scan_req.projection_indices().unwrap(),
+            scan_req.projection.as_deref().unwrap(),
             &[11, 10, 9, 8, 0, 1, 4]
         );
         assert_eq!(scan_req.filters.len(), 1);
@@ -407,7 +402,7 @@ mod test {
             .await
             .unwrap();
         assert_eq!(
-            scan_req.projection_indices().unwrap(),
+            scan_req.projection.as_deref().unwrap(),
             &[11, 10, 9, 8, 0, 1, 4]
         );
     }
