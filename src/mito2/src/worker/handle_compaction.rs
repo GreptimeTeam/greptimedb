@@ -43,7 +43,7 @@ impl<S> RegionWorkerLoop<S> {
         };
         let mut pending_ddls = self
             .compaction_scheduler
-            .accept_compaction_pick_finished(
+            .handle_compaction_pick_finished(
                 request,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
@@ -101,6 +101,7 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
+        // Reject stale terminal results before applying their manifest edit.
         if !self
             .compaction_scheduler
             .is_current_execution(region_id, &request.execution)

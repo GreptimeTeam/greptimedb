@@ -147,6 +147,8 @@ pub(crate) struct PreparedCompaction {
     ttl: TimeToLive,
 }
 
+/// Identifies an accepted compaction attempt and keeps its SST reservations alive.
+/// The plan id fences terminal notifications from superseded attempts.
 #[derive(Debug, Clone)]
 pub(crate) struct CompactionExecution {
     plan_id: u64,
@@ -185,7 +187,8 @@ pub(crate) struct CompactionScheduler {
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
-    /// Scheduler-lifetime identity token for compaction plans and executions.
+    /// Scheduler-wide generation counter for compaction plans and executions.
+    /// It outlives region statuses so close/reopen cannot reuse an old identity.
     next_plan_id: u64,
 }
 
@@ -396,6 +399,9 @@ impl CompactionScheduler {
         Vec::new()
     }
 
+    /// Returns whether a terminal notification belongs to the installed execution.
+    /// Background work may finish after its region status has been replaced, so
+    /// matching the region id alone is insufficient.
     pub(crate) fn is_current_execution(
         &self,
         region_id: RegionId,
@@ -413,6 +419,7 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
+        // A stale finish must not clear the replacement phase or notify its waiters and DDLs.
         if !self.is_current_execution(region_id, execution) {
             return Vec::new();
         }
@@ -498,6 +505,7 @@ impl CompactionScheduler {
         region_id: RegionId,
         execution: &CompactionExecution,
     ) -> Vec<SenderDdlRequest> {
+        // A stale cancellation must not remove a replacement execution's status.
         if !self.is_current_execution(region_id, execution) {
             return Vec::new();
         }
@@ -516,6 +524,7 @@ impl CompactionScheduler {
         execution: &CompactionExecution,
         err: Arc<Error>,
     ) {
+        // A stale failure must not tear down a replacement execution.
         if !self.is_current_execution(region_id, execution) {
             return;
         }
@@ -734,7 +743,7 @@ impl CompactionScheduler {
         })
     }
 
-    pub(crate) async fn accept_compaction_pick_finished(
+    pub(crate) async fn handle_compaction_pick_finished(
         &mut self,
         finished: CompactionPickFinished,
         manifest_ctx: &ManifestContextRef,
@@ -745,6 +754,8 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get(&region_id) else {
             return Vec::new();
         };
+        // Picking runs detached from the worker. Its result may arrive after
+        // close/reopen or replanning installed another Picking phase for this region.
         if !status.is_picking(finished.plan_id) {
             return Vec::new();
         }
@@ -826,17 +837,6 @@ impl CompactionScheduler {
                 .await
             }
         }
-    }
-
-    #[cfg(test)]
-    async fn handle_compaction_pick_finished(
-        &mut self,
-        finished: CompactionPickFinished,
-        manifest_ctx: &ManifestContextRef,
-        schema_metadata_manager: SchemaMetadataManagerRef,
-    ) -> Vec<SenderDdlRequest> {
-        self.accept_compaction_pick_finished(finished, manifest_ctx, schema_metadata_manager)
-            .await
     }
 
     async fn finish_compaction_planning(
@@ -944,6 +944,8 @@ impl CompactionScheduler {
                         }
 
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
+                        // An error may be ambiguous after the remote scheduler consumed
+                        // the notifier. Fence a delayed remote callback from the local fallback.
                         plan_id = Self::next_plan_id(&mut self.next_plan_id);
                         e.waiters
                     }
@@ -2347,7 +2349,7 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .accept_compaction_pick_finished(
+            .handle_compaction_pick_finished(
                 CompactionPickFinished {
                     region_id,
                     plan_id: 7,
@@ -2383,7 +2385,7 @@ mod tests {
 
         followup_finished.result = CompactionPlanningResult::NoPlan;
         let pending_ddls = scheduler
-            .accept_compaction_pick_finished(
+            .handle_compaction_pick_finished(
                 followup_finished,
                 &manifest_ctx,
                 schema_metadata_manager,
