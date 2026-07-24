@@ -1,6 +1,7 @@
 # Compatibility CI version window.
 #
-# The CI job tests this small sliding window of recent released `from`
-# versions against the PR-built `to` binary. Broader historical windows should
-# run in nightly or release-validation workflows.
-from_versions = ["v1.0.0", "v1.1.0"]
+# The generated sliding portion keeps the latest patch in each of the two most
+# recent stable minor lines. Exact =vX.Y.Z `from_range` anchors in case.toml
+# files are also retained so historical compatibility coverage is not dropped.
+# Run .github/scripts/update-compat-versions.py --update after release tags land.
+from_versions = ["v1.0.2", "v1.1.0", "v1.1.1", "v1.1.2", "v1.1.3"]
