@@ -383,18 +383,24 @@ impl CompactionScheduler {
             waiter.send(Ok(0));
         }
 
-        if status.pending_regular.is_some() {
-            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
-            return Vec::new();
-        }
-
-        // If there are pending DDL requests, run them.
+        // A queued DDL was waiting for the current task to terminate; chaining
+        // another compaction ahead of it would delay the DDL by a whole extra
+        // plan/execution cycle, so dispatch the DDLs first.
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
         if !pending_ddl_requests.is_empty() {
+            // The just-finished compaction satisfies any retained regular triggers.
+            for waiter in status.pending_regular.take().unwrap_or_default() {
+                waiter.send(Ok(0));
+            }
             self.region_status.remove(&region_id);
             // If there are pending DDL requests, we should return them to the caller.
             // And skip try to schedule next compaction task.
             return pending_ddl_requests;
+        }
+
+        if status.pending_regular.is_some() {
+            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
+            return Vec::new();
         }
         Vec::new()
     }
@@ -3565,6 +3571,52 @@ mod tests {
         assert_eq!(pending_ddls.len(), 1);
         assert!(!scheduler.region_status.contains_key(&region_id));
         assert_eq!(manual_rx.await.unwrap().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_finished_dispatches_pending_ddl_before_chained_regular() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        // A regular trigger was retained while picking and the region is now
+        // executing; a DDL queued behind the task must be dispatched as soon
+        // as the task finishes instead of waiting for a whole extra cycle.
+        let (regular_tx, regular_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.start_picking(7);
+        status.merge_regular_trigger(OptionOutputTx::from(regular_tx));
+        status.start_local_task();
+        scheduler.region_status.insert(region_id, status);
+
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(pending_ddls.len(), 1);
+        assert_eq!(regular_rx.await.unwrap().unwrap(), 0);
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
