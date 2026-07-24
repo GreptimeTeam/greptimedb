@@ -24,6 +24,7 @@ use std::time::Duration;
 use ahash::RandomState;
 use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
+use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
@@ -585,8 +586,8 @@ impl RangeSelect {
                     others => others,
                 };
 
-                let expr = match &range_expr {
-                    Expr::AggregateFunction(aggr)
+                let expr = match get_aggr_func(range_expr) {
+                    Some(aggr)
                         if (aggr.func.name() == "last_value"
                             || aggr.func.name() == "first_value") =>
                     {
@@ -632,7 +633,7 @@ impl RangeSelect {
                             .alias(name)
                             .build()
                     }
-                    Expr::AggregateFunction(aggr) => {
+                    Some(aggr) => {
                         let order_by = if !aggr.params.order_by.is_empty() {
                             aggr.params
                                 .order_by
@@ -664,7 +665,7 @@ impl RangeSelect {
                             .alias(name)
                             .build()
                     }
-                    _ => Err(DataFusionError::Plan(format!(
+                    None => Err(DataFusionError::Plan(format!(
                         "Unexpected Expr: {} in RangeSelect",
                         range_fn.expr
                     ))),
