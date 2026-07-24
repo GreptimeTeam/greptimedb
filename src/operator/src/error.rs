@@ -232,6 +232,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid entity semantic option, reason: {}", reason))]
+    InvalidEntitySemanticOption {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
@@ -337,6 +344,13 @@ pub enum Error {
 
     #[snafu(display("Schema `{name}` is read-only"))]
     SchemaReadOnly {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Table `{name}` is read-only"))]
+    TableReadOnly {
         name: String,
         #[snafu(implicit)]
         location: Location,
@@ -945,6 +959,7 @@ impl ErrorExt for Error {
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
+            | Error::InvalidEntitySemanticOption { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
@@ -984,7 +999,8 @@ impl ErrorExt for Error {
             }
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
-            | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
+            | Error::SchemaReadOnly { .. }
+            | Error::TableReadOnly { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),

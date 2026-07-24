@@ -7,9 +7,13 @@ create database information_schema;
 select *
 from information_schema.tables
 where table_name != 'scripts'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
-select * from information_schema.columns order by table_schema, table_name, column_name;
+select *
+from information_schema.columns
+where table_schema != 'greptime_private'
+order by table_schema, table_name, column_name;
 
 select table_schema, table_name from information_schema.tables order by table_name limit 5;
 
@@ -49,7 +53,7 @@ order by table_name;
 
 select table_name
 from information_schema.tables
-where table_schema not in ('my_db', 'information_schema', 'pg_catalog')
+where table_schema not in ('my_db', 'information_schema', 'pg_catalog', 'greptime_private')
 order by table_name;
 
 select table_catalog, table_schema, table_name, table_type, engine
@@ -58,6 +62,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
 select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
@@ -66,6 +71,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name, column_name;
 
 -- test query filter for columns --
@@ -84,15 +90,15 @@ drop schema my_db;
 use information_schema;
 
 -- test query filter for key_column_usage --
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db' and TABLE_SCHEMA != 'greptime_private';
 
 -- schemata --
 
@@ -109,7 +115,7 @@ select count(*) from build_info;
 
 desc table key_column_usage;
 
-select * from key_column_usage;
+select * from key_column_usage where table_schema != 'greptime_private';
 
 -- tables not implemented
 DESC TABLE COLUMN_PRIVILEGES;

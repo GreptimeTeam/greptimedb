@@ -14,6 +14,7 @@
 
 pub mod builder;
 mod dashboard;
+mod entity_graph;
 mod grpc;
 mod influxdb;
 mod jaeger;

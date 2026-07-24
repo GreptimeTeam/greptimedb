@@ -9,6 +9,7 @@ Error: 1004(InvalidArguments), Schema information_schema already exists
 select *
 from information_schema.tables
 where table_name != 'scripts'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
 +++++++++++++++++++++++++
@@ -56,7 +57,10 @@ order by table_schema, table_name;
 |greptime|public|numbers|LOCALTEMPORARY|2|0|0|0|0|0|test_engine|11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 +++++++++++++++++++++++++
 
-select * from information_schema.columns order by table_schema, table_name, column_name;
+select *
+from information_schema.columns
+where table_schema != 'greptime_private'
+order by table_schema, table_name, column_name;
 
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+---------------------+---------------+----------------+-------------+---------------------+----------------+--------+
 | table_catalog | table_schema       | table_name                            | column_name                       | ordinal_position | character_maximum_length | character_octet_length | numeric_precision | numeric_scale | datetime_precision | character_set_name | collation_name | column_key | extra | privileges    | generation_expression | greptime_data_type   | data_type           | semantic_type | column_default | is_nullable | column_type         | column_comment | srs_id |
@@ -629,7 +633,7 @@ order by table_name;
 
 select table_name
 from information_schema.tables
-where table_schema not in ('my_db', 'information_schema', 'pg_catalog')
+where table_schema not in ('my_db', 'information_schema', 'pg_catalog', 'greptime_private')
 order by table_name;
 
 +------------+
@@ -644,6 +648,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name;
 
 +---------------+--------------+------------+------------+--------+
@@ -658,6 +663,7 @@ where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
   and table_schema != 'pg_catalog'
+  and table_schema != 'greptime_private'
 order by table_schema, table_name, column_name;
 
 +---------------+--------------+------------+-------------+--------------+---------------+
@@ -695,12 +701,12 @@ use information_schema;
 Affected Rows: 0
 
 -- test query filter for key_column_usage --
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
@@ -708,12 +714,12 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        | dense               |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX' and TABLE_SCHEMA != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |
@@ -721,7 +727,7 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 | def                | public            | PRIMARY         | def           | greptime           | public       | numbers    | number      | 1                |                               |                         |                       |                        | dense               |
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 
-select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db' and TABLE_SCHEMA != 'greptime_private';
 
 ++
 ++
@@ -800,7 +806,7 @@ desc table key_column_usage;
 | greptime_index_type           | String |     | YES  |         | FIELD         |
 +-------------------------------+--------+-----+------+---------+---------------+
 
-select * from key_column_usage;
+select * from key_column_usage where table_schema != 'greptime_private';
 
 +--------------------+-------------------+-----------------+---------------+--------------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+---------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | real_table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name | greptime_index_type |

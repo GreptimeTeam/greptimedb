@@ -17,7 +17,10 @@ DESC TABLE TABLE_CONSTRAINTS;
 | enforced           | String |     | NO   |         | FIELD         |
 +--------------------+--------+-----+------+---------+---------------+
 
-SELECT * FROM TABLE_CONSTRAINTS ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+SELECT *
+FROM TABLE_CONSTRAINTS
+WHERE TABLE_SCHEMA != 'greptime_private'
+ORDER BY TABLE_NAME, CONSTRAINT_NAME;
 
 +--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
 | constraint_catalog | constraint_schema | constraint_name | table_schema | table_name | constraint_type | enforced |
@@ -37,7 +40,10 @@ use INFORMATION_SCHEMA;
 
 Affected Rows: 0
 
-SELECT * FROM TABLE_CONSTRAINTS ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+SELECT *
+FROM TABLE_CONSTRAINTS
+WHERE TABLE_SCHEMA != 'greptime_private'
+ORDER BY TABLE_NAME, CONSTRAINT_NAME;
 
 +--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
 | constraint_catalog | constraint_schema | constraint_name | table_schema | table_name | constraint_type | enforced |

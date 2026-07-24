@@ -31,16 +31,16 @@ use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
-use servers::otlp::trace::TraceAuxData;
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
+use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
 use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
-    SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_TRACE_CONVENTIONS,
-    SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE, SOURCE_OPENTELEMETRY,
-    TABLE_DATA_MODEL_TRACE_V1,
+    SEMANTIC_ENTITY_SERVICE_ID, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
+    SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
 };
 
 use crate::instance::Instance;
@@ -842,6 +842,9 @@ impl Instance {
             let mut c = (*ctx).clone();
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_TRACE);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            // `service_name` is a tag column in both trace models, so the main span
+            // table declares the logical `service` entity (Layer 1 auto-stamp).
+            c.set_extension(SEMANTIC_ENTITY_SERVICE_ID, SERVICE_NAME_COLUMN);
             if is_trace_v1_model {
                 c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
                 c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
