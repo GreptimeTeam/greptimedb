@@ -20,6 +20,7 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
+use common_error::ext::ErrorExt;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::{EnvVars, REGION_STATISTIC_KEY};
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
@@ -406,6 +407,9 @@ impl HeartbeatTask {
                                 sleep.as_mut().reset(Instant::now());
                             }
                             Err(e) => {
+                                exit_if_non_retryable_reconnect_error(&e, |code| {
+                                    std::process::exit(code)
+                                });
                                 // Before the META_LEASE_SECS expires,
                                 // any retries are meaningless, it always reads the old meta leader address.
                                 // Triggers to retry after retry_interval from Metasrv config.
@@ -458,5 +462,46 @@ impl HeartbeatTask {
         }
 
         Ok(())
+    }
+}
+
+fn exit_if_non_retryable_reconnect_error(error: &error::Error, exit: impl FnOnce(i32)) {
+    if !error.is_retryable() {
+        error!(error; "Non-retryable error while reconnecting to metasrv, exiting process");
+        exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::storage::RegionId;
+
+    use super::*;
+
+    #[test]
+    fn test_gc_config_mismatch_exits_process_on_reconnect() {
+        let error = error::GcConfigMismatchSnafu {
+            metasrv_gc_enabled: true,
+            datanode_gc_enabled: false,
+        }
+        .build();
+        let mut exit_code = None;
+
+        exit_if_non_retryable_reconnect_error(&error, |code| exit_code = Some(code));
+
+        assert_eq!(Some(1), exit_code);
+    }
+
+    #[test]
+    fn test_retryable_reconnect_error_does_not_exit_process() {
+        let error = error::RegionBusySnafu {
+            region_id: RegionId::new(1024, 1),
+        }
+        .build();
+        let mut exit_called = false;
+
+        exit_if_non_retryable_reconnect_error(&error, |_| exit_called = true);
+
+        assert!(!exit_called);
     }
 }
