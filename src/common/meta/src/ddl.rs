@@ -43,6 +43,7 @@ pub mod drop_database;
 pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
+pub(crate) mod flow_event;
 pub mod flow_meta;
 pub mod purge_dropped_table;
 pub mod table_meta;

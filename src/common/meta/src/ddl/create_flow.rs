@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
@@ -38,6 +39,7 @@ use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
+use crate::ddl::flow_event::{CreateFlowEventIntent, FlowDdlEvent};
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
@@ -206,7 +208,16 @@ impl CreateFlowProcedure {
         }
 
         if self.data.flow_id.is_none() {
-            self.allocate_flow_id().await?;
+            if self.data.is_pending() {
+                self.data.flow_id = Some(
+                    self.context
+                        .flow_metadata_allocator
+                        .allocate_flow_id()
+                        .await?,
+                );
+            } else {
+                self.allocate_flow_id().await?;
+            }
         }
         self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
 
@@ -400,6 +411,37 @@ impl Procedure for CreateFlowProcedure {
             CatalogLock::Read(catalog_name).into(),
             FlowNameLock::new(catalog_name, flow_name).into(),
         ])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => FlowDdlEvent::create_submitted(
+                &self.data.task.catalog_name,
+                &self.data.flow_context.schema,
+                &self.data.task.flow_name,
+                CreateFlowEventIntent {
+                    or_replace: self.data.task.or_replace,
+                    create_if_not_exists: self.data.task.create_if_not_exists,
+                    expire_after: self.data.task.expire_after,
+                    eval_interval_secs: self.data.task.eval_interval_secs,
+                },
+            ),
+            EventTrigger::Succeeded => {
+                let flow_id = match ctx.lifecycle_state {
+                    ProcedureState::Done {
+                        output: Some(output),
+                    } => output
+                        .downcast_ref::<FlowId>()
+                        .copied()
+                        .or(self.data.flow_id),
+                    _ => self.data.flow_id,
+                };
+                FlowDdlEvent::create_succeeded(flow_id)
+            }
+            _ => FlowDdlEvent::create_lifecycle(),
+        };
+
+        Some(Box::new(event))
     }
 }
 

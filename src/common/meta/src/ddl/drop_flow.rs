@@ -21,7 +21,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use futures::future::join_all;
@@ -31,6 +32,7 @@ use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
+use crate::ddl::flow_event::FlowDdlEvent;
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::flow_name::FlowName;
@@ -218,6 +220,20 @@ impl Procedure for DropFlowProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => FlowDdlEvent::drop_submitted(
+                &self.data.task.catalog_name,
+                &self.data.task.flow_name,
+                self.data.task.flow_id,
+                self.data.task.drop_if_exists,
+            ),
+            _ => FlowDdlEvent::drop_lifecycle(),
+        };
+
+        Some(Box::new(event))
     }
 }
 
