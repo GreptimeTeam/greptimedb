@@ -256,15 +256,24 @@ pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         }
         .fail();
     };
-    let Expr::Value(value) = var_value else {
-        return NotSupportedSnafu {
-            feat: "Set variable value must be a value",
+    let intervalstyle = match var_value {
+        Expr::Identifier(Ident {
+            value,
+            quote_style: _,
+            span: _,
+        }) => PGIntervalStyle::try_from(value.as_str()).context(InvalidConfigValueSnafu)?,
+        Expr::Value(value) => {
+            PGIntervalStyle::try_from(&value.value).context(InvalidConfigValueSnafu)?
         }
-        .fail();
+        _ => {
+            return NotSupportedSnafu {
+                feat: "Set variable value must be a value",
+            }
+            .fail();
+        }
     };
-    ctx.configuration_parameter().set_pg_intervalstyle_format(
-        PGIntervalStyle::try_from(&value.value).context(InvalidConfigValueSnafu)?,
-    );
+    ctx.configuration_parameter()
+        .set_pg_intervalstyle_format(intervalstyle);
     Ok(())
 }
 

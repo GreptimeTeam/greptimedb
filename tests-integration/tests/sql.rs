@@ -1160,6 +1160,12 @@ pub async fn test_postgres_intervalstyle(store_type: StorageType) {
     let client = validate_intervalstyle(client, "postgres", true).await;
     let client = validate_intervalstyle(client, "postgres_verbose", true).await;
     let client = validate_intervalstyle(client, "invalid_style", false).await;
+    assert!(
+        client
+            .simple_query("SET INTERVALSTYLE = postgres")
+            .await
+            .is_ok()
+    );
 
     let expected_formats: HashMap<&str, &str> = HashMap::from([
         ("iso_8601", "P1DT2H3M"),
