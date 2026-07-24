@@ -30,23 +30,30 @@ DEFAULT_CASES = [
     "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
     "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
     "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
-    "tests/perf/query_cases/promql_pushdown_7913/case.toml",
-    "tests/perf/query_cases/analyze_verbose_many_files/case.toml",
-    "tests/perf/query_cases/sql_topk_order_by/case.toml",
-    "tests/perf/query_cases/sql_aggregate_order_by/case.toml",
-    "tests/perf/query_cases/sql_join_filter_order/case.toml",
 ]
+
+HEAVY_CASES = [
+    "tests/perf/query_cases/prom_remote_write_7913/case.toml",
+]
+
+CASE_GROUPS = {
+    "all": DEFAULT_CASES,
+    "heavy": HEAVY_CASES,
+}
 
 
 def split_cases(values: list[str]) -> list[str]:
     tokens: list[str] = []
     for value in values:
         tokens.extend(part for part in re.split(r"[\s,]+", value.strip()) if part)
-    if not tokens or tokens == ["all"]:
+    if not tokens:
         return DEFAULT_CASES.copy()
-    if "all" in tokens:
-        raise ValueError("'all' cannot be mixed with explicit case paths")
-    return list(dict.fromkeys(tokens))
+    if "all" in tokens and len(tokens) > 1:
+        raise ValueError("'all' cannot be mixed with other case selectors")
+    cases: list[str] = []
+    for token in tokens:
+        cases.extend(CASE_GROUPS.get(token, [token]))
+    return list(dict.fromkeys(cases))
 
 
 def parse_bool(value: str) -> bool:
@@ -149,7 +156,7 @@ def write_summary(args: argparse.Namespace, reports: list[Path]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cases", action="append", help="'all' or comma/space separated case paths")
+    parser.add_argument("--cases", action="append", help="'all', 'heavy', or comma/space separated case paths")
     parser.add_argument("--base-src", type=Path, default=Path("base-src"))
     parser.add_argument("--candidate-src", type=Path, default=Path("candidate-src"))
     parser.add_argument("--base-bin", type=Path, default=configured_path(os.environ.get("BASE_BIN")))

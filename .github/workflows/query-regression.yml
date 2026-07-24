@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       case:
-        description: Query perf case path(s) in candidate checkout, or all
+        description: Query perf case path(s) in candidate checkout, all, or heavy
         required: false
         type: string
         default: all
@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       case:
-        description: Query perf case path(s) in candidate checkout, or all
+        description: Query perf case path(s) in candidate checkout, all, or heavy
         required: true
         default: all
       base_ref:
@@ -86,8 +86,8 @@ jobs:
       ${{ github.event_name != 'pull_request' ||
            (github.event_name == 'pull_request' &&
             !github.event.pull_request.draft &&
-            contains(github.event.pull_request.labels.*.name, 'query-regression') &&
-            (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
+            (github.event.label.name == 'query-regression' ||
+             github.event.label.name == 'heavy-regression')) }}
     runs-on: ${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
     concurrency:
@@ -134,7 +134,7 @@ jobs:
 
           fail_closed() {
             printf '%s\n' \
-              "PR changed or merge result unavailable; maintainer must remove and re-add query-regression after reviewing current revision. $1" >&2
+              "PR changed or merge result unavailable; maintainer must remove and re-add the regression label after reviewing current revision. $1" >&2
             exit 1
           }
 
@@ -558,9 +558,11 @@ jobs:
           git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
-      - name: Test query regression runner lifecycle
+      - name: Test query regression runner helpers
         working-directory: src
-        run: uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
+        run: |
+          uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
+          uv run --no-project python tests/perf/test_query_regression_case_selection.py
 
       - name: Build candidate greptime and fixture generators
         working-directory: src
@@ -586,11 +588,11 @@ jobs:
       - name: Run query regression
         id: run
         env:
-          CASE_PATHS: ${{ github.event_name == 'pull_request' && 'all' || inputs.case }}
+          CASE_PATHS: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy' || 'all') || inputs.case }}
           HTTP_TIMEOUT: ${{ github.event_name == 'pull_request' && '300' || inputs.http_timeout }}
           ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CASE_NAME: ${{ github.event_name == 'pull_request' && 'default case set' || inputs.case }}
+          CASE_NAME: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy case set' || 'default case set') || inputs.case }}
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
