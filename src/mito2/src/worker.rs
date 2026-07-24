@@ -1418,13 +1418,6 @@ impl WorkerListener {
         }
     }
 
-    pub(crate) fn on_compaction_schedule_attempt(&self, _region_id: RegionId) {
-        #[cfg(any(test, feature = "test"))]
-        if let Some(listener) = &self.listener {
-            listener.on_compaction_schedule_attempt(_region_id);
-        }
-    }
-
     pub(crate) async fn on_compaction_pick_begin(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {

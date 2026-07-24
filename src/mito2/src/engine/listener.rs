@@ -71,9 +71,6 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the compaction is scheduled.
     fn on_compaction_scheduled(&self, _region_id: RegionId) {}
 
-    /// Notifies the listener immediately before a worker asks the scheduler for compaction.
-    fn on_compaction_schedule_attempt(&self, _region_id: RegionId) {}
-
     /// Notifies the listener immediately before compaction planning invokes the picker.
     async fn on_compaction_pick_begin(&self, _region_id: RegionId) {}
 
@@ -111,9 +108,6 @@ pub struct CompactionPlanningGate {
     entered: Notify,
     cancel_requested: Notify,
     permits: Semaphore,
-    invocation_count: AtomicUsize,
-    schedule_attempted: Notify,
-    schedule_attempt_count: AtomicUsize,
     commit_armed: AtomicBool,
     commit_entered: Notify,
     commit_permits: Semaphore,
@@ -187,9 +181,6 @@ impl CompactionPlanningGate {
             entered: Notify::new(),
             cancel_requested: Notify::new(),
             permits: Semaphore::new(0),
-            invocation_count: AtomicUsize::new(0),
-            schedule_attempted: Notify::new(),
-            schedule_attempt_count: AtomicUsize::new(0),
             commit_armed: AtomicBool::new(false),
             commit_entered: Notify::new(),
             commit_permits: Semaphore::new(0),
@@ -212,16 +203,6 @@ impl CompactionPlanningGate {
 
     pub async fn wait_until_cancel_requested(&self) {
         self.cancel_requested.notified().await;
-    }
-
-    pub async fn wait_until_schedule_attempts(&self, expected: usize) {
-        while self.schedule_attempt_count() < expected {
-            self.schedule_attempted.notified().await;
-        }
-    }
-
-    pub fn schedule_attempt_count(&self) -> usize {
-        self.schedule_attempt_count.load(Ordering::Relaxed)
     }
 
     pub fn arm_commit(self: &Arc<Self>) -> CompactionCommitGateGuard {
@@ -250,10 +231,6 @@ impl CompactionPlanningGate {
         self.permits.add_permits(1);
     }
 
-    pub fn invocation_count(&self) -> usize {
-        self.invocation_count.load(Ordering::Relaxed)
-    }
-
     fn release_commit(&self) {
         self.commit_permits.add_permits(1);
     }
@@ -265,19 +242,11 @@ impl CompactionPlanningGate {
 
 #[async_trait]
 impl EventListener for CompactionPlanningGate {
-    fn on_compaction_schedule_attempt(&self, region_id: RegionId) {
-        if region_id == self.region_id {
-            self.schedule_attempt_count.fetch_add(1, Ordering::Relaxed);
-            self.schedule_attempted.notify_one();
-        }
-    }
-
     async fn on_compaction_pick_begin(&self, region_id: RegionId) {
         if region_id != self.region_id {
             return;
         }
 
-        self.invocation_count.fetch_add(1, Ordering::Relaxed);
         if !self.armed.swap(false, Ordering::Relaxed) {
             return;
         }
@@ -786,22 +755,5 @@ impl EventListener for GateIndexBuildListener {
         self.abort_count.fetch_add(1, Ordering::Relaxed);
         self.abort_notify.notify_one();
         self.stop_notify.notify_one();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_compaction_planning_gate_counts_every_matching_callback() {
-        let region_id = RegionId::new(1, 1);
-        let gate = CompactionPlanningGate::new(region_id);
-
-        gate.on_compaction_pick_begin(region_id).await;
-        gate.on_compaction_pick_begin(RegionId::new(2, 1)).await;
-        gate.on_compaction_pick_begin(region_id).await;
-
-        assert_eq!(2, gate.invocation_count());
     }
 }

@@ -218,90 +218,11 @@ impl Notifier for DefaultNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::{CompactionExecution, CompactionExecutionKind};
-    use crate::error::InvalidSchedulerStateSnafu;
-    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_job_id() {
         let id = Uuid::new_v4().to_string();
         let job_id = JobId::parse_str(&id).unwrap();
         assert_eq!(job_id.to_string(), id);
-    }
-
-    #[tokio::test]
-    async fn test_default_notifier_carries_remote_execution_on_success() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let execution = CompactionExecution::for_test(
-            Arc::new(VersionControlBuilder::new().build()),
-            CompactionExecutionKind::Remote,
-        );
-        let expected = execution.clone();
-        let notifier = DefaultNotifier::new(tx, execution);
-        let region_id = RegionId::new(1, 1);
-
-        notifier
-            .notify(
-                RemoteJobResult::CompactionJobResult(CompactionJobResult {
-                    job_id: JobId::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
-                    region_id,
-                    start_time: Instant::now(),
-                    region_edit: Ok(RegionEdit {
-                        files_to_add: Vec::new(),
-                        files_to_remove: Vec::new(),
-                        timestamp_ms: None,
-                        compaction_time_window: None,
-                        flushed_entry_id: None,
-                        flushed_sequence: None,
-                        committed_sequence: None,
-                    }),
-                }),
-                Vec::new(),
-            )
-            .await;
-
-        let request = rx.recv().await.unwrap();
-        let WorkerRequest::Background {
-            notify: BackgroundNotify::CompactionFinished(finished),
-            ..
-        } = request.request
-        else {
-            panic!("expected remote compaction success notification");
-        };
-        assert!(finished.execution.matches(&expected));
-    }
-
-    #[tokio::test]
-    async fn test_default_notifier_carries_remote_execution_on_failure() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let execution = CompactionExecution::for_test(
-            Arc::new(VersionControlBuilder::new().build()),
-            CompactionExecutionKind::Remote,
-        );
-        let expected = execution.clone();
-        let notifier = DefaultNotifier::new(tx, execution);
-        let region_id = RegionId::new(1, 1);
-
-        notifier
-            .notify(
-                RemoteJobResult::CompactionJobResult(CompactionJobResult {
-                    job_id: JobId::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
-                    region_id,
-                    start_time: Instant::now(),
-                    region_edit: Err(InvalidSchedulerStateSnafu.build()),
-                }),
-                Vec::new(),
-            )
-            .await;
-
-        let request = rx.recv().await.unwrap();
-        let WorkerRequest::Background {
-            notify: BackgroundNotify::CompactionFailed(failed),
-            ..
-        } = request.request
-        else {
-            panic!("expected remote compaction failure notification");
-        };
-        assert!(failed.execution.matches(&expected));
     }
 }

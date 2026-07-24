@@ -207,22 +207,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_base::Plugins;
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
     use store_api::storage::{FileId, RegionId};
 
-    use crate::cache::CacheManager;
-    use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
-    use crate::compaction::picker::Picker;
+    use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
-    use crate::config::MitoConfig;
     use crate::region::options::RegionOptions;
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
-    use crate::test_util::scheduler_util::SchedulerEnv;
 
     fn build_version(
         files: &[(FileId, i64, i64, Level)],
@@ -269,33 +264,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_pick_expired_ssts_without_marking_compacting() {
+    #[test]
+    fn test_pick_expired_ssts_without_marking_compacting() {
         let picker = WindowedCompactionPicker::new(None);
         let files = vec![(FileId::random(), 0, 10, 0)];
         let version = build_version(&files, Some(Duration::from_millis(1)));
-        let env = SchedulerEnv::new().await;
-        let manifest_ctx = env.mock_manifest_context(version.metadata.clone()).await;
-        let compaction_region = CompactionRegion {
-            region_id: version.metadata.region_id,
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: version.metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer,
-            manifest_ctx,
-            current_version: version,
-            file_purger: None,
-            ttl: None,
-            max_parallelism: 1,
-            plugins: Plugins::new(),
-        };
+        let (outputs, expired_ssts, _) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(12),
+        );
 
-        let output = picker.pick(&compaction_region).unwrap();
-
-        assert!(output.outputs.is_empty());
-        assert!(!output.expired_ssts.is_empty());
-        assert!(output.expired_ssts.iter().all(|file| !file.compacting()));
+        assert!(outputs.is_empty());
+        assert_eq!(1, expired_ssts.len());
+        assert!(expired_ssts.iter().all(|file| !file.compacting()));
     }
 
     const HOUR: i64 = 60 * 60 * 1000;

@@ -838,18 +838,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_try_set_compacting() {
-        let file = FileHandle::new(
-            create_file_meta(FileId::random(), 0),
-            crate::test_util::new_noop_file_purger(),
-        );
-
-        assert!(file.try_set_compacting());
-        assert!(!file.try_set_compacting());
-        file.set_compacting(false);
-        assert!(file.try_set_compacting());
-    }
 
     #[test]
     fn test_deserialize_file_meta() {

@@ -80,7 +80,6 @@ impl<S> RegionWorkerLoop<S> {
         };
         COMPACTION_REQUEST_COUNT.inc();
         let parallelism = req.parallelism.unwrap_or(1) as usize;
-        self.listener.on_compaction_schedule_attempt(region_id);
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
             req.options,
@@ -250,8 +249,6 @@ impl<S> RegionWorkerLoop<S> {
                 "minimal compaction interval time {:?} has passed, scheduling next compaction",
                 self.config.min_compaction_interval
             );
-            self.listener
-                .on_compaction_schedule_attempt(region.region_id);
             match self.compaction_scheduler.schedule_compaction(
                 region.region_id,
                 compact_request::Options::Regular(Default::default()),

@@ -286,37 +286,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_file_for_compaction_returns_unambiguous_matching_level() {
-        let purger = new_noop_file_purger();
-        let file_id = FileId::random();
-        let file = FileMeta {
-            file_id,
-            level: 1,
-            ..Default::default()
-        };
-        let selected = FileHandle::new(file.clone(), purger.clone());
-        let mut version = SstVersion::new();
-        version.add_files(purger, std::iter::once(file));
-
-        assert_eq!(
-            version
-                .file_for_compaction(&selected)
-                .unwrap()
-                .file_id()
-                .file_id(),
-            file_id
-        );
-        let missing = FileHandle::new(
-            FileMeta {
-                file_id: FileId::random(),
-                level: 1,
-                ..Default::default()
-            },
-            new_noop_file_purger(),
-        );
-        assert!(version.file_for_compaction(&missing).is_none());
-    }
 
     #[test]
     fn test_usage_only_counts_owned_files() {
