@@ -17,8 +17,8 @@ use url::Url;
 /// Placeholder substituted for any password found in a connection string.
 const REDACTED: &str = "***";
 
-/// Substituted for a whole URI-shaped connection string that no parser accepted.
-const REDACTED_URI: &str = "<redacted connection string>";
+/// Substituted for a whole connection string that cannot be safely sanitized.
+const REDACTED_CONNECTION_STRING: &str = "<redacted connection string>";
 
 /// Removes sensitive information (passwords) from a connection string before it
 /// is logged.
@@ -60,7 +60,7 @@ pub fn sanitize_connection_string(conn_str: &str) -> String {
     }
 
     if is_uri_like(conn_str) {
-        return REDACTED_URI.to_string();
+        return REDACTED_CONNECTION_STRING.to_string();
     }
 
     redact_keyword_password(conn_str)
@@ -103,24 +103,34 @@ fn is_uri_like(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Best-effort redaction of a `password` value in a keyword string, used only
-/// for inputs that neither `tokio_postgres::Config` nor [`Url`] accept (e.g. a
-/// libpq keyword DSN when `pg_kvbackend` is disabled). Keys are separated by
-/// Unicode whitespace; a value is single/double quoted or runs to the next
-/// unescaped whitespace, with `\` escaping the next character.
+/// Redacts `password` values in a keyword string. A standalone, case-insensitive
+/// `password` assignment outside a recognized keyword boundary causes the whole
+/// string to be redacted, since another option's value may otherwise retain it.
+/// Keys are separated by Unicode whitespace; a value is single/double quoted or
+/// runs to the next unescaped whitespace, with `\` escaping the next character.
 fn redact_keyword_password(s: &str) -> String {
     const KEY: &str = "password";
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
-        if is_keyword_at(s, i, KEY) {
+        if keyword_matches_at(s, i, KEY) {
             let mut j = skip_ws(s, i + KEY.len());
             if s[j..].starts_with('=') {
-                j = skip_ws(s, j + 1);
-                out.push_str("password=");
-                out.push_str(REDACTED);
-                i = skip_value(s, j);
-                continue;
+                if is_keyword_at(s, i, KEY) {
+                    j = skip_ws(s, j + 1);
+                    out.push_str("password=");
+                    out.push_str(REDACTED);
+                    i = skip_value(s, j);
+                    continue;
+                }
+
+                let embedded_in_identifier = s[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !embedded_in_identifier {
+                    return REDACTED_CONNECTION_STRING.to_string();
+                }
             }
         }
         let ch = s[i..].chars().next().unwrap();
@@ -128,6 +138,12 @@ fn redact_keyword_password(s: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+fn keyword_matches_at(s: &str, i: usize, keyword: &str) -> bool {
+    s[i..]
+        .get(..keyword.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
 }
 
 fn skip_ws(s: &str, mut i: usize) -> usize {
@@ -143,11 +159,11 @@ fn skip_ws(s: &str, mut i: usize) -> usize {
 
 /// True if `keyword` starts at byte `i` preceded by a keyword boundary. In
 /// addition to valid libpq whitespace separators, `;` and `&` are treated as
-/// conservative boundaries so malformed DSNs cannot leak credentials. `=` is
-/// deliberately excluded, so a value like `application_name=password=x` is not
-/// mistaken for a password key.
+/// conservative boundaries so malformed DSNs cannot leak credentials. Other
+/// punctuation, such as the `=` in `application_name=password=x`, is handled by
+/// the fail-closed path.
 fn is_keyword_at(s: &str, i: usize, keyword: &str) -> bool {
-    s[i..].starts_with(keyword)
+    keyword_matches_at(s, i, keyword)
         && (i == 0
             || s[..i]
                 .chars()
@@ -240,9 +256,36 @@ mod tests {
         }
 
         for dsn in [
-            "notpassword=LEAK_CANARY",
+            "host=localhost,password=LEAK_CANARY",
+            "host=localhost/password=LEAK_CANARY",
+            "host=localhost?password=LEAK_CANARY",
+            "host=localhost#password=LEAK_CANARY",
+            "host=localhost:password=LEAK_CANARY",
+            "host=localhost,PASSWORD=LEAK_CANARY",
             "application_name=password=LEAK_CANARY",
+            "password=a host=localhost,password=LEAK_CANARY",
+            "host=h,password=LEAK_CANARY password=b",
+            "user=u password=a host=h/password=LEAK_CANARY",
         ] {
+            let s = sanitize_connection_string(dsn);
+            assert_eq!(REDACTED_CONNECTION_STRING, s, "for {dsn:?}");
+        }
+
+        for (dsn, expected) in [
+            (
+                "PASSWORD=LEAK_CANARY host=localhost",
+                "password=*** host=localhost",
+            ),
+            (
+                "host=localhost Password=LEAK_CANARY",
+                "host=localhost password=***",
+            ),
+        ] {
+            let s = sanitize_connection_string(dsn);
+            assert_eq!(expected, s, "for {dsn:?}");
+        }
+
+        for dsn in ["notpassword=LEAK_CANARY", "notPassword=LEAK_CANARY"] {
             let s = sanitize_connection_string(dsn);
             assert!(s.contains("LEAK_CANARY"), "over-redacted for {dsn:?}: {s}");
         }
