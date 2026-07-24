@@ -1589,6 +1589,8 @@ pub struct RegionBuildIndexRequest {}
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
     All,
+    /// Discard all unflushed data while preserving persisted SST files.
+    Unflushed,
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.

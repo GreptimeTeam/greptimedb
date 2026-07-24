@@ -41,8 +41,9 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
-    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
+    RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult,
+    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
@@ -503,6 +504,52 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }))
                 .await
                 .inspect_err(|_| warn!("failed to send truncate result"));
+        });
+    }
+
+    /// Advances the durable replay frontier before discarding a region's memtables.
+    pub(crate) fn handle_manifest_discard_unflushed_action(
+        &self,
+        region: MitoRegionRef,
+        edit: RegionEdit,
+        discarded_rows: u64,
+        discarded_bytes: usize,
+        sender: OptionOutputTx,
+    ) {
+        if let Err(e) = region.set_truncating() {
+            sender.send(Err(e));
+            return;
+        }
+
+        let region_id = region.region_id;
+        let discarded_entry_id = edit.flushed_entry_id.unwrap_or_default();
+        let discarded_sequence = edit.flushed_sequence.unwrap_or_default();
+        let request_sender = self.sender.clone();
+        let manifest_ctx = region.manifest_ctx.clone();
+
+        common_runtime::spawn_global(async move {
+            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+            let result = manifest_ctx
+                .update_manifest(RegionLeaderState::Truncating, action_list, false)
+                .await
+                .map(|_| ());
+
+            let result = DiscardUnflushedResult {
+                region_id,
+                sender,
+                result,
+                discarded_entry_id,
+                discarded_sequence,
+                discarded_rows,
+                discarded_bytes,
+            };
+            let _ = request_sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                    region_id,
+                    notify: BackgroundNotify::DiscardUnflushed(result),
+                }))
+                .await
+                .inspect_err(|_| warn!("failed to send discard unflushed result"));
         });
     }
 

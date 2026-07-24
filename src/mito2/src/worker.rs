@@ -1256,6 +1256,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
+            BackgroundNotify::DiscardUnflushed(req) => {
+                self.handle_discard_unflushed_result(req).await
+            }
             BackgroundNotify::RegionChange(req) => {
                 self.handle_manifest_region_change_result(req).await
             }

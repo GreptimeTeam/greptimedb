@@ -43,7 +43,7 @@ use store_api::region_request::{
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
     StagingPartitionDirective,
 };
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
@@ -913,6 +913,8 @@ pub(crate) enum BackgroundNotify {
     CompactionFailed(CompactionFailed),
     /// Truncate result.
     Truncate(TruncateResult),
+    /// Discard unflushed data result.
+    DiscardUnflushed(DiscardUnflushedResult),
     /// Region change result.
     RegionChange(RegionChangeResult),
     /// Region edit result.
@@ -1065,6 +1067,25 @@ pub(crate) struct TruncateResult {
     /// Truncate result.
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
+}
+
+/// Notifies the result of discarding unflushed data from a region.
+#[derive(Debug)]
+pub(crate) struct DiscardUnflushedResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Manifest update result.
+    pub(crate) result: Result<()>,
+    /// Last WAL entry covered by the discard operation.
+    pub(crate) discarded_entry_id: EntryId,
+    /// Last sequence covered by the discard operation.
+    pub(crate) discarded_sequence: SequenceNumber,
+    /// Estimated number of discarded rows.
+    pub(crate) discarded_rows: u64,
+    /// Estimated number of discarded bytes.
+    pub(crate) discarded_bytes: usize,
 }
 
 /// Notifies the region the result of writing region change action.
