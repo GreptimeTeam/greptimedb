@@ -380,7 +380,7 @@ impl CompactionScheduler {
             waiter.send(Ok(0));
         }
 
-        if status.regular_replan_pending {
+        if status.pending_regular.is_some() {
             self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
         }
@@ -869,7 +869,7 @@ impl CompactionScheduler {
         if self
             .region_status
             .get(&region_id)
-            .is_some_and(|status| status.regular_replan_pending)
+            .is_some_and(|status| status.pending_regular.is_some())
         {
             self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
@@ -1309,10 +1309,8 @@ struct CompactionStatus {
     pending_ddl_requests: Vec<SenderDdlRequest>,
     /// Current compaction phase.
     phase: Option<CompactionPhase>,
-    /// Whether a regular trigger arrived while the current plan was being picked.
-    regular_replan_pending: bool,
-    /// Waiters owned by the pending regular follow-up.
-    pending_regular_waiters: Vec<OutputTx>,
+    /// Waiters owned by a retained regular follow-up; `Some(empty)` records an automatic trigger.
+    pending_regular: Option<Vec<OutputTx>>,
 }
 
 impl CompactionStatus {
@@ -1330,8 +1328,7 @@ impl CompactionStatus {
             pending_request: None,
             pending_ddl_requests: Vec::new(),
             phase: None,
-            regular_replan_pending: false,
-            pending_regular_waiters: Vec::new(),
+            pending_regular: None,
         }
     }
 
@@ -1343,8 +1340,8 @@ impl CompactionStatus {
     }
 
     fn start_regular_picking(&mut self, plan_id: u64) {
-        self.regular_replan_pending = false;
-        self.waiters.append(&mut self.pending_regular_waiters);
+        self.waiters
+            .extend(self.pending_regular.take().unwrap_or_default());
         self.start_picking(plan_id);
     }
 
@@ -1418,9 +1415,9 @@ impl CompactionStatus {
 
     fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx) {
         if self.can_retain_regular_followup() {
-            self.regular_replan_pending = true;
+            let pending_regular = self.pending_regular.get_or_insert_default();
             if let Some(waiter) = waiter.take_inner() {
-                self.pending_regular_waiters.push(waiter);
+                pending_regular.push(waiter);
             }
         } else {
             self.merge_waiter(waiter);
@@ -1459,7 +1456,7 @@ impl CompactionStatus {
         for waiter in self
             .waiters
             .drain(..)
-            .chain(self.pending_regular_waiters.drain(..))
+            .chain(self.pending_regular.take().unwrap_or_default())
         {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
@@ -1488,7 +1485,7 @@ impl CompactionStatus {
         for waiter in self
             .waiters
             .drain(..)
-            .chain(self.pending_regular_waiters.drain(..))
+            .chain(self.pending_regular.take().unwrap_or_default())
         {
             waiter.send(CompactionCancelledSnafu.fail());
         }
