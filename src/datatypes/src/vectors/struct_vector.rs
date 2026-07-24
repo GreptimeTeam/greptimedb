@@ -144,22 +144,25 @@ impl Vector for StructVector {
 
 impl VectorOp for StructVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        let column_arrays = self
-            .array
-            .columns()
-            .iter()
-            .map(|col| {
-                let vector = Helper::try_into_vector(col)
-                    .expect("Failed to replicate struct vector columns");
-                vector.replicate(offsets).to_arrow_array()
-            })
-            .collect::<Vec<_>>();
-        let replicated_array = StructArray::new(
-            self.array.fields().clone(),
-            column_arrays,
-            self.array.nulls().cloned(),
+        assert_eq!(offsets.len(), self.len());
+
+        if offsets.is_empty() {
+            return self.slice(0, 0);
+        }
+        let mut builder = StructVectorBuilder::with_type_and_capacity(
+            self.fields.clone(),
+            *offsets.last().unwrap(),
         );
-        Arc::new(StructVector::try_new(self.fields.clone(), replicated_array).unwrap())
+
+        let mut previous_offset = 0;
+        for (i, offset) in offsets.iter().enumerate() {
+            let data = self.get_data(i);
+            for _ in previous_offset..*offset {
+                builder.push(data.clone());
+            }
+            previous_offset = *offset;
+        }
+        builder.to_vector()
     }
 
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
