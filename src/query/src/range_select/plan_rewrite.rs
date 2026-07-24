@@ -20,6 +20,7 @@ use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use chrono::{DateTime, Utc};
+use common_function::aggrs::aggr_wrapper::get_aggr_func;
 use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
@@ -651,7 +652,7 @@ fn build_range_input_projection(
             Expr::Alias(alias) => alias.expr.as_ref(),
             expr => expr,
         };
-        let Expr::AggregateFunction(aggr) = range_expr else {
+        let Some(aggr) = get_aggr_func(range_expr) else {
             return Err(DataFusionError::Plan(format!(
                 "Unexpected Expr: {} in RangeSelect",
                 range_expr
@@ -751,7 +752,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_time::IntervalYearMonth;
-    use datafusion_expr::{BinaryExpr, Literal, Operator};
+    use datafusion_expr::{BinaryExpr, Literal, Operator, UserDefinedLogicalNodeCore};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::{QueryContext, QueryContextBuilder};
@@ -1018,6 +1019,84 @@ mod test {
             &["tag_0", "timestamp"],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn range_select_input_projection_collects_nested_alias_dependencies() {
+        let plan = do_query(
+            r#"SELECT timestamp, tag_0, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' BY (tag_0);"#,
+        )
+        .await
+        .unwrap();
+        let LogicalPlan::Extension(extension) = plan else {
+            panic!("expected RangeSelect rewrite output, got: {plan}");
+        };
+        let range_select = extension
+            .node
+            .as_any()
+            .downcast_ref::<RangeSelect>()
+            .expect("expected RangeSelect extension");
+        let mut range_exprs = range_select.range_expr.clone();
+        range_exprs[0].expr = range_exprs[0]
+            .expr
+            .clone()
+            .alias("inner_alias")
+            .alias("outer_alias");
+
+        let input = build_range_input_projection(
+            range_select.input.as_ref(),
+            &range_exprs,
+            &range_select.time_expr,
+            &range_select.by,
+        )
+        .unwrap();
+        let LogicalPlan::Projection(projection) = input else {
+            panic!("expected narrow Projection, got: {input}");
+        };
+        assert_eq!(
+            projection
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["tag_0", "timestamp", "field_0", "field_1"],
+        );
+    }
+
+    #[tokio::test]
+    async fn range_select_physical_plan_accepts_nested_aggregate_aliases() {
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_sql(
+            r#"SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM test ALIGN '1h' BY (tag_0);"#,
+            &query_ctx,
+        )
+        .unwrap();
+        let engine = create_test_engine().await;
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap();
+        let LogicalPlan::Extension(extension) = plan else {
+            panic!("expected RangeSelect rewrite output, got: {plan}");
+        };
+        let range_select = extension
+            .node
+            .as_any()
+            .downcast_ref::<RangeSelect>()
+            .expect("expected RangeSelect extension");
+        let mut exprs = range_select.expressions();
+        exprs[0] = exprs[0].clone().alias("inner_alias").alias("outer_alias");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                range_select
+                    .with_exprs_and_inputs(exprs, vec![range_select.input.as_ref().clone()])
+                    .unwrap(),
+            ),
+        });
+
+        engine.execute(plan, query_ctx).await.unwrap();
     }
 
     #[tokio::test]
