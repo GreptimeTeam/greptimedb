@@ -323,7 +323,7 @@ mod test {
         let logical_region_id = env.default_logical_region_id();
         let invalid_index = usize::MAX;
         let request = ScanRequest {
-            projection_input: Some(vec![invalid_index].into()),
+            projection: Some(vec![invalid_index]),
             ..Default::default()
         };
 
