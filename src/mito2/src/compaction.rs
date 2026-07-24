@@ -137,7 +137,6 @@ impl fmt::Debug for CompactionPlanningResult {
 pub(crate) struct CompactionPickFinished {
     pub(crate) region_id: RegionId,
     pub(crate) plan_id: u64,
-    pub(crate) version_control: VersionControlRef,
     pub(crate) result: CompactionPlanningResult,
 }
 
@@ -148,51 +147,27 @@ pub(crate) struct PreparedCompaction {
     ttl: TimeToLive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CompactionExecutionKind {
-    Local,
-    Remote,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct CompactionExecution {
     plan_id: u64,
-    version_control: VersionControlRef,
-    kind: CompactionExecutionKind,
     _files: CompactingFiles,
 }
 
 impl CompactionExecution {
-    fn new(
-        plan_id: u64,
-        version_control: VersionControlRef,
-        kind: CompactionExecutionKind,
-        files: CompactingFiles,
-    ) -> Self {
+    fn new(plan_id: u64, files: CompactingFiles) -> Self {
         Self {
             plan_id,
-            version_control,
-            kind,
             _files: files,
         }
     }
 
     pub(crate) fn matches(&self, other: &Self) -> bool {
         self.plan_id == other.plan_id
-            && self.kind == other.kind
-            && Arc::ptr_eq(&self.version_control, &other.version_control)
-    }
-
-    pub(crate) fn version_control(&self) -> &VersionControlRef {
-        &self.version_control
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(
-        version_control: VersionControlRef,
-        kind: CompactionExecutionKind,
-    ) -> Self {
-        Self::new(0, version_control, kind, CompactingFiles::empty())
+    pub(crate) fn for_test(plan_id: u64) -> Self {
+        Self::new(plan_id, CompactingFiles::empty())
     }
 }
 
@@ -210,7 +185,7 @@ pub(crate) struct CompactionScheduler {
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
-    /// Monotonically increasing token for compaction plans.
+    /// Scheduler-lifetime identity token for compaction plans and executions.
     next_plan_id: u64,
 }
 
@@ -320,12 +295,7 @@ impl CompactionScheduler {
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking(plan_id);
         self.region_status.insert(region_id, status);
-        self.dispatch_compaction_planning(
-            plan_id,
-            version_control.clone(),
-            request,
-            compact_options,
-        );
+        self.dispatch_compaction_planning(plan_id, request, compact_options);
         self.listener.on_compaction_scheduled(region_id);
         Ok(true)
     }
@@ -365,13 +335,12 @@ impl CompactionScheduler {
             max_parallelism,
         );
         status.merge_waiter(waiter);
-        let version_control = status.version_control.clone();
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking(plan_id);
-        self.dispatch_compaction_planning(plan_id, version_control, request, options);
+        self.dispatch_compaction_planning(plan_id, request, options);
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
             region_id
@@ -435,16 +404,6 @@ impl CompactionScheduler {
         self.region_status
             .get(&region_id)
             .is_some_and(|status| status.matches_execution(execution))
-    }
-
-    pub(crate) fn is_current_region_execution(
-        &self,
-        region_id: RegionId,
-        current_version_control: &VersionControlRef,
-        execution: &CompactionExecution,
-    ) -> bool {
-        Arc::ptr_eq(current_version_control, execution.version_control())
-            && self.is_current_execution(region_id, execution)
     }
 
     pub(crate) async fn on_execution_finished(
@@ -512,7 +471,6 @@ impl CompactionScheduler {
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
         );
-        let version_control = status.version_control.clone();
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
@@ -520,7 +478,6 @@ impl CompactionScheduler {
         status.start_regular_picking(plan_id);
         self.dispatch_compaction_planning(
             plan_id,
-            version_control,
             request,
             compact_request::Options::Regular(Default::default()),
         );
@@ -624,7 +581,6 @@ impl CompactionScheduler {
     fn dispatch_compaction_planning(
         &self,
         plan_id: u64,
-        version_control: VersionControlRef,
         request: CompactionRequest,
         options: compact_request::Options,
     ) {
@@ -635,14 +591,7 @@ impl CompactionScheduler {
             let request_sender = request.request_sender.clone();
             let planning =
                 Self::prepare_compaction(request, options, plugins, max_background_compactions);
-            Self::notify_planning_result(
-                region_id,
-                plan_id,
-                version_control,
-                request_sender,
-                planning,
-            )
-            .await;
+            Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
         });
     }
 
@@ -657,7 +606,6 @@ impl CompactionScheduler {
     async fn notify_planning_result(
         region_id: RegionId,
         plan_id: u64,
-        version_control: VersionControlRef,
         request_sender: Sender<WorkerRequestWithTime>,
         planning: impl Future<Output = CompactionPlanningResult> + Send,
     ) {
@@ -687,7 +635,6 @@ impl CompactionScheduler {
             notify: BackgroundNotify::CompactionPickFinished(CompactionPickFinished {
                 region_id,
                 plan_id,
-                version_control,
                 result,
             }),
         });
@@ -790,22 +737,15 @@ impl CompactionScheduler {
     pub(crate) async fn accept_compaction_pick_finished(
         &mut self,
         finished: CompactionPickFinished,
-        current_version_control: &VersionControlRef,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
         let region_id = finished.region_id;
         let plan_id = finished.plan_id;
-        let version_control = finished.version_control.clone();
-        if !Arc::ptr_eq(current_version_control, &finished.version_control) {
-            return Vec::new();
-        }
         let Some(status) = self.region_status.get(&region_id) else {
             return Vec::new();
         };
-        if !status.is_picking(finished.plan_id)
-            || !Arc::ptr_eq(&status.version_control, &finished.version_control)
-        {
+        if !status.is_picking(finished.plan_id) {
             return Vec::new();
         }
         if !status.accept_plan(finished.plan_id) {
@@ -843,7 +783,7 @@ impl CompactionScheduler {
                 };
                 let waiters = std::mem::take(&mut status.waiters);
                 match self
-                    .submit_prepared_compaction(prepared, files, waiters, plan_id, version_control)
+                    .submit_prepared_compaction(prepared, files, waiters, plan_id)
                     .await
                 {
                     Ok(Some(phase)) => {
@@ -895,14 +835,8 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
-        let current_version_control = finished.version_control.clone();
-        self.accept_compaction_pick_finished(
-            finished,
-            &current_version_control,
-            manifest_ctx,
-            schema_metadata_manager,
-        )
-        .await
+        self.accept_compaction_pick_finished(finished, manifest_ctx, schema_metadata_manager)
+            .await
     }
 
     async fn finish_compaction_planning(
@@ -952,8 +886,7 @@ impl CompactionScheduler {
         prepared: PreparedCompaction,
         files: CompactingFiles,
         waiters: Vec<OutputTx>,
-        plan_id: u64,
-        version_control: VersionControlRef,
+        mut plan_id: u64,
     ) -> Result<Option<CompactionPhase>> {
         let PreparedCompaction {
             compaction_region,
@@ -968,12 +901,7 @@ impl CompactionScheduler {
         // It will fall back to local compaction if there is no remote job scheduler.
         let waiters = if dynamic_compaction_opts.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
-                let execution = CompactionExecution::new(
-                    plan_id,
-                    version_control.clone(),
-                    CompactionExecutionKind::Remote,
-                    files.clone(),
-                );
+                let execution = CompactionExecution::new(plan_id, files.clone());
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
@@ -1016,7 +944,7 @@ impl CompactionScheduler {
                         }
 
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
-
+                        plan_id = Self::next_plan_id(&mut self.next_plan_id);
                         e.waiters
                     }
                 }
@@ -1049,12 +977,7 @@ impl CompactionScheduler {
 
         let cancel_handle = Arc::new(CancellationHandle::default());
         let state = LocalCompactionState::new(cancel_handle.clone());
-        let execution = CompactionExecution::new(
-            plan_id,
-            version_control,
-            CompactionExecutionKind::Local,
-            files,
-        );
+        let execution = CompactionExecution::new(plan_id, files);
         let local_compaction_task = Box::new(CompactionTaskImpl {
             state: state.clone(),
             execution: execution.clone(),
@@ -1447,23 +1370,16 @@ impl CompactionStatus {
     }
 
     fn matches_execution(&self, execution: &CompactionExecution) -> bool {
-        Arc::ptr_eq(&self.version_control, execution.version_control())
-            && self
-                .phase
-                .as_ref()
-                .and_then(CompactionPhase::execution)
-                .is_some_and(|current| current.matches(execution))
+        self.phase
+            .as_ref()
+            .and_then(CompactionPhase::execution)
+            .is_some_and(|current| current.matches(execution))
     }
 
     #[cfg(test)]
     fn start_local_task(&mut self) -> LocalCompactionState {
         let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
-        let execution = CompactionExecution::new(
-            0,
-            self.version_control.clone(),
-            CompactionExecutionKind::Local,
-            CompactingFiles::empty(),
-        );
+        let execution = CompactionExecution::new(0, CompactingFiles::empty());
         self.phase = Some(CompactionPhase::Local {
             state: state.clone(),
             execution,
@@ -1473,12 +1389,7 @@ impl CompactionStatus {
 
     #[cfg(test)]
     fn start_remote_task(&mut self) {
-        let execution = CompactionExecution::new(
-            0,
-            self.version_control.clone(),
-            CompactionExecutionKind::Remote,
-            CompactingFiles::empty(),
-        );
+        let execution = CompactionExecution::new(0, CompactingFiles::empty());
         self.phase = Some(CompactionPhase::Remote { execution });
     }
 
@@ -2034,14 +1945,14 @@ mod tests {
             .collect()
     }
 
-    fn use_remote_compaction(finished: &mut CompactionPickFinished) {
+    fn use_remote_compaction(finished: &mut CompactionPickFinished, fallback_to_local: bool) {
         let CompactionPlanningResult::Prepared(prepared) = &mut finished.result else {
             panic!("expected prepared compaction");
         };
         let crate::region::options::CompactionOptions::Twcs(options) =
             &mut prepared.compaction_region.region_options.compaction;
         options.remote_compaction = true;
-        options.fallback_to_local = false;
+        options.fallback_to_local = fallback_to_local;
     }
 
     fn picker_output_with_files(
@@ -2375,7 +2286,7 @@ mod tests {
         status.start_picking(7);
         scheduler.region_status.insert(region_id, status);
 
-        CompactionScheduler::notify_planning_result(region_id, 7, version_control, tx, async {
+        CompactionScheduler::notify_planning_result(region_id, 7, tx, async {
             panic!("planning boom")
         })
         .await;
@@ -2443,10 +2354,8 @@ mod tests {
                 CompactionPickFinished {
                     region_id,
                     plan_id: 7,
-                    version_control: version_control.clone(),
                     result: CompactionPlanningResult::NoPlan,
                 },
-                &version_control,
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
             )
@@ -2479,7 +2388,6 @@ mod tests {
         let pending_ddls = scheduler
             .accept_compaction_pick_finished(
                 followup_finished,
-                &version_control,
                 &manifest_ctx,
                 schema_metadata_manager,
             )
@@ -2632,7 +2540,7 @@ mod tests {
         let region_id = version_control.current().version.metadata.region_id;
         let (mut finished, manifest_ctx, schema_metadata_manager) =
             begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
-        use_remote_compaction(&mut finished);
+        use_remote_compaction(&mut finished, false);
         let selected = selected_files(&finished);
         let (waiter_tx, waiter_rx) = oneshot::channel();
         scheduler
@@ -2651,12 +2559,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stale_execution_does_not_affect_replacement_status() {
+    async fn test_remote_fallback_uses_new_execution_plan_id() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        scheduler
+            .plugins
+            .insert::<RemoteJobSchedulerRef>(Arc::new(FailingRemoteScheduler));
+        let version_control = compactable_version();
+        let region_id = version_control.current().version.metadata.region_id;
+        let (mut finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let remote_plan_id = finished.plan_id;
+        use_remote_compaction(&mut finished, true);
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(job_scheduler.num_jobs(), 1);
+        assert!(matches!(
+            scheduler.region_status[&region_id].phase.as_ref(),
+            Some(CompactionPhase::Local { .. })
+        ));
+        assert!(
+            !scheduler.region_status[&region_id]
+                .matches_execution(&CompactionExecution::for_test(remote_plan_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_plan_execution_does_not_affect_replacement_status() {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
-        let stale_execution =
-            CompactionExecution::for_test(compactable_version(), CompactionExecutionKind::Local);
+        let stale_execution = CompactionExecution::for_test(1);
         let replacement_version_control = compactable_version();
         let region_id = replacement_version_control
             .current()

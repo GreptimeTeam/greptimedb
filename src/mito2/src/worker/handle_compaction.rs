@@ -18,7 +18,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
-use crate::compaction::{CompactionExecution, CompactionPickFinished};
+use crate::compaction::CompactionPickFinished;
 use crate::config::IndexBuildMode;
 use crate::error::{RegionNotFoundSnafu, StaleCompactionExecutionSnafu};
 use crate::metrics::COMPACTION_REQUEST_COUNT;
@@ -31,18 +31,6 @@ use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    fn is_current_compaction_execution(
-        &self,
-        region: &MitoRegionRef,
-        execution: &CompactionExecution,
-    ) -> bool {
-        self.compaction_scheduler.is_current_region_execution(
-            region.region_id,
-            &region.version_control,
-            execution,
-        )
-    }
-
     pub(crate) async fn handle_compaction_pick_finished(
         &mut self,
         region_id: RegionId,
@@ -57,7 +45,6 @@ impl<S> RegionWorkerLoop<S> {
             .compaction_scheduler
             .accept_compaction_pick_finished(
                 request,
-                &region.version_control,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
             )
@@ -114,7 +101,10 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
-        if !self.is_current_compaction_execution(&region, &request.execution) {
+        if !self
+            .compaction_scheduler
+            .is_current_execution(region_id, &request.execution)
+        {
             request.on_failure(StaleCompactionExecutionSnafu { region_id }.build());
             return;
         }
@@ -196,10 +186,10 @@ impl<S> RegionWorkerLoop<S> {
         S: LogStore,
     {
         let execution = request.execution.clone();
-        let is_current = self
-            .regions
-            .get_region(region_id)
-            .is_some_and(|region| self.is_current_compaction_execution(&region, &execution));
+        let is_current = self.regions.get_region(region_id).is_some_and(|_| {
+            self.compaction_scheduler
+                .is_current_execution(region_id, &execution)
+        });
         request.on_success();
 
         if !is_current {
@@ -222,10 +212,13 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
         error!(req.err; "Failed to compact region: {}", req.region_id);
 
-        let Some(region) = self.regions.get_region(req.region_id) else {
+        if self.regions.get_region(req.region_id).is_none() {
             return;
-        };
-        if !self.is_current_compaction_execution(&region, &req.execution) {
+        }
+        if !self
+            .compaction_scheduler
+            .is_current_execution(req.region_id, &req.execution)
+        {
             return;
         }
         self.compaction_scheduler

@@ -1350,15 +1350,10 @@ mod tests {
 
     #[test]
     fn test_compaction_cancelled_sends_cancelled_error() {
-        let version_control =
-            Arc::new(crate::test_util::version_util::VersionControlBuilder::new().build());
         let (tx, rx) = oneshot::channel();
         let request = CompactionCancelled {
             region_id: RegionId::new(1, 1),
-            execution: crate::compaction::CompactionExecution::for_test(
-                version_control,
-                crate::compaction::CompactionExecutionKind::Local,
-            ),
+            execution: crate::compaction::CompactionExecution::for_test(0),
             senders: vec![OutputTx::new(tx)],
         };
 
