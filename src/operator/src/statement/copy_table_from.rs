@@ -417,7 +417,23 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
-        let max_insert_rows = req.limit.map(|n| n as usize);
+        let max_insert_rows = req
+            .limit
+            .map(|n| {
+                usize::try_from(n).map_err(|_| {
+                    error::InvalidCopyParameterSnafu {
+                        key: "limit".to_string(),
+                        value: n.to_string(),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?;
+        if max_insert_rows == Some(0) {
+            return Ok(gen_insert_output(rows_inserted, insert_cost));
+        }
+
+        let mut accepted_rows = 0;
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -443,6 +459,17 @@ impl StatementExecutor {
 
             while let Some(r) = stream.next().await {
                 let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
+                let record_batch = if let Some(max_insert_rows) = max_insert_rows {
+                    let remaining_rows = max_insert_rows - accepted_rows;
+                    if record_batch.num_rows() > remaining_rows {
+                        record_batch.slice(0, remaining_rows)
+                    } else {
+                        record_batch
+                    }
+                } else {
+                    record_batch
+                };
+                let record_batch_rows = record_batch.num_rows();
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
@@ -463,6 +490,7 @@ impl StatementExecutor {
                     },
                     query_ctx.clone(),
                 ));
+                accepted_rows += record_batch_rows;
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
                     let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
@@ -471,8 +499,14 @@ impl StatementExecutor {
                 }
 
                 if let Some(max_insert_rows) = max_insert_rows
-                    && rows_inserted >= max_insert_rows
+                    && accepted_rows == max_insert_rows
                 {
+                    if !pending.is_empty() {
+                        let (rows, cost) =
+                            batch_insert(&mut pending, &mut pending_mem_size).await?;
+                        rows_inserted += rows;
+                        insert_cost += cost;
+                    }
                     return Ok(gen_insert_output(rows_inserted, insert_cost));
                 }
             }
