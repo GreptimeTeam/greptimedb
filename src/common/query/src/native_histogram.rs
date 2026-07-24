@@ -110,6 +110,8 @@ pub fn is_native_histogram_value_type(data_type: &ConcreteDataType) -> bool {
     data_type == native_histogram_value_type()
 }
 
+pub const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
+
 // ---------------------------------------------------------------------------
 // Stable Parquet field ids for native-histogram sub-fields.
 //
