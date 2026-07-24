@@ -417,6 +417,9 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
+        let read_col_ids =
+            self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
+
         // Only apply nested projections and pass JSON type hints for structured JSON (JSON2)
         // columns. Legacy JSONB columns have JSON extension metadata but their physical
         // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
@@ -428,12 +431,12 @@ impl ScanRegion {
             .fields()
             .iter()
             .any(is_structured_json_field);
-        let read_cols = self.build_read_columns(
-            self.request.projection.as_deref(),
-            &predicate,
-            has_structured_json,
-        )?;
-        let read_col_ids = read_cols.column_ids();
+
+        let read_cols = if has_structured_json {
+            self.read_columns_with_json_type_hint(&read_col_ids)
+        } else {
+            ReadColumns::from_deduped_column_ids(read_col_ids.iter().copied())
+        };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let projection = self
@@ -674,36 +677,27 @@ impl ScanRegion {
         Ok(read_col_ids)
     }
 
-    /// Builds finalized read columns without merging or reordering intermediate containers.
-    fn build_read_columns(
-        &self,
-        projection: Option<&[usize]>,
-        predicate: &PredicateGroup,
-        apply_json_type_hint: bool,
-    ) -> Result<ReadColumns> {
-        let column_ids = self.build_read_col_ids(projection, predicate)?;
-        let metadata = &self.version.metadata;
+    /// Builds read columns with nested paths derived from JSON type hints.
+    fn read_columns_with_json_type_hint(&self, column_ids: &[ColumnId]) -> ReadColumns {
         let cols = column_ids
-            .into_iter()
-            .map(|column_id| {
-                let nested_paths = if apply_json_type_hint {
-                    metadata
-                        .column_by_id(column_id)
-                        .and_then(|column| {
-                            let column_name = &column.column_schema.name;
-                            self.request
-                                .json_type_hint
-                                .get(column_name)
-                                .map(|json_type| json_nested_paths(column_name, json_type))
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
+            .iter()
+            .map(|&column_id| {
+                let nested_paths = self
+                    .version
+                    .metadata
+                    .column_by_id(column_id)
+                    .and_then(|column| {
+                        let column_name = &column.column_schema.name;
+                        self.request
+                            .json_type_hint
+                            .get(column_name)
+                            .map(|json_type| json_nested_paths(column_name, json_type))
+                    })
+                    .unwrap_or_default();
                 ReadColumn::new(column_id, nested_paths)
             })
             .collect();
-        Ok(ReadColumns { cols })
+        ReadColumns { cols }
     }
 
     fn region_id(&self) -> RegionId {
