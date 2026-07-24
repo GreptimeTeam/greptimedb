@@ -286,7 +286,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn test_usage_only_counts_owned_files() {
         let purger = new_noop_file_purger();

@@ -321,9 +321,6 @@ async fn test_region_b_progresses_while_same_worker_region_a_is_picking() {
         .expect("region A compaction failed");
 }
 
-
-
-
 #[tokio::test]
 async fn test_picking_close_reopen_ignores_old_plan() {
     common_telemetry::init_default_ut_logging();
@@ -498,7 +495,6 @@ async fn test_enter_staging_waits_for_picking_logical_cancellation_ack() {
         .expect("enter-staging request failed");
     assert!(engine.get_region(region_id).unwrap().is_staging());
 }
-
 
 #[tokio::test]
 async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
@@ -1342,8 +1338,6 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
         .expect("enter-staging request failed");
     assert!(engine.get_region(region_id).unwrap().is_staging());
 }
-
-
 
 #[tokio::test]
 async fn test_compaction_update_time_window() {

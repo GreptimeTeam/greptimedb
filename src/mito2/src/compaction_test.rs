@@ -658,7 +658,7 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
     status.start_picking(7);
     scheduler.region_status.insert(region_id, status);
 
-    let (pre_fence_tx, prefence_rx) = oneshot::channel();
+    let (pre_fence_tx, pre_fence_rx) = oneshot::channel();
     assert!(
         !scheduler
             .schedule_compaction(
@@ -752,7 +752,7 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
         )
         .await;
     assert_eq!(pending_ddls.len(), 1);
-    assert_eq!(prefence_rx.await.unwrap().unwrap(), 0);
+    assert_eq!(pre_fence_rx.await.unwrap().unwrap(), 0);
     for waiter in postfence_waiters {
         assert_eq!(waiter.await.unwrap().unwrap(), 0);
     }

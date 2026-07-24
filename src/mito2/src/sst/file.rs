@@ -838,7 +838,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_deserialize_file_meta() {
         let file_meta = create_file_meta(FileId::random(), 0);
