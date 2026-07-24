@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["purge_table","purge_table_signature"],"struct":["PurgeTableFunction"]};

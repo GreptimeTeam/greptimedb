@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Tql"],"fn":["format_tql"],"struct":["TqlAnalyze","TqlEval","TqlExplain","TqlParameters"]};

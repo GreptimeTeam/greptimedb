@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["json_variant_into_projected_value","json_variant_into_struct_value","json_variant_into_value","null_on_json_type_mismatch"],"struct":["JsonVectorBuilder"]};

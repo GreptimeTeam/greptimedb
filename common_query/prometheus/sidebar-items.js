@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROMETHEUS_STALE_NAN_BITS"],"fn":["is_prometheus_stale_nan"]};

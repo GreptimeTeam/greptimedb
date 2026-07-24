@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_test_table_info","new_test_table_info_with_name"]};

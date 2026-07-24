@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_REGION_SEQ","REGION_GROUP_MASK","REGION_SEQ_MASK"],"enum":["ColumnDescriptorBuilderError"],"fn":["str_or_u64"],"struct":["ColumnDescriptor","ColumnDescriptorBuilder","RegionId"],"type":["ColumnId","RegionGroup","RegionNumber","RegionSeq","TableId"]};

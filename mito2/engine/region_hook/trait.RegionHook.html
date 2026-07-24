@@ -1,0 +1,238 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Hook for observing region mutations in mito2."><title>RegionHook in mito2::engine::region_hook - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (ac7f9ec7d 2026-03-20)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">RegionHook</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../mito2/index.html">mito2</a><span class="version">1.2.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Region<wbr>Hook</a></h2><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.on_manifest_updated" title="on_manifest_updated">on_manifest_updated</a></li><li><a href="#method.on_region_closed" title="on_region_closed">on_region_closed</a></li><li><a href="#method.on_region_dropped" title="on_region_dropped">on_region_dropped</a></li><li><a href="#method.on_region_files_removed" title="on_region_files_removed">on_region_files_removed</a></li><li><a href="#method.on_region_gc" title="on_region_gc">on_region_gc</a></li><li><a href="#method.on_region_opened" title="on_region_opened">on_region_opened</a></li><li><a href="#method.on_sst_files_written" title="on_sst_files_written">on_sst_files_written</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In mito2::<wbr>engine::<wbr>region_<wbr>hook</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">mito2</a>::<wbr><a href="../index.html">engine</a>::<wbr><a href="index.html">region_hook</a></div><h1>Trait <span class="trait">Region<wbr>Hook</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/mito2/engine/region_hook.rs.html#282-458">Source</a> </span></div><pre class="rust item-decl"><code>pub trait RegionHook:
+    <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/fmt/trait.Debug.html" title="trait core::fmt::Debug">Debug</a> {
+    // Provided methods
+    fn <a href="#method.on_sst_files_written" class="fn">on_sst_files_written</a>&lt;'life0, 'life1, 'life2, 'life3, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: &amp;'life1 RegionMetadataRef,
+        files: &amp;'life2 [<a class="struct" href="struct.SstFileInfo.html" title="struct mito2::engine::region_hook::SstFileInfo">SstFileInfo</a>&lt;'life3&gt;],
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             'life3: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_manifest_updated" class="fn">on_manifest_updated</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        action_list: &amp;'life1 <a class="struct" href="../../manifest/action/struct.RegionMetaActionList.html" title="struct mito2::manifest::action::RegionMetaActionList">RegionMetaActionList</a>,
+        manifest_version: ManifestVersion,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_region_opened" class="fn">on_region_opened</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: &amp;'life1 RegionMetadataRef,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_region_closed" class="fn">on_region_closed</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: &amp;'life1 RegionMetadataRef,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_region_dropped" class="fn">on_region_dropped</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: &amp;'life1 RegionMetadataRef,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_region_files_removed" class="fn">on_region_files_removed</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: &amp;'life1 RegionMetadataRef,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.on_region_gc" class="fn">on_region_gc</a>&lt;'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait&gt;(
+        &amp;'life0 self,
+        region_id: RegionId,
+        region_metadata: <a class="enum" href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;&amp;'life1 RegionMetadataRef&gt;,
+        access_layer: &amp;'life2 <a class="type" href="../../access_layer/type.AccessLayerRef.html" title="type mito2::access_layer::AccessLayerRef">AccessLayerRef</a>,
+        info: &amp;'life3 <a class="struct" href="struct.RegionGcInfo.html" title="struct mito2::engine::region_hook::RegionGcInfo">RegionGcInfo</a>&lt;'life4&gt;,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="type" href="../../error/type.Result.html" title="type mito2::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where Self: 'async_trait,
+             'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             'life3: 'async_trait,
+             'life4: 'async_trait</span> { ... }
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Hook for observing region mutations in mito2.</p>
+<p>Implementations can be registered via the <code>Plugins</code> system:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span>common_base::Plugins;
+<span class="kw">use </span>mito2::engine::region_hook::{RegionHook, RegionHookRef};
+
+plugins.insert(Arc::new(MyHook) <span class="kw">as </span>RegionHookRef);</code></pre></div></div></details><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.on_sst_files_written" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#293-300">Source</a><h4 class="code-header">fn <a href="#method.on_sst_files_written" class="fn">on_sst_files_written</a>&lt;'life0, 'life1, 'life2, 'life3, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: &amp;'life1 RegionMetadataRef,
+    files: &amp;'life2 [<a class="struct" href="struct.SstFileInfo.html" title="struct mito2::engine::region_hook::SstFileInfo">SstFileInfo</a>&lt;'life3&gt;],
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    'life3: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after SST <strong>data files</strong> are physically written, before manifest commit.</p>
+<p>This fires only when mito2 itself writes SST files (flush and compaction).
+It does <strong>not</strong> fire when SST files are pre-written externally (bulk ingestion,
+copy region) or when only index files are written (async index build).</p>
+<h5 id="metadata-availability"><a class="doc-anchor" href="#metadata-availability">§</a>Metadata availability</h5>
+<p>See <a href="struct.SstFileInfo.html" title="struct mito2::engine::region_hook::SstFileInfo"><code>SstFileInfo</code></a>: <code>file_meta</code> is always complete, but the <a href="../../sst/parquet/struct.SstInfo.html" title="struct mito2::sst::parquet::SstInfo"><code>SstInfo</code></a> footer
+and index output are empty on remote compaction. Hooks needing column statistics
+(e.g. an Iceberg manifest) must fetch the footer from object storage.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_manifest_updated" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#315-322">Source</a><h4 class="code-header">fn <a href="#method.on_manifest_updated" class="fn">on_manifest_updated</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    action_list: &amp;'life1 <a class="struct" href="../../manifest/action/struct.RegionMetaActionList.html" title="struct mito2::manifest::action::RegionMetaActionList">RegionMetaActionList</a>,
+    manifest_version: ManifestVersion,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after the region manifest is successfully committed to the <strong>live</strong>
+(normal) manifest directory.</p>
+<p>Fires for: flush, compaction, region edit, copy region, alter, truncate,
+async index build, and apply-staging promote. Does <strong>not</strong> fire for writes
+to the staging manifest directory (enter staging, operations during staging,
+the intermediate apply-staging edit) — those are suppressed because their
+effects are accumulated and delivered in a single promote notification.</p>
+<p>Does <strong>not</strong> fire for:</p>
+<ul>
+<li>Manifest reads / follower sync (no write)</li>
+<li>GC / checkpoint (internal bookkeeping)</li>
+<li>Failed manifest updates</li>
+</ul>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_region_opened" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#343-345">Source</a><h4 class="code-header">fn <a href="#method.on_region_opened" class="fn">on_region_opened</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: &amp;'life1 RegionMetadataRef,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called once a region <strong>open</strong> or <strong>create</strong> succeeds, but <strong>before</strong> the
+region is registered in the engine’s active set (<code>insert_region</code> runs
+immediately afterwards).</p>
+<p>Fires once when a region becomes active via a create or open request —
+the natural counterpart to <a href="trait.RegionHook.html#method.on_region_closed" title="method mito2::engine::region_hook::RegionHook::on_region_closed"><code>on_region_closed</code></a> / <a href="trait.RegionHook.html#method.on_region_dropped" title="method mito2::engine::region_hook::RegionHook::on_region_dropped"><code>on_region_dropped</code></a>.
+It does <strong>not</strong> fire for the compactor’s transient compaction regions
+(<code>open_compaction_region</code>), nor for the internal reopen performed during
+follower catch-up / leadership promotion.</p>
+<p>On the <strong>create</strong> path it runs inline in the region worker loop; on the
+<strong>open</strong> path it runs inside the spawned open task
+(<code>common_runtime::spawn_global</code>), concurrently with the worker loop
+(after WAL replay, before the region is registered/acknowledged).
+Implementations must be fast and must <strong>not</strong> assume worker-loop-thread
+affinity or strict ordering against concurrent requests to other regions.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_region_closed" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#360-362">Source</a><h4 class="code-header">fn <a href="#method.on_region_closed" class="fn">on_region_closed</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: &amp;'life1 RegionMetadataRef,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after a region is <strong>closed</strong> via a close request.</p>
+<p>The region is removed from the engine’s active set, but its data files,
+manifest, and WAL state are <strong>preserved</strong>; the region may be reopened
+later. Fires once per successful close, after the region’s background
+tasks (flush/compaction) have been stopped.</p>
+<p>Fires for a region of <strong>any</strong> role (leader or follower) that is closed.
+Does <strong>not</strong> fire when a region is dropped (see <a href="trait.RegionHook.html#method.on_region_dropped" title="method mito2::engine::region_hook::RegionHook::on_region_dropped"><code>on_region_dropped</code></a>).</p>
+<p>Runs inline in the region worker loop; implementations should be fast.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_region_dropped" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#375-377">Source</a><h4 class="code-header">fn <a href="#method.on_region_dropped" class="fn">on_region_dropped</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: &amp;'life1 RegionMetadataRef,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after a region is <strong>logically dropped</strong> (a drop request has been
+handled).</p>
+<p>The region is removed from the active set and its WAL entries are marked
+obsolete. Its data files are <strong>not yet deleted</strong> — they are scheduled for
+asynchronous removal by the GC worker. Observe physical deletion via
+<a href="trait.RegionHook.html#method.on_region_files_removed" title="method mito2::engine::region_hook::RegionHook::on_region_files_removed"><code>on_region_files_removed</code></a>.</p>
+<p>Runs inline in the region worker loop; implementations should be fast.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_region_files_removed" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#390-396">Source</a><h4 class="code-header">fn <a href="#method.on_region_files_removed" class="fn">on_region_files_removed</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: &amp;'life1 RegionMetadataRef,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after a dropped region’s data files are <strong>physically removed</strong> by
+the drop GC worker (the region directory has been deleted).</p>
+<p>This is the terminal event in a region’s file lifecycle; no further
+callbacks fire for this region id afterwards. Fires only when the drop
+worker itself deletes the directory. When global GC is enabled and the
+region is a normal table region dropped with <code>partial_drop</code>, the
+directory is left for global reclamation and this hook is <strong>not</strong> fired
+by the drop worker.</p>
+<p>Runs on a background task, outside the region worker loop.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.on_region_gc" class="method"><a class="src rightside" href="../../../src/mito2/engine/region_hook.rs.html#448-457">Source</a><h4 class="code-header">fn <a href="#method.on_region_gc" class="fn">on_region_gc</a>&lt;'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait&gt;(
+    &amp;'life0 self,
+    region_id: RegionId,
+    region_metadata: <a class="enum" href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;&amp;'life1 RegionMetadataRef&gt;,
+    access_layer: &amp;'life2 <a class="type" href="../../access_layer/type.AccessLayerRef.html" title="type mito2::access_layer::AccessLayerRef">AccessLayerRef</a>,
+    info: &amp;'life3 <a class="struct" href="struct.RegionGcInfo.html" title="struct mito2::engine::region_hook::RegionGcInfo">RegionGcInfo</a>&lt;'life4&gt;,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="type" href="../../error/type.Result.html" title="type mito2::error::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    Self: 'async_trait,
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    'life3: 'async_trait,
+    'life4: 'async_trait,</div></h4></section></summary><div class="docblock"><p>Called after the datanode’s global GC worker (<code>LocalGcWorker</code>) finishes a
+GC pass for a region — live regions (periodic GC) or dropped/repartitioned
+regions (the global reclamation path). Also fired by the offline cleanup
+path (<code>handle_offline_cleanup_request</code>, i.e. soft-drop PURGE) once the
+region directory has been removed. Lets extensions with sidecar files
+outside mito2’s region dir clean up residual files.</p>
+<p>Always scoped to <a href="struct.RegionGcInfo.html#structfield.removed_files" title="field mito2::engine::region_hook::RegionGcInfo::removed_files"><code>RegionGcInfo::removed_files</code></a>: clean only sidecar
+artifacts for the files mito deleted this pass. On a
+<a href="struct.RegionGcInfo.html#structfield.full_file_listing" title="field mito2::engine::region_hook::RegionGcInfo::full_file_listing"><code>RegionGcInfo::full_file_listing</code></a> pass you may also reconcile
+sidecar-only orphans (e.g. detect a fully-reaped region by cross-checking
+the region dir against your own manifest). This callback never authorizes
+blind whole-directory removal — derive “fully reaped” from your own state
+so a stale mito snapshot can’t cause accidental deletion.
+<a href="struct.RegionGcInfo.html#structfield.is_region_dropped" title="field mito2::engine::region_hook::RegionGcInfo::is_region_dropped"><code>RegionGcInfo::is_region_dropped</code></a> is context, not authorization.</p>
+<h5 id="retry"><a class="doc-anchor" href="#retry">§</a>Retry</h5>
+<p>Returning <code>Err</code> keeps the region un-acknowledged (<code>need_retry_regions</code>)
+for a future replay. <strong>Dropped/repartitioned</strong>: guaranteed — metasrv keeps
+the <code>table_repart</code> tombstone until <code>Ok</code>, so full-listing passes continue
+until cleanup finishes. <strong>Live</strong>: best-effort — not expedited through
+candidate selection, and a later full-listing pass may not reconstruct the
+same <code>removed_files</code>; treat live cleanup as opportunistic.</p>
+<p><code>region_metadata</code> is <code>None</code> for dropped regions; use <code>region_id</code> +
+<code>access_layer</code>. Idempotent.</p>
+<h5 id="execution-context"><a class="doc-anchor" href="#execution-context">§</a>Execution context</h5>
+<p>On the global-GC path this runs on the background GC task, outside the
+region worker loop. The offline cleanup path
+(<code>handle_offline_cleanup_request</code>, reached by soft-drop PURGE) instead
+runs it <strong>inline in the region worker loop</strong> and propagates <code>Err</code> so the
+caller retries the (idempotent) cleanup. So — like <code>on_region_closed</code> /
+<code>on_region_dropped</code> — implementations <strong>must be fast and must not block
+indefinitely</strong> while awaited there: while the callback is pending, every
+subsequent DDL request for every region on that worker is blocked.
+Extension authors who wrote their hook against the “background GC task”
+contract must account for this second, latency-sensitive trigger.</p>
+<p>The offline cleanup path fires this callback once the region directory is
+confirmed <strong>absent</strong> — including no-op purges where nothing was actually
+removed this call (a retry after the directory was already gone, or a
+region that never had files on this datanode, since
+<code>remove_region_dir_for_full_drop</code> returns <code>Ok</code> for an absent/empty
+prefix). <code>RegionGcInfo::removed_files</code> is empty in that case; do <strong>not</strong>
+interpret the call as “files were deleted in this call”. This is
+asymmetric with the GC path, which fires only when files were deleted or
+a full listing was performed.</p>
+</div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"></div><script src="../../../trait.impl/mito2/engine/region_hook/trait.RegionHook.js" async></script></section></div></main></body></html>

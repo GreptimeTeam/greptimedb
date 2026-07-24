@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BUILD_INFO"],"fn":["build_info","product_name","short_version","verbose_version","version"],"mod":["build"],"struct":["BuildInfo","OwnedBuildInfo"]};

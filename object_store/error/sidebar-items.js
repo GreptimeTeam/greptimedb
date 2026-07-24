@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"fn":["retry_hint_from_opendal_error"],"struct":["BuildHttpClientSnafu","CreateDirSnafu","InitBackendSnafu","RemoveDirSnafu"],"type":["Result"]};

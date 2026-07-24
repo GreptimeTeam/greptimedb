@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_recordbatches_from_mysql_rows","build_recordbatches_from_postgres_rows","normalize_meta_client_error"],"struct":["ErrorFormatter","MysqlFormatter","OutputFormatter","PostgresqlFormatter"]};

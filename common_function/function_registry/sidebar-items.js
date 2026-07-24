@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_admin_function"],"static":["ADMIN_FUNCTION_REGISTRY","FUNCTION_REGISTRY"],"struct":["FunctionRegistry"]};

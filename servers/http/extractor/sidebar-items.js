@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_otlp_metric_translation_strategy","string_value_from_header"],"struct":["LogTableName","OtlpMetricOptions","PipelineInfo","SelectInfoWrapper","TraceTableName"]};

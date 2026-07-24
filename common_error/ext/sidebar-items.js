@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RETRY_HINT_NON_RETRYABLE","RETRY_HINT_RETRYABLE"],"enum":["RetryHint"],"fn":["retry_hint_from_io_error"],"struct":["BoxedError","PlainError","Whatever","WhateverSnafu"],"trait":["ErrorExt","StackError"],"type":["WhateverResult"]};

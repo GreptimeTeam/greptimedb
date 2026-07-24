@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["MemoryAcquireTimeoutSnafu","MemoryLimitExceededSnafu","MemorySemaphoreClosedSnafu"],"type":["Result"]};

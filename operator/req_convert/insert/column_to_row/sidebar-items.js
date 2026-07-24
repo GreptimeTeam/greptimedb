@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["request_column_to_row"],"struct":["ColumnToRow"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PREFETCH_COUNT"],"fn":["cache_builder_if_needed","should_cache_builder"],"struct":["FileBuilderEntry","PartitionPruner","PruneRequest","Pruner","PrunerInner"]};

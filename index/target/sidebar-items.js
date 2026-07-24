@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IndexTarget","TargetKeyError"],"fn":["validate_column_key"],"struct":["EmptySnafu","InvalidCharactersSnafu","InvalidColumnIdSnafu"]};

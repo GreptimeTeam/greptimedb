@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_META_ELECTION_LOCK_ID","DEFAULT_META_TABLE_NAME"],"mod":["chroot","etcd","memory","rds","read_only","test","test_util","txn","util"],"trait":["KvBackend","ResettableKvBackend"],"type":["KvBackendRef","ResettableKvBackendRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SourceRegionDescriptor"],"fn":["convert_allocation_plan_to_repartition_plan"],"struct":["AllocationPlanEntry","RepartitionPlanEntry","TargetRegionDescriptor"]};

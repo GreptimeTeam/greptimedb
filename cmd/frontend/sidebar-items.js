@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APP_NAME"],"enum":["SubCommand"],"fn":["create_heartbeat_task"],"struct":["Command","Instance","StartCommand"],"type":["FrontendOptions"]};

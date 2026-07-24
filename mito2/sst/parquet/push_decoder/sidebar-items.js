@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["assemble_range","assemble_ranges","build_sst_parquet_record_batch_stream","overlapping_part"],"struct":["SstParquetRangeFetcher"]};

@@ -1,0 +1,227 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The unified OpenTelemetry backend — with SQL + PromQL on object storage."><title>greptime - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="greptime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (ac7f9ec7d 2026-03-20)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate greptime</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../greptime/index.html">greptime</a><span class="version">1.2.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#introduction" title="Introduction">Introduction</a></li><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#features" title="Features">Features</a></li><li><a href="#how-greptimedb-compares" title="How GreptimeDB Compares">How GreptimeDB Compares</a></li><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#try-greptimedb" title="Try GreptimeDB">Try GreptimeDB</a></li><li><a href="#getting-started" title="Getting Started">Getting Started</a></li><li><a href="#build-from-source" title="Build From Source">Build From Source</a></li><li><a href="#tools--extensions" title="Tools &#38; Extensions">Tools &amp; Extensions</a></li><li><a href="#project-status" title="Project Status">Project Status</a></li><li><a href="#community" title="Community">Community</a></li><li><a href="#license" title="License">License</a></li><li><a href="#commercial-support" title="Commercial Support">Commercial Support</a></li><li><a href="#contributing" title="Contributing">Contributing</a></li><li><a href="#acknowledgement" title="Acknowledgement">Acknowledgement</a></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#statics" title="Statics">Statics</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>greptime</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/greptime/greptime.rs.html#15-163">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/logo-text-padding.png">
+    <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/logo-text-padding-dark.png">
+    <img alt="GreptimeDB Logo" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/logo-text-padding.png" width="400px">
+  </picture>
+</p>
+<h2 align="center">One database for metrics, logs, and traces<br/>
+replacing Prometheus, Loki, and Elasticsearch</h2>
+<blockquote>
+<p>The unified OpenTelemetry backend — with SQL + PromQL on object storage.</p>
+</blockquote>
+<div align="center">
+<h3 align="center">
+  <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> |
+  <a href="https://greptimedb.rs/">API Docs</a> |
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/7685">Roadmap 2026</a>
+</h3>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
+<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+</a>
+<a href="https://hub.docker.com/r/greptime/greptimedb/">
+<img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml">
+<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="GitHub Actions"/>
+</a>
+<a href="https://codecov.io/gh/GreptimeTeam/greptimedb">
+<img src="https://codecov.io/gh/GreptimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
+</a>
+<a href="https://github.com/GreptimeTeam/greptimedb/blob/main/LICENSE">
+<img src="https://img.shields.io/github/license/GreptimeTeam/greptimedb" alt="License"/>
+</a>
+<br/>
+<a href="https://greptime.com/slack">
+<img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack&style=for-the-badge" alt="Slack"/>
+</a>
+<a href="https://twitter.com/greptime">
+<img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg?style=for-the-badge" alt="Twitter"/>
+</a>
+<a href="https://www.linkedin.com/company/greptime/">
+<img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=for-the-badge" alt="LinkedIn"/>
+</a>
+</div>
+<ul>
+<li><a href="#introduction">Introduction</a></li>
+<li><a href="#overview">Overview</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#how-greptimedb-compares">How GreptimeDB Compares</a></li>
+<li><a href="#architecture">Architecture</a></li>
+<li><a href="#try-greptimedb">Try GreptimeDB</a></li>
+<li><a href="#getting-started">Getting Started</a></li>
+<li><a href="#build-from-source">Build From Source</a></li>
+<li><a href="#tools--extensions">Tools &amp; Extensions</a></li>
+<li><a href="#project-status">Project Status</a></li>
+<li><a href="#community">Community</a></li>
+<li><a href="#license">License</a></li>
+<li><a href="#commercial-support">Commercial Support</a></li>
+<li><a href="#contributing">Contributing</a></li>
+<li><a href="#acknowledgement">Acknowledgement</a></li>
+</ul>
+<h3 id="introduction"><a class="doc-anchor" href="#introduction">§</a>Introduction</h3>
+<p><strong>GreptimeDB</strong> is an open-source observability database built for <a href="https://docs.greptime.com/user-guide/concepts/observability-2/">Observability 2.0</a> — treating metrics, logs, and traces as one unified data model (wide events) instead of three separate pillars.</p>
+<p>Use it as the single OpenTelemetry backend — replacing Prometheus, Loki, and Elasticsearch with one database built on object storage. Query with SQL and PromQL, scale without pain, cut costs up to 50×.</p>
+<h3 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h3>
+<p>A quick overview of what GreptimeDB ingests, how it connects to other systems, and what its distributed engine lets you do.</p>
+<p align="center">
+  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
+    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
+  </a>
+</p>
+<h3 id="features"><a class="doc-anchor" href="#features">§</a>Features</h3><div><table><thead><tr><th>Feature</th><th>Description</th></tr></thead><tbody>
+<tr><td><strong>Observability 2.0 native</strong></td><td>Logs, metrics, and traces in one engine with <a href="https://docs.greptime.com/user-guide/query-data/overview/">SQL + PromQL</a>. Native <a href="https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/">OpenTelemetry</a>, <a href="https://docs.greptime.com/user-guide/ingest-data/for-observability/prometheus/">Prometheus remote write</a>, and <a href="https://docs.greptime.com/user-guide/query-data/jaeger/">Jaeger</a>. Migrate one signal at a time, or use as a single backend.</td></tr>
+<tr><td><strong>Elastic compute-storage separation</strong></td><td>Scale reads independently with horizontal replicas. Serve high-concurrency workloads from dashboards, alerting, and AI agents — without resharding or data migration.</td></tr>
+<tr><td><strong>Sub-second on PB–EB-scale data</strong></td><td>Columnar engine with <a href="https://docs.greptime.com/user-guide/manage-data/data-index">fulltext, inverted, and skipping indexes</a>. Written in Rust. Designed for high-concurrency point queries, not just analytical scans.</td></tr>
+<tr><td><strong>50× lower cost</strong></td><td>Object storage (S3, GCS, Azure Blob) as <a href="https://docs.greptime.com/user-guide/deployments-administration/configuration/#storage-options">primary storage</a>, with a tiered cache (memory + local disk) to keep writes and queries fast.</td></tr>
+</tbody></table>
+</div>
+<p><strong>Perfect for:</strong></p>
+<ul>
+<li>Replacing Prometheus + Loki + Elasticsearch with a single observability backend</li>
+<li>Scaling past Prometheus — high cardinality, long-term storage, no Thanos/Mimir overhead</li>
+<li>AI/agent workloads — store GenAI telemetry (<a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OTel GenAI conventions</a>), and serve high-concurrency reads from SRE/developer agents via horizontal read replicas</li>
+<li>Cutting observability costs with object storage (up to 50× savings on traces, 30% on logs)</li>
+<li>Edge-to-cloud observability with unified APIs on resource-constrained devices</li>
+</ul>
+<blockquote>
+<p><strong>Why Observability 2.0?</strong> Three separate databases for metrics, logs, and traces means three storage layers, three query languages, and three sets of dashboards. GreptimeDB stores all three as timestamped wide events in one columnar engine — JOIN across signals in SQL, run one stack instead of three, and ingest AI agent telemetry the same way. Read more: <a href="https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database">Observability 2.0 and the Database for It</a>.</p>
+</blockquote>
+<p>Learn more in <a href="https://docs.greptime.com/user-guide/concepts/why-greptimedb">Why GreptimeDB</a>.</p>
+<h3 id="how-greptimedb-compares"><a class="doc-anchor" href="#how-greptimedb-compares">§</a>How GreptimeDB Compares</h3><div><table><thead><tr><th>Capability</th><th>GreptimeDB</th><th>Prometheus / Thanos / Mimir</th><th>Grafana Loki</th><th>Elasticsearch</th></tr></thead><tbody>
+<tr><td>Data types</td><td>Metrics, logs, traces</td><td>Metrics only</td><td>Logs only</td><td>Logs, traces</td></tr>
+<tr><td>Query language</td><td>SQL + PromQL</td><td>PromQL</td><td>LogQL</td><td>Query DSL</td></tr>
+<tr><td>Storage</td><td>Native object storage (S3, etc.)</td><td>Local disk + object storage (Thanos/Mimir)</td><td>Object storage (chunks)</td><td>Local disk</td></tr>
+<tr><td>Scaling</td><td>Compute-storage separation, stateless nodes</td><td>Federation / Thanos / Mimir — multi-component, ops heavy</td><td>Stateless + object storage</td><td>Shard-based, ops heavy</td></tr>
+<tr><td>Cost efficiency</td><td>Up to 50× lower storage cost</td><td>High at scale</td><td>Moderate</td><td>High (inverted index overhead)</td></tr>
+<tr><td>OpenTelemetry</td><td>Native (metrics + logs + traces)</td><td>Partial (metrics only)</td><td>Partial (logs only)</td><td>Via instrumentation</td></tr>
+</tbody></table>
+</div>
+<p><strong>Benchmarks:</strong></p>
+<ul>
+<li><a href="https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance">GreptimeDB tops JSONBench’s billion-record cold run test</a></li>
+<li><a href="https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs">TSBS Benchmark</a></li>
+<li><a href="https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions">More benchmark reports</a></li>
+</ul>
+<h3 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h3>
+<p>GreptimeDB can run in two modes:</p>
+<ul>
+<li><strong>Standalone</strong> — single binary for development and small deployments.</li>
+<li><strong>Distributed</strong> — four components, each independently scalable:
+<ul>
+<li><strong>Frontend</strong> — protocol entry (OTel, Prometheus, MySQL/PostgreSQL, gRPC, ingestion APIs for Elasticsearch/InfluxDB/Loki) and the distributed query engine. Stateless, scales horizontally.</li>
+<li><strong>Datanode</strong> — region engine with WAL, memtable, SST, cache, compaction, and indexes. Persists data to object storage. Elastic.</li>
+<li><strong>Metasrv</strong> — metadata, routing, repartitioning, autopilot, and security. Backed by a pluggable KV layer (etcd or RDS).</li>
+<li><strong>Flownode</strong> (optional) — continuous flow computation (streaming and materialized views).</li>
+</ul>
+</li>
+</ul>
+<p>For deeper coverage, see the <a href="https://docs.greptime.com/contributor-guide/overview/#architecture">architecture doc</a> or <a href="https://deepwiki.com/GreptimeTeam/greptimedb/1-overview">DeepWiki</a>.</p>
+<a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/architecture.png" target="_blank" rel="noopener">
+  <img alt="GreptimeDB System Overview" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/architecture.png">
+</a>
+<h3 id="try-greptimedb"><a class="doc-anchor" href="#try-greptimedb">§</a>Try GreptimeDB</h3>
+<p><strong>For AI agents</strong> — paste this prompt into your agent:</p>
+<div class="example-wrap"><pre class="language-text"><code>Read https://docs.greptime.com/SKILL.md and follow the instructions
+to deploy, configure, ingest, and query GreptimeDB.</code></pre></div><div class="example-wrap"><pre class="language-shell"><code>docker run -p 127.0.0.1:4000-4003:4000-4003 \
+  -v &quot;$(pwd)/greptimedb_data:/greptimedb_data&quot; \
+  --name greptime --rm \
+  greptime/greptimedb:latest standalone start \
+  --http-addr 0.0.0.0:4000 \
+  --rpc-bind-addr 0.0.0.0:4001 \
+  --mysql-addr 0.0.0.0:4002 \
+  --postgres-addr 0.0.0.0:4003</code></pre></div>
+<p>Dashboard: <a href="http://localhost:4000/dashboard">http://localhost:4000/dashboard</a></p>
+<p>Read more in the <a href="https://docs.greptime.com/getting-started/installation/overview">full Install Guide</a>.</p>
+<p><strong>Troubleshooting:</strong></p>
+<ul>
+<li>Cannot connect to the database? Ensure that ports <code>4000</code>, <code>4001</code>, <code>4002</code>, and <code>4003</code> are not blocked by a firewall or used by other services.</li>
+<li>Failed to start? Check the container logs with <code>docker logs greptime</code> for further details.</li>
+</ul>
+<h3 id="getting-started"><a class="doc-anchor" href="#getting-started">§</a>Getting Started</h3>
+<ul>
+<li><a href="https://docs.greptime.com/getting-started/quick-start">Quickstart</a></li>
+<li><a href="https://docs.greptime.com/user-guide/overview">User Guide</a></li>
+<li><a href="https://github.com/GreptimeTeam/demo-scene">Demo Scenes</a></li>
+<li><a href="https://docs.greptime.com/faq-and-others/faq">FAQ</a></li>
+</ul>
+<h3 id="build-from-source"><a class="doc-anchor" href="#build-from-source">§</a>Build From Source</h3>
+<p><strong>Prerequisites:</strong></p>
+<ul>
+<li><a href="https://www.rust-lang.org/tools/install">Rust toolchain</a> — nightly, pinned by <a href="https://github.com/GreptimeTeam/greptimedb/blob/main/rust-toolchain.toml"><code>rust-toolchain.toml</code></a></li>
+<li><a href="https://grpc.io/docs/protoc-installation/">Protobuf compiler</a> (&gt;= 3.15)</li>
+<li>C/C++ building essentials: <code>gcc</code> / <code>g++</code> / <code>autoconf</code> and the glibc dev package (<code>libc6-dev</code> on Ubuntu, <code>glibc-devel</code> on Fedora)</li>
+<li>Python toolchain (optional, only for some test scripts)</li>
+</ul>
+<p><strong>Build and run:</strong></p>
+<div class="example-wrap"><pre class="language-bash"><code>make                          # build greptime binary
+cargo run -- standalone start # start in standalone mode</code></pre></div>
+<p><strong>Common dev commands:</strong></p>
+<div class="example-wrap"><pre class="language-bash"><code>make fmt            # format Rust code
+make clippy         # lint (fails on warnings)
+make test           # unit + integration tests (uses cargo-nextest)
+make sqlness-test   # SQL regression tests</code></pre></div>
+<p>See the <a href="CONTRIBUTING.md">Contribution Guidelines</a> for the full developer workflow.</p>
+<h3 id="tools--extensions"><a class="doc-anchor" href="#tools--extensions">§</a>Tools &amp; Extensions</h3>
+<ul>
+<li><strong>Kubernetes</strong>: <a href="https://github.com/GreptimeTeam/greptimedb-operator">GreptimeDB Operator</a></li>
+<li><strong>Helm Charts</strong>: <a href="https://github.com/GreptimeTeam/helm-charts">Greptime Helm Charts</a></li>
+<li><strong>Dashboard</strong>: <a href="https://github.com/GreptimeTeam/dashboard">Web UI</a></li>
+<li><strong>gRPC Ingester</strong>: <a href="https://github.com/GreptimeTeam/greptimedb-ingester-go">Go</a>, <a href="https://github.com/GreptimeTeam/greptimedb-ingester-java">Java</a>, <a href="https://github.com/GreptimeTeam/greptimedb-ingester-cpp">C++</a>, <a href="https://github.com/GreptimeTeam/greptimedb-ingester-erl">Erlang</a>, <a href="https://github.com/GreptimeTeam/greptimedb-ingester-rust">Rust</a>, <a href="https://github.com/GreptimeTeam/greptimedb-ingester-dotnet">.NET</a></li>
+<li><strong>Grafana Data Source</strong>: <a href="https://github.com/GreptimeTeam/greptimedb-grafana-datasource">GreptimeDB Grafana data source plugin</a></li>
+<li><strong>Grafana Dashboard</strong>: <a href="https://github.com/GreptimeTeam/greptimedb/blob/main/grafana/README.md">Official Dashboard for monitoring</a></li>
+</ul>
+<h3 id="project-status"><a class="doc-anchor" href="#project-status">§</a>Project Status</h3>
+<p>GreptimeDB is at <a href="https://github.com/GreptimeTeam/greptimedb/releases/tag/v1.0.0">v1.0 GA</a> with stable APIs and regular releases. It runs in production at scale — <a href="https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb">OceanBase Cloud</a> operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60% after migrating from Grafana Loki. See more in <a href="https://greptime.com/blogs/?category=Use%20Case">case studies</a>.</p>
+<p>Read the <a href="https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights">v1.0 highlights</a> and <a href="https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026">2026 roadmap</a>, or browse the <a href="https://docs.greptime.com/nightly/reference/about-greptimedb-version">version reference</a>.</p>
+<p>If GreptimeDB is useful to you, please star the repo.</p>
+<a href="https://www.star-history.com/?repos=GreptimeTeam%2FGreptimeDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&theme=dark&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+ </picture>
+</a>
+<img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
+<h3 id="community"><a class="doc-anchor" href="#community">§</a>Community</h3>
+<p>We invite you to engage and contribute!</p>
+<ul>
+<li><a href="https://greptime.com/slack">Slack</a></li>
+<li><a href="https://github.com/GreptimeTeam/greptimedb/discussions">Discussions</a></li>
+<li><a href="https://greptime.com/">Official Website</a></li>
+<li><a href="https://greptime.com/blogs/">Blog</a></li>
+<li><a href="https://www.linkedin.com/company/greptime/">LinkedIn</a></li>
+<li><a href="https://X.com/greptime">X (Twitter)</a></li>
+<li><a href="https://www.youtube.com/@greptime">YouTube</a></li>
+</ul>
+<h3 id="license"><a class="doc-anchor" href="#license">§</a>License</h3>
+<p>GreptimeDB is an open-core project. Its core is licensed under the
+<a href="https://apache.org/licenses/LICENSE-2.0.txt">Apache License 2.0</a>.</p>
+<p>A small set of peripheral, enterprise-only features are gated behind the
+<code>enterprise</code> Cargo feature (not built by default) and are governed by the
+separate <a href="LICENSE-ENTERPRISE">GreptimeDB Enterprise License</a>. Source files under
+that license carry an explicit Enterprise License header.</p>
+<h3 id="commercial-support"><a class="doc-anchor" href="#commercial-support">§</a>Commercial Support</h3>
+<p>Running GreptimeDB in your organization?
+We offer enterprise add-ons, services, training, and consulting.
+<a href="https://greptime.com/contactus">Contact us</a> for details.</p>
+<h3 id="contributing"><a class="doc-anchor" href="#contributing">§</a>Contributing</h3>
+<ul>
+<li>Read our <a href="CONTRIBUTING.md">Contribution Guidelines</a>.</li>
+<li>Explore <a href="https://docs.greptime.com/contributor-guide/overview.html">Internal Concepts</a> and <a href="https://deepwiki.com/GreptimeTeam/greptimedb">DeepWiki</a>.</li>
+<li>Pick up a <a href="https://github.com/GreptimeTeam/greptimedb/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> and join the #contributors <a href="https://greptime.com/slack">Slack</a> channel.</li>
+</ul>
+<h3 id="acknowledgement"><a class="doc-anchor" href="#acknowledgement">§</a>Acknowledgement</h3>
+<p>Special thanks to all contributors! See <a href="AUTHOR.md">AUTHOR.md</a>.</p>
+<ul>
+<li>Uses <a href="https://arrow.apache.org/">Apache Arrow™</a> (memory model)</li>
+<li><a href="https://parquet.apache.org/">Apache Parquet™</a> (file storage)</li>
+<li><a href="https://datafusion.apache.org/">Apache DataFusion™</a> (query engine)</li>
+<li><a href="https://opendal.apache.org/">Apache OpenDAL™</a> (data access abstraction)</li>
+</ul>
+<hr />
+<p><em>All trademarks, logos, and brand names referenced in this README and in the Overview diagram are the property of their respective owners. Their use is for identification purposes only and does not imply endorsement or affiliation.</em></p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Command.html" title="struct greptime::Command">Command</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SubCommand.html" title="enum greptime::SubCommand">SubCommand</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="statics" class="section-header">Statics<a href="#statics" class="anchor">§</a></h2><dl class="item-table"><dt><a class="static" href="static.ALLOC.html" title="static greptime::ALLOC">ALLOC</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.main.html" title="fn greptime::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.main_body.html" title="fn greptime::main_body">main_<wbr>body</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.setup_human_panic.html" title="fn greptime::setup_human_panic">setup_<wbr>human_<wbr>panic</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.start.html" title="fn greptime::start">start</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["align_array","align_projected_batch"],"struct":["NestedSchemaAligner"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlatBatchConverter"],"fn":["timestamp_range_from_array"],"struct":["ObjectStoreWriterFactory","ParquetWriter","SizeAwareWriter","SourceStats"],"trait":["WriterFactory"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BYTES_TO_OVERFLOW_RUST_DECIMAL","DECIMAL128_DEFAULT_SCALE","DECIMAL128_MAX_PRECISION","DECIMAL128_MAX_SCALE"],"fn":["format_decimal_str","valid_precision_and_scale"],"struct":["Decimal128"]};

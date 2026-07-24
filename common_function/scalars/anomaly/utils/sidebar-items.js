@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["anomaly_ratio","cast_to_f64","collect_window_values","median_f64","percentile_sorted"]};

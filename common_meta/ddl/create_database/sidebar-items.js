@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AtomicCreateAccess","AtomicCreateOutcome","CreateDatabaseState"],"struct":["CreateDatabaseData","CreateDatabaseProcedure"],"trait":["CreateDatabaseMetadataCommitter"],"type":["CreateDatabaseMetadataCommitterRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["align_schema_by_nested_paths","build_field_from_nested_paths","find_struct_child","group_child_paths","new_jsonb_field","rebuild_field_by_nested_paths"]};

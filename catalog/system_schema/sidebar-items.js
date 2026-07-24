@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["information_schema","memory_table","numbers_table_provider","pg_catalog","predicate","utils"],"struct":["SystemTableDataSource"],"trait":["SystemSchemaProvider","SystemSchemaProviderInner","SystemTable"],"type":["SystemTableRef"]};

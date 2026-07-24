@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AddColumnLocation","OutputData"],"mod":["columnar_value","error","logical_plan","native_histogram","prelude","prometheus","request","stream"],"struct":["Output","OutputMeta"],"type":["OutputCost","OutputRows"]};
