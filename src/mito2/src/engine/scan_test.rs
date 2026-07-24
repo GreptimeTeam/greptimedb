@@ -125,7 +125,6 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
         seq_scan.input().read_cols,
         ReadColumns {
             cols: vec![
-                ReadColumn::new(0, vec![]),
                 ReadColumn::new(
                     1,
                     vec![vec![
@@ -134,6 +133,7 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
                         "x".to_string()
                     ]]
                 ),
+                ReadColumn::new(0, vec![]),
             ]
         }
     );

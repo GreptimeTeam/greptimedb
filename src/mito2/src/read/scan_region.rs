@@ -631,10 +631,12 @@ impl ScanRegion {
                 .get(*idx)
                 .with_context(|| InvalidRequestSnafu {
                     region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
+                    reason: format!("projection index {} is out of bounds", idx),
                 })?
                 .column_id;
             let inserted = seen.insert(col_id);
+            // DataFusion's logical `OptimizeProjections` rule deduplicates pushed-down
+            // projection indices via `RequiredIndices::compact()`.
             debug_assert!(
                 inserted,
                 "projection contains duplicate column id: {}",
