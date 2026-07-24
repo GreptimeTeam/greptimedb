@@ -413,9 +413,10 @@ impl ScanRegion {
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(self) -> Result<ScanInput> {
+        let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
+        let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
 
         let read_col_ids =
             self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
@@ -423,9 +424,7 @@ impl ScanRegion {
         // Only apply nested projections and pass JSON type hints for structured JSON (JSON2)
         // columns. Legacy JSONB columns have JSON extension metadata but their physical
         // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
-        let has_structured_json = self
-            .version
-            .metadata
+        let has_structured_json = metadata
             .schema
             .arrow_schema()
             .fields()
@@ -443,7 +442,7 @@ impl ScanRegion {
             .request
             .projection
             .clone()
-            .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
+            .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
         let json_type_hint = has_structured_json
             .then_some(&self.request.json_type_hint)
             .inspect(|json_type_hint| {
@@ -456,7 +455,7 @@ impl ScanRegion {
                 );
             });
         let mapper = FlatProjectionMapper::new_with_read_columns(
-            &self.version.metadata,
+            metadata,
             projection,
             read_cols,
             json_type_hint,
@@ -620,27 +619,31 @@ impl ScanRegion {
             return Ok(metadata
                 .column_metadatas
                 .iter()
-                .map(|column| column.column_id)
+                .map(|col| col.column_id)
                 .collect());
         };
 
         let mut read_col_ids = Vec::new();
         let mut seen = HashSet::new();
-        for index in projection {
-            let column_id = metadata
+        for idx in projection {
+            let col_id = metadata
                 .column_metadatas
-                .get(*index)
+                .get(*idx)
                 .with_context(|| InvalidRequestSnafu {
                     region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", index),
+                    reason: format!("projection index {} is out of bound", idx),
                 })?
                 .column_id;
-            if seen.insert(column_id) {
-                read_col_ids.push(column_id);
-            }
+            let inserted = seen.insert(col_id);
+            debug_assert!(
+                inserted,
+                "projection contains duplicate column id: {}",
+                col_id
+            );
+            // Keep the projection order.
+            read_col_ids.push(col_id);
         }
 
-        // Empty-output queries still need one physical column to preserve row counts.
         if projection.is_empty() {
             let time_index = metadata.time_index_column().column_id;
             if seen.insert(time_index) {
@@ -649,43 +652,48 @@ impl ScanRegion {
         }
 
         let mut extra_col_names = HashSet::new();
-        let mut columns = HashSet::new();
-        if let Some(predicate) = predicate.predicate_without_region() {
-            for expr in predicate.exprs() {
-                columns.clear();
-                if expr_to_columns(expr, &mut columns).is_ok() {
-                    extra_col_names.extend(columns.iter().map(|column| column.name.clone()));
+        let mut cols = HashSet::new();
+
+        if let Some(p) = predicate.predicate_without_region() {
+            for expr in p.exprs() {
+                cols.clear();
+                if expr_to_columns(expr, &mut cols).is_err() {
+                    continue;
                 }
+                extra_col_names.extend(cols.iter().map(|col| col.name.clone()));
             }
         }
+
         if let Some(expr) = predicate.region_partition_expr() {
             expr.collect_column_names(&mut extra_col_names);
         }
 
-        for column in &metadata.column_metadatas {
-            if extra_col_names.remove(&column.column_schema.name) && seen.insert(column.column_id) {
-                read_col_ids.push(column.column_id);
+        if !extra_col_names.is_empty() {
+            for col in &metadata.column_metadatas {
+                if extra_col_names.remove(&col.column_schema.name) && !seen.contains(&col.column_id)
+                {
+                    read_col_ids.push(col.column_id);
+                }
+            }
+            if !extra_col_names.is_empty() {
+                warn!(
+                    "Some columns in filters are not found in region {}: {:?}",
+                    metadata.region_id, extra_col_names
+                );
             }
         }
-        if !extra_col_names.is_empty() {
-            warn!(
-                "Some columns in filters are not found in region {}: {:?}",
-                metadata.region_id, extra_col_names
-            );
-        }
-
         Ok(read_col_ids)
     }
 
     /// Builds read columns with nested paths derived from JSON type hints.
-    fn read_columns_with_json_type_hint(&self, column_ids: &[ColumnId]) -> ReadColumns {
-        let cols = column_ids
+    fn read_columns_with_json_type_hint(&self, col_ids: &[ColumnId]) -> ReadColumns {
+        let cols = col_ids
             .iter()
-            .map(|&column_id| {
+            .map(|&col_id| {
                 let nested_paths = self
                     .version
                     .metadata
-                    .column_by_id(column_id)
+                    .column_by_id(col_id)
                     .and_then(|column| {
                         let column_name = &column.column_schema.name;
                         self.request
@@ -694,7 +702,7 @@ impl ScanRegion {
                             .map(|json_type| json_nested_paths(column_name, json_type))
                     })
                     .unwrap_or_default();
-                ReadColumn::new(column_id, nested_paths)
+                ReadColumn::new(col_id, nested_paths)
             })
             .collect();
         ReadColumns { cols }
