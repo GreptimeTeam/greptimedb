@@ -152,11 +152,10 @@ impl TableProvider for DfTableProviderAdapter {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).collect();
-        let projection_input = projection.map(|p| p.clone().into());
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;
-            request.projection_input = projection_input;
+            request.projection = projection.cloned();
             request.limit = limit;
             request.clone()
         };
