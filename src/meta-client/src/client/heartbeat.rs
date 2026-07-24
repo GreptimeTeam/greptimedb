@@ -27,7 +27,6 @@ use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{Id, LeaderProviderRef};
@@ -280,10 +279,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(HeartbeatClient::new(channel)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd))
+        Ok(common_grpc::configure_tonic_client!(
+            HeartbeatClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]

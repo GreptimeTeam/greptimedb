@@ -21,7 +21,7 @@ use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs,
 };
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use dashmap::DashMap;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::execution::{SessionStateBuilder, TaskContext};
@@ -505,7 +505,7 @@ pub(super) fn apply_remote_dyn_filter_update(
     }
 
     let Some(query_regs) = regs_by_query.get_query(query_id) else {
-        warn!(
+        debug!(
             "Ignored remote dynamic filter update without query registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
@@ -514,7 +514,7 @@ pub(super) fn apply_remote_dyn_filter_update(
 
     let mut query_regs = query_regs.lock().unwrap();
     let Some(registered) = query_regs.get_mut(filter_id) else {
-        warn!(
+        debug!(
             "Ignored remote dynamic filter update without filter registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
@@ -530,7 +530,7 @@ pub(super) fn unregister_remote_dyn_filter(
     filter_id: &RemoteDynFilterId,
 ) -> RemoteDynFilterUpdateOutcome {
     let Some(query_regs) = regs_by_query.get_query(query_id) else {
-        warn!(
+        debug!(
             "Ignored remote dynamic filter unregister without query registration, query_id: {}, filter_id: {}",
             query_id, filter_id
         );
@@ -540,7 +540,7 @@ pub(super) fn unregister_remote_dyn_filter(
     let (registered, should_remove_query) = {
         let mut locked = query_regs.lock().unwrap();
         let Some(registered) = locked.remove(filter_id) else {
-            warn!(
+            debug!(
                 "Ignored remote dynamic filter unregister without filter registration, query_id: {}, filter_id: {}",
                 query_id, filter_id
             );

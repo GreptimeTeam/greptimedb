@@ -76,6 +76,23 @@ pub(crate) mod table_source;
 use crate::FrontendInvoker;
 use crate::error::Error;
 
+fn expire_after_secs_to_millis(expire_after_secs: i64) -> Result<repr::Duration, Error> {
+    ensure!(
+        expire_after_secs >= 0,
+        InvalidQuerySnafu {
+            reason: format!("EXPIRE AFTER must be non-negative, got {expire_after_secs} seconds"),
+        }
+    );
+
+    expire_after_secs
+        .checked_mul(1_000)
+        .with_context(|| InvalidQuerySnafu {
+            reason: format!(
+                "EXPIRE AFTER value {expire_after_secs} seconds cannot be represented in milliseconds"
+            ),
+        })
+}
+
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
@@ -739,7 +756,7 @@ impl StreamingEngine {
             source_table_ids,
             create_if_not_exists,
             or_replace,
-            expire_after,
+            expire_after: expire_after_secs,
             eval_interval: _,
             comment,
             sql,
@@ -747,6 +764,9 @@ impl StreamingEngine {
             query_ctx,
             ..
         } = args;
+        let expire_after = expire_after_secs
+            .map(expire_after_secs_to_millis)
+            .transpose()?;
 
         let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table

@@ -25,7 +25,6 @@ use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::RwLock;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{Id, load_balance as lb};
@@ -275,17 +274,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        let max_decoding_message_size = self
-            .channel_manager
-            .config()
-            .max_recv_message_size
-            .as_bytes() as usize;
-
-        Ok(StoreClient::new(channel)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd)
-            .max_decoding_message_size(max_decoding_message_size))
+        Ok(common_grpc::configure_tonic_client!(
+            StoreClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]

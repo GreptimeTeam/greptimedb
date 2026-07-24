@@ -29,7 +29,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{}", msg))]
+    #[snafu(display("{}, code: {}, tonic code: {}", msg, code, tonic_code))]
     MetaServer {
         code: StatusCode,
         msg: String,
@@ -163,7 +163,7 @@ impl Error {
         matches!(
             self,
             Error::MetaServer {
-                tonic_code: tonic::Code::OutOfRange,
+                tonic_code: tonic::Code::OutOfRange | tonic::Code::ResourceExhausted,
                 ..
             }
         )
@@ -171,3 +171,32 @@ impl Error {
 }
 
 define_from_tonic_status!(Error, MetaServer);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_out_of_range() {
+        let err = Error::from(tonic::Status::new(tonic::Code::OutOfRange, "any message"));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_resource_exhausted() {
+        let err = Error::from(tonic::Status::new(
+            tonic::Code::ResourceExhausted,
+            "arbitrary message",
+        ));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_non_size_code() {
+        let err = Error::from(tonic::Status::new(tonic::Code::Internal, "message"));
+
+        assert!(!err.is_exceeded_size_limit());
+    }
+}

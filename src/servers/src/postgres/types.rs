@@ -1055,17 +1055,22 @@ pub(super) fn parameters_to_scalar_values(
                                 TimestampType::Nanosecond(_) => {
                                     let values = data
                                         .into_iter()
-                                        .filter_map(|ts| {
-                                            ts.and_then(|ts| {
-                                                ts.and_utc().timestamp_nanos_opt().map(|nanos| {
+                                        .map(|ts| match ts {
+                                            None => {
+                                                Ok(ScalarValue::TimestampNanosecond(None, None))
+                                            }
+                                            Some(ts) => ts
+                                                .and_utc()
+                                                .timestamp_nanos_opt()
+                                                .map(|nanos| {
                                                     ScalarValue::TimestampNanosecond(
                                                         Some(nanos),
                                                         None,
                                                     )
                                                 })
-                                            })
+                                                .ok_or_else(|| numeric_out_of_range_error(ts)),
                                         })
-                                        .collect::<Vec<_>>();
+                                        .collect::<PgWireResult<Vec<_>>>()?;
                                     ScalarValue::List(ScalarValue::new_list(
                                         &values,
                                         &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -2049,6 +2054,53 @@ mod test {
             }
             error => panic!("expected numeric out-of-range error, got {error:?}"),
         }
+    }
+
+    fn qbs_timestamp_nanosecond_array_plan() -> LogicalPlan {
+        build_plan_with_params(vec![(
+            "$1",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ))),
+        )])
+    }
+
+    #[test]
+    fn test_qbs_pg_timestamp_nanosecond_array_preserves_null_slot() {
+        let portal = make_portal(
+            vec![Some(Type::TIMESTAMP_ARRAY)],
+            vec![s(
+                r#"{"2024-01-01 00:00:00.000001",NULL,"2024-01-01 00:00:00.000003"}"#,
+            )],
+        );
+
+        let values =
+            parameters_to_scalar_values(&qbs_timestamp_nanosecond_array_plan(), &portal).unwrap();
+        let expected = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::TimestampNanosecond(Some(1_704_067_200_000_001_000), None),
+                ScalarValue::TimestampNanosecond(None, None),
+                ScalarValue::TimestampNanosecond(Some(1_704_067_200_000_003_000), None),
+            ],
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        ));
+        assert_eq!(expected, values[0]);
+    }
+
+    #[test]
+    fn test_qbs_pg_timestamp_nanosecond_array_out_of_range_rejected() {
+        let portal = make_portal(
+            vec![Some(Type::TIMESTAMP_ARRAY)],
+            vec![s(r#"{"3000-01-01 00:00:00"}"#)],
+        );
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(
+            &qbs_timestamp_nanosecond_array_plan(),
+            &portal,
+        ));
     }
 
     #[test]

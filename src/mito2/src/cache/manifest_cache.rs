@@ -39,6 +39,8 @@ const MANIFEST_DIR: &str = "cache/object/manifest/";
 /// Metric label for manifest files.
 const MANIFEST_TYPE: &str = "manifest";
 
+const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
 /// A manifest cache manages manifest files on local store and evicts files based
 /// on size.
 #[derive(Debug, Clone)]
@@ -261,7 +263,12 @@ impl ManifestCache {
     pub(crate) async fn put_file(&self, key: String, data: Vec<u8>) {
         let cache_file_path = self.cache_file_path(&key);
 
-        if let Err(e) = self.local_store.write(&cache_file_path, data.clone()).await {
+        if let Err(e) = self
+            .local_store
+            .write_with(&cache_file_path, data.clone())
+            .chunk(CHUNK_SIZE)
+            .await
+        {
             warn!(e; "Failed to write manifest to cache {}", cache_file_path);
             return;
         }
