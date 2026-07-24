@@ -3175,7 +3175,7 @@ mod tests {
         status.start_picking(7);
         scheduler.region_status.insert(region_id, status);
 
-        let (prefence_tx, prefence_rx) = oneshot::channel();
+        let (pre_fence_tx, prefence_rx) = oneshot::channel();
         assert!(
             !scheduler
                 .schedule_compaction(
@@ -3183,7 +3183,7 @@ mod tests {
                     compact_request::Options::Regular(Default::default()),
                     &version_control,
                     &env.access_layer,
-                    OptionOutputTx::from(prefence_tx),
+                    OptionOutputTx::from(pre_fence_tx),
                     &manifest_ctx,
                     schema_metadata_manager.clone(),
                     1,
