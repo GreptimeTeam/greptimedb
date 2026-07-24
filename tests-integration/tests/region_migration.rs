@@ -25,6 +25,7 @@ use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRe
 use common_meta::peer::Peer;
 use common_procedure::event::{
     EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
+    EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME,
 };
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -1288,6 +1289,7 @@ enum RegionMigrationEvents {
     ProcedureId,
     Timestamp,
     ProcedureState,
+    ProcedureTrigger,
     Schema,
     Table,
     EventType,
@@ -1306,6 +1308,7 @@ impl Iden for RegionMigrationEvents {
                 Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
                 Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
                 Self::ProcedureState => EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
+                Self::ProcedureTrigger => EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME,
                 Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
                 Self::Table => DEFAULT_EVENTS_TABLE_NAME,
                 Self::EventType => EVENTS_TABLE_TYPE_COLUMN_NAME,
@@ -1342,6 +1345,7 @@ async fn check_region_migration_events_system_table(
     let query = Query::select()
         .column(RegionMigrationEvents::RegionMigrationTriggerReason)
         .column(RegionMigrationEvents::ProcedureState)
+        .column(RegionMigrationEvents::ProcedureTrigger)
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
@@ -1357,11 +1361,11 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+---------------------------------+-----------------+
-| region_migration_trigger_reason | procedure_state |
-+---------------------------------+-----------------+
-| Manual                          | Running         |
-| Manual                          | Done            |
-+---------------------------------+-----------------+";
++---------------------------------+-----------------+-------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger |
++---------------------------------+-----------------+-------------------+
+| Manual                          | Running         | Submitted         |
+| Manual                          | Done            | Succeeded         |
++---------------------------------+-----------------+-------------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }

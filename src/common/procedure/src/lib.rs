@@ -29,9 +29,9 @@ pub mod test_util;
 pub use crate::error::{Error, Result};
 pub use crate::event::ProcedureEvent;
 pub use crate::procedure::{
-    BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, ContextProviderRef, LockKey,
-    Output, ParseIdError, PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo,
-    ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, StringKey,
-    UserMetadata,
+    BoxedProcedure, BoxedProcedureLoader, ChildSubmissionOutcome, Context, ContextProvider,
+    ContextProviderRef, EventContext, EventTrigger, LockKey, Output, ParseIdError, PoisonKey,
+    PoisonKeys, Procedure, ProcedureId, ProcedureInfo, ProcedureManager, ProcedureManagerRef,
+    ProcedureState, ProcedureWithId, RetryPhase, Status, StringKey,
 };
 pub use crate::watcher::Watcher;
