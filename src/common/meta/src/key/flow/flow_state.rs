@@ -93,22 +93,28 @@ impl<'a> MetadataKey<'a, FlowStateKey> for FlowStateKey {
 }
 
 /// The value of flow state size
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct FlowStateValue {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<FlowId, usize>,
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    #[serde(default)]
+    pub start_time_map: BTreeMap<FlowId, i64>,
 }
 
 impl FlowStateValue {
     pub fn new(
         state_size: BTreeMap<FlowId, usize>,
         last_exec_time_map: BTreeMap<FlowId, i64>,
+        start_time_map: BTreeMap<FlowId, i64>,
     ) -> Self {
         Self {
             state_size,
             last_exec_time_map,
+            start_time_map,
         }
     }
 }
@@ -147,12 +153,15 @@ impl FlowStateManager {
 }
 
 /// Flow's state report, send regularly through heartbeat message
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FlowStat {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<u32, usize>,
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    pub start_time_map: BTreeMap<FlowId, i64>,
 }
 
 impl From<FlowStateValue> for FlowStat {
@@ -160,6 +169,7 @@ impl From<FlowStateValue> for FlowStat {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
+            start_time_map: value.start_time_map,
         }
     }
 }
@@ -169,6 +179,7 @@ impl From<FlowStat> for FlowStateValue {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
+            start_time_map: value.start_time_map,
         }
     }
 }

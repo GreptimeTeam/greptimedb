@@ -46,6 +46,8 @@ pub struct TaskState {
     last_query_duration: Duration,
     /// Last successful execution time in unix timestamp milliseconds.
     last_exec_time_millis: Option<i64>,
+    /// First execution time in unix timestamp milliseconds, set once.
+    start_time_millis: Option<i64>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -79,6 +81,7 @@ impl TaskState {
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
+            start_time_millis: None,
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
@@ -90,8 +93,14 @@ impl TaskState {
         }
     }
 
-    /// called after last query is done
-    /// `is_succ` indicate whether the last query is successful
+    /// Record the first-execution start time. Call this once, just before
+    /// the first frontend query is dispatched, not after it completes.
+    pub fn record_start_time_if_first(&mut self) {
+        if self.start_time_millis.is_none() {
+            self.start_time_millis = Some(common_time::util::current_time_millis());
+        }
+    }
+
     pub fn after_query_exec(&mut self, elapsed: Duration, is_succ: bool) {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
@@ -103,6 +112,11 @@ impl TaskState {
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
         self.last_exec_time_millis
+    }
+
+    /// First execution time in unix timestamp milliseconds, set once.
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.start_time_millis
     }
 
     pub fn checkpoint_mode(&self) -> CheckpointMode {

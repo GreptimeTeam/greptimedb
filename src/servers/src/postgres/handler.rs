@@ -600,6 +600,53 @@ fn describe_fields(
                 format.format_for(1),
             ),
         ]),
+        // SHOW FLOW STATUS returns six columns; return their descriptions so
+        // prepared/extended-protocol clients receive the correct row description.
+        SqlPlan::Statement(Statement::ShowFlowStatus(_), _) => Ok(vec![
+            FieldInfo::new(
+                "flow_id".to_string(),
+                None,
+                None,
+                Type::INT8,
+                format.format_for(0),
+            ),
+            FieldInfo::new(
+                "flow_name".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                format.format_for(1),
+            ),
+            FieldInfo::new(
+                "start_time".to_string(),
+                None,
+                None,
+                Type::TIMESTAMP,
+                format.format_for(2),
+            ),
+            FieldInfo::new(
+                "last_execution_time".to_string(),
+                None,
+                None,
+                Type::TIMESTAMP,
+                format.format_for(3),
+            ),
+            FieldInfo::new(
+                "uptime_seconds".to_string(),
+                None,
+                None,
+                Type::INT8,
+                format.format_for(4),
+            ),
+            FieldInfo::new(
+                "state_size".to_string(),
+                None,
+                None,
+                Type::NUMERIC,
+                format.format_for(5),
+            ),
+        ]),
+
         // single column show statements
         SqlPlan::Statement(
             Statement::ShowTables(_) | Statement::ShowFlows(_) | Statement::ShowViews(_),

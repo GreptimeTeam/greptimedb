@@ -1499,6 +1499,11 @@ pub fn check_permission(
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
+        Statement::ShowFlowStatus(_stmt) => {
+            // Flow statistics are organized based on the catalog dimension and
+            // filtered by the current catalog, so there is no need to check the
+            // permission of the database(schema).
+        }
         #[cfg(feature = "enterprise")]
         Statement::ShowTriggers(_stmt) => {
             // The trigger is organized based on the catalog dimension, so there

@@ -290,6 +290,10 @@ impl BatchingTask {
         self.state.read().unwrap().last_execution_time_millis()
     }
 
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.state.read().unwrap().start_time_millis()
+    }
+
     /// Collect flow-related extensions from the task's query context that should be
     /// forwarded to the frontend (e.g. scheduled time).
     fn frontend_extensions(&self) -> HashMap<String, String> {
@@ -654,6 +658,10 @@ impl BatchingTask {
         );
 
         let mut peer_desc = None;
+        {
+            let mut state = self.state.write().unwrap();
+            state.record_start_time_if_first();
+        }
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])

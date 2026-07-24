@@ -26,8 +26,8 @@ use crate::error::{
 use crate::parser::ParserContext;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant,
-    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
-    ShowSearchPath, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowCreateView, ShowDatabases, ShowFlowStatus, ShowFlows, ShowIndex, ShowKind, ShowProcessList,
+    ShowRegion, ShowSearchPath, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -57,6 +57,12 @@ impl ParserContext<'_> {
             self.parse_show_views()
         } else if self.consume_token("FLOWS") {
             self.parse_show_flows()
+        } else if self.consume_token("FLOW") {
+            if self.consume_token("STATUS") {
+                self.parse_show_flow_status()
+            } else {
+                self.unsupported(self.peek_token_as_string())
+            }
         } else if self.matches_keyword(Keyword::CHARSET) {
             self.parser.next_token();
             Ok(Statement::ShowCharset(self.parse_show_kind()?))
@@ -585,6 +591,12 @@ impl ParserContext<'_> {
         let kind = self.parse_show_kind()?;
 
         Ok(Statement::ShowFlows(ShowFlows { kind, database }))
+    }
+
+    fn parse_show_flow_status(&mut self) -> Result<Statement> {
+        let kind = self.parse_show_kind()?;
+
+        Ok(Statement::ShowFlowStatus(ShowFlowStatus { kind }))
     }
 
     fn parse_show_processlist(&mut self, full: bool) -> Result<Statement> {
@@ -1245,6 +1257,22 @@ mod tests {
             Statement::ShowFlows(ShowFlows {
                 kind: ShowKind::All,
                 database: Some("d1".to_string()),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_flow_status() {
+        let sql = "SHOW FLOW STATUS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowFlowStatus(ShowFlowStatus {
+                kind: ShowKind::All,
             })
         );
         assert_eq!(sql, stmts[0].to_string());
