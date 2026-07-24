@@ -1089,15 +1089,6 @@ enum CompactionPhase {
     },
 }
 
-impl CompactionPhase {
-    fn execution(&self) -> Option<&CompactionExecution> {
-        match self {
-            Self::Picking { .. } => None,
-            Self::Local { execution, .. } | Self::Remote { execution } => Some(execution),
-        }
-    }
-}
-
 /// Owns atomic reservations for every SST selected by a compaction plan.
 #[derive(Debug, Clone)]
 struct CompactingFiles {
@@ -1371,7 +1362,11 @@ impl CompactionStatus {
     fn matches_execution(&self, execution: &CompactionExecution) -> bool {
         self.phase
             .as_ref()
-            .and_then(CompactionPhase::execution)
+            .and_then(|phase| match phase {
+                CompactionPhase::Picking { .. } => None,
+                CompactionPhase::Local { execution, .. }
+                | CompactionPhase::Remote { execution } => Some(execution),
+            })
             .is_some_and(|current| current.matches(execution))
     }
 
