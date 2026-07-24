@@ -443,7 +443,7 @@ jobs:
           kubectl wait \
             --for=condition=Ready \
             pod -l app.kubernetes.io/instance=kafka \
-            --timeout=120s \
+            --timeout=180s \
             -n kafka-cluster
       - if: matrix.mode.kafkaWalHelper
         name: Setup Kafka WAL helper
@@ -653,7 +653,7 @@ jobs:
           kubectl wait \
             --for=condition=Ready \
             pod -l app.kubernetes.io/instance=kafka \
-            --timeout=120s \
+            --timeout=180s \
             -n kafka-cluster
       - name: Print etcd info
         shell: bash
