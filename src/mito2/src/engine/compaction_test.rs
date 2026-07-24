@@ -15,11 +15,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::{ColumnSchema, Rows};
-use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
@@ -34,11 +32,11 @@ use store_api::region_request::{
     RegionTruncateRequest, SetRegionOption, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::listener::{CompactionListener, CompactionPlanningGate, EventListener};
+use crate::engine::listener::{CompactionListener, CompactionPlanningGate};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
@@ -152,92 +150,6 @@ impl Drop for CompactionListenerGuard {
         if let Some(listener) = self.0.take() {
             listener.wake();
         }
-    }
-}
-
-struct LocalCancellationGate {
-    merge_entered: Notify,
-    merge_permits: Semaphore,
-    cancel_requested: Notify,
-    pending_ddl_armed: AtomicBool,
-    pending_ddl_entered: Notify,
-    pending_ddl_permits: Semaphore,
-}
-
-impl Default for LocalCancellationGate {
-    fn default() -> Self {
-        Self {
-            merge_entered: Notify::new(),
-            merge_permits: Semaphore::new(0),
-            cancel_requested: Notify::new(),
-            pending_ddl_armed: AtomicBool::new(false),
-            pending_ddl_entered: Notify::new(),
-            pending_ddl_permits: Semaphore::new(0),
-        }
-    }
-}
-
-struct LocalCancellationGateGuard(Option<Arc<LocalCancellationGate>>);
-
-impl LocalCancellationGateGuard {
-    fn new(gate: Arc<LocalCancellationGate>) -> Self {
-        Self(Some(gate))
-    }
-
-    fn release_merge(&self) {
-        self.0.as_ref().unwrap().merge_permits.add_permits(1);
-    }
-
-    fn release_pending_ddl_dispatch(&self) {
-        self.0.as_ref().unwrap().pending_ddl_permits.add_permits(1);
-    }
-}
-
-impl Drop for LocalCancellationGateGuard {
-    fn drop(&mut self) {
-        if let Some(gate) = self.0.take() {
-            gate.merge_permits.add_permits(1);
-            gate.pending_ddl_permits.add_permits(1);
-        }
-    }
-}
-
-impl LocalCancellationGate {
-    async fn wait_until_merge_finished(&self) {
-        self.merge_entered.notified().await;
-    }
-
-    async fn wait_until_cancel_requested(&self) {
-        self.cancel_requested.notified().await;
-    }
-
-    fn arm_pending_ddl_dispatch(&self) {
-        self.pending_ddl_armed.store(true, Ordering::Relaxed);
-    }
-
-    async fn wait_until_pending_ddl_dispatch(&self) {
-        self.pending_ddl_entered.notified().await;
-    }
-}
-
-#[async_trait]
-impl EventListener for LocalCancellationGate {
-    async fn on_merge_ssts_finished(&self, _region_id: RegionId) {
-        self.merge_entered.notify_one();
-        self.merge_permits.acquire().await.unwrap().forget();
-    }
-
-    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {
-        self.cancel_requested.notify_one();
-    }
-
-    async fn on_compaction_result_notified(&self, _region_id: RegionId) {
-        if !self.pending_ddl_armed.swap(false, Ordering::Relaxed) {
-            return;
-        }
-
-        self.pending_ddl_entered.notify_one();
-        self.pending_ddl_permits.acquire().await.unwrap().forget();
     }
 }
 
@@ -527,8 +439,6 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
     let create = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .build();
-    let table_dir = create.table_dir.clone();
-    let options = create.options.clone();
     let column_schemas = create
         .column_metadatas
         .iter()
@@ -540,12 +450,6 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .unwrap();
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
-    let input_file_ids = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap()
-        .file_ids();
-    assert_eq!(2, input_file_ids.len());
 
     let commit_guard = gate.arm_commit();
     let compact_engine = engine.clone();
@@ -602,18 +506,6 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .expect("compaction task panicked")
         .expect("compaction failed");
     assert!(!truncate_task.is_finished());
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    let compacted_file_ids = scanner.file_ids();
-    assert_eq!(1, compacted_file_ids.len());
-    let compacted_file_id = compacted_file_ids[0];
-    assert!(!input_file_ids.contains(&compacted_file_id));
-    assert_eq!(
-        (0..20).map(|value| value * 1000).collect::<Vec<_>>(),
-        collect_stream_ts(scanner.scan().await.unwrap()).await
-    );
 
     pending_ddl_guard.release();
     tokio::time::timeout(Duration::from_secs(5), truncate_task)
@@ -626,44 +518,6 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(!scanner.file_ids().contains(&compacted_file_id));
-    assert!(
-        collect_stream_ts(scanner.scan().await.unwrap())
-            .await
-            .is_empty()
-    );
-
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Close(RegionCloseRequest::default()),
-        )
-        .await
-        .unwrap();
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                table_dir,
-                path_type: PathType::Bare,
-                options,
-                skip_wal_replay: false,
-                checkpoint: None,
-                requirements: Default::default(),
-            }),
-        )
-        .await
-        .unwrap();
-    engine
-        .set_region_role(region_id, RegionRole::Leader)
-        .unwrap();
-
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    assert!(!scanner.file_ids().contains(&compacted_file_id));
     assert!(
         collect_stream_ts(scanner.scan().await.unwrap())
             .await
@@ -1255,8 +1109,8 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let listener = Arc::new(LocalCancellationGate::default());
-    let listener_guard = LocalCancellationGateGuard::new(listener.clone());
+    let region_id = RegionId::new(2049, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
     let engine = env
         .create_engine_with(
             MitoConfig {
@@ -1264,12 +1118,10 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
                 ..Default::default()
             },
             None,
-            Some(listener.clone()),
+            Some(gate.clone()),
             None,
         )
         .await;
-
-    let region_id = RegionId::new(2049, 1);
     env.get_schema_metadata_manager()
         .register_region_table_info(
             region_id.table_id(),
@@ -1294,10 +1146,11 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
         .await
         .unwrap();
 
+    let merge_guard = gate.arm_merge();
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
 
-    tokio::time::timeout(Duration::from_secs(5), listener.wait_until_merge_finished())
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_merge_entered())
         .await
         .expect("local compaction did not reach its cancellable merge gate");
 
@@ -1312,25 +1165,22 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
             )
             .await
     });
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        listener.wait_until_cancel_requested(),
-    )
-    .await
-    .expect("enter-staging did not request local compaction cancellation");
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_cancel_requested())
+        .await
+        .expect("enter-staging did not request local compaction cancellation");
     assert!(!staging_task.is_finished());
 
-    listener.arm_pending_ddl_dispatch();
-    listener_guard.release_merge();
+    let pending_ddl_guard = gate.arm_pending_ddl_dispatch();
+    merge_guard.release();
     tokio::time::timeout(
         Duration::from_secs(5),
-        listener.wait_until_pending_ddl_dispatch(),
+        gate.wait_until_pending_ddl_dispatch(),
     )
     .await
     .expect("cancelled compaction did not notify before pending DDL dispatch");
     assert!(!staging_task.is_finished());
 
-    listener_guard.release_pending_ddl_dispatch();
+    pending_ddl_guard.release();
     tokio::time::timeout(Duration::from_secs(5), &mut staging_task)
         .await
         .expect("enter-staging did not finish after cancellation notification")

@@ -101,13 +101,16 @@ pub trait EventListener: Send + Sync {
 
 pub type EventListenerRef = Arc<dyn EventListener>;
 
-/// Test gate that blocks compaction planning for one region before picker execution.
+/// Test gate that blocks selected compaction lifecycle phases for one region.
 pub struct CompactionPlanningGate {
     region_id: RegionId,
     armed: AtomicBool,
     entered: Notify,
     cancel_requested: Notify,
     permits: Semaphore,
+    merge_armed: AtomicBool,
+    merge_entered: Notify,
+    merge_permits: Semaphore,
     commit_armed: AtomicBool,
     commit_entered: Notify,
     commit_permits: Semaphore,
@@ -131,6 +134,25 @@ impl Drop for CompactionPlanningGateGuard {
     fn drop(&mut self) {
         if let Some(gate) = self.gate.take() {
             gate.release();
+        }
+    }
+}
+
+/// Releases an armed merge gate when a test exits unexpectedly.
+pub struct CompactionMergeGateGuard {
+    gate: Option<Arc<CompactionPlanningGate>>,
+}
+
+impl CompactionMergeGateGuard {
+    pub fn release(mut self) {
+        self.gate.take().unwrap().release_merge();
+    }
+}
+
+impl Drop for CompactionMergeGateGuard {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release_merge();
         }
     }
 }
@@ -181,6 +203,9 @@ impl CompactionPlanningGate {
             entered: Notify::new(),
             cancel_requested: Notify::new(),
             permits: Semaphore::new(0),
+            merge_armed: AtomicBool::new(false),
+            merge_entered: Notify::new(),
+            merge_permits: Semaphore::new(0),
             commit_armed: AtomicBool::new(false),
             commit_entered: Notify::new(),
             commit_permits: Semaphore::new(0),
@@ -203,6 +228,17 @@ impl CompactionPlanningGate {
 
     pub async fn wait_until_cancel_requested(&self) {
         self.cancel_requested.notified().await;
+    }
+
+    pub fn arm_merge(self: &Arc<Self>) -> CompactionMergeGateGuard {
+        self.merge_armed.store(true, Ordering::Relaxed);
+        CompactionMergeGateGuard {
+            gate: Some(self.clone()),
+        }
+    }
+
+    pub async fn wait_until_merge_entered(&self) {
+        self.merge_entered.notified().await;
     }
 
     pub fn arm_commit(self: &Arc<Self>) -> CompactionCommitGateGuard {
@@ -231,6 +267,10 @@ impl CompactionPlanningGate {
         self.permits.add_permits(1);
     }
 
+    fn release_merge(&self) {
+        self.merge_permits.add_permits(1);
+    }
+
     fn release_commit(&self) {
         self.commit_permits.add_permits(1);
     }
@@ -253,6 +293,15 @@ impl EventListener for CompactionPlanningGate {
 
         self.entered.notify_one();
         self.permits.acquire().await.unwrap().forget();
+    }
+
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+        if region_id != self.region_id || !self.merge_armed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+
+        self.merge_entered.notify_one();
+        self.merge_permits.acquire().await.unwrap().forget();
     }
 
     async fn on_compaction_commit_begin(&self, region_id: RegionId) {
