@@ -212,6 +212,9 @@ impl<S> RegionWorkerLoop<S> {
             .compaction_scheduler
             .on_execution_cancelled(region_id, &execution)
             .await;
+        if !pending_ddls.is_empty() {
+            self.listener.on_compaction_result_notified(region_id).await;
+        }
 
         self.handle_ddl_requests(&mut pending_ddls).await;
     }
