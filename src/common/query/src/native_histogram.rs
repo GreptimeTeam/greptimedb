@@ -23,7 +23,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::types::{StructField, StructType};
 use once_cell::sync::Lazy;
 
-pub const NATIVE_HISTOGRAM_FIELD: &str = "greptime_native_histogram";
+use crate::prelude::greptime_native_histogram;
+
 pub const SCHEMA_FIELD: &str = "schema";
 pub const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
 pub const SUM_FIELD: &str = "sum";
@@ -107,7 +108,7 @@ pub fn native_histogram_value_type() -> &'static ConcreteDataType {
 }
 
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
+    name == greptime_native_histogram() && data_type == native_histogram_value_type()
 }
 
 // ---------------------------------------------------------------------------

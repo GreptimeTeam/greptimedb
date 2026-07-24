@@ -25,7 +25,7 @@ use api::v1::{ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Val
 use bytes::Bytes;
 use common_grpc::precision::Precision;
 use common_query::native_histogram::*;
-use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::Message;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -270,7 +270,7 @@ fn native_histogram_column_schema() -> ColumnSchema {
             .into_parts();
 
     ColumnSchema {
-        column_name: NATIVE_HISTOGRAM_FIELD.to_string(),
+        column_name: greptime_native_histogram().to_string(),
         datatype: datatype as i32,
         semantic_type: SemanticType::Field as i32,
         datatype_extension,
@@ -400,7 +400,7 @@ fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
     // The histogram field column is generated from the protobuf payload.
     for (name, _) in tags {
         ensure!(
-            name != NATIVE_HISTOGRAM_FIELD,
+            name != greptime_native_histogram(),
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 label `{name}` conflicts with an internal native histogram label"
@@ -854,7 +854,7 @@ mod tests {
             "internal histogram label on samples",
             request_with_sample(vec![
                 (METRIC_NAME_LABEL, "metric"),
-                (NATIVE_HISTOGRAM_FIELD, "user_value"),
+                (greptime_native_histogram(), "user_value"),
             ]),
             "conflicts with an internal native histogram label",
         ));
@@ -962,7 +962,7 @@ mod tests {
                 .iter()
                 .map(|col| col.column_name.as_str())
                 .collect::<Vec<_>>(),
-            vec![greptime_timestamp(), NATIVE_HISTOGRAM_FIELD]
+            vec![greptime_timestamp(), greptime_native_histogram()]
         );
         assert_eq!(
             rows.rows[0].values[0].value_data,
@@ -1005,7 +1005,7 @@ mod tests {
         let mut request = test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "metric"),
-                (NATIVE_HISTOGRAM_FIELD, "user_value"),
+                (greptime_native_histogram(), "user_value"),
             ],
             vec![],
         );
@@ -1070,7 +1070,7 @@ mod tests {
                 .iter()
                 .map(|col| col.column_name.as_str())
                 .collect::<Vec<_>>(),
-            vec![greptime_timestamp(), NATIVE_HISTOGRAM_FIELD]
+            vec![greptime_timestamp(), greptime_native_histogram()]
         );
 
         assert_eq!(
@@ -1138,7 +1138,7 @@ mod tests {
     }
 
     fn histogram_field_value(rows: &Rows, row_idx: usize, field_name: &str) -> Option<ValueData> {
-        let histogram_idx = column_index(&rows.schema, NATIVE_HISTOGRAM_FIELD);
+        let histogram_idx = column_index(&rows.schema, greptime_native_histogram());
         let Some(ValueData::StructValue(histogram)) =
             &rows.rows[row_idx].values[histogram_idx].value_data
         else {
