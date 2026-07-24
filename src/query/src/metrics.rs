@@ -434,13 +434,13 @@ mod tests {
             &self,
             _read_preference: ReadPreference,
             _request: common_query::request::QueryRequest,
-        ) -> Result<SendableRecordBatchStream> {
+        ) -> Result<crate::region_query::RoutedRegionQueryStream> {
             unreachable!("metrics tests should not execute remote queries")
         }
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _update: RemoteDynFilterUpdate,
         ) -> Result<()> {
@@ -449,7 +449,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _unregister: RemoteDynFilterUnregister,
         ) -> Result<()> {
