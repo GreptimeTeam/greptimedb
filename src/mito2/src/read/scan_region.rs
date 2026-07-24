@@ -698,11 +698,11 @@ impl ScanRegion {
                     .metadata
                     .column_by_id(col_id)
                     .and_then(|column| {
-                        let column_name = &column.column_schema.name;
+                        let col_name = &column.column_schema.name;
                         self.request
                             .json_type_hint
-                            .get(column_name)
-                            .map(|json_type| json_nested_paths(column_name, json_type))
+                            .get(col_name)
+                            .map(|json_type| json_nested_paths(col_name, json_type))
                     })
                     .unwrap_or_default();
                 ReadColumn::new(col_id, nested_paths)
