@@ -421,16 +421,17 @@ impl ScanRegion {
         let read_col_ids =
             self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
 
-        // Only apply nested projections and pass JSON type hints for structured JSON (JSON2)
-        // columns. Legacy JSONB columns have JSON extension metadata but their physical
-        // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
+        // Narrow JSON2 columns to avoid reading unnecessary nested fields.
+        //
+        // `read_col_ids` selects the root columns required by the projection and predicates,
+        // while nested projection is currently only applied to JSON2 columns, whose type hints
+        // further narrow them to the requested nested fields.
         let has_structured_json = metadata
             .schema
             .arrow_schema()
             .fields()
             .iter()
             .any(is_structured_json_field);
-
         let read_cols = if has_structured_json {
             self.read_columns_with_json_type_hint(&read_col_ids)
         } else {

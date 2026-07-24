@@ -97,22 +97,48 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     test_util::put_rows(&engine, region_id, rows).await;
     test_util::flush_region(&engine, region_id, None).await;
 
+    // Without a type hint, the scanner reads the whole JSON2 root column.
+    let request = ScanRequest {
+        projection: Some(vec![1, 0]),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await?;
+    let Scanner::Seq(seq_scan) = &scanner else {
+        unreachable!();
+    };
+    assert_eq!(
+        seq_scan.input().read_cols,
+        ReadColumns::from_deduped_column_ids([1, 0])
+    );
+
+    let stream = scanner.scan().await?;
+    let batches = RecordBatches::try_collect(stream).await?;
+    let expected = r#"
++------------------------------------------+-------+
+| field_0                                  | tag_0 |
++------------------------------------------+-------+
+| {a: {x: 10, y: ignored-a}, b: ignored-b} | tag-1 |
+| {a: {x: 20, y: ignored-c}, b: ignored-d} | tag-2 |
++------------------------------------------+-------+
+"#;
+    assert_eq!(batches.pretty_print()?, expected.trim());
+
     // Simulate a query expression like json_get(field_0, 'a.x'): the logical projection still
     // returns the JSON2 root column, while json_type_hint tells scan input construction which
     // nested physical path is needed.
-
+    let json_type_hint = HashMap::from([(
+        "field_0".to_string(),
+        JsonNativeType::Object(JsonObjectType::from([(
+            "a".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([(
+                "x".to_string(),
+                JsonNativeType::i64(),
+            )])),
+        )])),
+    )]);
     let request = ScanRequest {
         projection: Some(vec![1, 0]),
-        json_type_hint: HashMap::from([(
-            "field_0".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([(
-                "a".to_string(),
-                JsonNativeType::Object(JsonObjectType::from([(
-                    "x".to_string(),
-                    JsonNativeType::i64(),
-                )])),
-            )])),
-        )]),
+        json_type_hint: json_type_hint.clone(),
         ..Default::default()
     };
     let scanner = engine.scanner(region_id, request).await?;
@@ -150,6 +176,33 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
 | {a: {x: 10}} | tag-1 |
 | {a: {x: 20}} | tag-2 |
 +--------------+-------+
+"#;
+    assert_eq!(batches.pretty_print()?, expected.trim());
+
+    // A type hint only narrows a projected JSON2 root; it must not add an unprojected root.
+    let request = ScanRequest {
+        projection: Some(vec![0]),
+        json_type_hint,
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await?;
+    let Scanner::Seq(seq_scan) = &scanner else {
+        unreachable!();
+    };
+    assert_eq!(
+        seq_scan.input().read_cols,
+        ReadColumns::from_deduped_column_ids([0])
+    );
+
+    let stream = scanner.scan().await?;
+    let batches = RecordBatches::try_collect(stream).await?;
+    let expected = r#"
++-------+
+| tag_0 |
++-------+
+| tag-1 |
+| tag-2 |
++-------+
 "#;
     assert_eq!(batches.pretty_print()?, expected.trim());
     Ok(())
