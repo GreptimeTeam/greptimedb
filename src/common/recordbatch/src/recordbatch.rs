@@ -21,10 +21,8 @@ use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
 use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions};
-use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
-use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
@@ -61,8 +59,6 @@ impl RecordBatch {
         // TODO(LFC): Remove the casting here once `Batch` is no longer used.
         let arrow_arrays = Self::cast_view_arrays(schema.arrow_schema(), arrow_arrays)?;
 
-        let arrow_arrays = maybe_align_json_array_with_schema(schema.arrow_schema(), arrow_arrays)?;
-
         let df_record_batch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
 
@@ -87,8 +83,6 @@ impl RecordBatch {
         // the casting here will be removed in the end.
         // TODO(LFC): Remove the casting here once `Batch` is no longer used.
         let arrow_arrays = Self::cast_view_arrays(&arrow_schema, arrow_arrays)?;
-
-        let arrow_arrays = maybe_align_json_array_with_schema(&arrow_schema, arrow_arrays)?;
 
         let df_record_batch = DfRecordBatch::try_new(arrow_schema, arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
@@ -377,36 +371,11 @@ pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Resul
     Ok(RecordBatch::from_df_record_batch(schema, record_batch))
 }
 
-fn maybe_align_json_array_with_schema(
-    schema: &ArrowSchemaRef,
-    arrays: Vec<ArrayRef>,
-) -> Result<Vec<ArrayRef>> {
-    if schema.fields().iter().all(|f| !is_structured_json_field(f)) {
-        return Ok(arrays);
-    }
-
-    let mut aligned = Vec::with_capacity(arrays.len());
-    for (field, array) in schema.fields().iter().zip(arrays) {
-        if !is_structured_json_field(field) {
-            aligned.push(array);
-            continue;
-        }
-
-        let json_array = JsonArray::from(&array)
-            .try_align(field.data_type())
-            .context(DataTypesSnafu)?;
-        aligned.push(json_array);
-    }
-    Ok(aligned)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{
-        AsArray, BinaryArray, StringArray, StringViewArray, UInt32Array,
-    };
+    use datatypes::arrow::array::{AsArray, StringArray, StringViewArray, UInt32Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
@@ -629,10 +598,10 @@ mod tests {
             .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
         let arrow_schema = Arc::new(ArrowSchema::new(vec![field]));
         let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
-        let arrays =
-            vec![Arc::new(BinaryArray::from(vec![Some(br#"{"a":1}"#.as_slice())])) as ArrayRef];
-
-        let aligned = maybe_align_json_array_with_schema(schema.arrow_schema(), arrays).unwrap();
-        assert_eq!(aligned[0].data_type(), &DataType::Binary);
+        let columns: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(
+            br#"{"a":1}"#.to_vec(),
+        )]))];
+        let batch = RecordBatch::new(schema, columns).unwrap();
+        assert_eq!(batch.column(0).data_type(), &DataType::Binary);
     }
 }

@@ -1,0 +1,268 @@
+-- Read-time scalar casts. json_get(..., path)::type is rewritten to typed json_get.
+-- Keep each value in a separate SST so mixed JSON2 physical layouts are exercised.
+CREATE TABLE json2_cast_scalar (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_cast_scalar VALUES (1, '{"a":42}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (2, '{"a":"42"}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (3, '{"a":"bad"}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (4, '{"a":3.14}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (5, '{"a":true}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (6, '{"a":null}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (7, '{"a":{"b":1}}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (8, '{"a":[1,2]}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_scalar VALUES (9, '{"z":0}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_scalar');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_scalar') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+SELECT
+    ts,
+    json_get(j, 'a')::BIGINT AS a_bigint,
+    json_get(j, 'a')::DOUBLE AS a_double,
+    json_get(j, 'a')::BOOLEAN AS a_bool,
+    json_get(j, 'a')::STRING AS a_string
+FROM json2_cast_scalar
+ORDER BY ts;
+
++-------------------------+----------+----------+--------+----------+
+| ts                      | a_bigint | a_double | a_bool | a_string |
++-------------------------+----------+----------+--------+----------+
+| 1970-01-01T00:00:00.001 | 42       | 42.0     | true   | 42       |
+| 1970-01-01T00:00:00.002 | 42       | 42.0     |        | 42       |
+| 1970-01-01T00:00:00.003 |          |          |        | bad      |
+| 1970-01-01T00:00:00.004 | 3        | 3.14     | true   | 3.14     |
+| 1970-01-01T00:00:00.005 | 1        | 1.0      | true   | true     |
+| 1970-01-01T00:00:00.006 |          |          |        |          |
+| 1970-01-01T00:00:00.007 |          |          |        | {"b":1}  |
+| 1970-01-01T00:00:00.008 |          |          |        | [1,2]    |
+| 1970-01-01T00:00:00.009 |          |          |        |          |
++-------------------------+----------+----------+--------+----------+
+
+DROP TABLE json2_cast_scalar;
+
+Affected Rows: 0
+
+-- Read-time parent projection while only child leaves are stored.
+CREATE TABLE json2_cast_parent (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_cast_parent VALUES (1, '{"a":{"b":1,"c":2}}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_parent');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_parent') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_parent VALUES (2, '{"a":{"b":"1","c":"2"}}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_parent');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_parent') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+INSERT INTO json2_cast_parent VALUES (3, '{"a":{"b":true,"c":false}}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_parent');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_parent') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+SELECT
+    ts,
+    json_get(j, 'a')::STRING AS a_string,
+    json_get(j, 'a')::INT AS a_int,
+    json_get(j, 'a.b')::BIGINT AS ab_bigint,
+    json_get(j, 'a.c')::STRING AS ac_string
+FROM json2_cast_parent
+ORDER BY ts;
+
++-------------------------+----------------------+-------+-----------+-----------+
+| ts                      | a_string             | a_int | ab_bigint | ac_string |
++-------------------------+----------------------+-------+-----------+-----------+
+| 1970-01-01T00:00:00.001 | {"b":1,"c":2}        |       | 1         | 2         |
+| 1970-01-01T00:00:00.002 | {"b":"1","c":"2"}    |       |           | 2         |
+| 1970-01-01T00:00:00.003 | {"b":true,"c":false} |       |           | false     |
++-------------------------+----------------------+-------+-----------+-----------+
+
+DROP TABLE json2_cast_parent;
+
+Affected Rows: 0
+
+-- Write-time schema alignment across different ingest batches.
+CREATE TABLE json2_cast_write_alignment (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_cast_write_alignment VALUES
+    (1, '{"s":null,"b":null,"n":null,"o":null,"l":null,"ui":18446744073709551615,"uf":9007199254740993,"if":-9007199254740993}');
+
+Affected Rows: 1
+
+INSERT INTO json2_cast_write_alignment VALUES
+    (2, '{"s":"text","b":true,"n":42,"o":{"x":1},"l":[1,2],"ui":-1,"uf":1.5,"if":1.5}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_cast_write_alignment');
+
++-------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_cast_write_alignment') |
++-------------------------------------------------+
+| 0                                               |
++-------------------------------------------------+
+
+SELECT
+    ts,
+    json_get(j, 's')::STRING AS null_to_string,
+    json_get(j, 'b')::BOOLEAN AS null_to_bool,
+    json_get(j, 'n')::UINT64 AS null_to_uint,
+    json_get(j, 'o')::STRING AS null_to_object,
+    json_get(j, 'l')::STRING AS null_to_list,
+    json_get(j, 'ui')::STRING AS uint_int_variant,
+    json_get(j, 'uf')::STRING AS uint_float_variant,
+    json_get(j, 'if')::STRING AS int_float_variant
+FROM json2_cast_write_alignment
+ORDER BY ts;
+
++-------------------------+----------------+--------------+--------------+----------------+--------------+----------------------+--------------------+-------------------+
+| ts                      | null_to_string | null_to_bool | null_to_uint | null_to_object | null_to_list | uint_int_variant     | uint_float_variant | int_float_variant |
++-------------------------+----------------+--------------+--------------+----------------+--------------+----------------------+--------------------+-------------------+
+| 1970-01-01T00:00:00.001 |                |              |              |                |              | 18446744073709551615 | 9007199254740993   | -9007199254740993 |
+| 1970-01-01T00:00:00.002 | text           | true         | 42           | {"x":1}        | [1,2]        | -1                   | 1.5                | 1.5               |
++-------------------------+----------------+--------------+--------------+----------------+--------------+----------------------+--------------------+-------------------+
+
+DROP TABLE json2_cast_write_alignment;
+
+Affected Rows: 0
+

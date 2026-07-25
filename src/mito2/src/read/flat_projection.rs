@@ -367,7 +367,7 @@ impl FlatProjectionMapper {
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
             if is_structured_json_field(field) {
                 array = JsonArray::from(&array)
-                    .try_align(field.data_type())
+                    .project_to(field.data_type())
                     .context(DataTypesSnafu)?;
             }
 

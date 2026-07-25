@@ -175,7 +175,7 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
 
     if is_structured_json_field(field) {
         return JsonArray::from(array)
-            .try_align(field.data_type())
+            .project_to(field.data_type())
             .context(DataTypeMismatchSnafu);
     }
 

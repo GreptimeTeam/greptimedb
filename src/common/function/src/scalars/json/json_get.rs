@@ -19,7 +19,7 @@ use arrow::compute;
 use arrow::datatypes::Float64Type;
 use arrow_schema::Field;
 use datafusion_common::arrow::array::{
-    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
+    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
@@ -69,6 +69,7 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
             Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
                 as Box<dyn JsonGetResultBuilder>
         }
+        DataType::Int32 => Box::new(Int32ResultBuilder(Int32Builder::with_capacity(len))),
         DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
         DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
         DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
@@ -77,6 +78,16 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
         }
     };
     Ok(builder)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JsonGetCastMode {
+    /// Used by json_get(... )::type. Values are cast for query evaluation and
+    /// mismatches become NULL.
+    Project,
+    /// Used by json_get_int/json_get_float/json_get_bool/json_get_string.
+    /// These functions extract values of the requested JSON type.
+    Extract,
 }
 
 // TODO: refactor this to StringLikeArrayBuilder from Arrow 57
@@ -114,12 +125,18 @@ impl JsonGetResultBuilder for StringResultBuilder {
     }
 }
 
-#[derive(Default, Display, Debug)]
+#[derive(Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetString(JsonGetWithType);
 
 impl JsonGetString {
     pub const NAME: &'static str = "json_get_string";
+}
+
+impl Default for JsonGetString {
+    fn default() -> Self {
+        Self(JsonGetWithType::extract())
+    }
 }
 
 impl Function for JsonGetString {
@@ -165,12 +182,41 @@ impl JsonGetResultBuilder for IntResultBuilder {
     }
 }
 
-#[derive(Default, Display, Debug)]
+struct Int32ResultBuilder(Int32Builder);
+
+impl JsonGetResultBuilder for Int32ResultBuilder {
+    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
+        let value = match value {
+            JsonResultValue::Jsonb(value) => jsonb::to_i64(&value).ok(),
+            JsonResultValue::JsonStructByColumn(column, i) => int_array_value_at_index(column, i),
+            JsonResultValue::JsonStructByValue(value) => value.as_i64(),
+        }
+        .and_then(|value| i32::try_from(value).ok());
+        self.0.append_option(value);
+        Ok(())
+    }
+
+    fn append_null(&mut self) {
+        self.0.append_null();
+    }
+
+    fn build(&mut self) -> ArrayRef {
+        Arc::new(self.0.finish())
+    }
+}
+
+#[derive(Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetInt(JsonGetWithType);
 
 impl JsonGetInt {
     pub const NAME: &'static str = "json_get_int";
+}
+
+impl Default for JsonGetInt {
+    fn default() -> Self {
+        Self(JsonGetWithType::extract())
+    }
 }
 
 impl Function for JsonGetInt {
@@ -224,12 +270,18 @@ impl JsonGetResultBuilder for FloatResultBuilder {
     }
 }
 
-#[derive(Default, Display, Debug)]
+#[derive(Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetFloat(JsonGetWithType);
 
 impl JsonGetFloat {
     pub const NAME: &'static str = "json_get_float";
+}
+
+impl Default for JsonGetFloat {
+    fn default() -> Self {
+        Self(JsonGetWithType::extract())
+    }
 }
 
 impl Function for JsonGetFloat {
@@ -283,12 +335,18 @@ impl JsonGetResultBuilder for BoolResultBuilder {
     }
 }
 
-#[derive(Default, Display, Debug)]
+#[derive(Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetBool(JsonGetWithType);
 
 impl JsonGetBool {
     pub const NAME: &'static str = "json_get_bool";
+}
+
+impl Default for JsonGetBool {
+    fn default() -> Self {
+        Self(JsonGetWithType::extract())
+    }
 }
 
 impl Function for JsonGetBool {
@@ -332,7 +390,12 @@ fn jsonb_get(
     Ok(())
 }
 
-fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result<ArrayRef> {
+fn json_struct_get(
+    array: &ArrayRef,
+    path: &str,
+    with_type: &DataType,
+    cast_mode: JsonGetCastMode,
+) -> Result<ArrayRef> {
     let path = path.trim_start_matches("$");
 
     // Fast path: if the JSON array fields can be directly indexed into by the `path`, simply get
@@ -384,24 +447,28 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result
 
     if direct {
         let casted = if current.data_type() != with_type {
-            match (current.data_type(), with_type) {
-                (DataType::Binary, _) => {
-                    // Fall back to the slow path if the found JSON sub-array is serialized to bytes
-                    // (because of JSON type conflicting)
-                    build_with(current, with_type, |v| Some(v))?
-                }
-                (DataType::List(_) | DataType::Struct(_), with_type) if with_type.is_string() => {
-                    // Special handle for wanted array is string (Arrow cast is not working here if
-                    // the datatype is list or struct), because it could be used in displaying the
-                    // result.
-                    build_with(current, with_type, |v| Some(v))?
-                }
-                (_, with_type) if with_type.is_string() => {
-                    // Same special handle for wanted array is string as above, except for simply
-                    // casting by Arrow is more desirable.
-                    arrow_cast::cast(current.as_ref(), with_type)?
-                }
-                _ => new_null_array(with_type, current.len()),
+            match cast_mode {
+                JsonGetCastMode::Project => JsonArray::from(current)
+                    .project_to(with_type)
+                    .map_err(|e| exec_datafusion_err!("{e}"))?,
+                JsonGetCastMode::Extract => match (current.data_type(), with_type) {
+                    (DataType::Binary, _) => {
+                        // Fall back to the slow path if the found JSON sub-array is serialized to
+                        // bytes (because of JSON type conflicting).
+                        build_with(current, with_type, |v| Some(v))?
+                    }
+                    (DataType::List(_) | DataType::Struct(_), with_type)
+                        if with_type.is_string() =>
+                    {
+                        // Special handle for wanted array is string because Arrow cast is not
+                        // working here if the datatype is list or struct.
+                        build_with(current, with_type, |v| Some(v))?
+                    }
+                    (_, with_type) if with_type.is_string() => {
+                        arrow_cast::cast(current.as_ref(), with_type)?
+                    }
+                    _ => new_null_array(with_type, current.len()),
+                },
             }
         } else {
             current.clone()
@@ -425,16 +492,25 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetWithType {
     signature: Signature,
+    cast_mode: JsonGetCastMode,
 }
 
 impl JsonGetWithType {
     pub const NAME: &'static str = "json_get";
+
+    fn extract() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+            cast_mode: JsonGetCastMode::Extract,
+        }
+    }
 }
 
 impl Default for JsonGetWithType {
     fn default() -> Self {
         Self {
             signature: Signature::variadic_any(Volatility::Immutable),
+            cast_mode: JsonGetCastMode::Project,
         }
     }
 }
@@ -509,7 +585,7 @@ impl Function for JsonGetWithType {
                 jsonb_get(jsons, path, builder.as_mut())?;
                 builder.build()
             }
-            DataType::Struct(_) => json_struct_get(&arg0, path, &with_type)?,
+            DataType::Struct(_) => json_struct_get(&arg0, path, &with_type, self.cast_mode)?,
             _ => {
                 return exec_err!("JSON_GET not supported argument type {}", arg0.data_type());
             }
