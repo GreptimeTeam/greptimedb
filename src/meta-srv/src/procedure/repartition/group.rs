@@ -39,7 +39,7 @@ use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status, StringKey, UserMetadata,
+    Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
@@ -259,11 +259,6 @@ impl Procedure for RepartitionGroupProcedure {
 
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
-    }
-
-    fn user_metadata(&self) -> Option<UserMetadata> {
-        // TODO(weny): support user metadata.
-        None
     }
 }
 

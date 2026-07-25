@@ -48,7 +48,7 @@ use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey, UserMetadata,
+    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
@@ -786,11 +786,6 @@ impl Procedure for RepartitionProcedure {
 
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
-    }
-
-    fn user_metadata(&self) -> Option<UserMetadata> {
-        // TODO(weny): support user metadata.
-        None
     }
 }
 
