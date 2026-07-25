@@ -89,7 +89,25 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
+impl_scalar_vector_op!(BinaryVector, BooleanVector, StringVector);
+
+impl VectorOp for ListVector {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate::replicate_list(self, offsets)
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, ListVector, filter)
+    }
+
+    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+        cast::cast_non_constant!(self, to_type)
+    }
+
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        take::take_indices!(self, ListVector, indices)
+    }
+}
 
 impl VectorOp for Decimal128Vector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
