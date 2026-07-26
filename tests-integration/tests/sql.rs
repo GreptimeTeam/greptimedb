@@ -1166,6 +1166,13 @@ pub async fn test_postgres_intervalstyle(store_type: StorageType) {
             .await
             .is_ok()
     );
+    let result = get_row(
+        client
+            .simple_query("SELECT INTERVAL '1 day 2 hours 3 minutes'")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(result, "1 day 02:03:00");
 
     let expected_formats: HashMap<&str, &str> = HashMap::from([
         ("iso_8601", "P1DT2H3M"),

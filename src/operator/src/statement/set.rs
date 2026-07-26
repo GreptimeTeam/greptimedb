@@ -267,7 +267,7 @@ pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
         }
         _ => {
             return NotSupportedSnafu {
-                feat: "Set variable value must be a value",
+                feat: "Set variable value must be a value or identifier",
             }
             .fail();
         }
