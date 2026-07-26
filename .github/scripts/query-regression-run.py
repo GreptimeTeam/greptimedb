@@ -118,6 +118,8 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
     ]
     if parse_bool(args.allow_large_fixture):
         cmd.append("--allow-large-fixture")
+    if args.otelgen_bin is not None:
+        cmd.extend(["--otelgen-bin", str(args.otelgen_bin)])
 
     print(f"::group::Query regression case: {case_path}", flush=True)
     try:
@@ -159,6 +161,7 @@ def main() -> int:
         type=Path,
         default=configured_path(os.environ.get("FIXTURE_GENERATOR")),
     )
+    parser.add_argument("--otelgen-bin", type=Path, default=configured_path(os.environ.get("OTELGEN_BIN")))
     parser.add_argument("--cargo-profile", default=os.environ.get("CARGO_PROFILE", "nightly"))
     parser.add_argument("--work-dir", default=Path("query-regression-work"), type=Path)
     parser.add_argument("--http-timeout", default=os.environ.get("HTTP_TIMEOUT", "300"))

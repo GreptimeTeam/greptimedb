@@ -1,0 +1,23 @@
+[case]
+name = "otlp_trace_load"
+description = "OTLP trace v1 ingestion performance regression"
+
+[scenario]
+kind = "otlp_trace_load"
+
+[scenario.load]
+database = "public"
+table = "opentelemetry_traces"
+pipeline = "greptime_trace_v1"
+duration_seconds = 120
+warmup_seconds = 60
+rate = 50000
+workers = 4
+exporter_shards = 4
+workload = "microservices"
+visibility_timeout_seconds = 120
+
+[scenario.load.thresholds]
+max_candidate_throughput_regression_pct = 20
+max_candidate_mean_latency_regression_pct = 20
+max_failure_count = 0

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,8 @@ pub(super) enum Scenario {
     DirectReadableSst(DirectReadableSstScenario),
     #[serde(rename = "prom_remote_write_then_query")]
     PromRemoteWriteThenQuery(PromRemoteWriteThenQueryScenario),
+    #[serde(rename = "otlp_trace_load")]
+    OtlpTraceLoad(OtlpTraceLoadScenario),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -47,6 +49,33 @@ pub(super) struct PromRemoteWriteThenQueryScenario {
     #[serde(default)]
     pub(super) queries: Vec<serde_json::Value>,
     pub(super) remote_write: PromRemoteWritePlan,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct OtlpTraceLoadScenario {
+    pub(super) load: OtlpTraceLoadPlan,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct OtlpTraceLoadPlan {
+    pub(super) database: String,
+    pub(super) table: String,
+    pub(super) pipeline: String,
+    pub(super) duration_seconds: NonZeroU64,
+    pub(super) warmup_seconds: u64,
+    pub(super) rate: NonZeroU64,
+    pub(super) workers: NonZeroUsize,
+    pub(super) exporter_shards: NonZeroUsize,
+    pub(super) workload: String,
+    pub(super) visibility_timeout_seconds: NonZeroU64,
+    pub(super) thresholds: OtlpTraceLoadThresholds,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct OtlpTraceLoadThresholds {
+    pub(super) max_candidate_throughput_regression_pct: f64,
+    pub(super) max_candidate_mean_latency_regression_pct: f64,
+    pub(super) max_failure_count: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -412,6 +441,7 @@ impl Scenario {
         match self {
             Scenario::DirectReadableSst(_) => "direct_readable_sst",
             Scenario::PromRemoteWriteThenQuery(_) => "prom_remote_write_then_query",
+            Scenario::OtlpTraceLoad(_) => "otlp_trace_load",
         }
     }
 
