@@ -88,6 +88,17 @@ watch = false
 ## The number of threads to execute datanode ingestion operations.
 #+ ingest_rt_size = 8
 
+## Experimental weighted, work-conserving query/write task scheduler.
+#+ [runtime.experimental_workload_scheduler]
+## Enable the scheduler. Disabled by default.
+#+ enable = false
+## Maximum task polls admitted to Tokio at once. Zero uses 4 * global_rt_size.
+#+ max_concurrent_polls = 0
+## Relative query share while both query and write workloads are backlogged.
+#+ query_weight = 2
+## Relative write share while both query and write workloads are backlogged.
+#+ write_weight = 8
+
 ## The metasrv client options.
 [meta_client]
 ## The addresses of the metasrv.

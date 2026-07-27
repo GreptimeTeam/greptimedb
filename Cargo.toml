@@ -271,6 +271,7 @@ zstd = "0.13"
 api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
+catio = { git = "https://github.com/waynexia/catio.git", rev = "ddcd3e9e5a5fdd1e58866ed4e6dbbc2062bae44a" }
 catalog = { path = "src/catalog" }
 cli = { path = "src/cli" }
 client = { path = "src/client" }
