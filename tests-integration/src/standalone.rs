@@ -284,12 +284,7 @@ impl GreptimeDbStandaloneBuilder {
         .unwrap();
         let instance = Arc::new(instance);
 
-        event_recorder_handle
-            .install(
-                instance.event_recorder(),
-                opts.frontend_options().event_recorder.event_types,
-            )
-            .unwrap();
+        event_recorder_handle.install(instance.event_recorder());
 
         // set the frontend client for flownode
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;

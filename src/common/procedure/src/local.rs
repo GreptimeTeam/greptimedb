@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_error::ext::BoxedError;
-use common_event_recorder::{EventRecorderRef, EventTypeFilter, EventTypeFilterRef};
+use common_event_recorder::EventRecorderRef;
 use common_runtime::{JoinHandle, RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
@@ -633,7 +633,6 @@ type PauseAwareRef = Arc<dyn PauseAware>;
 
 struct EventRecorderConfig {
     recorder: Option<EventRecorderRef>,
-    event_type_filter: EventTypeFilterRef,
 }
 
 /// A delayed configuration handle for procedure lifecycle event recording.
@@ -642,22 +641,13 @@ pub struct EventRecorderHandle(Arc<Mutex<EventRecorderConfig>>);
 
 impl EventRecorderHandle {
     fn new(recorder: Option<EventRecorderRef>) -> Self {
-        Self(Arc::new(Mutex::new(EventRecorderConfig {
-            recorder,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })))
+        Self(Arc::new(Mutex::new(EventRecorderConfig { recorder })))
     }
 
-    /// Installs the recorder and event-type filter used by subsequently submitted procedures.
-    pub fn install(
-        &self,
-        recorder: EventRecorderRef,
-        event_type_filter: EventTypeFilterRef,
-    ) -> Result<()> {
+    /// Installs the recorder used by subsequently submitted procedures.
+    pub fn install(&self, recorder: EventRecorderRef) {
         let mut config = self.0.lock().unwrap();
         config.recorder = Some(recorder);
-        config.event_type_filter = event_type_filter;
-        Ok(())
     }
 }
 
@@ -750,7 +740,6 @@ impl LocalManager {
             store: self.procedure_store.clone(),
             rolling_back: false,
             event_recorder: event_recorder.recorder.clone(),
-            event_type_filter: event_recorder.event_type_filter.clone(),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         };
@@ -1055,12 +1044,20 @@ mod tests {
         ManagerContext::new(poison_manager)
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct CapturingEventRecorder {
         events: Mutex<Vec<Box<dyn Event>>>,
+        event_type_filter: EventTypeFilterRef,
     }
 
     impl CapturingEventRecorder {
+        fn with_event_type_filter(event_type_filter: EventTypeFilterRef) -> Self {
+            Self {
+                events: Mutex::new(vec![]),
+                event_type_filter,
+            }
+        }
+
         fn triggers(&self) -> Vec<EventTrigger> {
             self.events
                 .lock()
@@ -1083,7 +1080,17 @@ mod tests {
             self.events.lock().unwrap().push(event);
         }
 
+        fn event_type_filter(&self) -> EventTypeFilterRef {
+            self.event_type_filter.clone()
+        }
+
         fn close(&self) {}
+    }
+
+    impl Default for CapturingEventRecorder {
+        fn default() -> Self {
+            Self::with_event_type_filter(Arc::new(EventTypeFilter::All))
+        }
     }
 
     #[derive(Debug)]
@@ -1305,10 +1312,12 @@ mod tests {
         let dir = create_temp_dir("shared_event_filter");
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let poison_manager = Arc::new(InMemoryPoisonStore::new());
-        let event_recorder = Arc::new(CapturingEventRecorder::default());
         let event_type_filter = Arc::new(EventTypeFilter::Only(HashSet::from([String::from(
             "test_procedure",
         )])));
+        let event_recorder = Arc::new(CapturingEventRecorder::with_event_type_filter(
+            event_type_filter.clone(),
+        ));
         let captured_filter = Arc::new(Mutex::new(None));
         let manager = LocalManager::new(
             ManagerConfig::default(),
@@ -1317,10 +1326,7 @@ mod tests {
             None,
             None,
         );
-        manager
-            .event_recorder_handle()
-            .install(event_recorder, event_type_filter.clone())
-            .unwrap();
+        manager.event_recorder_handle().install(event_recorder);
         manager.manager_ctx.start();
 
         manager
@@ -1354,8 +1360,7 @@ mod tests {
         );
         manager
             .event_recorder_handle()
-            .install(event_recorder.clone(), Arc::new(EventTypeFilter::All))
-            .unwrap();
+            .install(event_recorder.clone());
         manager.manager_ctx.start();
 
         manager
@@ -1388,8 +1393,7 @@ mod tests {
         );
         manager
             .event_recorder_handle()
-            .install(event_recorder.clone(), Arc::new(EventTypeFilter::All))
-            .unwrap();
+            .install(event_recorder.clone());
         manager.manager_ctx.start();
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -1438,11 +1442,7 @@ mod tests {
 
         manager
             .event_recorder_handle()
-            .install(
-                Arc::new(CapturingEventRecorder::default()),
-                Arc::new(EventTypeFilter::All),
-            )
-            .unwrap();
+            .install(Arc::new(CapturingEventRecorder::default()));
 
         manager.stop().await.unwrap();
     }

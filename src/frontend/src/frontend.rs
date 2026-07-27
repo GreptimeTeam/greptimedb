@@ -116,11 +116,7 @@ impl Default for FrontendOptions {
 
 impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&[
-            "heartbeat_env_vars",
-            "meta_client.metasrv_addrs",
-            "event_recorder.event_types",
-        ])
+        Some(&["heartbeat_env_vars", "meta_client.metasrv_addrs"])
     }
 }
 

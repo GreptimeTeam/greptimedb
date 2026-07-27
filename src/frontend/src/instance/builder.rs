@@ -304,12 +304,14 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let event_type_filter = self.options.event_recorder.event_types.clone();
-        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            statement_executor.clone(),
-            self.options.slow_query.ttl,
-            self.options.event_recorder.ttl,
-        ))));
+        let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
+            Box::new(EventHandlerImpl::new(
+                statement_executor.clone(),
+                self.options.slow_query.ttl,
+                self.options.event_recorder.ttl,
+            )),
+            self.options.event_recorder.event_types.clone(),
+        ));
 
         Ok(Instance {
             frontend_peer_addr,
@@ -322,7 +324,6 @@ impl FrontendBuilder {
             deleter,
             table_metadata_manager,
             event_recorder,
-            event_type_filter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),

@@ -46,7 +46,7 @@ use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_event_recorder::{EventRecorderRef, EventTypeFilterRef};
+use common_event_recorder::EventRecorderRef;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -129,7 +129,6 @@ pub struct Instance {
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,
-    event_type_filter: EventTypeFilterRef,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
@@ -179,11 +178,6 @@ impl Instance {
     /// Returns the event recorder configured for this frontend instance.
     pub fn event_recorder(&self) -> EventRecorderRef {
         self.event_recorder.clone()
-    }
-
-    /// Returns the event-type filter shared with this instance's recorder.
-    pub fn event_type_filter(&self) -> EventTypeFilterRef {
-        self.event_type_filter.clone()
     }
 
     pub fn node_manager(&self) -> &NodeManagerRef {

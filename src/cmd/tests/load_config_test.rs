@@ -418,11 +418,6 @@ fn test_load_event_types_from_env() {
 
     temp_env::with_var(env_key, Some("region_migration"), || {
         for event_types in [
-            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix)
-                .unwrap()
-                .component
-                .event_recorder
-                .event_types,
             GreptimeOptions::<MetasrvOptions>::load_layered_options(None, env_prefix)
                 .unwrap()
                 .component

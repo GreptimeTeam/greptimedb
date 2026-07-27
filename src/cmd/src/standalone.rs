@@ -608,12 +608,7 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
-        event_recorder_handle
-            .install(
-                fe_instance.event_recorder(),
-                fe_instance.event_type_filter(),
-            )
-            .context(error::StartProcedureManagerSnafu)?;
+        event_recorder_handle.install(fe_instance.event_recorder());
 
         // set the frontend client for flownode
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;

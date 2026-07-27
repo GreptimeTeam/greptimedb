@@ -232,6 +232,9 @@ pub trait EventRecorder: Send + Sync + Debug + 'static {
     /// Records an event for persistence and processing by [EventHandler].
     fn record(&self, event: Box<dyn Event>);
 
+    /// Returns the event types accepted by this recorder.
+    fn event_type_filter(&self) -> EventTypeFilterRef;
+
     /// Cancels the event recorder.
     fn close(&self);
 }
@@ -315,6 +318,7 @@ pub struct EventRecorderImpl {
 }
 
 impl EventRecorderImpl {
+    #[cfg(test)]
     pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
         Self::with_event_type_filter(event_handler, Arc::new(EventTypeFilter::All))
     }
@@ -363,6 +367,10 @@ impl EventRecorder for EventRecorderImpl {
         if let Err(e) = self.tx.try_send(event) {
             error!("Failed to send event to the background processor: {}", e);
         }
+    }
+
+    fn event_type_filter(&self) -> EventTypeFilterRef {
+        self.event_types.clone()
     }
 
     // Closes the event recorder. It will stop the background processor and flush the buffer.
@@ -596,12 +604,18 @@ mod tests {
     #[tokio::test]
     async fn test_event_recorder_rejects_filtered_event_before_queueing() {
         let count = Arc::new(AtomicUsize::new(0));
+        let event_type_filter = Arc::new(EventTypeFilter::Only(HashSet::new()));
         let mut event_recorder = EventRecorderImpl::with_event_type_filter(
             Box::new(CountingEventHandler {
                 count: count.clone(),
             }),
-            Arc::new(EventTypeFilter::Only(HashSet::new())),
+            event_type_filter.clone(),
         );
+
+        assert!(Arc::ptr_eq(
+            &event_type_filter,
+            &event_recorder.event_type_filter()
+        ));
 
         event_recorder.record(Box::new(TestEvent {}));
         event_recorder.close();
