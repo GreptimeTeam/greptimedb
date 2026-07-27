@@ -836,7 +836,12 @@ impl HttpServer {
     /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Result<Router> {
         let timeout_layer = if self.options.timeout != Duration::default() {
-            Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
+            Some(
+                ServiceBuilder::new().layer(
+                    DynamicTimeoutLayer::new(self.options.timeout)
+                        .with_status_code_fn(Self::request_timeout_status_code),
+                ),
+            )
         } else {
             info!("HTTP server timeout is disabled");
             None
@@ -939,6 +944,14 @@ impl HttpServer {
                             ),
                     ),
             ))
+    }
+
+    fn request_timeout_status_code(request: &Request) -> HttpStatusCode {
+        if request.uri().path() == "/v1/prometheus/write" {
+            HttpStatusCode::GATEWAY_TIMEOUT
+        } else {
+            HttpStatusCode::REQUEST_TIMEOUT
+        }
     }
 
     fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
@@ -1366,9 +1379,8 @@ mod test {
 
     use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
-    use axum::handler::Handler;
     use axum::http::StatusCode;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
     use datafusion_expr::LogicalPlan;
@@ -1429,10 +1441,6 @@ mod test {
         }
     }
 
-    fn timeout() -> DynamicTimeoutLayer {
-        DynamicTimeoutLayer::new(Duration::from_millis(10))
-    }
-
     async fn forever() {
         pending().await
     }
@@ -1446,10 +1454,11 @@ mod test {
         let server = HttpServerBuilder::new(options)
             .with_sql_handler(instance.clone())
             .build();
-        server.build(server.make_app()).unwrap().route(
-            "/test/timeout",
-            get(forever.layer(ServiceBuilder::new().layer(timeout()))),
-        )
+        let app = server
+            .make_app()
+            .route("/test/timeout", get(forever))
+            .route("/v1/prometheus/write", post(forever));
+        server.build(app).unwrap()
     }
 
     #[tokio::test]
@@ -1603,10 +1612,17 @@ mod test {
         common_telemetry::init_default_ut_logging();
 
         let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app(tx);
+        let options = HttpOptions {
+            timeout: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let app = make_test_app_custom(tx, options);
         let client = TestClient::new(app).await;
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let res = client.post("/v1/prometheus/write").send().await;
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
 
         let now = Instant::now();
         let res = client
