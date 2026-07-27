@@ -137,7 +137,11 @@ pub fn extract_schema_from_query(query: &Query) -> Option<String> {
 
 /// Create a DataFrame from a remote Query
 #[tracing::instrument(skip_all)]
-pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
+pub fn query_to_plan(
+    dataframe: DataFrame,
+    q: &Query,
+    timestamp_column_name: &str,
+) -> Result<LogicalPlan> {
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -145,8 +149,9 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
 
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
-    conditions.push(col(greptime_timestamp()).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(greptime_timestamp()).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+    conditions
+        .push(col(timestamp_column_name).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions.push(col(timestamp_column_name).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -261,14 +266,18 @@ struct LabelColumn<'a> {
     values: LabelValues<'a>,
 }
 
-fn label_columns(recordbatch: &RecordBatch) -> Result<Vec<LabelColumn<'_>>> {
+fn label_columns<'a>(
+    recordbatch: &'a RecordBatch,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> Result<Vec<LabelColumn<'a>>> {
     recordbatch
         .schema
         .column_schemas()
         .iter()
         .enumerate()
         .filter(|(_, column_schema)| {
-            column_schema.name != greptime_timestamp() && column_schema.name != greptime_value()
+            column_schema.name != timestamp_column_name && column_schema.name != value_column_name
         })
         .map(|(index, column_schema)| {
             let array = recordbatch.column(index);
@@ -354,24 +363,31 @@ fn new_timeseries(table: &str, columns: &[LabelColumn<'_>], row: usize) -> TimeS
 
 pub fn recordbatches_to_timeseries(
     table_name: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
     recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
     Ok(recordbatches
         .take()
         .into_iter()
-        .map(|x| recordbatch_to_timeseries(table_name, x))
+        .map(|x| recordbatch_to_timeseries(table_name, timestamp_column_name, value_column_name, x))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
         .collect())
 }
 
-fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
-    let ts_column = recordbatch.column_by_name(greptime_timestamp()).context(
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: "missing greptime_timestamp column in query result",
-        },
-    )?;
+fn recordbatch_to_timeseries(
+    table: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    recordbatch: RecordBatch,
+) -> Result<Vec<TimeSeries>> {
+    let ts_column = recordbatch
+        .column_by_name(timestamp_column_name)
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
+        })?;
     let ts_column = ts_column
         .as_primitive_opt::<TimestampMillisecondType>()
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
@@ -381,11 +397,11 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
             ),
         })?;
 
-    let field_column = recordbatch.column_by_name(greptime_value()).context(
-        error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: "missing greptime_value column in query result",
-        },
-    )?;
+    let field_column = recordbatch
+        .column_by_name(value_column_name)
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!("missing value column '{value_column_name}' in query result"),
+        })?;
     let field_column = field_column
         .as_primitive_opt::<Float64Type>()
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
@@ -395,7 +411,7 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
             ),
         })?;
 
-    let columns = label_columns(&recordbatch)?;
+    let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
     let mut timeseries: Vec<TimeSeries> = Vec::new();
     let mut timeseries_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut previous_timeseries: Option<usize> = None;
@@ -832,7 +848,7 @@ mod tests {
         let table_provider = Arc::new(DfTableProviderAdapter::new(table));
 
         let dataframe = ctx.read_table(table_provider.clone()).unwrap();
-        let plan = query_to_plan(dataframe, &q).unwrap();
+        let plan = query_to_plan(dataframe, &q, greptime_timestamp()).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
         let ts_col = greptime_timestamp();
@@ -866,7 +882,7 @@ mod tests {
         };
 
         let dataframe = ctx.read_table(table_provider).unwrap();
-        let plan = query_to_plan(dataframe, &q).unwrap();
+        let plan = query_to_plan(dataframe, &q, greptime_timestamp()).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
         let ts_col = greptime_timestamp();
@@ -1054,7 +1070,13 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
+        let timeseries = recordbatches_to_timeseries(
+            "metric1",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatches,
+        )
+        .unwrap();
         assert_eq!(2, timeseries.len());
 
         assert_eq!(
@@ -1129,7 +1151,7 @@ mod tests {
         )
         .unwrap();
         let recordbatch = RecordBatch::from_df_record_batch(schema.clone(), batch);
-        let columns = label_columns(&recordbatch).unwrap();
+        let columns = label_columns(&recordbatch, greptime_timestamp(), greptime_value()).unwrap();
         assert!(matches!(
             columns[0].values,
             LabelValues::DictionaryUtf8 { .. }
@@ -1137,7 +1159,13 @@ mod tests {
         drop(columns);
         let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
 
-        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
+        let timeseries = recordbatches_to_timeseries(
+            "metric1",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatches,
+        )
+        .unwrap();
 
         assert_eq!(3, timeseries.len());
         assert_eq!(
@@ -1205,7 +1233,13 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries("metric1", recordbatch).unwrap();
+        let timeseries = recordbatch_to_timeseries(
+            "metric1",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatch,
+        )
+        .unwrap();
 
         // The result stays sorted by labels as it was with the previous BTreeMap.
         assert_eq!("host1", timeseries[0].labels[1].value);
@@ -1256,7 +1290,13 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries("metric1", recordbatch).unwrap();
+        let timeseries = recordbatch_to_timeseries(
+            "metric1",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatch,
+        )
+        .unwrap();
 
         assert_eq!(2, timeseries.len());
         assert_eq!(

@@ -1609,7 +1609,9 @@ mod tests {
     use std::time::Duration;
 
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
-    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
+    use api::prom_store::remote::{
+        Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
+    };
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     use auth::{PermissionResp, UserInfoRef};
     use catalog::process_manager::ProcessManager;
@@ -1632,8 +1634,9 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
-    use datatypes::vectors::{StringVector, VectorRef};
+    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, VectorRef};
     use log_query::LogQuery;
+    use prost::Message;
     use query::query_engine::options::QueryOptions;
     use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
@@ -2260,6 +2263,74 @@ mod tests {
         results.remove(0).with_context(|_| ExecuteSqlSnafu {
             sql: sql.to_string(),
         })
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_with_custom_timestamp_and_value_columns() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("custom_value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("custom_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let response = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    start_timestamp_ms: 1500,
+                    end_timestamp_ms: 2500,
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "custom_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        let response = ReadResponse::decode(body.as_slice()).unwrap();
+
+        assert_eq!(1, response.results.len());
+        assert_eq!(1, response.results[0].timeseries.len());
+        let timeseries = &response.results[0].timeseries[0];
+        assert_eq!(
+            vec![Label {
+                name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                value: "custom_metric".to_string(),
+            }],
+            timeseries.labels
+        );
+        assert_eq!(
+            vec![Sample {
+                value: 2.0,
+                timestamp: 2000,
+            }],
+            timeseries.samples
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
