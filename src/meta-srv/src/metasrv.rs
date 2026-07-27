@@ -942,6 +942,9 @@ impl Metasrv {
 
 #[cfg(test)]
 mod tests {
+    use common_event_recorder::EventTypeFilter;
+
+    use super::*;
     use crate::metasrv::MetasrvNodeInfo;
 
     #[test]
@@ -952,5 +955,21 @@ mod tests {
         assert_eq!(node_info.version, "0.1.0");
         assert_eq!(node_info.git_commit, "1234567890");
         assert_eq!(node_info.start_time_ms, 1715145600);
+    }
+
+    #[test]
+    fn test_metasrv_event_recorder_options_preserve_event_type_filter_semantics() {
+        let all = MetasrvOptions::default().event_recorder;
+        let none: EventRecorderOptions = toml::from_str("ttl = '90d'\nevent_types = []").unwrap();
+        let selected: EventRecorderOptions =
+            toml::from_str("ttl = '90d'\nevent_types = ['create_database']").unwrap();
+
+        assert!(all.event_types.allows("future_event"));
+        assert_eq!(
+            none.event_types.as_ref(),
+            &EventTypeFilter::Only(Default::default())
+        );
+        assert!(selected.event_types.allows("create_database"));
+        assert!(!selected.event_types.allows("drop_database"));
     }
 }

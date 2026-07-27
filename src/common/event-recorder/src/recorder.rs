@@ -13,17 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-};
+use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
 use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
@@ -38,19 +34,79 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{MismatchedSchemaSnafu, Result};
+use crate::event_table::{PAYLOAD_COLUMN, TIMESTAMP_COLUMN, TYPE_COLUMN, base_column_schemas};
 
 /// The default table name for storing the events.
 pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
 
 /// The column name for the event type.
-pub const EVENTS_TABLE_TYPE_COLUMN_NAME: &str = "type";
+pub const EVENTS_TABLE_TYPE_COLUMN_NAME: &str = TYPE_COLUMN.name();
 /// The column name for the event payload.
-pub const EVENTS_TABLE_PAYLOAD_COLUMN_NAME: &str = "payload";
+pub const EVENTS_TABLE_PAYLOAD_COLUMN_NAME: &str = PAYLOAD_COLUMN.name();
 /// The column name for the event timestamp.
-pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = TIMESTAMP_COLUMN.name();
 
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
+
+/// A shared event-type filter used by event producers and recorders.
+pub type EventTypeFilterRef = Arc<EventTypeFilter>;
+
+/// Restricts the event types that are recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventTypeFilter {
+    /// Records all current and future event types.
+    All,
+    /// Records only the event types in the set.
+    Only(HashSet<String>),
+}
+
+impl EventTypeFilter {
+    /// Returns whether the filter retains `event_type`.
+    pub fn allows(&self, event_type: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(event_types) => event_types.contains(event_type),
+        }
+    }
+}
+
+impl Default for EventTypeFilter {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+fn deserialize_event_types<'de, D>(
+    deserializer: D,
+) -> std::result::Result<EventTypeFilterRef, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    HashSet::<String>::deserialize(deserializer)
+        .map(|event_types| Arc::new(EventTypeFilter::Only(event_types)))
+}
+
+fn serialize_event_types<S>(
+    event_types: &EventTypeFilterRef,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match event_types.as_ref() {
+        EventTypeFilter::All => serializer.serialize_none(),
+        EventTypeFilter::Only(event_types) => {
+            let mut event_types = event_types.iter().collect::<Vec<_>>();
+            event_types.sort_unstable();
+            event_types.serialize(serializer)
+        }
+    }
+}
+
+fn event_type_filter_is_all(event_types: &EventTypeFilterRef) -> bool {
+    matches!(event_types.as_ref(), EventTypeFilter::All)
+}
 
 /// The time interval for flushing batched events to the event handler.
 pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
@@ -131,31 +187,10 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
 
     // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
     let event = &events[0];
-    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + event.extra_schema().len());
-    schema.extend(vec![
-        ColumnSchema {
-            column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Tag.into(),
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Binary as i32,
-            semantic_type: SemanticType::Field as i32,
-            datatype_extension: Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-            }),
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            ..Default::default()
-        },
-    ]);
-    schema.extend(event.extra_schema());
+    let extra_schema = event.extra_schema();
+    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + extra_schema.len());
+    schema.extend(base_column_schemas());
+    schema.extend(extra_schema);
 
     let mut rows: Vec<Row> = Vec::with_capacity(events.len());
     for event in events {
@@ -248,12 +283,21 @@ pub struct EventRecorderOptions {
     /// TTL for the events table that will be used to store the events.
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,
+    /// Event types that the recorder retains. When omitted, all event types are retained.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_event_types",
+        serialize_with = "serialize_event_types",
+        skip_serializing_if = "event_type_filter_is_all"
+    )]
+    pub event_types: EventTypeFilterRef,
 }
 
 impl Default for EventRecorderOptions {
     fn default() -> Self {
         Self {
             ttl: DEFAULT_EVENTS_TABLE_TTL,
+            event_types: Arc::new(EventTypeFilter::All),
         }
     }
 }
@@ -263,6 +307,8 @@ impl Default for EventRecorderOptions {
 pub struct EventRecorderImpl {
     // The channel to send the events to the background processor.
     tx: Sender<Box<dyn Event>>,
+    // The event types this recorder accepts before sending to the background processor.
+    event_types: EventTypeFilterRef,
     // The cancel token to cancel the background processor.
     cancel_token: CancellationToken,
     // The background processor to process the events.
@@ -271,11 +317,20 @@ pub struct EventRecorderImpl {
 
 impl EventRecorderImpl {
     pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
+        Self::with_event_type_filter(event_handler, Arc::new(EventTypeFilter::All))
+    }
+
+    /// Creates an event recorder with an event-type filter.
+    pub fn with_event_type_filter(
+        event_handler: Box<dyn EventHandler>,
+        event_types: EventTypeFilterRef,
+    ) -> Self {
         let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
         let cancel_token = CancellationToken::new();
 
         let mut recorder = Self {
             tx,
+            event_types,
             handle: None,
             cancel_token: cancel_token.clone(),
         };
@@ -302,6 +357,10 @@ impl EventRecorderImpl {
 impl EventRecorder for EventRecorderImpl {
     // Accepts an event and send it to the background handler.
     fn record(&self, event: Box<dyn Event>) {
+        if !self.event_types.allows(event.event_type()) {
+            return;
+        }
+
         if let Err(e) = self.tx.try_send(event) {
             error!("Failed to send event to the background processor: {}", e);
         }
@@ -438,6 +497,9 @@ impl EventProcessor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use serde_json::json;
 
     use super::*;
@@ -477,6 +539,67 @@ mod tests {
             assert_eq!(event.event_type(), "test_event");
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_event_type_filter_defaults_to_all() {
+        let options = toml::from_str::<EventRecorderOptions>("ttl = '90d'").unwrap();
+
+        assert!(options.event_types.allows("slow_query"));
+        assert!(options.event_types.allows("future_event"));
+    }
+
+    #[test]
+    fn test_event_type_filter_deserializes_explicit_empty_array() {
+        let options =
+            toml::from_str::<EventRecorderOptions>("ttl = '90d'\nevent_types = []").unwrap();
+
+        assert_eq!(
+            options.event_types.as_ref(),
+            &EventTypeFilter::Only(HashSet::new())
+        );
+    }
+
+    #[test]
+    fn test_event_type_filter_deserializes_selected_types() {
+        let options = toml::from_str::<EventRecorderOptions>(
+            "ttl = '90d'\nevent_types = ['create_database']",
+        )
+        .unwrap();
+
+        assert!(options.event_types.allows("create_database"));
+        assert!(!options.event_types.allows("drop_database"));
+    }
+
+    struct CountingEventHandler {
+        count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EventHandler for CountingEventHandler {
+        async fn handle(&self, _events: &[Box<dyn Event>]) -> Result<()> {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder_rejects_filtered_event_before_queueing() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut event_recorder = EventRecorderImpl::with_event_type_filter(
+            Box::new(CountingEventHandler {
+                count: count.clone(),
+            }),
+            Arc::new(EventTypeFilter::Only(HashSet::new())),
+        );
+
+        event_recorder.record(Box::new(TestEvent {}));
+        event_recorder.close();
+
+        if let Some(handle) = event_recorder.handle.take() {
+            assert!(handle.await.is_ok());
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

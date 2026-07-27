@@ -19,7 +19,7 @@ use std::time::Duration;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_error::ext::PlainError;
 use common_error::status_code::StatusCode;
-use common_event_recorder::EventRecorderRef;
+use common_event_recorder::{EventRecorderRef, EventTypeFilterRef};
 use common_telemetry::tracing::warn;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, tracing};
@@ -142,6 +142,7 @@ pub(crate) struct Runner {
     pub(crate) store: Arc<ProcedureStore>,
     pub(crate) rolling_back: bool,
     pub(crate) event_recorder: Option<EventRecorderRef>,
+    pub(crate) event_type_filter: EventTypeFilterRef,
     pub(crate) execute_retry_attempt: u32,
     pub(crate) rollback_retry_attempt: u32,
 }
@@ -520,6 +521,7 @@ impl Runner {
             store: self.store.clone(),
             rolling_back: false,
             event_recorder: self.event_recorder.clone(),
+            event_type_filter: self.event_type_filter.clone(),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         };
@@ -776,6 +778,7 @@ impl Runner {
             procedure_id: self.meta.id,
             lifecycle_state: &state,
             trigger: trigger.clone(),
+            event_type_filter: self.event_type_filter.clone(),
         };
         if let Some(event) = self.procedure.event(&context) {
             recorder.record(Box::new(crate::event::ProcedureEvent::new(
@@ -837,6 +840,7 @@ mod tests {
             store,
             rolling_back: false,
             event_recorder: None,
+            event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         }

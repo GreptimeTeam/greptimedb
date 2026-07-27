@@ -14,6 +14,7 @@
 
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, KvBackendConfig};
+use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
@@ -71,6 +72,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// The event recorder options.
+    pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
     pub heartbeat_env_vars: Vec<String>,
 }
@@ -109,6 +112,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
     }
@@ -150,6 +154,7 @@ impl StandaloneOptions {
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
             slow_query: cloned_opts.slow_query,
+            event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
         }
@@ -181,5 +186,41 @@ impl StandaloneOptions {
                 .unwrap()
                 .sanitize(&self.storage.data_home);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_event_recorder::EventTypeFilter;
+
+    use super::*;
+
+    #[test]
+    fn test_event_recorder_event_types_preserve_filter_semantics() {
+        let all: StandaloneOptions = toml::from_str("").unwrap();
+        let none: StandaloneOptions = toml::from_str("[event_recorder]\nevent_types = []").unwrap();
+        let selected: StandaloneOptions =
+            toml::from_str("[event_recorder]\nevent_types = ['create_database']").unwrap();
+
+        assert!(all.event_recorder.event_types.allows("future_event"));
+        assert_eq!(
+            none.event_recorder.event_types.as_ref(),
+            &EventTypeFilter::Only(Default::default())
+        );
+        assert!(
+            selected
+                .event_recorder
+                .event_types
+                .allows("create_database")
+        );
+        assert!(!selected.event_recorder.event_types.allows("drop_database"));
+
+        let frontend_options = selected.frontend_options();
+        assert!(Arc::ptr_eq(
+            &selected.event_recorder.event_types,
+            &frontend_options.event_recorder.event_types,
+        ));
     }
 }

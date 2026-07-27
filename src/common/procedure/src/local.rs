@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_error::ext::BoxedError;
-use common_event_recorder::EventRecorderRef;
+use common_event_recorder::{EventRecorderRef, EventTypeFilter, EventTypeFilterRef};
 use common_runtime::{JoinHandle, RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
@@ -633,6 +633,7 @@ type PauseAwareRef = Arc<dyn PauseAware>;
 
 struct EventRecorderConfig {
     recorder: Option<EventRecorderRef>,
+    event_type_filter: EventTypeFilterRef,
     started: bool,
 }
 
@@ -676,6 +677,7 @@ impl LocalManager {
             pause_aware,
             event_recorder: Mutex::new(EventRecorderConfig {
                 recorder: event_recorder,
+                event_type_filter: Arc::new(EventTypeFilter::All),
                 started: false,
             }),
         }
@@ -711,6 +713,7 @@ impl LocalManager {
             procedure.poison_keys(),
             procedure.type_name(),
         ));
+        let event_recorder = self.event_recorder.lock().unwrap();
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -721,7 +724,8 @@ impl LocalManager {
                 .with_max_times(self.max_retry_times),
             store: self.procedure_store.clone(),
             rolling_back: false,
-            event_recorder: self.event_recorder.lock().unwrap().recorder.clone(),
+            event_recorder: event_recorder.recorder.clone(),
+            event_type_filter: event_recorder.event_type_filter.clone(),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         };
@@ -893,6 +897,18 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
+    fn set_event_recorder_with_filter(
+        &self,
+        event_recorder: EventRecorderRef,
+        event_type_filter: EventTypeFilterRef,
+    ) -> Result<()> {
+        let mut config = self.event_recorder.lock().unwrap();
+        ensure!(!config.started, ManagerAlreadyStartedSnafu);
+        config.recorder = Some(event_recorder);
+        config.event_type_filter = event_type_filter;
+        Ok(())
+    }
+
     async fn start(&self) -> Result<()> {
         let mut task = self.remove_outdated_meta_task.lock().await;
 
@@ -1015,12 +1031,13 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-    use common_event_recorder::{Event, EventRecorder};
+    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -1251,6 +1268,72 @@ mod tests {
             };
             Box::new(f)
         }
+    }
+
+    struct FilterCapturingProcedure {
+        captured_filter: Arc<Mutex<Option<EventTypeFilterRef>>>,
+    }
+
+    #[async_trait]
+    impl Procedure for FilterCapturingProcedure {
+        fn type_name(&self) -> &str {
+            "FilterCapturingProcedure"
+        }
+
+        async fn execute(&mut self, _: &Context) -> Result<Status> {
+            Ok(Status::done())
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+
+        fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            *self.captured_filter.lock().unwrap() = Some(ctx.event_type_filter.clone());
+            Some(Box::new(TestProcedureEvent))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_is_shared_with_procedure_context() {
+        let dir = create_temp_dir("shared_event_filter");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let event_type_filter = Arc::new(EventTypeFilter::Only(HashSet::from([String::from(
+            "test_procedure",
+        )])));
+        let captured_filter = Arc::new(Mutex::new(None));
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .set_event_recorder_with_filter(event_recorder, event_type_filter.clone())
+            .unwrap();
+        manager.manager_ctx.start();
+
+        manager
+            .submit(ProcedureWithId {
+                id: ProcedureId::random(),
+                procedure: Box::new(FilterCapturingProcedure {
+                    captured_filter: captured_filter.clone(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        let captured_filter = captured_filter.lock().unwrap().clone().unwrap();
+        assert!(Arc::ptr_eq(&event_type_filter, &captured_filter));
+        assert!(captured_filter.allows("test_procedure"));
+        assert!(!captured_filter.allows("other_procedure"));
     }
 
     #[tokio::test]

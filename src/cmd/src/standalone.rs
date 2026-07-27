@@ -614,7 +614,7 @@ impl StartCommand {
                 msg: "frontend event recorder",
             })?;
         procedure_manager
-            .set_event_recorder(event_recorder)
+            .set_event_recorder_with_filter(event_recorder, fe_instance.event_type_filter())
             .context(error::StartProcedureManagerSnafu)?;
 
         // set the frontend client for flownode

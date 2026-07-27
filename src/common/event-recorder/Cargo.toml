@@ -26,5 +26,8 @@ store-api.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+[dev-dependencies]
+toml.workspace = true
+
 [lints]
 workspace = true

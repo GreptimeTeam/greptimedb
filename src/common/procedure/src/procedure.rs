@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::{Event, EventRecorderRef};
+use common_event_recorder::{Event, EventRecorderRef, EventTypeFilterRef};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
@@ -250,6 +250,8 @@ pub struct EventContext<'a> {
     pub lifecycle_state: &'a ProcedureState,
     /// Lifecycle action that caused the event hook to be called.
     pub trigger: EventTrigger,
+    /// Event types retained by the configured recorder.
+    pub event_type_filter: EventTypeFilterRef,
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
@@ -677,6 +679,17 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Sets the recorder used for procedure lifecycle events before the manager starts.
     fn set_event_recorder(&self, event_recorder: EventRecorderRef) -> Result<()>;
 
+    /// Sets the recorder and event-type filter used for procedure lifecycle events before the
+    /// manager starts.
+    fn set_event_recorder_with_filter(
+        &self,
+        event_recorder: EventRecorderRef,
+        event_type_filter: EventTypeFilterRef,
+    ) -> Result<()> {
+        let _ = event_type_filter;
+        self.set_event_recorder(event_recorder)
+    }
+
     /// Starts the background GC task.
     ///
     /// Recovers unfinished procedures and reruns them.
@@ -759,6 +772,7 @@ mod tests {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
         };
 
         assert!(DefaultEventProcedure.event(&context).is_none());
