@@ -34,6 +34,8 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::types::{StructField, StructType};
 use once_cell::sync::Lazy;
 
+use crate::prelude::greptime_native_histogram;
+
 pub const NATIVE_HISTOGRAM_FIELD: &str = "greptime_native_histogram";
 pub const SCHEMA_FIELD: &str = "schema";
 pub const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
