@@ -921,7 +921,6 @@ mod tests {
                 .await
                 .unwrap();
             let filter = physical_plan
-                .as_any()
                 .downcast_ref::<FilterExec>()
                 .expect("regex residual must remain a FilterExec");
             assert!(matches!(
@@ -1330,7 +1329,25 @@ mod tests {
                     None,
                 ))),
                 expected_greptime: "Filter: CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
-                expected_datafusion: "Filter: t.ts_ms = TimestampMillisecond(5000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
+            },
+            Case {
+                name: "timestamp widening try_cast exact",
+                fields: vec![Field::new(
+                    "ts_ms",
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    false,
+                )],
+                predicate: try_cast(
+                    col("ts_ms"),
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                )
+                .eq(lit(ScalarValue::TimestampNanosecond(
+                    Some(5_000_000_000),
+                    None,
+                ))),
+                expected_greptime: "Filter: TRY_CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: TRY_CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
             },
         ];
 

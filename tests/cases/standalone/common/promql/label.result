@@ -103,8 +103,10 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "h
 -- Should return empty result instead of error
 tql eval label_join(demo_num_cpus, "new_label", "-", "instance", "job");
 
-++
-++
++------+-------+-----------+
+| time | value | new_label |
++------+-------+-----------+
++------+-------+-----------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "$2", "idc", "(.*):(.*)");
@@ -202,14 +204,18 @@ TQL EVAL(0, 15, '5s') label_replace(vector(1), "host", "host1", "", "");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host1", "", "");
 
-++
-++
++------+------+----------------------------+
+| host | time | test.val * .greptime_value |
++------+------+----------------------------+
++------+------+----------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} + label_replace(vector(1), "host", "host1", "", "");
 
-++
-++
++------+------+----------------------------+
+| host | time | test.val + .greptime_value |
++------+------+----------------------------+
++------+------+----------------------------+
 
 -- Empty regex with existing source label
 -- SQLNESS SORT_RESULT 3 1
@@ -272,15 +278,19 @@ TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "", "instance",
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host2", "host", "");
 
-++
-++
++------+------+----------------------------+
+| host | time | test.val * .greptime_value |
++------+------+----------------------------+
++------+------+----------------------------+
 
 -- Empty regex and not existing label in left expression
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "addr", "host1", "instance", "");
 
-++
-++
++------+------+----------------------------+
+| addr | time | test.val * .greptime_value |
++------+------+----------------------------+
++------+------+----------------------------+
 
 TQL EVAL label_replace(demo_num_cpus, "~invalid", "", "src", "(.*)");
 
@@ -345,8 +355,10 @@ SELECT * FROM test;
 -- test the non-existent matchers --
 TQL EVAL (0, 1, '5s') test{job=~"host1|host3"};
 
-++
-++
++----+------+-----+
+| ts | host | val |
++----+------+-----+
++----+------+-----+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 1, '5s') test{job=~".*"};
@@ -360,8 +372,10 @@ TQL EVAL (0, 1, '5s') test{job=~".*"};
 
 TQL EVAL (0, 1, '5s') test{job=~".+"};
 
-++
-++
++----+------+-----+
+| ts | host | val |
++----+------+-----+
++----+------+-----+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 1, '5s') test{job=""};
@@ -375,8 +389,10 @@ TQL EVAL (0, 1, '5s') test{job=""};
 
 TQL EVAL (0, 1, '5s') test{job!=""};
 
-++
-++
++----+------+-----+
+| ts | host | val |
++----+------+-----+
++----+------+-----+
 
 DROP TABLE test;
 

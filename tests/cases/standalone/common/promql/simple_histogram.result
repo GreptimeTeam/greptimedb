@@ -134,8 +134,10 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[10m]));
 
-++
-++
++----+------------------------------------------+---+
+| ts | prom_rate(ts_range,val,ts,Int64(600000)) | s |
++----+------------------------------------------+---+
++----+------------------------------------------+---+
 
 drop table histogram_bucket;
 
@@ -349,6 +351,7 @@ tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(
 
 ++
 ++
+++
 
 -- test case where table exists but doesn't have 'le' column should raise error
 CREATE TABLE greptime_servers_postgres_query_elapsed_no_le (
@@ -367,10 +370,12 @@ tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(g
 
 ++
 ++
+++
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
+++
 ++
 ++
 

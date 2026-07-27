@@ -32,6 +32,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
     col, lit,
@@ -298,6 +299,53 @@ fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
     }
 
     plan.inputs().into_iter().find_map(find_merge_scan)
+}
+
+fn find_table_scan<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a datafusion_expr::logical_plan::TableScan> {
+    if let LogicalPlan::TableScan(table_scan) = plan
+        && table_scan.table_name.to_string() == table_name
+    {
+        return Some(table_scan);
+    }
+
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_table_scan(input, table_name))
+}
+
+fn find_merge_scan_for_table<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a MergeScanLogicalPlan> {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+        && find_table_scan(merge_scan.input(), table_name).is_some()
+    {
+        return Some(merge_scan);
+    }
+
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_merge_scan_for_table(input, table_name))
+}
+
+fn has_filter_above_table_scan(plan: &LogicalPlan, table_name: &str, predicate: &Expr) -> bool {
+    if let LogicalPlan::Filter(filter) = plan
+        && split_conjunction(&filter.predicate).contains(&predicate)
+        && find_table_scan(filter.input.as_ref(), table_name).is_some()
+    {
+        return true;
+    }
+
+    plan.inputs()
+        .into_iter()
+        .any(|input| has_filter_above_table_scan(input, table_name, predicate))
 }
 
 #[test]
@@ -2477,34 +2525,37 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
-    let plan_str = result.to_string();
-    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
-    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
-    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
-    // a standalone Filter: line. It must still be in TableScan partial_filters
-    // and below the Inner Join.
+    let predicate = col("t1.pk1").eq(lit("v"));
+    let t1_remote_input = find_merge_scan_for_table(&result, "t1")
+        .expect("expected MergeScan for t1")
+        .input();
+    let t1_scan = find_table_scan(t1_remote_input, "t1").expect("expected t1 TableScan");
     assert!(
-        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
-        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
-    );
-    assert!(
-        plan_str.contains(
-            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
-        ),
-        "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
+        t1_scan
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "expected t1 TableScan to contain the pushed predicate: {t1_remote_input}"
     );
 
-    // Find the position of the filter and verify it appears after a MergeScan
-    // opening (i.e., inside remote_input) rather than before the Join.
-    let filter_pos = plan_str
-        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
-        .unwrap();
-    let join_pos = plan_str.find("Inner Join").unwrap();
-    // The filter should be after the Join (meaning it was pushed down below the Join,
-    // into a MergeScan's remote_input)
+    // Inexact provider pushdown must retain the predicate in an ancestor Filter.
     assert!(
-        filter_pos > join_pos,
-        "Filter should be pushed below Join (into MergeScan remote_input), but found before Join"
+        has_filter_above_table_scan(t1_remote_input, "t1", &predicate),
+        "expected an ancestor Filter for t1 to retain the pushed predicate: {t1_remote_input}"
+    );
+
+    let t2_remote_input = find_merge_scan_for_table(&result, "t2")
+        .expect("expected MergeScan for t2")
+        .input();
+    assert!(
+        !find_table_scan(t2_remote_input, "t2")
+            .expect("expected t2 TableScan")
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "t2 TableScan must not contain t1's predicate: {t2_remote_input}"
     );
 }
 

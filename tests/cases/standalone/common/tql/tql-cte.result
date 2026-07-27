@@ -668,8 +668,10 @@ WITH time_shifted AS (
 )
 SELECT * FROM time_shifted;
 
-++
-++
++----+-----+
+| ts | val |
++----+-----+
++----+-----+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED

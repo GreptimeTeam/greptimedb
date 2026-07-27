@@ -71,7 +71,7 @@ SELECT * FROM `delete_between`;
 
 DROP TABLE `delete_between`;
 
--- SQLNESS REPLACE ( at line \d+ column \d+)
+-- SQLNESS REPLACE (\sat\sline\s\d+\scolumn\s\d+)
 create table if not exists invalid_merge_mode(
     host string,
     ts timestamp,

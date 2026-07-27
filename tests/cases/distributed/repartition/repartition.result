@@ -210,18 +210,24 @@ SHOW CREATE TABLE metric_physical_table;
 -- Verify select * works and returns empty
 SELECT * FROM metric_physical_table;
 
-++
-++
++----+------+-----+------------+--------+
+| ts | host | cpu | __table_id | __tsid |
++----+------+-----+------------+--------+
++----+------+-----+------------+--------+
 
 SELECT * FROM logical_table_v1;
 
-++
-++
++-----+------+----+
+| cpu | host | ts |
++-----+------+----+
++-----+------+----+
 
 SELECT * FROM logical_table_v2;
 
-++
-++
++-----+------+----+
+| cpu | host | ts |
++-----+------+----+
++-----+------+----+
 
 -- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE metric_physical_table MERGE PARTITION (
@@ -257,18 +263,24 @@ SHOW CREATE TABLE metric_physical_table;
 -- Verify select * works and returns empty
 SELECT * FROM metric_physical_table;
 
-++
-++
++----+------+-----+------------+--------+
+| ts | host | cpu | __table_id | __tsid |
++----+------+-----+------------+--------+
++----+------+-----+------------+--------+
 
 SELECT * FROM logical_table_v1;
 
-++
-++
++-----+------+----+
+| cpu | host | ts |
++-----+------+----+
++-----+------+----+
 
 SELECT * FROM logical_table_v2;
 
-++
-++
++-----+------+----+
+| cpu | host | ts |
++-----+------+----+
++-----+------+----+
 
 DROP TABLE logical_table_v1;
 

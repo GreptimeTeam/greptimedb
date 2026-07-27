@@ -1336,7 +1336,7 @@ mod test {
 
     use super::*;
     use crate::SqlPlan;
-    use crate::postgres::handler::PgSqlPlan;
+    use crate::postgres::handler::{PgSqlPlan, PlanningContext};
 
     #[test]
     fn test_schema_convert() {
@@ -1857,6 +1857,10 @@ mod test {
             PgSqlPlan {
                 plan: SqlPlan::Empty,
                 copy_to_stdout_format: None,
+                planning_context: PlanningContext {
+                    catalog: String::new(),
+                    schema: String::new(),
+                },
             },
             client_param_types,
         ));
