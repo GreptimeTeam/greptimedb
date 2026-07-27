@@ -15,9 +15,7 @@
 use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
-use common_query::prelude::{
-    greptime_count, greptime_summary_quantile, greptime_timestamp, greptime_value,
-};
+use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -752,13 +750,13 @@ fn encode_summary(
             for quantile in &data_point.quantile_values {
                 row_writer::write_f64(
                     table,
-                    greptime_summary_quantile(quantile.quantile),
+                    format!("greptime_p{:02}", quantile.quantile * 100f64),
                     quantile.value,
                     &mut row,
                 )?;
             }
 
-            row_writer::write_f64(table, greptime_count(), data_point.count as f64, &mut row)?;
+            row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
             table.add_row(row);
         }
     } else {
@@ -855,6 +853,7 @@ fn encode_summary(
 
 #[cfg(test)]
 mod tests {
+    use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
@@ -1053,6 +1052,47 @@ mod tests {
                 greptime_timestamp(),
                 greptime_value()
             ]
+        );
+    }
+
+    #[test]
+    fn test_encode_legacy_summary_keeps_legacy_column_names() {
+        set_default_prefix(Some("custom")).unwrap();
+        let mut tables = MultiTableData::default();
+        let summary = Summary {
+            data_points: vec![SummaryDataPoint {
+                attributes: vec![keyvalue("host", "testserver")],
+                time_unix_nano: 100,
+                count: 25,
+                quantile_values: vec![ValueAtQuantile {
+                    quantile: 0.90,
+                    value: 1000.0,
+                }],
+                ..Default::default()
+            }],
+        };
+
+        encode_summary(
+            &mut tables,
+            "datamon",
+            &summary,
+            None,
+            None,
+            &OtlpMetricCtx {
+                is_legacy: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let table = tables.get_or_default_table_data("datamon", 0, 0);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|column| column.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["host", "custom_timestamp", "greptime_p90", GREPTIME_COUNT,]
         );
     }
 

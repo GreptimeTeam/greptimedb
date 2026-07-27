@@ -17,7 +17,7 @@ mod extract_new_columns;
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_value_schema;
+use common_query::native_histogram::is_native_histogram_value_type;
 use common_telemetry::info;
 use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
@@ -423,10 +423,7 @@ impl MetricEngineInner {
             .fail();
         };
 
-        if is_native_histogram_value_schema(
-            &field_col.column_schema.name,
-            &field_col.column_schema.data_type,
-        ) {
+        if is_native_histogram_value_type(&field_col.column_schema.data_type) {
             return Ok(());
         }
 

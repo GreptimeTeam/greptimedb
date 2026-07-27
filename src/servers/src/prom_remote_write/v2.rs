@@ -400,7 +400,7 @@ fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
     // The histogram field column is generated from the protobuf payload.
     for (name, _) in tags {
         ensure!(
-            name != greptime_native_histogram(),
+            name != greptime_native_histogram() && name != NATIVE_HISTOGRAM_FIELD,
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 label `{name}` conflicts with an internal native histogram label"
@@ -625,7 +625,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::value::ValueData;
-    use common_query::prelude::{greptime_timestamp, greptime_value};
+    use common_query::prelude::{greptime_timestamp, greptime_value, set_default_prefix};
     use session::context::QueryContext;
 
     use super::*;
@@ -1018,6 +1018,22 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid prometheus remote request, msg: remote write v2 label `greptime_native_histogram` conflicts with an internal native histogram label"
+        );
+    }
+
+    #[test]
+    fn test_rejects_legacy_histogram_label_after_prefix_change() {
+        set_default_prefix(Some("custom")).unwrap();
+        assert_eq!(greptime_native_histogram(), "custom_native_histogram");
+
+        let err = ensure_no_internal_histogram_labels(&vec![(
+            NATIVE_HISTOGRAM_FIELD.to_string(),
+            "user_value".to_string(),
+        )])
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with an internal native histogram label")
         );
     }
 

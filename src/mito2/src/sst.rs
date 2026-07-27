@@ -22,8 +22,7 @@ use arrow_schema::DataType;
 use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
 use common_base::readable_size::ReadableSize;
 use common_query::native_histogram::{
-    is_native_histogram_value_schema, native_histogram_list_element_id,
-    native_histogram_subfield_id,
+    is_native_histogram_value_type, native_histogram_list_element_id, native_histogram_subfield_id,
 };
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
@@ -87,10 +86,10 @@ pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
 /// fields), so external readers can identify it by extension and resolve
 /// nested fields by id.
 ///
-/// Detection is by the native-histogram column name and struct type
-/// (`is_native_histogram_value_schema`); other struct columns are left
-/// untouched. mito2 reads SST columns by schema position, never by field
-/// metadata, so this only affects external readers.
+/// Detection is by the exact native-histogram struct type
+/// (`is_native_histogram_value_type`); other struct columns are left untouched.
+/// mito2 reads SST columns by schema position, never by field metadata, so this
+/// only affects external readers.
 ///
 /// Returns an error if the parent column's `PARQUET:field_id` is missing,
 /// malformed, or exceeds `i32::MAX`, or if a sub-field id cannot be derived
@@ -98,10 +97,7 @@ pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
 /// the derived id overflows a positive `i32` (an absurdly large parent
 /// `column_id`); see [`native_histogram_subfield_id`].
 fn stamp_native_histogram_subfield_ids(field: &mut Field) -> crate::error::Result<()> {
-    if !is_native_histogram_value_schema(
-        field.name(),
-        &ConcreteDataType::from_arrow_type(field.data_type()),
-    ) {
+    if !is_native_histogram_value_type(&ConcreteDataType::from_arrow_type(field.data_type())) {
         return Ok(());
     }
     // Namespace sub-field ids by the parent column's field id (its
@@ -796,26 +792,12 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_wrap_schema_requires_canonical_name() {
-        // Detection requires the canonical column name: a histogram-typed field
-        // named differently is left untouched.
-        use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-        use common_query::native_histogram::native_histogram_value_type;
-        use datatypes::data_type::DataType;
-
-        let hist_arrow = native_histogram_value_type().as_arrow_type();
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "custom_histogram",
-            hist_arrow,
-            true,
-        )]));
+    fn test_maybe_wrap_schema_recognizes_histogram_by_type() {
+        let schema = Arc::new(Schema::new(vec![histogram_field("custom_histogram", 5)]));
 
         let wrapped = maybe_wrap_schema(&schema).unwrap();
         let hist = wrapped.field_with_name("custom_histogram").unwrap();
-        assert!(
-            hist.metadata().get(EXTENSION_TYPE_NAME_KEY).is_none(),
-            "a histogram-typed field without the canonical name must not be stamped"
-        );
+        assert_histogram_stamped(hist, 5);
     }
 
     #[test]
@@ -925,40 +907,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parquet_roundtrip_noncanonical_struct_untouched() {
-        // A histogram-shaped struct without the canonical column name is left
-        // untouched on disk: no extension, no nested field ids.
-        use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
-        use common_query::native_histogram::native_histogram_value_type;
-        use datatypes::data_type::DataType;
-
-        let hist_arrow = native_histogram_value_type().as_arrow_type();
+    fn test_parquet_roundtrip_recognizes_histogram_by_type() {
+        // The persisted type, rather than a process-local configured name,
+        // identifies native histograms across upgrades and prefix changes.
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            Field::new("custom_histogram", hist_arrow, true),
+            histogram_field("custom_histogram", 9),
         ]));
 
         let on_disk = parquet_footer_arrow_schema(&schema);
         let hist = on_disk.field_with_name("custom_histogram").unwrap();
-        assert!(
-            hist.metadata().get(EXTENSION_TYPE_NAME_KEY).is_none(),
-            "a histogram-typed field without the canonical name must not be stamped on disk"
-        );
-        if let ArrowDataType::Struct(children) = hist.data_type() {
-            for child in children {
-                assert!(
-                    child.metadata().get(PARQUET_FIELD_ID_KEY).is_none(),
-                    "non-histogram sub-field {} must not get a field id on disk",
-                    child.name()
-                );
-            }
-        } else {
-            panic!("expected a struct, got {:?}", hist.data_type());
-        }
+        assert_histogram_stamped(hist, 9);
     }
 
     #[test]

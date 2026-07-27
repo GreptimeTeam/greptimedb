@@ -25,7 +25,7 @@ flowchart TD
     J --> K["same metric-engine flag as samples, no batcher"]
     K --> L["table: <metric>"]
 
-    L --> M["field: greptime_native_histogram Struct"]
+    L --> M["field: configured native-histogram Struct"]
     M --> N["struct children: counts, spans, buckets, sum, schema"]
     H --> P["written headers and counters"]
     K --> P
@@ -41,7 +41,9 @@ Native histogram rows follow the same metric-engine switch as samples. They do
 not use the pending rows batcher yet because the batcher assumes the classic
 timestamp + Float64 value + string tags shape.
 
-Each histogram row stores `greptime_native_histogram` as one Struct field:
+Each histogram row stores one Struct field named
+`<default_column_prefix>_native_histogram`. The default name is
+`greptime_native_histogram`; an empty prefix produces `native_histogram`.
 
 - common scalar children: `schema`, `zero_threshold`, `sum`, `reset_hint`,
   `start_timestamp`;

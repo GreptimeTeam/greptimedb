@@ -18,7 +18,7 @@ mod validate;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_value_schema;
+use common_query::native_histogram::is_native_histogram_value_type;
 use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
@@ -246,10 +246,7 @@ impl MetricEngineInner {
 
             ensure!(
                 fields.len() == 1
-                    && is_native_histogram_value_schema(
-                        &fields[0].column_schema.name,
-                        &fields[0].column_schema.data_type
-                    ),
+                    && is_native_histogram_value_type(&fields[0].column_schema.data_type),
                 AddingFieldColumnSnafu {
                     name: first_added_field.column_metadata.column_schema.name.clone(),
                 }
