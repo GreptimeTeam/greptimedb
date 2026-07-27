@@ -128,7 +128,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    event_recorder: Option<EventRecorderRef>,
+    event_recorder: EventRecorderRef,
     event_type_filter: EventTypeFilterRef,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
@@ -176,8 +176,8 @@ impl Instance {
         &self.process_manager
     }
 
-    /// Returns the optional event recorder configured for this frontend instance.
-    pub fn event_recorder(&self) -> Option<EventRecorderRef> {
+    /// Returns the event recorder configured for this frontend instance.
+    pub fn event_recorder(&self) -> EventRecorderRef {
         self.event_recorder.clone()
     }
 
@@ -257,16 +257,14 @@ impl Instance {
             return None;
         }
 
-        self.event_recorder.clone().map(|event_recorder| {
-            SlowQueryTimer::new(
-                CatalogQueryStatement::Sql(stmt.clone()),
-                schema_name,
-                self.slow_query_options.threshold,
-                self.slow_query_options.sample_ratio,
-                self.slow_query_options.record_type,
-                event_recorder,
-            )
-        })
+        Some(SlowQueryTimer::new(
+            CatalogQueryStatement::Sql(stmt.clone()),
+            schema_name,
+            self.slow_query_options.threshold,
+            self.slow_query_options.sample_ratio,
+            self.slow_query_options.record_type,
+            self.event_recorder.clone(),
+        ))
     }
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
@@ -809,20 +807,16 @@ impl Instance {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
             let slow_query_timer = if plan_is_readonly {
-                self.slow_query_options
-                    .enable
-                    .then(|| self.event_recorder.clone())
-                    .flatten()
-                    .map(|event_recorder| {
-                        SlowQueryTimer::new(
-                            CatalogQueryStatement::Plan(query.clone()),
-                            schema_name.clone(),
-                            self.slow_query_options.threshold,
-                            self.slow_query_options.sample_ratio,
-                            self.slow_query_options.record_type,
-                            event_recorder,
-                        )
-                    })
+                self.slow_query_options.enable.then(|| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Plan(query.clone()),
+                        schema_name.clone(),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
+                        self.event_recorder.clone(),
+                    )
+                })
             } else {
                 None
             };
@@ -1196,21 +1190,16 @@ impl PrometheusHandler for Instance {
         };
         let raw_query = query_statement.to_string();
 
-        let slow_query_timer = self
-            .slow_query_options
-            .enable
-            .then(|| self.event_recorder.clone())
-            .flatten()
-            .map(|event_recorder| {
-                SlowQueryTimer::new(
-                    query_statement,
-                    query_ctx.current_schema(),
-                    self.slow_query_options.threshold,
-                    self.slow_query_options.sample_ratio,
-                    self.slow_query_options.record_type,
-                    event_recorder,
-                )
-            });
+        let slow_query_timer = self.slow_query_options.enable.then(|| {
+            SlowQueryTimer::new(
+                query_statement,
+                query_ctx.current_schema(),
+                self.slow_query_options.threshold,
+                self.slow_query_options.sample_ratio,
+                self.slow_query_options.record_type,
+                self.event_recorder.clone(),
+            )
+        });
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
@@ -2279,7 +2268,7 @@ mod tests {
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
 
-        assert!(instance.event_recorder().is_some());
+        let _event_recorder = instance.event_recorder();
 
         Ok(())
     }

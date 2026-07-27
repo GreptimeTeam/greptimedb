@@ -142,11 +142,19 @@ impl MockInstanceBuilder {
                     guard,
                     kv_backend,
                     procedure_manager,
+                    event_recorder_handle,
                     ..
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, guard, opts, procedure_manager, false)
+                        .build_with(
+                            kv_backend,
+                            guard,
+                            opts,
+                            procedure_manager,
+                            event_recorder_handle,
+                            false,
+                        )
                         .await,
                 )
             }

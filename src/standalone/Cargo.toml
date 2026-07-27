@@ -14,6 +14,7 @@ client.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
 common-macro.workspace = true
 common-memory-manager.workspace = true
 common-meta.workspace = true
@@ -40,3 +41,6 @@ store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

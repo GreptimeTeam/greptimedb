@@ -33,9 +33,9 @@ use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::error::{
     self, CheckStatusSnafu, DuplicateProcedureSnafu, Error, LoaderConflictSnafu,
-    ManagerAlreadyStartedSnafu, ManagerNotStartSnafu, ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu,
-    ProcedureNotFoundSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
-    StopRemoveOutdatedMetaTaskSnafu, TooManyRunningProceduresSnafu,
+    ManagerNotStartSnafu, ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu,
+    Result, StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
+    TooManyRunningProceduresSnafu,
 };
 use crate::local::runner::Runner;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState, PoisonKeys, ProcedureInfo};
@@ -634,7 +634,31 @@ type PauseAwareRef = Arc<dyn PauseAware>;
 struct EventRecorderConfig {
     recorder: Option<EventRecorderRef>,
     event_type_filter: EventTypeFilterRef,
-    started: bool,
+}
+
+/// A delayed configuration handle for procedure lifecycle event recording.
+#[derive(Clone)]
+pub struct EventRecorderHandle(Arc<Mutex<EventRecorderConfig>>);
+
+impl EventRecorderHandle {
+    fn new(recorder: Option<EventRecorderRef>) -> Self {
+        Self(Arc::new(Mutex::new(EventRecorderConfig {
+            recorder,
+            event_type_filter: Arc::new(EventTypeFilter::All),
+        })))
+    }
+
+    /// Installs the recorder and event-type filter used by subsequently submitted procedures.
+    pub fn install(
+        &self,
+        recorder: EventRecorderRef,
+        event_type_filter: EventTypeFilterRef,
+    ) -> Result<()> {
+        let mut config = self.0.lock().unwrap();
+        config.recorder = Some(recorder);
+        config.event_type_filter = event_type_filter;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -653,7 +677,7 @@ pub struct LocalManager {
     remove_outdated_meta_task: TokioMutex<Option<RepeatedTask<Error>>>,
     config: ManagerConfig,
     pause_aware: Option<PauseAwareRef>,
-    event_recorder: Mutex<EventRecorderConfig>,
+    event_recorder: EventRecorderHandle,
 }
 
 impl LocalManager {
@@ -675,12 +699,13 @@ impl LocalManager {
             remove_outdated_meta_task: TokioMutex::new(None),
             config,
             pause_aware,
-            event_recorder: Mutex::new(EventRecorderConfig {
-                recorder: event_recorder,
-                event_type_filter: Arc::new(EventTypeFilter::All),
-                started: false,
-            }),
+            event_recorder: EventRecorderHandle::new(event_recorder),
         }
+    }
+
+    /// Returns the handle used to configure procedure lifecycle event recording.
+    pub fn event_recorder_handle(&self) -> EventRecorderHandle {
+        self.event_recorder.clone()
     }
 
     /// Build remove outedated meta task
@@ -713,7 +738,7 @@ impl LocalManager {
             procedure.poison_keys(),
             procedure.type_name(),
         ));
-        let event_recorder = self.event_recorder.lock().unwrap();
+        let event_recorder = self.event_recorder.0.lock().unwrap();
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -890,25 +915,6 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
-    fn set_event_recorder(&self, event_recorder: EventRecorderRef) -> Result<()> {
-        let mut config = self.event_recorder.lock().unwrap();
-        ensure!(!config.started, ManagerAlreadyStartedSnafu);
-        config.recorder = Some(event_recorder);
-        Ok(())
-    }
-
-    fn set_event_recorder_with_filter(
-        &self,
-        event_recorder: EventRecorderRef,
-        event_type_filter: EventTypeFilterRef,
-    ) -> Result<()> {
-        let mut config = self.event_recorder.lock().unwrap();
-        ensure!(!config.started, ManagerAlreadyStartedSnafu);
-        config.recorder = Some(event_recorder);
-        config.event_type_filter = event_type_filter;
-        Ok(())
-    }
-
     async fn start(&self) -> Result<()> {
         let mut task = self.remove_outdated_meta_task.lock().await;
 
@@ -924,12 +930,8 @@ impl ProcedureManager for LocalManager {
 
         *task = Some(task_inner);
 
-        {
-            let mut config = self.event_recorder.lock().unwrap();
-            config.started = true;
-            self.manager_ctx.reset_runtime_state();
-            self.manager_ctx.start();
-        }
+        self.manager_ctx.reset_runtime_state();
+        self.manager_ctx.start();
 
         info!("LocalManager is start.");
 
@@ -1316,7 +1318,8 @@ mod tests {
             None,
         );
         manager
-            .set_event_recorder_with_filter(event_recorder, event_type_filter.clone())
+            .event_recorder_handle()
+            .install(event_recorder, event_type_filter.clone())
             .unwrap();
         manager.manager_ctx.start();
 
@@ -1349,7 +1352,10 @@ mod tests {
             None,
             None,
         );
-        manager.set_event_recorder(event_recorder.clone()).unwrap();
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone(), Arc::new(EventTypeFilter::All))
+            .unwrap();
         manager.manager_ctx.start();
 
         manager
@@ -1380,7 +1386,10 @@ mod tests {
             None,
             None,
         );
-        manager.set_event_recorder(event_recorder.clone()).unwrap();
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone(), Arc::new(EventTypeFilter::All))
+            .unwrap();
         manager.manager_ctx.start();
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -1413,7 +1422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_event_recorder_after_start_fails() {
+    async fn test_event_recorder_handle_installs_after_start() {
         let dir = create_temp_dir("set_event_recorder_after_start");
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let poison_manager = Arc::new(InMemoryPoisonStore::new());
@@ -1427,10 +1436,13 @@ mod tests {
 
         manager.start().await.unwrap();
 
-        let err = manager
-            .set_event_recorder(Arc::new(CapturingEventRecorder::default()))
-            .unwrap_err();
-        assert_matches!(err, Error::ManagerAlreadyStarted { .. });
+        manager
+            .event_recorder_handle()
+            .install(
+                Arc::new(CapturingEventRecorder::default()),
+                Arc::new(EventTypeFilter::All),
+            )
+            .unwrap();
 
         manager.stop().await.unwrap();
     }

@@ -384,6 +384,3 @@ enable_heap_profiling = true
 [event_recorder]
 ## TTL for the events table that will be used to store the events. Default is `90d`.
 ttl = "90d"
-## Event types to retain. When omitted, all current and future event types are retained.
-## Set to an empty list to disable event recording.
-#+ event_types = ["create_database", "alter_database", "drop_database"]
