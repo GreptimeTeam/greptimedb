@@ -2084,6 +2084,9 @@ experimental_enable_prometheus_native_histogram = false
 cors_allowed_origins = []
 enable_cors = true
 experimental_enable_explain_analyze_stream = true
+api_server_enable = true
+api_server_host = "127.0.0.1"
+api_server_port = 4006
 
 [grpc]
 bind_addr = "127.0.0.1:4001"
