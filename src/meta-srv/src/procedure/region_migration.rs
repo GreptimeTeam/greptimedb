@@ -1051,6 +1051,7 @@ mod tests {
                     procedure_id: common_procedure::ProcedureId::random(),
                     lifecycle_state: &state,
                     trigger,
+                    event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
                 })
                 .unwrap();
             assert_eq!(event.event_type(), "region_migration");

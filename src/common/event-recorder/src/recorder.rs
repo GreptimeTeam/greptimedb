@@ -276,7 +276,7 @@ pub trait EventHandler: Send + Sync + 'static {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventRecorderOptions {
     /// TTL for the events table that will be used to store the events.
-    #[serde(with = "humantime_serde")]
+    #[serde(default = "default_events_table_ttl", with = "humantime_serde")]
     pub ttl: Duration,
     /// Event types that the recorder retains. When omitted, all event types are retained.
     #[serde(
@@ -286,6 +286,10 @@ pub struct EventRecorderOptions {
         skip_serializing_if = "event_type_filter_is_all"
     )]
     pub event_types: EventTypeFilterRef,
+}
+
+fn default_events_table_ttl() -> Duration {
+    DEFAULT_EVENTS_TABLE_TTL
 }
 
 impl Default for EventRecorderOptions {
@@ -549,6 +553,17 @@ mod tests {
         let options =
             toml::from_str::<EventRecorderOptions>("ttl = '90d'\nevent_types = []").unwrap();
 
+        assert_eq!(
+            options.event_types.as_ref(),
+            &EventTypeFilter::Only(HashSet::new())
+        );
+    }
+
+    #[test]
+    fn test_event_recorder_options_default_ttl_for_partial_table() {
+        let options = toml::from_str::<EventRecorderOptions>("event_types = []").unwrap();
+
+        assert_eq!(DEFAULT_EVENTS_TABLE_TTL, options.ttl);
         assert_eq!(
             options.event_types.as_ref(),
             &EventTypeFilter::Only(HashSet::new())

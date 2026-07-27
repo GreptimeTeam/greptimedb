@@ -412,6 +412,35 @@ fn test_load_heartbeat_env_vars_from_env() {
 }
 
 #[test]
+fn test_load_event_types_from_env() {
+    let env_prefix = "EVENT_TYPES_UT";
+    let env_key = [env_prefix, "EVENT_RECORDER", "EVENT_TYPES"].join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("region_migration"), || {
+        for event_types in [
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+            GreptimeOptions::<MetasrvOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+        ] {
+            assert!(event_types.allows("region_migration"));
+            assert!(!event_types.allows("other_event"));
+        }
+    });
+}
+
+#[test]
 fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
     // The `sparse_primary_key_encoding` option was removed from the metric
     // engine config and is now always-on. Existing user configs that still set

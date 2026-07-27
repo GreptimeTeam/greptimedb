@@ -120,7 +120,11 @@ impl Default for StandaloneOptions {
 
 impl Configurable for StandaloneOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["heartbeat_env_vars", "wal.broker_endpoints"])
+        Some(&[
+            "heartbeat_env_vars",
+            "wal.broker_endpoints",
+            "event_recorder.event_types",
+        ])
     }
 }
 

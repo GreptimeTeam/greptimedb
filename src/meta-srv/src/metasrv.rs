@@ -408,7 +408,11 @@ impl Default for MetasrvOptions {
 
 impl Configurable for MetasrvOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints", "store_addrs"])
+        Some(&[
+            "wal.broker_endpoints",
+            "store_addrs",
+            "event_recorder.event_types",
+        ])
     }
 }
 
