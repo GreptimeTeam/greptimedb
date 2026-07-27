@@ -3320,19 +3320,15 @@ mod tests {
         scheduler.region_status.insert(region_id, status);
         let (ddl_tx, _ddl_rx) = oneshot::channel();
 
-        let result = scheduler.try_cancel_and_add_ddl(
-            region_id,
-            OptionOutputTx::from(ddl_tx),
-            (),
-            |_| {
+        let result =
+            scheduler.try_cancel_and_add_ddl(region_id, OptionOutputTx::from(ddl_tx), (), |_| {
                 crate::request::DdlRequest::EnterStaging(
                     store_api::region_request::EnterStagingRequest {
                         partition_directive:
                             store_api::region_request::StagingPartitionDirective::RejectAllWrites,
                     },
                 )
-            },
-        );
+            });
 
         assert!(result.is_ok());
         assert!(scheduler.has_pending_ddls(region_id));

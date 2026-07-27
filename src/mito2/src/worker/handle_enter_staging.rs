@@ -98,13 +98,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let (sender, partition_directive) = match self
-            .compaction_scheduler
-            .try_cancel_and_add_ddl(region_id, sender, partition_directive, |partition_directive| {
+        let (sender, partition_directive) = match self.compaction_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            partition_directive,
+            |partition_directive| {
                 DdlRequest::EnterStaging(EnterStagingRequest {
                     partition_directive,
                 })
-            }) {
+            },
+        ) {
             Ok(()) => {
                 self.listener.on_compaction_cancel_requested(region_id);
                 return;
