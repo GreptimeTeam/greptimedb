@@ -23,7 +23,7 @@ use arrow::datatypes::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit};
-use chrono::NaiveDateTime;
+use chrono::{Datelike, NaiveDateTime};
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -52,6 +52,9 @@ use crate::error::{
     TimestampOverflowSnafu,
 };
 use crate::metrics::*;
+
+const MYSQL_DATETIME_MIN_YEAR: i32 = 1000;
+const MYSQL_DATETIME_MAX_YEAR: i32 = 9999;
 
 /// Try to write multiple output to the writer if possible.
 pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
@@ -227,56 +230,60 @@ impl MysqlResultWriter {
     ) -> Result<()> {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
-        let timestamp_indexes = record_batch
+        let mut timestamp_slots = vec![None; record_batch.num_columns()];
+        let mut staged_timestamps = record_batch
             .columns()
             .iter()
             .enumerate()
-            .filter_map(|(index, column)| {
-                matches!(column.data_type(), DataType::Timestamp(_, _)).then_some(index)
+            .filter(|(_, column)| matches!(column.data_type(), DataType::Timestamp(_, _)))
+            .enumerate()
+            .map(|(slot, (column_index, column))| {
+                timestamp_slots[column_index] = Some(slot);
+                (column, StagedTimestamp::new())
             })
             .collect::<Vec<_>>();
-        let mut staged_timestamps = Vec::with_capacity(timestamp_indexes.len());
-        staged_timestamps.resize_with(timestamp_indexes.len(), StagedTimestamp::new);
         for i in 0..record_batch.num_rows() {
-            if !timestamp_indexes.is_empty() {
-                for (slot, &column_index) in timestamp_indexes.iter().enumerate() {
-                    let column =
-                        record_batch
-                            .columns()
-                            .get(column_index)
-                            .context(InternalSnafu {
-                                err_msg: "timestamp column index is invalid",
-                            })?;
-                    let staged_timestamp =
-                        staged_timestamps.get_mut(slot).context(InternalSnafu {
-                            err_msg: "timestamp staging slot is missing",
+            for (column, staged_timestamp) in &mut staged_timestamps {
+                let column = *column;
+                staged_timestamp.datetime = None;
+                staged_timestamp.formatted.clear();
+                if !column.is_null(i) {
+                    let timestamp = datatypes::arrow_array::timestamp_array_value(column, i);
+                    let datetime = timestamp
+                        .to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
+                        .with_context(|| TimestampOverflowSnafu {
+                            error: format!(
+                                "timestamp {} overflow with unit {}",
+                                timestamp.value(),
+                                timestamp.unit()
+                            ),
                         })?;
-                    staged_timestamp.datetime = None;
-                    staged_timestamp.formatted.clear();
-                    if !column.is_null(i) {
-                        let timestamp = datatypes::arrow_array::timestamp_array_value(column, i);
-                        let datetime = timestamp
-                            .to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
-                            .context(TimestampOverflowSnafu {
-                                error: format!(
-                                    "timestamp {} overflow with unit {}",
-                                    timestamp.value(),
-                                    timestamp.unit()
-                                ),
-                            })?;
-                        write!(
-                            &mut staged_timestamp.formatted,
-                            "{}",
-                            datetime.format("%Y-%m-%d %H:%M:%S%.f")
-                        )
-                        .map_err(|_| {
-                            InternalSnafu {
-                                err_msg: "timestamp formatting failed",
-                            }
-                            .build()
-                        })?;
-                        staged_timestamp.datetime = Some(datetime);
+                    let year = datetime.year();
+                    if !(MYSQL_DATETIME_MIN_YEAR..=MYSQL_DATETIME_MAX_YEAR).contains(&year) {
+                        return TimestampOverflowSnafu {
+                            error: format!(
+                                "timestamp {} with unit {} has local year {}, outside MySQL DATETIME range {}..={}",
+                                timestamp.value(),
+                                timestamp.unit(),
+                                year,
+                                MYSQL_DATETIME_MIN_YEAR,
+                                MYSQL_DATETIME_MAX_YEAR,
+                            ),
+                        }
+                        .fail();
                     }
+                    write!(
+                        &mut staged_timestamp.formatted,
+                        "{}",
+                        datetime.format("%Y-%m-%d %H:%M:%S%.f")
+                    )
+                    .map_err(|_| {
+                        InternalSnafu {
+                            err_msg: "timestamp formatting failed",
+                        }
+                        .build()
+                    })?;
+                    staged_timestamp.datetime = Some(datetime);
                 }
             }
 
@@ -353,15 +360,17 @@ impl MysqlResultWriter {
                         row_writer.write_col(v.to_chrono_date())?;
                     }
                     DataType::Timestamp(_, _) => {
-                        let slot =
-                            timestamp_indexes
-                                .binary_search(&j)
-                                .ok()
-                                .context(InternalSnafu {
-                                    err_msg: "timestamp column has no staging slot",
-                                })?;
-                        let staged_timestamp =
-                            staged_timestamps.get(slot).context(InternalSnafu {
+                        let slot = timestamp_slots
+                            .get(j)
+                            .context(InternalSnafu {
+                                err_msg: "timestamp column index is invalid",
+                            })?
+                            .as_ref()
+                            .context(InternalSnafu {
+                                err_msg: "timestamp column has no staging slot",
+                            })?;
+                        let (_, staged_timestamp) =
+                            staged_timestamps.get(*slot).context(InternalSnafu {
                                 err_msg: "timestamp staging slot is missing",
                             })?;
                         let datetime = staged_timestamp.datetime.context(InternalSnafu {

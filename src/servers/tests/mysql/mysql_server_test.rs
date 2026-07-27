@@ -16,23 +16,32 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use chrono::{Datelike, NaiveDate};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
-use common_time::Timestamp;
+use common_time::{Timestamp, Timezone};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::{Int32Vector, TimestampMicrosecondVector, TimestampSecondVector};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
+use query::parser::PromQuery;
+use query::query_engine::DescribeResult;
 use servers::error::Result;
 use servers::install_default_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
+use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use table::TableRef;
 use table::test_util::MemTable;
 
@@ -47,8 +56,15 @@ struct MysqlOpts<'a> {
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
-    let _ = install_default_crypto_provider();
     let query_handler = create_testing_sql_query_handler(table);
+    create_mysql_server_with_query_handler(query_handler, opts)
+}
+
+fn create_mysql_server_with_query_handler(
+    query_handler: ServerSqlQueryHandlerRef,
+    opts: MysqlOpts<'_>,
+) -> Result<Box<dyn Server>> {
+    let _ = install_default_crypto_provider();
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
         .thread_name("mysql-io-handlers")
@@ -77,6 +93,59 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         )),
         None,
     ))
+}
+
+struct SessionTimezoneQueryHandler {
+    inner: ServerSqlQueryHandlerRef,
+}
+
+#[async_trait]
+impl SqlQueryHandler for SessionTimezoneQueryHandler {
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if query == "SET time_zone = '+08:00'" {
+            query_ctx.set_timezone(Timezone::hours_mins_opt(8, 0).unwrap());
+            return vec![Ok(Output::new_with_affected_rows(0))];
+        }
+
+        self.inner.do_query(query, query_ctx).await
+    }
+
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inner.do_analyze_stream_query(query, query_ctx).await
+    }
+
+    async fn do_exec_plan(
+        &self,
+        plan: LogicalPlan,
+        stmt: Option<Statement>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inner.do_exec_plan(plan, stmt, query_ctx).await
+    }
+
+    async fn do_promql_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        self.inner.do_promql_query(query, query_ctx).await
+    }
+
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<DescribeResult>> {
+        self.inner.do_describe(stmt, query_ctx).await
+    }
+
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+        self.inner.is_valid_schema(catalog, schema).await
+    }
 }
 
 #[tokio::test]
@@ -449,6 +518,41 @@ async fn test_mysql_text_protocol_out_of_range_timestamp_fails_closed() -> Resul
 }
 
 #[tokio::test]
+async fn test_mysql_text_protocol_max_timestamp_with_session_timezone_fails_closed() -> Result<()> {
+    let timestamp = Timestamp::MAX_SECOND.value();
+    let (table, _) = timestamp_table("max_timestamp_with_session_timezone", Some(timestamp));
+    let query_handler = Arc::new(SessionTimezoneQueryHandler {
+        inner: create_testing_sql_query_handler(table),
+    });
+    let mut mysql_server =
+        create_mysql_server_with_query_handler(query_handler, Default::default())?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    connection
+        .query_drop("SET time_zone = '+08:00'")
+        .await
+        .unwrap();
+
+    let result = match connection
+        .query_iter("SELECT id, ts FROM max_timestamp_with_session_timezone")
+        .await
+    {
+        Ok(mut result) => result.collect::<MysqlTextRow>().await,
+        Err(error) => Err(error),
+    };
+    assert_timestamp_overflow_with_value(result, timestamp);
+    assert_eq!(Some(1), connection.query_first("SELECT 1").await.unwrap());
+
+    mysql_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_mysql_binary_protocol_out_of_range_timestamp_fails_closed() -> Result<()> {
     let timestamp = i64::MAX;
     assert!(
@@ -467,6 +571,44 @@ async fn test_mysql_binary_protocol_out_of_range_timestamp_fails_closed() -> Res
     let (result, health_check) =
         query_timestamp_with_mysql_binary_protocol(table, "out_of_range_timestamp").await;
     assert_timestamp_overflow(result);
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_chrono_representable_year_overflow_fails_closed() -> Result<()>
+{
+    let timestamp = Timestamp::new_second(
+        NaiveDate::from_ymd_opt(100_000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp(),
+    );
+    assert_eq!(
+        100_000,
+        timestamp
+            .to_chrono_datetime_with_timezone(None)
+            .unwrap()
+            .year(),
+        "the target value must be Chrono-representable"
+    );
+
+    let (table, schema) = timestamp_table(
+        "chrono_representable_year_overflow",
+        Some(timestamp.value()),
+    );
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "chrono_representable_year_overflow")
+            .await;
+    assert_timestamp_overflow_with_value(result, timestamp.value());
     assert_eq!(Some(1), health_check.unwrap());
 
     Ok(())
@@ -703,6 +845,10 @@ async fn query_mysql_binary_protocol(
 }
 
 fn assert_timestamp_overflow<T>(result: mysql_async::Result<T>) {
+    assert_timestamp_overflow_with_value(result, i64::MAX);
+}
+
+fn assert_timestamp_overflow_with_value<T>(result: mysql_async::Result<T>, timestamp: i64) {
     match result {
         Err(mysql_async::Error::Server(error)) => {
             assert_eq!(1210, error.code, "expected ER_WRONG_ARGUMENTS");
@@ -712,7 +858,7 @@ fn assert_timestamp_overflow<T>(result: mysql_async::Result<T>) {
                 error.message
             );
             assert!(
-                error.message.contains("9223372036854775807"),
+                error.message.contains(&timestamp.to_string()),
                 "expected raw timestamp value, got: {}",
                 error.message
             );
