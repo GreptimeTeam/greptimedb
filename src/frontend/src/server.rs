@@ -38,7 +38,7 @@ use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
+use servers::pending_rows_batcher::{PendingRowsBatcher, pending_rows_batch_sync_enabled};
 use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
@@ -398,10 +398,18 @@ where
 }
 
 fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
+    effective_http_options_with_sync(opts, pending_rows_batch_sync_enabled())
+}
+
+fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) -> HttpOptions {
     let mut http = opts.http.clone();
     let flush_interval = opts.prom_store.pending_rows_flush_interval;
     let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
+    // In asynchronous batch mode submissions return right after enqueue and
+    // no request waits for a pending-row flush, so the timeout must not be
+    // raised either.
     if !opts.prom_store.pending_rows_batching_enabled()
+        || !batch_sync
         || http.timeout.is_zero()
         || http.timeout > fallback_timeout
     {
@@ -459,10 +467,29 @@ mod tests {
 
             assert_eq!(
                 Duration::from_millis(expected),
-                effective_http_options(&opts).timeout,
+                effective_http_options_with_sync(&opts, true).timeout,
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn test_effective_http_timeout_skips_fallback_in_async_batch_mode() {
+        // With `PENDING_ROWS_BATCH_SYNC=false`, submissions return right after
+        // enqueue and no request waits for a pending-row flush, so the
+        // timeout must not be raised.
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_millis(1000);
+        opts.prom_store.pending_rows_flush_interval = Duration::from_millis(5000);
+
+        assert_eq!(
+            Duration::from_millis(1000),
+            effective_http_options_with_sync(&opts, false).timeout,
+        );
+        assert_eq!(
+            Duration::from_millis(6000),
+            effective_http_options_with_sync(&opts, true).timeout,
+        );
     }
 
     #[test]
@@ -494,7 +521,7 @@ mod tests {
 
             assert_eq!(
                 Duration::from_millis(1000),
-                effective_http_options(&opts).timeout,
+                effective_http_options_with_sync(&opts, true).timeout,
                 "{name}"
             );
         }
