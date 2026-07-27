@@ -63,8 +63,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Run GitHub script tests
+      - name: Run Node GitHub script tests
         run: node --test .github/scripts/query-regression-comment.test.cjs
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - name: Run check-version script tests
+        run: uv run --no-project python .github/scripts/check-version-test.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}

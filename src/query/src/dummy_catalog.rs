@@ -188,7 +188,7 @@ impl TableProvider for DummyTableProvider {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
-        request.projection_input = projection.map(|p| p.clone().into());
+        request.projection = projection.cloned();
         request.filters = filters.to_vec();
         request.limit = limit;
         if let Some(query_ctx) = &self.query_ctx {

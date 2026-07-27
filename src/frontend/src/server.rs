@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use auth::UserProviderRef;
 use axum::extract::{Request, State};
@@ -21,7 +22,7 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use common_base::Plugins;
 use common_config::Configurable;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
@@ -32,12 +33,12 @@ use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
-use servers::http::{HttpServer, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
+use servers::pending_rows_batcher::{PendingRowsBatcher, pending_rows_batch_sync_enabled};
 use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
@@ -102,7 +103,7 @@ where
         opts: &FrontendOptions,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone())
+        let mut builder = HttpServerBuilder::new(effective_http_options(opts))
             .with_memory_limiter(request_memory_limiter)
             .with_sql_handler(self.instance.clone());
 
@@ -396,6 +397,133 @@ where
     }
 }
 
+fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
+    effective_http_options_with_sync(opts, pending_rows_batch_sync_enabled())
+}
+
+fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) -> HttpOptions {
+    let mut http = opts.http.clone();
+    let flush_interval = opts.prom_store.pending_rows_flush_interval;
+    let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
+    // In asynchronous batch mode submissions return right after enqueue and
+    // no request waits for a pending-row flush, so the timeout must not be
+    // raised either.
+    if !opts.prom_store.pending_rows_batching_enabled()
+        || !batch_sync
+        || http.timeout.is_zero()
+        || http.timeout > fallback_timeout
+    {
+        return http;
+    }
+
+    let configured_timeout = http.timeout;
+    http.timeout = fallback_timeout;
+    warn!(
+        ?configured_timeout,
+        ?flush_interval,
+        ?fallback_timeout,
+        "HTTP request timeout is not longer than the pending-row timeout fallback; using the fallback"
+    );
+    http
+}
+
 fn parse_addr(addr: &str) -> Result<SocketAddr> {
     addr.parse().context(error::ParseAddrSnafu { addr })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_effective_http_timeout_for_pending_rows() {
+        let cases = [
+            ("disabled timeout", 0, 5000, true, true, 0),
+            ("disabled prom store", 1000, 5000, false, true, 1000),
+            ("disabled metric engine", 1000, 5000, true, false, 1000),
+            ("disabled batching", 1000, 0, true, true, 1000),
+            ("timeout below flush interval", 4000, 5000, true, true, 6000),
+            (
+                "timeout equals flush interval",
+                5000,
+                5000,
+                true,
+                true,
+                6000,
+            ),
+            ("timeout below fallback", 5500, 5000, true, true, 6000),
+            ("timeout equals fallback", 6000, 5000, true, true, 6000),
+            ("timeout above fallback", 7000, 5000, true, true, 7000),
+        ];
+
+        for (name, timeout, flush_interval, enable, with_metric_engine, expected) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_millis(timeout);
+            opts.prom_store.pending_rows_flush_interval = Duration::from_millis(flush_interval);
+            opts.prom_store.enable = enable;
+            opts.prom_store.with_metric_engine = with_metric_engine;
+
+            assert_eq!(
+                Duration::from_millis(expected),
+                effective_http_options_with_sync(&opts, true).timeout,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_effective_http_timeout_skips_fallback_in_async_batch_mode() {
+        // With `PENDING_ROWS_BATCH_SYNC=false`, submissions return right after
+        // enqueue and no request waits for a pending-row flush, so the
+        // timeout must not be raised.
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_millis(1000);
+        opts.prom_store.pending_rows_flush_interval = Duration::from_millis(5000);
+
+        assert_eq!(
+            Duration::from_millis(1000),
+            effective_http_options_with_sync(&opts, false).timeout,
+        );
+        assert_eq!(
+            Duration::from_millis(6000),
+            effective_http_options_with_sync(&opts, true).timeout,
+        );
+    }
+
+    #[test]
+    fn test_effective_http_timeout_skips_fallback_when_batcher_disabled() {
+        // Mirrors the conditions under which `PendingRowsBatcher::try_new`
+        // returns `None`; in these cases no request can wait for a pending-row
+        // flush, so the timeout must not be raised.
+        type KnobMutator = fn(&mut FrontendOptions);
+        let cases: [(&str, KnobMutator); 4] = [
+            ("zero max_batch_rows", |opts| {
+                opts.prom_store.max_batch_rows = 0
+            }),
+            ("zero max_concurrent_flushes", |opts| {
+                opts.prom_store.max_concurrent_flushes = 0
+            }),
+            ("zero worker_channel_capacity", |opts| {
+                opts.prom_store.worker_channel_capacity = 0
+            }),
+            ("zero max_inflight_requests", |opts| {
+                opts.prom_store.max_inflight_requests = 0
+            }),
+        ];
+
+        for (name, disable_batcher) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_millis(1000);
+            opts.prom_store.pending_rows_flush_interval = Duration::from_millis(5000);
+            disable_batcher(&mut opts);
+
+            assert_eq!(
+                Duration::from_millis(1000),
+                effective_http_options_with_sync(&opts, true).timeout,
+                "{name}"
+            );
+        }
+    }
 }

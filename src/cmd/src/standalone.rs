@@ -402,7 +402,7 @@ impl StartCommand {
             .metadata_kv_backend_creator
             .create(metadata_dir, &opts)
             .await?;
-        let procedure_manager =
+        let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
         plugins::setup_standalone_plugins(&mut plugins, &plugin_opts, &opts, kv_backend.clone())
@@ -607,6 +607,8 @@ impl StartCommand {
             .await
             .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
+
+        event_recorder_handle.install(fe_instance.event_recorder());
 
         // set the frontend client for flownode
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;

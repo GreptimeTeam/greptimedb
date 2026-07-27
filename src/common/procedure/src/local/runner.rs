@@ -776,6 +776,7 @@ impl Runner {
             procedure_id: self.meta.id,
             lifecycle_state: &state,
             trigger: trigger.clone(),
+            event_type_filter: recorder.event_type_filter(),
         };
         if let Some(event) = self.procedure.event(&context) {
             recorder.record(Box::new(crate::event::ProcedureEvent::new(

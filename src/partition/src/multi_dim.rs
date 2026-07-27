@@ -121,12 +121,18 @@ impl MultiDimPartitionRule {
     fn evaluate_expr(&self, expr: &PartitionExpr, values: &[Value]) -> Result<bool> {
         match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
             (Operand::Column(name), Operand::Value(r)) => {
-                let index = self.name_to_index.get(name).unwrap();
+                let index = self
+                    .name_to_index
+                    .get(name)
+                    .context(UndefinedColumnSnafu { column: name })?;
                 let l = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
             (Operand::Value(l), Operand::Column(name)) => {
-                let index = self.name_to_index.get(name).unwrap();
+                let index = self
+                    .name_to_index
+                    .get(name)
+                    .context(UndefinedColumnSnafu { column: name })?;
                 let r = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
@@ -414,6 +420,46 @@ mod tests {
         assert_matches!(rule.find_region(&["hzz".into()]), Ok(2));
         assert_matches!(rule.find_region(&["sh".into()]), Ok(3));
         assert_matches!(rule.find_region(&["zzzz".into()]), Ok(3));
+    }
+
+    #[test]
+    fn test_find_region_rejects_undeclared_column_on_lhs() {
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Column("rack".to_string()),
+                RestrictedOp::Lt,
+                Operand::Value(Value::String("n".into())),
+            )],
+            false,
+        )
+        .unwrap();
+
+        assert_matches!(
+            rule.find_region(&[Value::String("z".into())]),
+            Err(Error::UndefinedColumn { column, .. }) if column == "rack"
+        );
+    }
+
+    #[test]
+    fn test_find_region_rejects_undeclared_column_on_rhs() {
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Value(Value::String("n".into())),
+                RestrictedOp::Gt,
+                Operand::Column("rack".to_string()),
+            )],
+            false,
+        )
+        .unwrap();
+
+        assert_matches!(
+            rule.find_region(&[Value::String("z".into())]),
+            Err(Error::UndefinedColumn { column, .. }) if column == "rack"
+        );
     }
 
     #[test]

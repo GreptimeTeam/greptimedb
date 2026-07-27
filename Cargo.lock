@@ -2379,6 +2379,7 @@ dependencies = [
  "store-api",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -14004,6 +14005,7 @@ dependencies = [
  "common-base",
  "common-config",
  "common-error",
+ "common-event-recorder",
  "common-macro",
  "common-memory-manager",
  "common-meta",
@@ -14029,6 +14031,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "toml 0.8.23",
  "url",
 ]
 

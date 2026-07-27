@@ -119,6 +119,7 @@ jobs:
 
       # The 'is-current-version-latest' determines whether to update 'latest' Docker tags and downstream repositories.
       is-current-version-latest: ${{ steps.check-version.outputs.is-current-version-latest }}
+      is-current-version-stable: ${{ steps.check-version.outputs.is-current-version-stable }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -504,7 +505,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -550,7 +551,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
@@ -573,6 +574,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' && inputs.release_images == false &&
         needs.release-images-to-dockerhub.result == 'skipped')) &&
       (github.event_name != 'workflow_dispatch' || github.ref_type != 'tag' ||
+       needs.allocate-runners.outputs.is-current-version-stable != 'true' ||
        needs.allocate-runners.outputs.is-current-version-latest == 'true')
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
@@ -654,7 +656,7 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag') }}
+    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && needs.allocate-runners.outputs.is-current-version-stable == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
@@ -680,7 +682,7 @@ jobs:
 
   bump-helm-charts-version:
     name: Bump helm charts version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:
@@ -701,7 +703,7 @@ jobs:
 
   bump-homebrew-greptime-version:
     name: Bump homebrew greptime version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:

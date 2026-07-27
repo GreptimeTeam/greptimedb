@@ -64,6 +64,21 @@ use crate::prom_row_builder::{
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 /// Whether wait for ingestion result before reply to client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
+
+/// Returns whether pending-row batch submissions wait for the flush result
+/// before replying to the client (synchronous mode), controlled by the
+/// `PENDING_ROWS_BATCH_SYNC` environment variable and defaulting to `true`.
+///
+/// Callers that reason about how long a remote write request may block (e.g.
+/// the frontend HTTP timeout fallback) must consult this instead of
+/// duplicating the env lookup.
+pub fn pending_rows_batch_sync_enabled() -> bool {
+    std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
+        .ok()
+        .as_deref()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(true)
+}
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
@@ -372,11 +387,7 @@ impl PendingRowsBatcher {
         }
 
         let (shutdown, _) = broadcast::channel(1);
-        let pending_rows_batch_sync = std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
-            .ok()
-            .as_deref()
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true);
+        let pending_rows_batch_sync = pending_rows_batch_sync_enabled();
         let workers = Arc::new(DashMap::new());
         PENDING_WORKERS.set(workers.len() as i64);
         let (flow_notification_tx, flow_notification_rx) =

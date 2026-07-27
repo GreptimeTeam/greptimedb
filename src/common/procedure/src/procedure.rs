@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, EventTypeFilterRef};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
@@ -250,6 +250,8 @@ pub struct EventContext<'a> {
     pub lifecycle_state: &'a ProcedureState,
     /// Lifecycle action that caused the event hook to be called.
     pub trigger: EventTrigger,
+    /// Event types retained by the configured recorder.
+    pub event_type_filter: EventTypeFilterRef,
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
@@ -756,6 +758,7 @@ mod tests {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(common_event_recorder::EventTypeFilter::All),
         };
 
         assert!(DefaultEventProcedure.event(&context).is_none());

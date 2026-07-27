@@ -40,6 +40,7 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_provider::build_wal_provider;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::local::EventRecorderHandle;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
@@ -64,6 +65,7 @@ pub struct GreptimeDbStandalone {
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+    pub event_recorder_handle: EventRecorderHandle,
 }
 
 impl GreptimeDbStandalone {
@@ -157,6 +159,7 @@ impl GreptimeDbStandaloneBuilder {
         guard: TestGuard,
         opts: StandaloneOptions,
         procedure_manager: ProcedureManagerRef,
+        event_recorder_handle: EventRecorderHandle,
         register_procedure_loaders: bool,
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
@@ -281,6 +284,8 @@ impl GreptimeDbStandaloneBuilder {
         .unwrap();
         let instance = Arc::new(instance);
 
+        event_recorder_handle.install(instance.event_recorder());
+
         // set the frontend client for flownode
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
@@ -324,6 +329,7 @@ impl GreptimeDbStandaloneBuilder {
             guard,
             kv_backend,
             procedure_manager,
+            event_recorder_handle,
         }
     }
 
@@ -347,7 +353,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend_config,
         )
         .unwrap();
-        let procedure_manager =
+        let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
         let standalone_opts = StandaloneOptions {
@@ -361,7 +367,14 @@ impl GreptimeDbStandaloneBuilder {
             ..StandaloneOptions::default()
         };
 
-        self.build_with(kv_backend, guard, standalone_opts, procedure_manager, true)
-            .await
+        self.build_with(
+            kv_backend,
+            guard,
+            standalone_opts,
+            procedure_manager,
+            event_recorder_handle,
+            true,
+        )
+        .await
     }
 }
