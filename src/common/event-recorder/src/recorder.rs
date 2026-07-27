@@ -318,7 +318,6 @@ pub struct EventRecorderImpl {
 }
 
 impl EventRecorderImpl {
-    #[cfg(test)]
     pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
         Self::with_event_type_filter(event_handler, Arc::new(EventTypeFilter::All))
     }

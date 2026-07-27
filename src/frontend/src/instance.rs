@@ -129,6 +129,7 @@ pub struct Instance {
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,
+    slow_query_recorder: EventRecorderRef,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
@@ -257,7 +258,7 @@ impl Instance {
             self.slow_query_options.threshold,
             self.slow_query_options.sample_ratio,
             self.slow_query_options.record_type,
-            self.event_recorder.clone(),
+            self.slow_query_recorder.clone(),
         ))
     }
 
@@ -808,7 +809,7 @@ impl Instance {
                         self.slow_query_options.threshold,
                         self.slow_query_options.sample_ratio,
                         self.slow_query_options.record_type,
-                        self.event_recorder.clone(),
+                        self.slow_query_recorder.clone(),
                     )
                 })
             } else {
@@ -1191,7 +1192,7 @@ impl PrometheusHandler for Instance {
                 self.slow_query_options.threshold,
                 self.slow_query_options.sample_ratio,
                 self.slow_query_options.record_type,
-                self.event_recorder.clone(),
+                self.slow_query_recorder.clone(),
             )
         });
 
