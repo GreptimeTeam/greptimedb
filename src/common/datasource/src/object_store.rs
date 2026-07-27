@@ -169,6 +169,12 @@ impl LocalFileAccess {
             debug!(
                 "Failed to open an authorized local SQL path inside the copy root, path: {location}, error: {error:?}"
             );
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return error::LocalFilePathNotFoundSnafu {
+                    path: location.to_string(),
+                }
+                .build();
+            }
             error::LocalFileAccessDeniedSnafu {
                 path: location.to_string(),
                 reason: "path could not be safely resolved within the configured copy root"
@@ -459,10 +465,15 @@ mod tests {
         );
 
         let missing = copy_root.join("missing/directory");
+        let error = build_backend("missing/directory/data.txt", &connection, &access)
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, Error::LocalFilePathNotFound { .. }));
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
         assert!(
-            build_backend("missing/directory/data.txt", &connection, &access)
-                .await
-                .is_err()
+            error.to_string().contains("does not exist"),
+            "unexpected error: {error}"
         );
         assert!(!missing.exists());
 

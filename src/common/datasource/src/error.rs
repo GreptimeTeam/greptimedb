@@ -87,6 +87,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Local filesystem path '{}' does not exist within the configured copy root",
+        path
+    ))]
+    LocalFilePathNotFound {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid local filesystem copy root '{}'", root))]
     InvalidLocalFileRoot {
         root: String,
@@ -264,6 +274,7 @@ impl ErrorExt for Error {
             | InvalidUrl { .. }
             | LocalFileAccessDisabled { .. }
             | LocalFileAccessDenied { .. }
+            | LocalFilePathNotFound { .. }
             | InvalidLocalFileRoot { .. }
             | EmptyHostPath { .. }
             | InferSchema { .. }

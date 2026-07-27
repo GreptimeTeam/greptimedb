@@ -113,7 +113,14 @@ fn standalone_local_file_access(
             }
             .into_error(error)
         })?;
-        let canonical_copy_root = access.sandbox_root().unwrap();
+        let canonical_copy_root = access.sandbox_root().ok_or_else(|| {
+            common_datasource::error::InvalidLocalFileRootSnafu {
+                root: copy_root.display().to_string(),
+            }
+            .into_error(std::io::Error::other(
+                "sandboxed local file access has no root",
+            ))
+        })?;
         let default_copy_root = canonical_data_home.join("copy");
         let exposes_internal_files = canonical_data_home.starts_with(canonical_copy_root)
             || (canonical_copy_root.starts_with(&canonical_data_home)
