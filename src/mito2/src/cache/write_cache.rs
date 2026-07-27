@@ -241,6 +241,7 @@ impl WriteCache {
             metrics,
         )
         .await
+        .with_float_field_encoding(write_request.float_field_encoding)
         .with_file_cleaner(cleaner);
 
         let sst_info = match write_request.sst_write_format {
@@ -501,8 +502,11 @@ impl UploadTracker {
 mod tests {
     use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
+    use mito_codec::row_converter::build_primary_key_codec;
     use object_store::ATOMIC_WRITE_DIR;
+    use parquet::basic::Encoding;
     use parquet::file::metadata::PageIndexPolicy;
+    use store_api::metadata::RegionMetadataRef;
     use store_api::region_request::PathType;
     use store_api::storage::FileId;
 
@@ -512,14 +516,91 @@ mod tests {
     use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
+    use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::FlatSource;
-    use crate::region::options::IndexOptions;
+    use crate::region::options::{FloatFieldEncodingPolicy, IndexOptions};
     use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::TestEnv;
+    use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
     use crate::test_util::sst_util::{
         new_flat_source_from_record_batches, new_record_batch_by_range,
         sst_file_handle_with_file_id, sst_region_metadata,
     };
+
+    fn float_source(metadata: &RegionMetadataRef) -> FlatSource {
+        let key_values = build_key_values_with_ts_seq_values(
+            metadata,
+            "a".to_string(),
+            0,
+            [1, 2].into_iter(),
+            [Some(1.0), Some(2.0)].into_iter(),
+            0,
+        );
+        let schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let mut converter =
+            BulkPartConverter::new(metadata, schema, 2, build_primary_key_codec(metadata), true);
+        converter.append_key_values(&key_values).unwrap();
+        new_flat_source_from_record_batches(vec![converter.convert().unwrap().batch])
+    }
+
+    #[tokio::test]
+    async fn test_write_cache_uses_request_float_field_encoding_policy() {
+        let mut env = TestEnv::new().await;
+        let remote_store = env.init_object_store_manager();
+        let local_dir = create_temp_dir("");
+        let write_cache = env
+            .create_write_cache(
+                new_fs_store(local_dir.path().to_str().unwrap()),
+                ReadableSize::mb(10),
+            )
+            .await;
+        let metadata = metadata_for_test();
+        let request = SstWriteRequest {
+            op_type: OperationType::Flush,
+            metadata: metadata.clone(),
+            source: float_source(&metadata),
+            cache_manager: Default::default(),
+            storage: None,
+            max_sequence: None,
+            sst_write_format: Default::default(),
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
+            index_options: IndexOptions::default(),
+            index_config: Default::default(),
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
+        };
+        let upload_request = SstUploadRequest {
+            dest_path_provider: RegionFilePathFactory::new("test".to_string(), PathType::Data),
+            remote_store,
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let sst = write_cache
+            .write_and_upload_sst(
+                request,
+                upload_request,
+                &WriteOptions::default(),
+                &mut metrics,
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_metadata = sst.file_metadata.unwrap();
+        let value_column = parquet_metadata
+            .row_group(0)
+            .columns()
+            .iter()
+            .find(|column| column.column_path().string() == "v1")
+            .unwrap();
+        assert!(
+            value_column
+                .encodings()
+                .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+        );
+    }
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {
@@ -552,6 +633,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -656,6 +738,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -750,6 +833,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),

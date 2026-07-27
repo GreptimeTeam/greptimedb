@@ -453,7 +453,8 @@ impl MemtableBuilderProvider {
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
                     .with_row_group_size(options.row_group_size())
-                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
+                    .with_compact_dispatcher(self.compact_dispatcher.clone())
+                    .with_float_field_encoding(options.float_field_encoding),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -476,7 +477,8 @@ impl MemtableBuilderProvider {
             merge_mode,
         )
         .with_row_group_size(options.row_group_size())
-        .with_compact_dispatcher(self.compact_dispatcher.clone());
+        .with_compact_dispatcher(self.compact_dispatcher.clone())
+        .with_float_field_encoding(options.float_field_encoding);
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
             builder = builder.with_config(config.clone());
@@ -775,6 +777,7 @@ mod tests {
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
     use crate::memtable::bulk::BulkMemtableConfig;
+    use crate::region::options::FloatFieldEncodingPolicy;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -847,5 +850,22 @@ mod tests {
             provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
 
         assert_eq!(&config, builder.config());
+    }
+
+    #[test]
+    fn test_bulk_memtable_builder_uses_region_float_field_encoding_policy() {
+        let provider = MemtableBuilderProvider::new(None, Arc::new(MitoConfig::default()));
+        let options = RegionOptions {
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
+            ..Default::default()
+        };
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(
+            FloatFieldEncodingPolicy::ByteStreamSplit,
+            builder.float_field_encoding()
+        );
     }
 }

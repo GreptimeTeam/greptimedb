@@ -493,6 +493,8 @@ pub struct CopyQueryToRequest {
 mod tests {
     use std::time::Duration;
 
+    use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY;
+
     use super::*;
 
     #[test]
@@ -566,10 +568,20 @@ mod tests {
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000).into()),
-            extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+            extra_options: HashMap::from([
+                ("a".to_string(), "A".to_string()),
+                (
+                    EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                    "byte_stream_split".to_string(),
+                ),
+            ]),
             skip_wal: false,
         };
         let serialized_map = HashMap::from(&options);
+        assert_eq!(
+            Some(&"byte_stream_split".to_string()),
+            serialized_map.get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY)
+        );
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
     }

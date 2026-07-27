@@ -473,6 +473,7 @@ impl SstMerger for DefaultSstMerger {
                     } else {
                         FormatType::PrimaryKey
                     },
+                    float_field_encoding: compaction_region.region_options.float_field_encoding,
                     index_options,
                     index_config,
                     inverted_index_config,

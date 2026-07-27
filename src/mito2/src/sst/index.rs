@@ -1234,6 +1234,7 @@ mod tests {
     use crate::cache::write_cache::WriteCache;
     use crate::config::{FulltextIndexConfig, IndexBuildMode, MitoConfig, Mode};
     use crate::memtable::time_partition::TimePartitions;
+    use crate::region::options::FloatFieldEncodingPolicy;
     use crate::region::version::{VersionBuilder, VersionControl};
     use crate::sst::file::RegionFileId;
     use crate::sst::file_purger::NoopFilePurger;
@@ -1388,6 +1389,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: FloatFieldEncodingPolicy::Default,
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config,
