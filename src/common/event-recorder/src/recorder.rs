@@ -53,9 +53,10 @@ pub type EventRecorderRef = Arc<dyn EventRecorder>;
 pub type EventTypeFilterRef = Arc<EventTypeFilter>;
 
 /// Restricts the event types that are recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EventTypeFilter {
     /// Records all current and future event types.
+    #[default]
     All,
     /// Records only the event types in the set.
     Only(HashSet<String>),
@@ -68,12 +69,6 @@ impl EventTypeFilter {
             Self::All => true,
             Self::Only(event_types) => event_types.contains(event_type),
         }
-    }
-}
-
-impl Default for EventTypeFilter {
-    fn default() -> Self {
-        Self::All
     }
 }
 
