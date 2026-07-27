@@ -888,14 +888,6 @@ default_ratio = 1.0
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
 
-## Configuration options for the event recorder.
-[event_recorder]
-## TTL for the events table that will be used to store the events. Default is `90d`.
-ttl = "90d"
-## Event types to retain. When omitted, all current and future event types are retained.
-## Set to an empty list to disable event recording.
-#+ event_types = ["create_database", "alter_database", "drop_database"]
-
 ## The memory options.
 [memory]
 ## Whether to enable heap profiling activation during startup.
