@@ -728,43 +728,23 @@ impl RangeManipulateStream {
         let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
-        let mut range_start_index = 0usize;
-        let mut last_range_start = 0;
-        let mut start_delta = 0;
+        let mut left = 0usize;
+        let mut right = 0usize;
         for curr_ts in (start..=end).step_by(self.interval as _) {
-            // determine range start
             let start_ts = curr_ts - self.range;
 
-            // advance cursor based on last range
-            let mut range_start = ts_column.len();
-            let mut range_end = 0;
-            let mut cursor = range_start_index + start_delta;
-            // search back to keep the result correct
-            while cursor < ts_column.len() && ts_column.value(cursor) > start_ts && cursor > 0 {
-                cursor -= 1;
+            while left < len && ts_column.value(left) <= start_ts {
+                left += 1;
+            }
+            right = right.max(left);
+            while right < len && ts_column.value(right) <= curr_ts {
+                right += 1;
             }
 
-            while cursor < ts_column.len() {
-                let ts = ts_column.value(cursor);
-                if range_start > cursor && ts > start_ts {
-                    range_start = cursor;
-                    range_start_index = range_start;
-                }
-                if ts <= curr_ts {
-                    range_end = range_end.max(cursor);
-                } else {
-                    range_start_index = range_start_index.saturating_sub(1usize);
-                    break;
-                }
-                cursor += 1;
-            }
-            if range_start > range_end {
+            if left == right {
                 ranges.push((0, 0));
-                start_delta = 0;
             } else {
-                ranges.push((range_start as _, (range_end + 1 - range_start) as _));
-                start_delta = range_start - last_range_start;
-                last_range_start = range_start;
+                ranges.push((left as _, (right - left) as _));
             }
         }
 
@@ -1106,6 +1086,259 @@ mod test {
                 ts % 30000,
                 1758093274000 % 30000,
                 "All timestamps should maintain query alignment pattern"
+            );
+        }
+    }
+
+    fn calculate_range_for_test(
+        query_start: i64,
+        query_end: i64,
+        interval: i64,
+        range: i64,
+        timestamps: &[i64],
+    ) -> (Vec<(u32, u32)>, (i64, i64)) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
+        let stream = RangeManipulateStream {
+            start: query_start,
+            end: query_end,
+            interval,
+            range,
+            time_index: 0,
+            field_columns: vec![],
+            aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
+            output_schema: schema.clone(),
+            input: Box::pin(empty_stream),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(
+                timestamps.to_vec(),
+            ))],
+        )
+        .unwrap();
+
+        stream.calculate_range(&batch).unwrap()
+    }
+
+    /// Calculates exact offsets directly from the range predicate used by PromQL.
+    ///
+    /// Input timestamps are sorted and non-null. Interval is positive, range is
+    /// nonnegative, and test values are chosen to avoid `i64` overflow.
+    fn calculate_range_oracle(
+        timestamps: &[i64],
+        start: i64,
+        end: i64,
+        interval: i64,
+        range: i64,
+    ) -> Vec<(u32, u32)> {
+        // Match `calculate_range`'s explicit empty-input early return.
+        if timestamps.is_empty() || start > end {
+            return vec![];
+        }
+
+        (start..=end)
+            .step_by(interval as usize)
+            .map(|curr| {
+                let mut offset = None;
+                let mut length = 0;
+                for (index, &ts) in timestamps.iter().enumerate() {
+                    if ts > curr - range && ts <= curr {
+                        offset.get_or_insert(index);
+                        length += 1;
+                    }
+                }
+                (offset.unwrap_or(0) as u32, length)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn calculate_range_characterizes_returned_bounds() {
+        let cases = [
+            (
+                "positive non-aligned last timestamp plus range",
+                0,
+                100,
+                10,
+                9,
+                vec![13, 26],
+                (20, 30),
+            ),
+            (
+                "negative non-aligned last timestamp plus range",
+                -50,
+                50,
+                10,
+                9,
+                vec![-37, -26],
+                (-30, -10),
+            ),
+            (
+                "query alignment not based on epoch",
+                4,
+                94,
+                30,
+                15,
+                vec![20, 50, 80],
+                (34, 90),
+            ),
+            ("leading data", 0, 100, 10, 10, vec![-10, 15], (0, 20)),
+            (
+                "trailing data past query end",
+                0,
+                100,
+                10,
+                10,
+                vec![35, 45, 110],
+                (40, 100),
+            ),
+            (
+                "optimized start after query end",
+                0,
+                50,
+                10,
+                0,
+                vec![100],
+                (100, 50),
+            ),
+        ];
+
+        for (name, query_start, query_end, interval, range, timestamps, expected_bounds) in cases {
+            let (_, bounds) =
+                calculate_range_for_test(query_start, query_end, interval, range, &timestamps);
+            assert_eq!(bounds, expected_bounds, "{name}");
+        }
+    }
+
+    #[test]
+    fn calculate_range_matches_bruteforce_oracle_for_deterministic_cases() {
+        let cases = vec![
+            (
+                "duplicate lower and upper bounds",
+                vec![0, 10, 10, 20, 20, 30],
+                10,
+                20,
+                10,
+                10,
+            ),
+            (
+                "zero range excludes duplicates at current timestamp",
+                vec![10, 10, 10],
+                10,
+                10,
+                1,
+                0,
+            ),
+            (
+                "consecutive nonempty empty nonempty ranges",
+                vec![10, 30],
+                10,
+                30,
+                10,
+                5,
+            ),
+            ("step smaller than range", vec![0, 4, 8, 12], 0, 12, 3, 5),
+            ("step equal to range", vec![0, 5, 10, 15], 0, 15, 5, 5),
+            ("step greater than range", vec![0, 7, 14, 21], 0, 21, 7, 3),
+            (
+                "negative sparse/tail timestamps",
+                vec![-30, -20, -10, 0],
+                -25,
+                5,
+                5,
+                7,
+            ),
+            ("one sample", vec![42], 0, 100, 10, 15),
+            ("empty input", vec![], -20, 20, 5, 10),
+        ];
+
+        for (name, timestamps, query_start, query_end, interval, range) in cases {
+            let (actual, (start, end)) =
+                calculate_range_for_test(query_start, query_end, interval, range, &timestamps);
+            let expected = calculate_range_oracle(&timestamps, start, end, interval, range);
+            assert_eq!(actual, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn calculate_range_positive_time_translated_regression() {
+        let timestamps = [0, 10, 20, 30];
+        let expected = vec![(0, 1), (1, 1), (1, 1), (2, 1), (2, 1), (3, 1), (3, 1)];
+        let (actual, bounds) = calculate_range_for_test(5, 35, 5, 7, &timestamps);
+
+        assert_eq!(bounds, (5, 35));
+        assert_eq!(
+            calculate_range_oracle(&timestamps, bounds.0, bounds.1, 5, 7),
+            expected
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn calculate_range_matches_oracle_for_dense_positive_time_windows() {
+        let timestamps = (0..=3_600).step_by(15).collect::<Vec<i64>>();
+
+        for (name, range) in [
+            ("one minute", 60),
+            ("five minutes", 300),
+            ("one hour", 3_600),
+        ] {
+            let (actual, (start, end)) = calculate_range_for_test(0, 3_600, 15, range, &timestamps);
+            assert_eq!((start, end), (0, 3_600), "{name} bounds");
+            assert_eq!(
+                actual,
+                calculate_range_oracle(&timestamps, start, end, 15, range),
+                "{name} window"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TinyPrng(u64);
+
+    impl TinyPrng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn next_i64(&mut self, min: i64, max: i64) -> i64 {
+            min + (self.next_u64() % (max - min + 1) as u64) as i64
+        }
+    }
+
+    #[test]
+    fn calculate_range_matches_bruteforce_oracle_for_seeded_matrix() {
+        let mut prng = TinyPrng(0x5eed_cafe_f00d_baad);
+
+        for case in 0..512 {
+            let interval = prng.next_i64(1, 11);
+            let range = prng.next_i64(0, 25);
+            let query_start = prng.next_i64(-200, 200);
+            let query_end = query_start + interval * prng.next_i64(0, 20);
+            let mut timestamps = Vec::new();
+            let mut timestamp = prng.next_i64(-250, 250);
+            for _ in 0..prng.next_i64(0, 20) {
+                timestamp += prng.next_i64(0, 7);
+                timestamps.push(timestamp);
+            }
+
+            let (actual, (start, end)) =
+                calculate_range_for_test(query_start, query_end, interval, range, &timestamps);
+            let expected = calculate_range_oracle(&timestamps, start, end, interval, range);
+            assert_eq!(
+                actual, expected,
+                "case={case}, timestamps={timestamps:?}, query=({query_start}, {query_end}), \
+                 interval={interval}, range={range}, bounds=({start}, {end})"
             );
         }
     }
