@@ -281,18 +281,21 @@ where
         opts: &FrontendOptions,
         toml: String,
         request_memory_limiter: ServerMemoryLimiter,
-    ) -> Result<HttpServer> {
+    ) -> Result<(HttpServer, Option<HttpServer>)> {
         let builder = if let Some(builder) = self.http_server_builder.take() {
             builder
         } else {
             self.http_server_builder(opts, request_memory_limiter)
         };
 
-        let http_server = builder
+        // The API server is configured entirely under `[http]` (`api_server_enable`,
+        // `api_server_host`, `api_server_port`) and shares every other `[http]`
+        // option with the main server.
+        let (internal, api) = builder
             .with_metrics_handler(MetricsHandler)
             .with_greptime_config_options(toml)
-            .build();
-        Ok(http_server)
+            .build_servers();
+        Ok((internal, api))
     }
 
     pub fn build(mut self) -> Result<ServerHandlers> {
@@ -333,12 +336,22 @@ where
         }
 
         {
-            // Always init HTTP server
+            // Always init the internal/full HTTP server (v1 + internal interfaces)
+            // and, when enabled, the dedicated HTTP API server (v1 + dashboard only).
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
-            let http_server =
+            let (http_server, http_api_server) =
                 self.build_http_server(&opts, toml, self.server_memory_limiter.clone())?;
             handlers.insert((Box::new(http_server), http_addr));
+
+            if let Some(http_api_server) = http_api_server {
+                let http_api_addr = parse_addr(&format!(
+                    "{}:{}",
+                    http_options.api_server_host, http_options.api_server_port
+                ))?;
+                info!("HTTP API server is enabled at {}", http_api_addr);
+                handlers.insert((Box::new(http_api_server), http_api_addr));
+            }
         }
 
         if opts.mysql.enable {

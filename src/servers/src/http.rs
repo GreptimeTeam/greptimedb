@@ -123,6 +123,8 @@ pub const HTTP_API_PREFIX: &str = "/v1/";
 pub const HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH: &str = "/v1";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
+/// Default address port for the public HTTP API server.
+const DEFAULT_HTTP_API_ADDR_PORT: u16 = 4006;
 
 /// Authorization header
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
@@ -138,6 +140,9 @@ pub static PUBLIC_API_PREFIX: [&str; 4] = [
 #[derive(Default)]
 pub struct HttpServer {
     router: StdMutex<Router>,
+    /// Accumulated internal-only (non-`v1`) routes such as `/metrics` and `/config`.
+    /// They are mounted on the internal/full HTTP server but not on the API-only server.
+    internal_router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     memory_limiter: ServerMemoryLimiter,
@@ -145,6 +150,25 @@ pub struct HttpServer {
     // server configs
     options: HttpOptions,
     bind_addr: Option<SocketAddr>,
+    /// `true` when this server is the dedicated HTTP **API** server that serves
+    /// only the `v1` interfaces plus the dashboard. When `false` it is the
+    /// internal/full server that additionally serves health, status, metrics,
+    /// config and debug interfaces.
+    api_only: bool,
+}
+
+impl HttpServer {
+    /// Returns `true` when this server also serves the internal-only interfaces
+    /// (health, ready, status, metrics, config, debug). Only the internal/full
+    /// server does; the API-only server does not.
+    fn serves_internal_routes(&self) -> bool {
+        !self.api_only
+    }
+
+    /// A short human-readable label for this server instance, used in logs.
+    fn kind(&self) -> &'static str {
+        if self.api_only { "HTTP API" } else { "HTTP" }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +195,16 @@ pub struct HttpOptions {
     pub enable_cors: bool,
 
     pub experimental_enable_explain_analyze_stream: bool,
+
+    /// Whether to start the dedicated public HTTP **API** server, which serves
+    /// only the `v1` interfaces plus the dashboard. It shares every other
+    /// `[http]` option with the main server and only differs by its bound
+    /// address (see `api_server_host` / `api_server_port`).
+    pub api_server_enable: bool,
+    /// Host of the dedicated HTTP API server. Defaults to `127.0.0.1`.
+    pub api_server_host: String,
+    /// Port of the dedicated HTTP API server. Defaults to `4006`.
+    pub api_server_port: u16,
 }
 
 impl Default for HttpOptions {
@@ -185,6 +219,9 @@ impl Default for HttpOptions {
             prom_validation_mode: PromValidationMode::Strict,
             experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: true,
+            api_server_enable: true,
+            api_server_host: "127.0.0.1".to_string(),
+            api_server_port: DEFAULT_HTTP_API_ADDR_PORT,
         }
     }
 }
@@ -526,6 +563,8 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     user_provider: Option<UserProviderRef>,
     router: Router,
+    /// Accumulated internal (non-`v1`) routes such as `/metrics` and `/config`.
+    internal_router: Router,
     memory_limiter: ServerMemoryLimiter,
 }
 
@@ -535,6 +574,7 @@ impl HttpServerBuilder {
             options,
             user_provider: None,
             router: Router::new(),
+            internal_router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
         }
     }
@@ -653,7 +693,9 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            router: self.router.merge(HttpServer::route_metrics(handler)),
+            internal_router: self
+                .internal_router
+                .merge(HttpServer::route_metrics(handler)),
             ..self
         }
     }
@@ -712,7 +754,7 @@ impl HttpServerBuilder {
         });
 
         Self {
-            router: self.router.merge(config_router),
+            internal_router: self.internal_router.merge(config_router),
             ..self
         }
     }
@@ -764,37 +806,99 @@ impl HttpServerBuilder {
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router),
+            internal_router: StdMutex::new(self.internal_router),
             bind_addr: None,
             memory_limiter: self.memory_limiter,
+            api_only: false,
         }
+    }
+
+    /// Builds the internal/full HTTP server (serves the `v1` interfaces **and**
+    /// the internal interfaces such as health, status, metrics, config and debug).
+    /// When [`HttpOptions::api_server_enable`] is `true` (the default), it also
+    /// builds a dedicated HTTP **API** server that serves only the `v1`
+    /// interfaces plus the dashboard.
+    ///
+    /// The first returned server is bound to `self.options.addr` (e.g. port
+    /// `4000`) and keeps the historical single-server behavior, so nothing that
+    /// talks to it breaks. The optional second server is bound to
+    /// `api_server_host:api_server_port` (e.g. port `4006`) and is meant to be
+    /// the public-facing API surface. The API server inherits **every** option
+    /// from `[http]` except the bound address, so anything configured under
+    /// `[http]` is effective for both servers.
+    pub fn build_servers(self) -> (HttpServer, Option<HttpServer>) {
+        let api_enabled = self.options.api_server_enable;
+        let api_addr = format!(
+            "{}:{}",
+            self.options.api_server_host, self.options.api_server_port
+        );
+
+        let internal = HttpServer {
+            options: self.options,
+            user_provider: self.user_provider.clone(),
+            shutdown_tx: Mutex::new(None),
+            router: StdMutex::new(self.router.clone()),
+            internal_router: StdMutex::new(self.internal_router.clone()),
+            bind_addr: None,
+            memory_limiter: self.memory_limiter.clone(),
+            api_only: false,
+        };
+
+        let api = if api_enabled {
+            // The API server shares every option with the internal/full server
+            // except the bound address.
+            let api_options = HttpOptions {
+                addr: api_addr,
+                ..internal.options.clone()
+            };
+            Some(HttpServer {
+                options: api_options,
+                user_provider: self.user_provider.clone(),
+                shutdown_tx: Mutex::new(None),
+                router: StdMutex::new(self.router),
+                internal_router: StdMutex::new(self.internal_router),
+                bind_addr: None,
+                memory_limiter: self.memory_limiter,
+                api_only: true,
+            })
+        } else {
+            None
+        };
+
+        (internal, api)
     }
 }
 
 impl HttpServer {
     /// Gets the router and adds necessary root routes (health, status, dashboard).
     pub fn make_app(&self) -> Router {
-        let mut router = {
-            let router = self.router.lock().unwrap();
-            router.clone()
-        };
+        let mut router = self.router.lock().unwrap().clone();
 
-        router = router
-            .route("/", routing::get(handler::index))
-            .route(
-                "/health",
-                routing::get(handler::health).post(handler::health),
-            )
-            .route(
-                &format!("/{HTTP_API_VERSION}/health"),
-                routing::get(handler::health).post(handler::health),
-            )
-            .route(
-                "/ready",
-                routing::get(handler::health).post(handler::health),
-            );
+        // The `v1` health check is available on every HTTP server (including the
+        // API-only server) so clients can probe it.
+        router = router.route(
+            &format!("/{HTTP_API_VERSION}/health"),
+            routing::get(handler::health).post(handler::health),
+        );
 
-        router = router.route("/status", routing::get(handler::status));
+        if self.serves_internal_routes() {
+            // Internal-only interfaces live on the internal/full HTTP server.
+            router = router.merge(self.internal_router.lock().unwrap().clone());
+            router = router
+                .route("/", routing::get(handler::index))
+                .route(
+                    "/health",
+                    routing::get(handler::health).post(handler::health),
+                )
+                .route(
+                    "/ready",
+                    routing::get(handler::health).post(handler::health),
+                )
+                .route("/status", routing::get(handler::status));
+        }
 
+        // The dashboard runs on top of the `v1` APIs, so it is served on every
+        // HTTP server (including the API-only server).
         #[cfg(feature = "dashboard")]
         {
             if !self.options.disable_dashboard {
@@ -881,7 +985,7 @@ impl HttpServer {
             None
         };
 
-        Ok(router
+        let router = router
             // middlewares
             .layer(
                 ServiceBuilder::new()
@@ -906,9 +1010,11 @@ impl HttpServer {
                     .layer(middleware::from_fn(
                         read_preference::extract_read_preference,
                     )),
-            )
-            // Handlers for debug, we don't expect a timeout.
-            .nest(
+            );
+
+        // Debug handlers only live on the server that serves the internal interfaces.
+        if self.serves_internal_routes() {
+            Ok(router.nest(
                 "/debug",
                 Router::new()
                     // handler for changing log level dynamically
@@ -939,6 +1045,9 @@ impl HttpServer {
                             ),
                     ),
             ))
+        } else {
+            Ok(router)
+        }
     }
 
     fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
@@ -1270,6 +1379,7 @@ impl HttpServer {
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
+pub const HTTP_API_SERVER: &str = "HTTP_API_SERVER";
 
 #[async_trait]
 impl Server for HttpServer {
@@ -1280,7 +1390,7 @@ impl Server for HttpServer {
         {
             info!("Receiver dropped, the HTTP server has already exited");
         }
-        info!("Shutdown HTTP server");
+        info!("Shutdown {}", self.kind());
 
         Ok(())
     }
@@ -1291,7 +1401,9 @@ impl Server for HttpServer {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
-                AlreadyStartedSnafu { server: "HTTP" }
+                AlreadyStartedSnafu {
+                    server: self.kind()
+                }
             );
 
             let app = self.build(self.make_app())?;
@@ -1329,7 +1441,7 @@ impl Server for HttpServer {
             serve
         };
         let listening = serve.local_addr().context(InternalIoSnafu)?;
-        info!("HTTP server is bound to {}", listening);
+        info!("{} server is bound to {}", self.kind(), listening);
 
         common_runtime::spawn_global(async move {
             if let Err(e) = serve
@@ -1346,7 +1458,11 @@ impl Server for HttpServer {
     }
 
     fn name(&self) -> &str {
-        HTTP_SERVER
+        if self.api_only {
+            HTTP_API_SERVER
+        } else {
+            HTTP_SERVER
+        }
     }
 
     fn bind_addr(&self) -> Option<SocketAddr> {
@@ -1475,6 +1591,120 @@ mod test {
             .send()
             .await;
         assert_ne!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn make_split_builder() -> HttpServerBuilder {
+        let (tx, _rx) = mpsc::channel(100);
+        let instance = Arc::new(DummyInstance { _tx: tx });
+        HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(instance)
+            .with_metrics_handler(MetricsHandler)
+            .with_greptime_config_options("dummy = \"value\"".to_string())
+    }
+
+    #[tokio::test]
+    pub async fn test_http_api_options_defaults() {
+        let opts = HttpOptions::default();
+        assert!(opts.api_server_enable);
+        assert_eq!(opts.api_server_host, "127.0.0.1");
+        assert_eq!(opts.api_server_port, 4006);
+    }
+
+    #[tokio::test]
+    pub async fn test_build_serves_all_routes() {
+        // The single (internal/full) server built via `build()` keeps serving both
+        // the public v1 interfaces and the internal ones. This is the historical
+        // single-server behavior and must not change.
+        let server = make_split_builder().build();
+        assert_eq!(server.name(), HTTP_SERVER);
+
+        let app = server.build(server.make_app()).unwrap();
+        let client = TestClient::new(app).await;
+
+        for path in ["/v1/health", "/health", "/status", "/metrics", "/config"] {
+            let res = client.get(path).send().await;
+            assert_eq!(
+                res.status(),
+                StatusCode::OK,
+                "internal/full server should serve {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_build_servers_separates_api_and_internal_routes() {
+        // `build_servers` produces the internal/full server (everything) plus a
+        // dedicated API server that only serves the v1 interfaces (and dashboard).
+        let (internal, api) = make_split_builder().build_servers();
+        let api = api.expect("API server is enabled by default");
+        assert_eq!(internal.name(), HTTP_SERVER);
+        assert_eq!(api.name(), HTTP_API_SERVER);
+
+        let internal_app = internal.build(internal.make_app()).unwrap();
+        let api_app = api.build(api.make_app()).unwrap();
+
+        let internal_client = TestClient::new(internal_app).await;
+        let api_client = TestClient::new(api_app).await;
+
+        // Both servers serve the v1 interfaces (e.g. the v1 health check).
+        assert_eq!(
+            internal_client.get("/v1/health").send().await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            api_client.get("/v1/health").send().await.status(),
+            StatusCode::OK
+        );
+
+        // The internal-only interfaces are served by the internal/full server...
+        for path in ["/health", "/status", "/metrics", "/config"] {
+            assert_eq!(
+                internal_client.get(path).send().await.status(),
+                StatusCode::OK,
+                "internal/full server should serve {path}"
+            );
+            // ...and NOT by the API-only server.
+            assert_eq!(
+                api_client.get(path).send().await.status(),
+                StatusCode::NOT_FOUND,
+                "API server should NOT serve {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_servers_api_inherits_http_options() {
+        // The API server must inherit every `[http]` option except the bound addr.
+        let http_opts = HttpOptions {
+            timeout: Duration::from_secs(42),
+            body_limit: ReadableSize::mb(128),
+            cors_allowed_origins: vec!["https://example.com".to_string()],
+            ..HttpOptions::default()
+        };
+        let (internal, api) = HttpServerBuilder::new(http_opts.clone()).build_servers();
+        let api = api.expect("API server is enabled by default");
+
+        // Only the bound address differs.
+        assert_eq!(internal.options.addr, http_opts.addr);
+        assert_eq!(api.options.addr, "127.0.0.1:4006");
+        // Everything else is inherited from `[http]`.
+        assert_eq!(api.options.timeout, http_opts.timeout);
+        assert_eq!(api.options.body_limit, http_opts.body_limit);
+        assert_eq!(
+            api.options.cors_allowed_origins,
+            http_opts.cors_allowed_origins
+        );
+    }
+
+    #[test]
+    fn test_build_servers_can_disable_api_server() {
+        // When `api_server_enable` is false, no API server is built.
+        let opts = HttpOptions {
+            api_server_enable: false,
+            ..HttpOptions::default()
+        };
+        let (_internal, api) = HttpServerBuilder::new(opts).build_servers();
+        assert!(api.is_none());
     }
 
     #[tokio::test]
