@@ -273,6 +273,23 @@ pub async fn test_http_auth(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
+    // 6. `/config` exposes the full runtime options (potentially including
+    //    credentials), so it must require authentication too.
+    let res = client.get("/config").send().await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = client
+        .get("/config")
+        .header("Authorization", basic_auth("greptime_user", "wrong_pwd"))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = client
+        .get("/config")
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     guard.remove_all().await;
 }
 

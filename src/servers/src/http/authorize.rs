@@ -39,7 +39,7 @@ use crate::error::{
 use crate::http::header::{GREPTIME_TIMEZONE_HEADER_NAME, GreptimeDbName};
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::splunk::is_splunk_request;
-use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
+use crate::http::{AUTH_REQUIRED_PATHS, AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -342,6 +342,11 @@ fn need_auth<B>(req: &Request<B>) -> bool {
         }
     }
 
+    // Paths outside the `/v1/` prefix that expose sensitive data.
+    if AUTH_REQUIRED_PATHS.contains(&path) {
+        return true;
+    }
+
     path.starts_with(HTTP_API_PREFIX)
 }
 
@@ -409,6 +414,28 @@ mod tests {
             .unwrap();
 
         assert!(need_auth(&req));
+
+        // `/config` lives outside `/v1/` but exposes sensitive runtime options,
+        // so it must require authentication.
+        let req = Request::builder()
+            .uri("http://127.0.0.1/config")
+            .body(())
+            .unwrap();
+        assert!(need_auth(&req));
+
+        // query strings must not affect the decision
+        let req = Request::builder()
+            .uri("http://127.0.0.1/config?format=json")
+            .body(())
+            .unwrap();
+        assert!(need_auth(&req));
+
+        // unrelated root-level paths are still public
+        let req = Request::builder()
+            .uri("http://127.0.0.1/status")
+            .body(())
+            .unwrap();
+        assert!(!need_auth(&req));
     }
 
     #[test]

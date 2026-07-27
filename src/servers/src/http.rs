@@ -135,6 +135,12 @@ pub static PUBLIC_API_PREFIX: [&str; 4] = [
     "/v1/splunk/services/collector/health",
 ];
 
+/// Paths that live outside the `/v1/` API prefix but still require
+/// authentication (e.g. `/config`, which exposes the full runtime options,
+/// potentially including credentials). Has no effect when no user provider is
+/// configured.
+pub static AUTH_REQUIRED_PATHS: [&str; 1] = ["/config"];
+
 #[derive(Default)]
 pub struct HttpServer {
     router: StdMutex<Router>,
