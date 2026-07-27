@@ -658,9 +658,7 @@ mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
-    use common_query::prelude::{
-        greptime_native_histogram, greptime_timestamp, greptime_value,
-    };
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use mito2::region::options::{FloatFieldEncodingPolicy, RegionOptions};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY;

@@ -301,10 +301,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         {
             all_options_altered = false;
         }
-        if current_options != version.options {
-            region.version_control.alter_options(current_options);
-        }
         if all_options_altered {
+            if current_options != version.options {
+                region.version_control.alter_options(current_options);
+            }
             Ok(None)
         } else {
             let kind = AlterKind::SetRegionOptions { options };

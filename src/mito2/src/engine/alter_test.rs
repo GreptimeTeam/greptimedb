@@ -83,6 +83,17 @@ fn alter_float_field_encoding(encoding: &str) -> RegionAlterRequest {
     }
 }
 
+fn alter_ttl_and_float_field_encoding() -> RegionAlterRequest {
+    RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![
+                SetRegionOption::Ttl(Some(Duration::from_secs(500).into())),
+                SetRegionOption::FloatFieldEncoding("byte_stream_split".to_string()),
+            ],
+        },
+    }
+}
+
 async fn assert_sst_float_field_encoding(
     engine: &MitoEngine,
     region_id: RegionId,
@@ -3289,4 +3300,220 @@ async fn test_alter_float_field_encoding_manifest_failure_is_atomic() {
     assert!(printed.contains("| 0     | 0.0"));
     assert!(printed.contains("| 2048  | 2048.0"));
     assert!(printed.contains("| 2049  | 2049.0"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_alter_mixed_region_options_manifest_failure_is_atomic() {
+    let fail_state = Arc::new(FailOnceCloseState::new(
+        Arc::new(|path| path.contains("/manifest/") && path.ends_with(".json")),
+        1,
+        "injected manifest close failure",
+    ));
+    let writer_state = fail_state.clone();
+    let mock_layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, writer| {
+            if writer_state.matches(path) {
+                Box::new(FailOnceCloseWriter {
+                    path: path.to_string(),
+                    state: writer_state.clone(),
+                    inner: writer,
+                })
+            } else {
+                writer
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let listener = Arc::new(AlterBarrierListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(60 * 60),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let metadata_before = engine.get_region(region_id).unwrap().metadata();
+    let manifest_version = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest_version()
+        .await;
+    let flush_manifest = format!("manifest/{:020}.json", manifest_version + 1);
+    let change_manifest = format!("manifest/{:020}.json", manifest_version + 2);
+    fail_state.arm_once();
+    let alter_engine = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        alter_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(alter_ttl_and_float_field_encoding()),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fail_state.wait_failing_close_started(),
+    )
+    .await
+    .unwrap();
+    let matched_paths = fail_state.matched_paths();
+    assert_eq!(2, matched_paths.len());
+    assert!(matched_paths[0].ends_with(&flush_manifest));
+    assert!(matched_paths[1].ends_with(&change_manifest));
+    assert_eq!(Some(matched_paths[1].clone()), fail_state.failed_path());
+
+    fail_state.release_failure();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        listener.wait_region_change_started(),
+    )
+    .await
+    .unwrap();
+    assert!(!alter_job.is_finished());
+    assert_sst_float_field_encoding(&engine, region_id, &[false]).await;
+
+    let request_count = listener.request_count();
+    let write_engine = engine.clone();
+    let write_schema = column_schemas.clone();
+    let write_job = tokio::spawn(async move {
+        put_rows(
+            &write_engine,
+            region_id,
+            Rows {
+                schema: write_schema,
+                rows: build_rows(3, 4),
+            },
+        )
+        .await;
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        listener.wait_request_count(request_count + 1),
+    )
+    .await
+    .unwrap();
+    assert!(!write_job.is_finished());
+
+    listener.release_region_change();
+    let alter_error = tokio::time::timeout(Duration::from_secs(5), alter_job)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, alter_error.status_code());
+    tokio::time::timeout(Duration::from_secs(5), write_job)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(1, fail_state.failures());
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    assert_eq!(None, version.options.ttl);
+    assert_eq!(
+        FloatFieldEncodingPolicy::Default,
+        version.options.float_field_encoding
+    );
+    assert!(Arc::ptr_eq(&metadata_before, &region.metadata()));
+
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        4,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    let printed = batches.pretty_print().unwrap();
+    assert!(printed.contains("| 0     | 0.0"));
+    assert!(printed.contains("| 3     | 3.0"));
+
+    flush_region(&engine, region_id, None).await;
+    let default_files = sst_float_field_encodings_by_file_id(&engine, region_id).await;
+    assert!(!default_files.is_empty());
+    assert!(default_files.values().all(|encoding| !encoding));
+
+    let retry_engine = engine.clone();
+    let retry_alter_job = tokio::spawn(async move {
+        retry_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(alter_ttl_and_float_field_encoding()),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        listener.wait_region_change_started(),
+    )
+    .await
+    .unwrap();
+    listener.release_region_change();
+    tokio::time::timeout(Duration::from_secs(5), retry_alter_job)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(Some(Duration::from_secs(500).into()), version.options.ttl);
+    assert_eq!(
+        FloatFieldEncodingPolicy::ByteStreamSplit,
+        version.options.float_field_encoding
+    );
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(4, 5),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let bss_files = sst_float_field_encodings_by_file_id(&engine, region_id).await;
+    let new_file_ids = bss_files
+        .keys()
+        .filter(|file_id| !default_files.contains_key(file_id))
+        .copied()
+        .collect::<HashSet<_>>();
+    assert!(!new_file_ids.is_empty());
+    assert!(new_file_ids.iter().all(|file_id| bss_files[file_id]));
+
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        5,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    let printed = batches.pretty_print().unwrap();
+    assert!(printed.contains("| 0     | 0.0"));
+    assert!(printed.contains("| 4     | 4.0"));
 }

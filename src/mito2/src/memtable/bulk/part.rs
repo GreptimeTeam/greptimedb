@@ -1822,7 +1822,16 @@ mod tests {
         let projection = [4];
         let reader = encoded
             .read(
-                Arc::new(BulkIterContext::new(metadata, Some(&projection), None, false).unwrap()),
+                Arc::new(
+                    BulkIterContext::new(
+                        metadata,
+                        Some(&projection),
+                        None,
+                        false,
+                        crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+                    )
+                    .unwrap(),
+                ),
                 None,
                 None,
             )

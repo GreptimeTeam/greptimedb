@@ -62,8 +62,8 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::{FloatFieldEncodingPolicy, MergeMode};
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::field_column_start;
-use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 
 /// Default merge threshold for triggering compaction.
 const DEFAULT_MERGE_THRESHOLD: usize = 16;
