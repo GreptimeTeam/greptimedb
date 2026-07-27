@@ -26,7 +26,9 @@ use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 
 use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
-use crate::dist_plan::{FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber};
+use crate::dist_plan::{
+    FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber, SubscriberRegistration,
+};
 use crate::region_query::RegionQueryTarget;
 
 #[derive(Debug, Clone)]
@@ -113,10 +115,18 @@ pub(crate) fn register_dyn_filter_subscribers_for_region(
     captured_dyn_filters: &[CapturedDynFilter],
 ) {
     for captured_dyn_filter in captured_dyn_filters {
-        let _ = registry.register_subscriber(
+        let registration = registry.register_subscriber(
             &captured_dyn_filter.filter_id,
             Subscriber::new(region_id, target.clone()),
         );
+        if registration == SubscriberRegistration::MissingFilter {
+            common_telemetry::warn!(
+                "Remote dynamic filter {} missing when registering subscriber for region {} at target {:?}",
+                captured_dyn_filter.filter_id,
+                region_id,
+                target
+            );
+        }
     }
 }
 
