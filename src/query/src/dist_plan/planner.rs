@@ -254,13 +254,7 @@ impl DistExtensionPlanner {
             .iter()
             .map(|r| RegionId::new(table_info.table_id(), r.region.id.region_number()))
             .collect::<Vec<_>>();
-        let Some(logical_partition_columns) = partition_column_types(&table_info) else {
-            debug!(
-                "DistExtensionPlanner: invalid partition metadata for table {}, using all regions: {:?}",
-                table_name, all_regions
-            );
-            return Ok(all_regions);
-        };
+        let logical_partition_columns = partition_column_types(&table_info);
         let partition_columns = logical_partition_columns
             .iter()
             .map(|(name, _)| name.clone())
@@ -305,17 +299,7 @@ impl DistExtensionPlanner {
                 .table_info_by_id(physical_table_id)
                 .await
             {
-                Ok(Some(table_info)) if table_info.table_id() == physical_table_id => table_info,
-                Ok(Some(table_info)) => {
-                    debug!(
-                        "DistExtensionPlanner: physical table info id mismatch for table {}: expected {}, got {}, using all regions: {:?}",
-                        table_name,
-                        physical_table_id,
-                        table_info.table_id(),
-                        all_regions
-                    );
-                    return Ok(all_regions);
-                }
+                Ok(Some(table_info)) => table_info,
                 Ok(None) => {
                     debug!(
                         "DistExtensionPlanner: physical table info not found for table {} (id: {}), using all regions: {:?}",
@@ -332,13 +316,7 @@ impl DistExtensionPlanner {
                 }
             }
         };
-        let Some(physical_partition_columns) = partition_column_types(&physical_table_info) else {
-            debug!(
-                "DistExtensionPlanner: invalid physical partition metadata for table {} (id: {}), using all regions: {:?}",
-                table_name, physical_table_id, all_regions
-            );
-            return Ok(all_regions);
-        };
+        let physical_partition_columns = partition_column_types(&physical_table_info);
         let partition_column_types = physical_partition_columns
             .iter()
             .cloned()
@@ -379,17 +357,6 @@ impl DistExtensionPlanner {
         if partitions.is_empty() {
             return Ok(all_regions);
         }
-        if partitions
-            .iter()
-            .any(|partition| partition.partition_expr.is_none())
-        {
-            debug!(
-                "DistExtensionPlanner: route metadata contains a missing partition expression for table {}, using all regions: {:?}",
-                table_name, all_regions
-            );
-            return Ok(all_regions);
-        }
-
         // Apply region pruning based on partition rules
         let pruned_regions = match ConstraintPruner::prune_regions(
             &partition_expressions,
@@ -429,21 +396,11 @@ impl DistExtensionPlanner {
     }
 }
 
-fn partition_column_types(table_info: &TableInfo) -> Option<Vec<(String, ConcreteDataType)>> {
-    let column_schemas = table_info.meta.schema.column_schemas();
-    let mut names =
-        std::collections::HashSet::with_capacity(table_info.meta.partition_key_indices.len());
+fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataType)> {
     table_info
         .meta
-        .partition_key_indices
-        .iter()
-        .map(|index| {
-            let column = column_schemas.get(*index)?;
-            if !names.insert(column.name.clone()) {
-                return None;
-            }
-            Some((column.name.clone(), column.data_type.clone()))
-        })
+        .partition_columns()
+        .map(|column| (column.name.clone(), column.data_type.clone()))
         .collect()
 }
 
