@@ -39,9 +39,9 @@ const COL_DESCRIPTION_FUNCTION_NAME: &str = "col_description";
 const SHOBJ_DESCRIPTION_FUNCTION_NAME: &str = "shobj_description";
 const PG_MY_TEMP_SCHEMA_FUNCTION_NAME: &str = "pg_my_temp_schema";
 
-define_nullary_udf!(CurrentSchemaFunction);
-define_nullary_udf!(SessionUserFunction);
-define_nullary_udf!(CurrentDatabaseFunction);
+define_nullary_udf!(CurrentSchemaFunction, Volatility::Stable);
+define_nullary_udf!(SessionUserFunction, Volatility::Stable);
+define_nullary_udf!(CurrentDatabaseFunction, Volatility::Stable);
 define_nullary_udf!(PgMyTempSchemaFunction);
 
 impl Function for CurrentDatabaseFunction {
@@ -158,11 +158,13 @@ impl Function for CurrentSchemasFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let input = as_boolean_array(&args[0]);
 
         // Create a UTF8 array with a single value
-        let mut values = vec!["public"];
+        let current_schema = func_ctx.query_ctx.current_schema();
+        let mut values = vec![current_schema.as_str()];
         // include implicit schemas
         if input.value(0) {
             values.push(INFORMATION_SCHEMA_NAME);
@@ -407,9 +409,13 @@ mod tests {
     use arrow_schema::Field;
     use datafusion::arrow::array::Array;
     use datafusion_common::ScalarValue;
+    use datafusion_common::cast::as_list_array;
+    use datafusion_common::config::ConfigOptions;
     use datafusion_expr::ColumnarValue;
+    use session::context::QueryContextBuilder;
 
     use super::*;
+    use crate::function::FunctionContext;
 
     fn create_test_args(args: Vec<ColumnarValue>, number_rows: usize) -> ScalarFunctionArgs {
         ScalarFunctionArgs {
@@ -419,6 +425,96 @@ mod tests {
             return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
             config_options: Arc::new(Default::default()),
         }
+    }
+
+    fn create_test_args_with_context(
+        args: Vec<ColumnarValue>,
+        number_rows: usize,
+        function_context: FunctionContext,
+    ) -> ScalarFunctionArgs {
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(function_context);
+
+        ScalarFunctionArgs {
+            args,
+            arg_fields: vec![],
+            number_rows,
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            config_options: Arc::new(config_options),
+        }
+    }
+
+    fn current_schemas_values(result: ColumnarValue) -> Vec<String> {
+        let ColumnarValue::Array(result) = result else {
+            panic!("Expected Array result");
+        };
+        let values = as_list_array(&result).unwrap().value(0);
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        values
+            .iter()
+            .map(|value| value.unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_session_functions_are_stable() {
+        for function in [
+            &CurrentSchemaFunction::default() as &dyn Function,
+            &CurrentDatabaseFunction::default(),
+            &SessionUserFunction::default(),
+        ] {
+            assert_eq!(Volatility::Stable, function.signature().volatility);
+        }
+    }
+
+    #[test]
+    fn test_current_schema_functions_use_live_query_context() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .current_schema("initial_schema".to_string())
+                .build(),
+        );
+        let function_context = FunctionContext {
+            query_ctx: query_ctx.clone(),
+            ..Default::default()
+        };
+        query_ctx.set_current_schema("live_schema");
+
+        let current_schema = CurrentSchemaFunction::default()
+            .invoke_with_args(create_test_args_with_context(
+                vec![],
+                1,
+                function_context.clone(),
+            ))
+            .unwrap();
+        let current_schema = match current_schema {
+            ColumnarValue::Scalar(value) => value,
+            ColumnarValue::Array(_) => {
+                panic!("Expected Scalar result for current_schema, got Array")
+            }
+        };
+        assert_eq!(
+            ScalarValue::Utf8View(Some("live_schema".to_string())),
+            current_schema
+        );
+
+        let current_schemas = CurrentSchemasFunction::new()
+            .invoke_with_args(create_test_args_with_context(
+                vec![ColumnarValue::Scalar(ScalarValue::Boolean(Some(false)))],
+                1,
+                function_context.clone(),
+            ))
+            .unwrap();
+        assert_eq!(vec!["live_schema"], current_schemas_values(current_schemas));
+
+        let current_schemas = CurrentSchemasFunction::new()
+            .invoke_with_args(create_test_args_with_context(
+                vec![ColumnarValue::Scalar(ScalarValue::Boolean(None))],
+                1,
+                function_context,
+            ))
+            .unwrap();
+        assert_eq!(vec!["live_schema"], current_schemas_values(current_schemas));
     }
 
     #[test]

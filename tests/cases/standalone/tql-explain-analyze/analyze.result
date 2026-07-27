@@ -268,8 +268,10 @@ Affected Rows: 0
 
 TQL EVAL sum(test2);
 
-++
-++
++--------------------+---------------------------+
+| greptime_timestamp | sum(test2.greptime_value) |
++--------------------+---------------------------+
++--------------------+---------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
