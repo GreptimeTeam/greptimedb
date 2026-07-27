@@ -56,6 +56,22 @@ fn default_flow_notification_queue_capacity() -> NonZeroUsize {
     NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN)
 }
 
+impl PromStoreOptions {
+    /// Returns whether the pending rows batcher can be enabled with these
+    /// options. Mirrors the enablement conditions of
+    /// `PendingRowsBatcher::try_new` in the servers crate, which returns
+    /// `None` when any of these knobs is zero.
+    pub fn pending_rows_batching_enabled(&self) -> bool {
+        self.enable
+            && self.with_metric_engine
+            && !self.pending_rows_flush_interval.is_zero()
+            && self.max_batch_rows > 0
+            && self.max_concurrent_flushes > 0
+            && self.worker_channel_capacity > 0
+            && self.max_inflight_requests > 0
+    }
+}
+
 impl Default for PromStoreOptions {
     fn default() -> Self {
         Self {

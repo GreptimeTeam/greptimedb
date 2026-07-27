@@ -401,9 +401,7 @@ fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
     let mut http = opts.http.clone();
     let flush_interval = opts.prom_store.pending_rows_flush_interval;
     let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
-    if !opts.prom_store.enable
-        || !opts.prom_store.with_metric_engine
-        || flush_interval.is_zero()
+    if !opts.prom_store.pending_rows_batching_enabled()
         || http.timeout.is_zero()
         || http.timeout > fallback_timeout
     {
@@ -461,6 +459,41 @@ mod tests {
 
             assert_eq!(
                 Duration::from_millis(expected),
+                effective_http_options(&opts).timeout,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_effective_http_timeout_skips_fallback_when_batcher_disabled() {
+        // Mirrors the conditions under which `PendingRowsBatcher::try_new`
+        // returns `None`; in these cases no request can wait for a pending-row
+        // flush, so the timeout must not be raised.
+        type KnobMutator = fn(&mut FrontendOptions);
+        let cases: [(&str, KnobMutator); 4] = [
+            ("zero max_batch_rows", |opts| {
+                opts.prom_store.max_batch_rows = 0
+            }),
+            ("zero max_concurrent_flushes", |opts| {
+                opts.prom_store.max_concurrent_flushes = 0
+            }),
+            ("zero worker_channel_capacity", |opts| {
+                opts.prom_store.worker_channel_capacity = 0
+            }),
+            ("zero max_inflight_requests", |opts| {
+                opts.prom_store.max_inflight_requests = 0
+            }),
+        ];
+
+        for (name, disable_batcher) in cases {
+            let mut opts = FrontendOptions::default();
+            opts.http.timeout = Duration::from_millis(1000);
+            opts.prom_store.pending_rows_flush_interval = Duration::from_millis(5000);
+            disable_batcher(&mut opts);
+
+            assert_eq!(
+                Duration::from_millis(1000),
                 effective_http_options(&opts).timeout,
                 "{name}"
             );
