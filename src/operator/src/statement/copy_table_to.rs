@@ -21,7 +21,7 @@ use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
-use common_datasource::object_store::{build_backend, parse_url};
+use common_datasource::object_store::{build_backend_for_write, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
@@ -183,7 +183,7 @@ impl StatementExecutor {
         let filename = filename.context(error::UnexpectedSnafu {
             violated: format!("Expected filename, path: {path}"),
         })?;
-        let object_store = build_backend(location, connection, &self.local_file_access)
+        let object_store = build_backend_for_write(location, connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
         self.stream_to_file(stream, format, object_store, &filename)

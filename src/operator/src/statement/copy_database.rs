@@ -21,7 +21,7 @@ use client::{Output, OutputData, OutputMeta};
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{LocalFileAccess, build_backend};
+use common_datasource::object_store::{LocalFileAccess, build_backend, build_backend_for_write};
 use common_stat::get_total_cpu_cores;
 use common_telemetry::{debug, error, info, tracing};
 use futures::future::try_join_all;
@@ -66,7 +66,7 @@ impl StatementExecutor {
                 value: req.location,
             }
         );
-        build_backend(&req.location, &req.connection, &self.local_file_access)
+        build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
 

@@ -436,6 +436,9 @@ data_home = "./greptimedb_data"
 ## Relative SQL paths are resolved below this directory. Absolute paths are accepted only when
 ## they are inside this directory. Defaults to `<data_home>/copy`.
 ## Distributed deployments always reject SQL access to local files.
+## Upgrade note: COPY commands and existing external tables that reference paths outside this
+## directory will fail. Move those files below the copy root, set this option to a dedicated
+## directory containing them, or migrate the files to object storage before upgrading.
 #+ copy_root = "./greptimedb_data/copy"
 
 ## The storage type used to store the data.

@@ -140,7 +140,12 @@ impl LocalFileAccess {
         Ok(authorized)
     }
 
-    async fn open_backend_root(&self, location: &str, relative_root: &str) -> Result<SecureFsRoot> {
+    async fn open_backend_root(
+        &self,
+        location: &str,
+        relative_root: &str,
+        create: bool,
+    ) -> Result<SecureFsRoot> {
         let LocalFileAccess::Sandboxed { root } = self else {
             return error::LocalFileAccessDisabledSnafu {
                 path: location.to_string(),
@@ -150,17 +155,23 @@ impl LocalFileAccess {
 
         let root = root.root.clone();
         let relative_root = relative_root.trim_matches('/').to_string();
-        common_runtime::spawn_blocking_global(move || root.open_subdir(relative_root))
-            .await
-            .context(error::JoinHandleSnafu)?
-            .map_err(|_| {
-                error::LocalFileAccessDeniedSnafu {
-                    path: location.to_string(),
-                    reason: "path could not be safely resolved within the configured copy root"
-                        .to_string(),
-                }
-                .build()
-            })
+        common_runtime::spawn_blocking_global(move || {
+            if create {
+                root.create_subdir(relative_root)
+            } else {
+                root.open_subdir(relative_root)
+            }
+        })
+        .await
+        .context(error::JoinHandleSnafu)?
+        .map_err(|_| {
+            error::LocalFileAccessDeniedSnafu {
+                path: location.to_string(),
+                reason: "path could not be safely resolved within the configured copy root"
+                    .to_string(),
+            }
+            .build()
+        })
     }
 }
 
@@ -229,6 +240,24 @@ pub async fn build_backend(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<ObjectStore> {
+    build_backend_inner(url, connection, local_file_access, false).await
+}
+
+/// Builds a backend for an operation that may create the target directory.
+pub async fn build_backend_for_write(
+    url: &str,
+    connection: &HashMap<String, String>,
+    local_file_access: &LocalFileAccess,
+) -> Result<ObjectStore> {
+    build_backend_inner(url, connection, local_file_access, true).await
+}
+
+async fn build_backend_inner(
+    url: &str,
+    connection: &HashMap<String, String>,
+    local_file_access: &LocalFileAccess,
+    create_local_root: bool,
+) -> Result<ObjectStore> {
     let (schema, host, path) = parse_url(url)?;
     let normalized_schema = schema.to_uppercase();
 
@@ -248,7 +277,9 @@ pub async fn build_backend(
         };
         let authorized = local_file_access.authorize(url, &local_path, trailing_slash)?;
         let (root, _) = find_dir_and_filename(&authorized);
-        let root = local_file_access.open_backend_root(url, &root).await?;
+        let root = local_file_access
+            .open_backend_root(url, &root, create_local_root)
+            .await?;
         return build_fs_backend(&root);
     }
 
@@ -307,7 +338,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use url::Url;
 
-    use super::{LocalFileAccess, build_backend, handle_windows_path};
+    use super::{LocalFileAccess, build_backend, build_backend_for_write, handle_windows_path};
     use crate::error::Error;
 
     #[test]
@@ -331,7 +362,7 @@ mod tests {
         let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
         let connection = HashMap::new();
 
-        let store = build_backend("nested/data.txt", &connection, &access)
+        let store = build_backend_for_write("nested/data.txt", &connection, &access)
             .await
             .unwrap();
         store.write("data.txt", "first").await.unwrap();
@@ -340,6 +371,14 @@ mod tests {
             fs::read_to_string(copy_root.join("nested/data.txt")).unwrap(),
             "second"
         );
+
+        let missing = copy_root.join("missing/directory");
+        assert!(
+            build_backend("missing/directory/data.txt", &connection, &access)
+                .await
+                .is_err()
+        );
+        assert!(!missing.exists());
 
         let absolute = copy_root.join("nested/data.txt");
         let store = build_backend(absolute.to_str().unwrap(), &connection, &access)
@@ -462,7 +501,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            build_backend("escape/new", &connection, &access)
+            build_backend_for_write("escape/new", &connection, &access)
                 .await
                 .is_err()
         );

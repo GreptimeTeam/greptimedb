@@ -74,6 +74,20 @@ impl SecureFsRoot {
             return Ok(self.clone());
         }
 
+        let dir = self.dir.open_dir(&path)?;
+        Ok(Self {
+            dir: Arc::new(dir),
+            path: Arc::new(self.path.join(path)),
+        })
+    }
+
+    /// Creates and opens a descendant directory without leaving this capability root.
+    pub fn create_subdir(&self, path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = normalize_relative_path(path.as_ref())?;
+        if path.as_os_str().is_empty() {
+            return Ok(self.clone());
+        }
+
         self.dir.create_dir_all(&path)?;
         let dir = self.dir.open_dir(&path)?;
         Ok(Self {
