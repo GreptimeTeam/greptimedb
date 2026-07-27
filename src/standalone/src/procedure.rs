@@ -21,7 +21,7 @@ use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
-use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::local::{EventRecorderHandle, LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::{BoxedProcedure, ProcedureManagerRef};
 use store_api::storage::TableId;
@@ -33,7 +33,7 @@ use crate::error::NoSupportRepartitionProcedureSnafu;
 pub fn build_procedure_manager(
     kv_backend: KvBackendRef,
     procedure_config: ProcedureConfig,
-) -> ProcedureManagerRef {
+) -> (ProcedureManagerRef, EventRecorderHandle) {
     let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
     let manager_config = ManagerConfig {
@@ -43,13 +43,16 @@ pub fn build_procedure_manager(
         ..Default::default()
     };
     let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend));
-    Arc::new(LocalManager::new(
+    let procedure_manager = LocalManager::new(
         manager_config,
         kv_state_store.clone(),
         kv_state_store,
         Some(runtime_switch_manager),
         None,
-    ))
+    );
+    let event_recorder_handle = procedure_manager.event_recorder_handle();
+
+    (Arc::new(procedure_manager), event_recorder_handle)
 }
 
 /// No-op implementation of [`RepartitionProcedureFactory`] for standalone mode.

@@ -2271,6 +2271,9 @@ allow_query_fallback = false
 
 [memory]
 enable_heap_profiling = true
+
+[event_recorder]
+ttl = "2months 29days 2h 52m 48s"
 "#,
     )
     .trim()

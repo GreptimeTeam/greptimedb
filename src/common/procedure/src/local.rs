@@ -631,6 +631,26 @@ impl Default for ManagerConfig {
 
 type PauseAwareRef = Arc<dyn PauseAware>;
 
+struct EventRecorderConfig {
+    recorder: Option<EventRecorderRef>,
+}
+
+/// A delayed configuration handle for procedure lifecycle event recording.
+#[derive(Clone)]
+pub struct EventRecorderHandle(Arc<Mutex<EventRecorderConfig>>);
+
+impl EventRecorderHandle {
+    fn new(recorder: Option<EventRecorderRef>) -> Self {
+        Self(Arc::new(Mutex::new(EventRecorderConfig { recorder })))
+    }
+
+    /// Installs the recorder used by subsequently submitted procedures.
+    pub fn install(&self, recorder: EventRecorderRef) {
+        let mut config = self.0.lock().unwrap();
+        config.recorder = Some(recorder);
+    }
+}
+
 #[async_trait]
 pub trait PauseAware: Send + Sync {
     /// Returns true if the procedure manager is paused.
@@ -647,7 +667,7 @@ pub struct LocalManager {
     remove_outdated_meta_task: TokioMutex<Option<RepeatedTask<Error>>>,
     config: ManagerConfig,
     pause_aware: Option<PauseAwareRef>,
-    event_recorder: Option<EventRecorderRef>,
+    event_recorder: EventRecorderHandle,
 }
 
 impl LocalManager {
@@ -669,8 +689,13 @@ impl LocalManager {
             remove_outdated_meta_task: TokioMutex::new(None),
             config,
             pause_aware,
-            event_recorder,
+            event_recorder: EventRecorderHandle::new(event_recorder),
         }
+    }
+
+    /// Returns the handle used to configure procedure lifecycle event recording.
+    pub fn event_recorder_handle(&self) -> EventRecorderHandle {
+        self.event_recorder.clone()
     }
 
     /// Build remove outedated meta task
@@ -703,6 +728,7 @@ impl LocalManager {
             procedure.poison_keys(),
             procedure.type_name(),
         ));
+        let event_recorder = self.event_recorder.0.lock().unwrap();
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -713,7 +739,7 @@ impl LocalManager {
                 .with_max_times(self.max_retry_times),
             store: self.procedure_store.clone(),
             rolling_back: false,
-            event_recorder: self.event_recorder.clone(),
+            event_recorder: event_recorder.recorder.clone(),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         };
@@ -996,12 +1022,13 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-    use common_event_recorder::{Event, EventRecorder};
+    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -1017,12 +1044,20 @@ mod tests {
         ManagerContext::new(poison_manager)
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct CapturingEventRecorder {
         events: Mutex<Vec<Box<dyn Event>>>,
+        event_type_filter: EventTypeFilterRef,
     }
 
     impl CapturingEventRecorder {
+        fn with_event_type_filter(event_type_filter: EventTypeFilterRef) -> Self {
+            Self {
+                events: Mutex::new(vec![]),
+                event_type_filter,
+            }
+        }
+
         fn triggers(&self) -> Vec<EventTrigger> {
             self.events
                 .lock()
@@ -1045,7 +1080,17 @@ mod tests {
             self.events.lock().unwrap().push(event);
         }
 
+        fn event_type_filter(&self) -> EventTypeFilterRef {
+            self.event_type_filter.clone()
+        }
+
         fn close(&self) {}
+    }
+
+    impl Default for CapturingEventRecorder {
+        fn default() -> Self {
+            Self::with_event_type_filter(Arc::new(EventTypeFilter::All))
+        }
     }
 
     #[derive(Debug)]
@@ -1234,6 +1279,72 @@ mod tests {
         }
     }
 
+    struct FilterCapturingProcedure {
+        captured_filter: Arc<Mutex<Option<EventTypeFilterRef>>>,
+    }
+
+    #[async_trait]
+    impl Procedure for FilterCapturingProcedure {
+        fn type_name(&self) -> &str {
+            "FilterCapturingProcedure"
+        }
+
+        async fn execute(&mut self, _: &Context) -> Result<Status> {
+            Ok(Status::done())
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+
+        fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            *self.captured_filter.lock().unwrap() = Some(ctx.event_type_filter.clone());
+            Some(Box::new(TestProcedureEvent))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_is_shared_with_procedure_context() {
+        let dir = create_temp_dir("shared_event_filter");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_type_filter = Arc::new(EventTypeFilter::Only(HashSet::from([String::from(
+            "test_procedure",
+        )])));
+        let event_recorder = Arc::new(CapturingEventRecorder::with_event_type_filter(
+            event_type_filter.clone(),
+        ));
+        let captured_filter = Arc::new(Mutex::new(None));
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager.event_recorder_handle().install(event_recorder);
+        manager.manager_ctx.start();
+
+        manager
+            .submit(ProcedureWithId {
+                id: ProcedureId::random(),
+                procedure: Box::new(FilterCapturingProcedure {
+                    captured_filter: captured_filter.clone(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        let captured_filter = captured_filter.lock().unwrap().clone().unwrap();
+        assert!(Arc::ptr_eq(&event_type_filter, &captured_filter));
+        assert!(captured_filter.allows("test_procedure"));
+        assert!(!captured_filter.allows("other_procedure"));
+    }
+
     #[tokio::test]
     async fn test_fresh_submission_emits_submitted_event() {
         let dir = create_temp_dir("fresh_submission_event");
@@ -1245,8 +1356,11 @@ mod tests {
             state_store,
             poison_manager,
             None,
-            Some(event_recorder.clone()),
+            None,
         );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
         manager.manager_ctx.start();
 
         manager
@@ -1275,8 +1389,11 @@ mod tests {
             state_store,
             poison_manager,
             None,
-            Some(event_recorder.clone()),
+            None,
         );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
         manager.manager_ctx.start();
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -1306,6 +1423,28 @@ mod tests {
         );
         assert!(event_recorder.triggers().contains(&EventTrigger::Recovered));
         assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder_handle_installs_after_start() {
+        let dir = create_temp_dir("set_event_recorder_after_start");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+
+        manager.start().await.unwrap();
+
+        manager
+            .event_recorder_handle()
+            .install(Arc::new(CapturingEventRecorder::default()));
+
+        manager.stop().await.unwrap();
     }
 
     #[derive(Debug)]
