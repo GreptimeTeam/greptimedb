@@ -351,6 +351,12 @@ impl DistExtensionPlanner {
         Ok(pruned_regions)
     }
 
+    /// Resolves the partition-column types that are safe to use for region pruning.
+    ///
+    /// A logical metric table may retain stale partition metadata after its physical table is
+    /// repartitioned. Predicate extraction must remain bounded by the logical metadata, while
+    /// pruning needs the physical datatypes to evaluate route expressions. Any lookup failure or
+    /// logical/physical datatype mismatch returns `None`, causing the caller to scan all regions.
     async fn partition_column_types_for_pruning(
         &self,
         table_name: &TableName,
