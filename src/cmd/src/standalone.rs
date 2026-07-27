@@ -69,7 +69,7 @@ use plugins::frontend::context::{
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
 use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -607,6 +607,15 @@ impl StartCommand {
             .await
             .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
+
+        let event_recorder = fe_instance
+            .event_recorder()
+            .context(error::MissingConfigSnafu {
+                msg: "frontend event recorder",
+            })?;
+        procedure_manager
+            .set_event_recorder(event_recorder)
+            .context(error::StartProcedureManagerSnafu)?;
 
         // set the frontend client for flownode
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;

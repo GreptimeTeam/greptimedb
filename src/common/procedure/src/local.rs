@@ -33,9 +33,9 @@ use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::error::{
     self, CheckStatusSnafu, DuplicateProcedureSnafu, Error, LoaderConflictSnafu,
-    ManagerNotStartSnafu, ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu,
-    Result, StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
-    TooManyRunningProceduresSnafu,
+    ManagerAlreadyStartedSnafu, ManagerNotStartSnafu, ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu,
+    ProcedureNotFoundSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
+    StopRemoveOutdatedMetaTaskSnafu, TooManyRunningProceduresSnafu,
 };
 use crate::local::runner::Runner;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState, PoisonKeys, ProcedureInfo};
@@ -631,6 +631,11 @@ impl Default for ManagerConfig {
 
 type PauseAwareRef = Arc<dyn PauseAware>;
 
+struct EventRecorderConfig {
+    recorder: Option<EventRecorderRef>,
+    started: bool,
+}
+
 #[async_trait]
 pub trait PauseAware: Send + Sync {
     /// Returns true if the procedure manager is paused.
@@ -647,7 +652,7 @@ pub struct LocalManager {
     remove_outdated_meta_task: TokioMutex<Option<RepeatedTask<Error>>>,
     config: ManagerConfig,
     pause_aware: Option<PauseAwareRef>,
-    event_recorder: Option<EventRecorderRef>,
+    event_recorder: Mutex<EventRecorderConfig>,
 }
 
 impl LocalManager {
@@ -669,7 +674,10 @@ impl LocalManager {
             remove_outdated_meta_task: TokioMutex::new(None),
             config,
             pause_aware,
-            event_recorder,
+            event_recorder: Mutex::new(EventRecorderConfig {
+                recorder: event_recorder,
+                started: false,
+            }),
         }
     }
 
@@ -713,7 +721,7 @@ impl LocalManager {
                 .with_max_times(self.max_retry_times),
             store: self.procedure_store.clone(),
             rolling_back: false,
-            event_recorder: self.event_recorder.clone(),
+            event_recorder: self.event_recorder.lock().unwrap().recorder.clone(),
             execute_retry_attempt: 0,
             rollback_retry_attempt: 0,
         };
@@ -878,6 +886,13 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
+    fn set_event_recorder(&self, event_recorder: EventRecorderRef) -> Result<()> {
+        let mut config = self.event_recorder.lock().unwrap();
+        ensure!(!config.started, ManagerAlreadyStartedSnafu);
+        config.recorder = Some(event_recorder);
+        Ok(())
+    }
+
     async fn start(&self) -> Result<()> {
         let mut task = self.remove_outdated_meta_task.lock().await;
 
@@ -893,8 +908,12 @@ impl ProcedureManager for LocalManager {
 
         *task = Some(task_inner);
 
-        self.manager_ctx.reset_runtime_state();
-        self.manager_ctx.start();
+        {
+            let mut config = self.event_recorder.lock().unwrap();
+            config.started = true;
+            self.manager_ctx.reset_runtime_state();
+            self.manager_ctx.start();
+        }
 
         info!("LocalManager is start.");
 
@@ -1245,8 +1264,9 @@ mod tests {
             state_store,
             poison_manager,
             None,
-            Some(event_recorder.clone()),
+            None,
         );
+        manager.set_event_recorder(event_recorder.clone()).unwrap();
         manager.manager_ctx.start();
 
         manager
@@ -1275,8 +1295,9 @@ mod tests {
             state_store,
             poison_manager,
             None,
-            Some(event_recorder.clone()),
+            None,
         );
+        manager.set_event_recorder(event_recorder.clone()).unwrap();
         manager.manager_ctx.start();
         manager
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
@@ -1306,6 +1327,29 @@ mod tests {
         );
         assert!(event_recorder.triggers().contains(&EventTrigger::Recovered));
         assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
+    }
+
+    #[tokio::test]
+    async fn test_set_event_recorder_after_start_fails() {
+        let dir = create_temp_dir("set_event_recorder_after_start");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+
+        manager.start().await.unwrap();
+
+        let err = manager
+            .set_event_recorder(Arc::new(CapturingEventRecorder::default()))
+            .unwrap_err();
+        assert_matches!(err, Error::ManagerAlreadyStarted { .. });
+
+        manager.stop().await.unwrap();
     }
 
     #[derive(Debug)]

@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, EventRecorderRef};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
@@ -673,6 +673,9 @@ pub enum InitProcedureState {
 pub trait ProcedureManager: Send + Sync + 'static {
     /// Registers loader for specific procedure type `name`.
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
+
+    /// Sets the recorder used for procedure lifecycle events before the manager starts.
+    fn set_event_recorder(&self, event_recorder: EventRecorderRef) -> Result<()>;
 
     /// Starts the background GC task.
     ///

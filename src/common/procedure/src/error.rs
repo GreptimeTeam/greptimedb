@@ -64,6 +64,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Procedure Manager has already started"))]
+    ManagerAlreadyStarted {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize to json"))]
     ToJson {
         #[snafu(source)]
@@ -272,6 +278,7 @@ impl ErrorExt for Error {
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }
             | Error::ManagerNotStart { .. }
+            | Error::ManagerAlreadyStarted { .. }
             | Error::ManagerPasued { .. }
             | Error::TooManyRunningProcedures { .. }
             | Error::RollbackProcedureRecovered { .. } => StatusCode::IllegalState,

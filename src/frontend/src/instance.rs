@@ -175,6 +175,11 @@ impl Instance {
         &self.process_manager
     }
 
+    /// Returns the optional event recorder configured for this frontend instance.
+    pub fn event_recorder(&self) -> Option<EventRecorderRef> {
+        self.event_recorder.clone()
+    }
+
     pub fn node_manager(&self) -> &NodeManagerRef {
         self.inserter.node_manager()
     }
@@ -2260,6 +2265,17 @@ mod tests {
         results.remove(0).with_context(|_| ExecuteSqlSnafu {
             sql: sql.to_string(),
         })
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder_is_exposed() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        assert!(instance.event_recorder().is_some());
+
+        Ok(())
     }
 
     #[tokio::test]
