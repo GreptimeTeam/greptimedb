@@ -233,14 +233,6 @@ uv run --no-project python .github/scripts/query-regression-run.py \
 REPORT="$WORK_DIR/otlp_trace_load/query-regression-report.json"
 ```
 
-Install [YouPlot](https://github.com/red-data-tools/YouPlot) once, then render
-all comparison metrics and threshold results in the terminal:
-
-```bash
-brew install youplot
-tests/perf/plot_otlp_trace_report.sh "$REPORT"
-```
-
 For each target, `accepted_spans` should equal `table_rows`, and `failures`
 should stay within `max_failure_count`. Throughput is better when
 `spans_per_second` is higher; its `actual_pct` is
