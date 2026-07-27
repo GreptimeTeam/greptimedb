@@ -64,7 +64,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
-use crate::events::region_migration_event::RegionMigrationEvent;
+use crate::events::region_migration_event::{REGION_MIGRATION_EVENT_TYPE, RegionMigrationEvent};
 use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
@@ -964,7 +964,11 @@ impl Procedure for RegionMigrationProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        if !ctx.event_type_filter.allows(REGION_MIGRATION_EVENT_TYPE) {
+            return None;
+        }
+
         Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
             &self.context.persistent_ctx,
         )))
