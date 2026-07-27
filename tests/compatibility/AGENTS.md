@@ -28,12 +28,42 @@ This file is intended for AI agents editing compat cases or the compat runner. F
 - All required fields must be non-empty: `name`, `reason`, `introduced_by`,
   `topologies`, `from_range`, `to_range`, `features`, `owner`.
 
+## Old-Stage Datanode Overlays
+
+- An old-stage datanode overlay is declared only as:
+
+  ```toml
+  [old_config]
+  datanode = "old-datanode.overlay.toml"
+  ```
+
+  `datanode` is required if `[old_config]` exists. Empty tables and unknown
+  keys are parse errors.
+- The sidecar path is relative to its case directory and must remain confined
+  there. It contains native datanode TOML and is loaded and preflighted before
+  services or state are created.
+- The runner merges tables recursively only when both values are tables.
+  Scalars, type mismatches, arrays, and arrays of tables replace atomically;
+  `region_engine` has no special merge behavior.
+- Do not use an overlay to set runner-owned fields: `mode`, `node_id`,
+  `storage.data_home`, `meta_client_options.metasrv_addrs`, `wal.provider`, or
+  `wal.dir` for Raft WAL / `wal.broker_endpoints` for Kafka WAL. The runner
+  restores or deletes them according to its baseline and warns without showing
+  values.
+
 ## Phase Semantics
 
 - `setup.sql` runs on the **old (from)** binary. Only success is required;
   output is not compared to any file.
 - `verify.sql` runs on the **new (to)** binary. Output is compared against
   `verify.result`.
+- Overlays apply only to old-stage datanodes and survive old-stage setup
+  restarts; the current stage uses a clean configuration.
+- The baseline profile runs first. Cases with semantically equivalent datanode
+  TOML share one sequential, isolated profile, and every profile has an
+  independent state and etcd lifecycle.
+- Without fail-fast, only cases with successful setup are verified. Fail-fast
+  cleans up the active profile before stopping.
 
 ## PostgreSQL Protocol Cases
 
@@ -48,9 +78,10 @@ cargo run -p sqlness-runner -- compat --dry-run [--from-version vX.Y.Z] [--test-
 ```
 
 The dry-run performs full discovery and filtering (name, topology, metadata
-validation, namespace dedup, version-range matching) but starts no services,
-creates no temp dirs, and mutates no files. Use it to check which cases
-would be selected before a real run.
+validation, namespace dedup, version-range matching) and displays selected
+profiles, cases, and sidecar paths without configuration values. It starts no
+services, creates no temp dirs, and mutates no files. Use it to check which
+cases would be selected before a real run.
 
 ## CI Version Window
 

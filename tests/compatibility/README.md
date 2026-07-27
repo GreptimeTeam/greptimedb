@@ -68,6 +68,34 @@ namespace = "my_explicit_namespace"   # defaults to sanitized directory name
 
 **Required fields**: `name`, `reason`, `introduced_by`, `topologies`, `from_range`, `to_range`, `features`, `owner`.
 
+### Old-Stage Datanode Configuration Overlay
+
+To apply a datanode configuration overlay while running the old stage, add this
+strict optional table to `case.toml`:
+
+```toml
+[old_config]
+datanode = "old-datanode.overlay.toml"
+```
+
+`datanode` is required whenever `[old_config]` is present; empty tables and
+unknown keys are rejected. The reference is relative to the case directory and
+must remain confined to that directory. The sidecar is native datanode TOML,
+which the runner loads and preflights before starting services or creating
+state.
+
+The runner first applies the datanode baseline, then merges the sidecar. Tables
+merge recursively only when both values are tables. Scalars, type mismatches,
+arrays, and arrays of tables replace the baseline value atomically. In
+particular, `region_engine` has no special merge behavior.
+
+Runner-owned fields cannot be changed by an overlay: `mode`, `node_id`,
+`storage.data_home`, `meta_client_options.metasrv_addrs`, and `wal.provider`,
+plus `wal.dir` for Raft WAL or `wal.broker_endpoints` for Kafka WAL. The runner
+restores these fields to its baseline values, or deletes them when the baseline
+has no value. It warns about protected-field overrides without printing their
+values.
+
 ### Version-Range Filtering
 
 `from_range` and `to_range` control which binary versions a case applies to:
@@ -166,9 +194,19 @@ Each case runs in its own database namespace to prevent cross-case interference:
 
 ## Batch Behavior
 
-- All cases in a run share one cluster lifecycle: start from-version cluster → run all setups → restart with to-version binary → run all verifies
-- Cases run **serially** (no parallelism in PR1). Namespace state is session/protocol state and cannot be shared concurrently.
+- The baseline (no-overlay) profile runs first. Cases whose old datanode TOML
+  is semantically equivalent share one profile; profiles run serially and in
+  isolation.
+- Each profile has its own state and etcd lifecycle. Its overlay is applied
+  only to old-stage datanodes and remains in effect through old-stage setup
+  restarts. The current stage always uses a clean configuration.
+- Cases run **serially** (no parallelism in PR1). Namespace state is
+  session/protocol state and cannot be shared concurrently.
 - Same namespace across cases is rejected.
+- Without fail-fast, the runner verifies only cases whose setup succeeded.
+  With fail-fast, it cleans up the active profile before stopping.
+- `--dry-run` displays the selected profiles, cases, and sidecar paths without
+  printing configuration values; it starts no services.
 
 ## xfail Policy (Future)
 
