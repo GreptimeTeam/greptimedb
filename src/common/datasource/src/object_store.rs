@@ -170,10 +170,7 @@ impl LocalFileAccess {
                 "Failed to open an authorized local SQL path inside the copy root, path: {location}, error: {error:?}"
             );
             if error.kind() == std::io::ErrorKind::NotFound {
-                return error::LocalFilePathNotFoundSnafu {
-                    path: location.to_string(),
-                }
-                .build();
+                return error::LocalFilePathNotFoundSnafu { path: location }.build();
             }
             error::LocalFileAccessDeniedSnafu {
                 path: location.to_string(),
