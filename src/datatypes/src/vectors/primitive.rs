@@ -433,7 +433,6 @@ mod tests {
     fn check_vec(v: Int32Vector) {
         assert_eq!(4, v.len());
         assert_eq!("Int32Vector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
 

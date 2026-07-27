@@ -30,18 +30,18 @@ use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
+use crate::error::{self, ConvertScalarToArrowArraySnafu, Result};
 use crate::prelude::DataType;
-use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::scalars::Scalar;
 use crate::types::StructType;
-use crate::value::{ListValue, ListValueRef, Value};
+use crate::value::Value;
 use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
+    BinaryVector, BooleanVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
     Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
+    ListVector, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
     UInt16Vector, UInt32Vector, UInt64Vector, Vector, VectorRef,
@@ -120,133 +120,19 @@ impl Helper {
 
     /// Try to cast an arrow scalar value into vector
     pub fn try_from_scalar_value(value: ScalarValue, length: usize) -> Result<VectorRef> {
-        let vector = match value {
-            ScalarValue::Null => ConstantVector::new(Arc::new(NullVector::new(1)), length),
-            ScalarValue::Boolean(v) => {
-                ConstantVector::new(Arc::new(BooleanVector::from(vec![v])), length)
+        let value = match value {
+            // GreptimeDB doesn't support Float16 vectors.
+            ScalarValue::Float16(v) => ScalarValue::Float32(v.map(f32::from)),
+            ScalarValue::LargeUtf8(v) => ScalarValue::Utf8(v),
+            ScalarValue::LargeBinary(v) | ScalarValue::FixedSizeBinary(_, v) => {
+                ScalarValue::Binary(v)
             }
-            ScalarValue::Float16(v) => ConstantVector::new(
-                Arc::new(Float32Vector::from(vec![v.map(f32::from)])),
-                length,
-            ),
-            ScalarValue::Float32(v) => {
-                ConstantVector::new(Arc::new(Float32Vector::from(vec![v])), length)
-            }
-            ScalarValue::Float64(v) => {
-                ConstantVector::new(Arc::new(Float64Vector::from(vec![v])), length)
-            }
-            ScalarValue::Int8(v) => {
-                ConstantVector::new(Arc::new(Int8Vector::from(vec![v])), length)
-            }
-            ScalarValue::Int16(v) => {
-                ConstantVector::new(Arc::new(Int16Vector::from(vec![v])), length)
-            }
-            ScalarValue::Int32(v) => {
-                ConstantVector::new(Arc::new(Int32Vector::from(vec![v])), length)
-            }
-            ScalarValue::Int64(v) => {
-                ConstantVector::new(Arc::new(Int64Vector::from(vec![v])), length)
-            }
-            ScalarValue::UInt8(v) => {
-                ConstantVector::new(Arc::new(UInt8Vector::from(vec![v])), length)
-            }
-            ScalarValue::UInt16(v) => {
-                ConstantVector::new(Arc::new(UInt16Vector::from(vec![v])), length)
-            }
-            ScalarValue::UInt32(v) => {
-                ConstantVector::new(Arc::new(UInt32Vector::from(vec![v])), length)
-            }
-            ScalarValue::UInt64(v) => {
-                ConstantVector::new(Arc::new(UInt64Vector::from(vec![v])), length)
-            }
-            ScalarValue::Utf8(v) | ScalarValue::LargeUtf8(v) => {
-                ConstantVector::new(Arc::new(StringVector::from(vec![v])), length)
-            }
-            ScalarValue::Binary(v)
-            | ScalarValue::LargeBinary(v)
-            | ScalarValue::FixedSizeBinary(_, v) => {
-                ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
-            }
-            ScalarValue::List(array) => {
-                let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
-                let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
-                let scalar_values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .context(ConvertArrowArrayToScalarsSnafu)?;
-                let values = scalar_values
-                    .into_iter()
-                    .flat_map(|v| v.unwrap_or_else(|| vec![ScalarValue::Null]))
-                    .map(ScalarValue::try_into)
-                    .collect::<Result<Vec<Value>>>()?;
-                builder.push(Some(ListValueRef::Ref {
-                    val: &ListValue::new(values, item_type),
-                }));
-                let list_vector = builder.to_vector();
-                ConstantVector::new(list_vector, length)
-            }
-            ScalarValue::Date32(v) => {
-                ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
-            }
-            ScalarValue::TimestampSecond(v, _) => {
-                // Timezone is unimplemented now.
-                ConstantVector::new(Arc::new(TimestampSecondVector::from(vec![v])), length)
-            }
-            ScalarValue::TimestampMillisecond(v, _) => {
-                // Timezone is unimplemented now.
-                ConstantVector::new(Arc::new(TimestampMillisecondVector::from(vec![v])), length)
-            }
-            ScalarValue::TimestampMicrosecond(v, _) => {
-                // Timezone is unimplemented now.
-                ConstantVector::new(Arc::new(TimestampMicrosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::TimestampNanosecond(v, _) => {
-                // Timezone is unimplemented now.
-                ConstantVector::new(Arc::new(TimestampNanosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::Time32Second(v) => {
-                ConstantVector::new(Arc::new(TimeSecondVector::from(vec![v])), length)
-            }
-            ScalarValue::Time32Millisecond(v) => {
-                ConstantVector::new(Arc::new(TimeMillisecondVector::from(vec![v])), length)
-            }
-            ScalarValue::Time64Microsecond(v) => {
-                ConstantVector::new(Arc::new(TimeMicrosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::Time64Nanosecond(v) => {
-                ConstantVector::new(Arc::new(TimeNanosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::IntervalYearMonth(v) => {
-                ConstantVector::new(Arc::new(IntervalYearMonthVector::from(vec![v])), length)
-            }
-            ScalarValue::IntervalDayTime(v) => {
-                ConstantVector::new(Arc::new(IntervalDayTimeVector::from(vec![v])), length)
-            }
-            ScalarValue::IntervalMonthDayNano(v) => {
-                ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
-            }
-            ScalarValue::DurationSecond(v) => {
-                ConstantVector::new(Arc::new(DurationSecondVector::from(vec![v])), length)
-            }
-            ScalarValue::DurationMillisecond(v) => {
-                ConstantVector::new(Arc::new(DurationMillisecondVector::from(vec![v])), length)
-            }
-            ScalarValue::DurationMicrosecond(v) => {
-                ConstantVector::new(Arc::new(DurationMicrosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::DurationNanosecond(v) => {
-                ConstantVector::new(Arc::new(DurationNanosecondVector::from(vec![v])), length)
-            }
-            ScalarValue::Decimal128(v, p, s) => {
-                let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
-                ConstantVector::new(Arc::new(vector), length)
-            }
-            ScalarValue::Struct(v) => {
-                let struct_type = StructType::from(v.fields());
-                ConstantVector::new(
-                    Arc::new(StructVector::try_new(struct_type, (*v).clone())?),
-                    length,
-                )
-            }
-            ScalarValue::Decimal32(_, _, _)
+            // Timezones are not supported by GreptimeDB vectors.
+            ScalarValue::TimestampSecond(v, _) => ScalarValue::TimestampSecond(v, None),
+            ScalarValue::TimestampMillisecond(v, _) => ScalarValue::TimestampMillisecond(v, None),
+            ScalarValue::TimestampMicrosecond(v, _) => ScalarValue::TimestampMicrosecond(v, None),
+            ScalarValue::TimestampNanosecond(v, _) => ScalarValue::TimestampNanosecond(v, None),
+            value @ (ScalarValue::Decimal32(_, _, _)
             | ScalarValue::Decimal64(_, _, _)
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
@@ -257,15 +143,19 @@ impl Helper {
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
             | ScalarValue::Date64(_)
-            | ScalarValue::RunEndEncoded(_, _, _) => {
+            | ScalarValue::RunEndEncoded(_, _, _)) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
                 .fail();
             }
+            value => value,
         };
 
-        Ok(Arc::new(vector))
+        let array = value
+            .to_array_of_size(length)
+            .context(ConvertScalarToArrowArraySnafu)?;
+        Self::try_into_vector(array)
     }
 
     /// Try to cast an arrow array into vector
@@ -473,12 +363,15 @@ mod tests {
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Int32Type, IntervalMonthDayNano};
-    use arrow_array::{BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray};
-    use arrow_schema::DataType;
+    use arrow_array::{
+        BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray, StructArray,
+    };
+    use arrow_schema::{DataType, Field, Fields};
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
     use common_time::{Date, Duration};
+    use datafusion_common::scalar::ScalarStructBuilder;
 
     use super::*;
     use crate::value::Value;
@@ -569,6 +462,94 @@ mod tests {
             let items = v.as_list().unwrap().unwrap().items();
             assert_eq!(vec![Value::Int32(1), Value::Int32(2)], items);
         }
+    }
+
+    #[test]
+    fn test_try_from_scalar_value_materializes_values() {
+        let vector = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 4).unwrap();
+        assert_eq!(ConcreteDataType::int32_datatype(), vector.data_type());
+        assert_eq!(4, vector.len());
+        assert_eq!(0, vector.null_count());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Int32(42), vector.get(i));
+        }
+
+        let empty = Helper::try_from_scalar_value(ScalarValue::Int32(Some(42)), 0).unwrap();
+        assert_eq!(ConcreteDataType::int32_datatype(), empty.data_type());
+        assert!(empty.is_empty());
+
+        let nulls = Helper::try_from_scalar_value(ScalarValue::Int32(None), 3).unwrap();
+        assert_eq!(3, nulls.len());
+        assert_eq!(3, nulls.null_count());
+        for i in 0..nulls.len() {
+            assert_eq!(Value::Null, nulls.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_struct_value() {
+        let fields = Fields::from(vec![
+            Field::new("id", ArrowDataType::Int32, false),
+            Field::new("name", ArrowDataType::Utf8, true),
+        ]);
+        let value = ScalarValue::Struct(Arc::new(StructArray::new(
+            fields.clone(),
+            vec![
+                ScalarValue::Int32(Some(7)).to_array().unwrap(),
+                ScalarValue::Utf8(Some("greptime".to_string()))
+                    .to_array()
+                    .unwrap(),
+            ],
+            None,
+        )));
+
+        let vector = Helper::try_from_scalar_value(value, 3).unwrap();
+        assert_eq!(
+            ConcreteDataType::struct_datatype(StructType::from(&fields)),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            let Value::Struct(value) = vector.get(i) else {
+                panic!("expected struct value");
+            };
+            assert_eq!(
+                &[Value::Int32(7), Value::String("greptime".into())],
+                value.items()
+            );
+        }
+
+        let null = ScalarStructBuilder::new_null(fields);
+        let vector = Helper::try_from_scalar_value(null, 2).unwrap();
+        assert_eq!(2, vector.len());
+        assert_eq!(2, vector.null_count());
+        assert_eq!(Value::Null, vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
+    }
+
+    #[test]
+    fn test_try_from_scalar_value_normalizes_arrow_types() {
+        let string =
+            Helper::try_from_scalar_value(ScalarValue::LargeUtf8(Some("greptime".to_string())), 2)
+                .unwrap();
+        assert_eq!(ConcreteDataType::string_datatype(), string.data_type());
+        assert_eq!(&ArrowDataType::Utf8, string.to_arrow_array().data_type());
+
+        let binary =
+            Helper::try_from_scalar_value(ScalarValue::FixedSizeBinary(2, Some(vec![1, 2])), 2)
+                .unwrap();
+        assert_eq!(ConcreteDataType::binary_datatype(), binary.data_type());
+        assert_eq!(&ArrowDataType::Binary, binary.to_arrow_array().data_type());
+
+        let timestamp = Helper::try_from_scalar_value(
+            ScalarValue::TimestampMillisecond(Some(42), Some("UTC".into())),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            &ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            timestamp.to_arrow_array().data_type()
+        );
     }
 
     #[test]

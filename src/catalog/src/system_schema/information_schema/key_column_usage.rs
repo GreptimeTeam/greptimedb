@@ -26,7 +26,7 @@ use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
+use datatypes::vectors::{StringVector, StringVectorBuilder, UInt32VectorBuilder};
 use futures_util::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -326,10 +326,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
     fn finish(&mut self) -> Result<RecordBatch> {
         let rows_num = self.table_catalog.len();
 
-        let null_string_vector = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec![None as Option<&str>])),
-            rows_num,
-        ));
+        let null_string_vector = Arc::new(StringVector::from(vec![None as Option<&str>; rows_num]));
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.constraint_catalog.finish()),
             Arc::new(self.constraint_schema.finish()),

@@ -290,7 +290,6 @@ mod tests {
         assert_eq!(vector2.null_count(), 16);
 
         assert_eq!("NullVector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_null());
         assert!(v.only_null());
 

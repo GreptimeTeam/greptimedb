@@ -151,11 +151,8 @@ impl ColumnDefaultConstraint {
             ColumnDefaultConstraint::Value(v) => {
                 ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
 
-                // TODO(yingwen):
-                // 1. For null value, we could use NullVector once it supports custom logical type.
-                // 2. For non null value, we could use ConstantVector, but it would cause all codes
-                //  attempt to downcast the vector fail if they don't check whether the vector is const
-                //  first.
+                // TODO(yingwen): For null value, we could use NullVector once it supports custom
+                // logical type.
                 let mut mutable_vector = data_type.create_mutable_vector(1);
                 mutable_vector.try_push_value_ref(&v.as_value_ref())?;
                 let base_vector = mutable_vector.to_vector();

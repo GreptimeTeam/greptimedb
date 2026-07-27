@@ -67,7 +67,6 @@ mod tests {
 
     use super::*;
     use crate::value::{ListValue, ListValueRef};
-    use crate::vectors::constant::ConstantVector;
     use crate::vectors::{
         Decimal128Vector, Int32Vector, ListVectorBuilder, NullVector, StringVector, VectorOp,
     };
@@ -135,19 +134,6 @@ mod tests {
         expect_builder.push(Some(ListValueRef::Ref { val: &second }));
         let expect = expect_builder.to_vector();
         assert_eq!(expect, v);
-    }
-
-    #[test]
-    fn test_replicate_constant() {
-        let v = Arc::new(StringVector::from_slice(&["hello"]));
-        let cv = ConstantVector::new(v.clone(), 2);
-        let offsets = [1, 4];
-
-        let cv = cv.replicate(&offsets);
-        assert_eq!(4, cv.len());
-
-        let expect: VectorRef = Arc::new(ConstantVector::new(v, 4));
-        assert_eq!(expect, cv);
     }
 
     #[test]

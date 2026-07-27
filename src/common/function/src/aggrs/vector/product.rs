@@ -159,9 +159,6 @@ impl Accumulator for VectorProduct {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{ConstantVector, StringVector, Vector};
-
     use super::*;
 
     #[test]
@@ -213,14 +210,12 @@ mod tests {
         vec_product.update_batch(&v).unwrap();
         assert_eq!(ScalarValue::Binary(None), vec_product.evaluate().unwrap());
 
-        // test update with constant vector
+        // test update with repeated values
         let mut vec_product = VectorProduct::default();
-        let v: Vec<ArrayRef> = vec![
-            Arc::new(ConstantVector::new(
-                Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
-                4,
-            ))
-            .to_arrow_array(),
+        let v = vec![
+            ScalarValue::Utf8(Some("[1.0,2.0,3.0]".to_string()))
+                .to_array_of_size(4)
+                .unwrap(),
         ];
 
         vec_product.update_batch(&v).unwrap();

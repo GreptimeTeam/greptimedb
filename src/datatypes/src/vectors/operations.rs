@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use crate::error::{self, Result};
 use crate::types::LogicalPrimitiveType;
-use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConcreteDataType, Decimal128Vector, ListVector, NullVector,
     PrimitiveVector, StringVector, UInt32Vector, Vector, VectorRef,
@@ -164,23 +163,5 @@ impl VectorOp for NullVector {
 
     fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
         take::take_indices!(self, NullVector, indices)
-    }
-}
-
-impl VectorOp for ConstantVector {
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        self.replicate_vector(offsets)
-    }
-
-    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        self.filter_vector(filter)
-    }
-
-    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
-        self.cast_vector(to_type)
-    }
-
-    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
-        self.take_vector(indices)
     }
 }
