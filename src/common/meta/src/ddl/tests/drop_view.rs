@@ -15,10 +15,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::Row;
 use api::v1::value::ValueData;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_event_recorder::Event;
+use common_event_recorder::testing::assert_event_contract;
+use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
     ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
     RetryPhase,
@@ -27,11 +29,9 @@ use common_procedure_test::execute_procedure_until_done;
 use store_api::storage::TableId;
 
 use crate::ddl::drop_view::{DropViewProcedure, DropViewState};
+use crate::ddl::event::view::DROP_VIEW_EVENT_TYPE;
 use crate::ddl::test_util::create_table::test_create_table_task;
-use crate::ddl::tests::create_view::{test_create_view_task, test_table_names};
-use crate::ddl::view_event::{
-    CATALOG_NAME_COLUMN, DROP_VIEW_EVENT_TYPE, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN, VIEW_NAME_COLUMN,
-};
+use crate::ddl::tests::create_view::{test_create_view_task, test_table_names, view_event_schema};
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -53,6 +53,7 @@ fn event_for(procedure: &DropViewProcedure, trigger: EventTrigger) -> Box<dyn Ev
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap()
 }
@@ -66,7 +67,19 @@ fn test_drop_view_event_submission() {
     );
     let event = event_for(&procedure, EventTrigger::Submitted);
 
-    assert_eq!(event.event_type(), DROP_VIEW_EVENT_TYPE);
+    assert_event_contract(
+        event.as_ref(),
+        DROP_VIEW_EVENT_TYPE,
+        &view_event_schema(),
+        &[Row {
+            values: vec![
+                ValueData::StringValue("greptime".to_string()).into(),
+                ValueData::StringValue("public".to_string()).into(),
+                ValueData::StringValue("view_name".to_string()).into(),
+                ValueData::U32Value(42).into(),
+            ],
+        }],
+    );
     assert_eq!(
         event.json_payload().unwrap(),
         serde_json::json!({"version": 1, "drop_if_exists": true})
@@ -84,17 +97,6 @@ fn test_drop_view_event_submission() {
             .unwrap()
             .to_string()
             .contains("view_name")
-    );
-
-    let row = event.extra_rows().unwrap().remove(0);
-    assert_eq!(
-        row.values,
-        vec![
-            ValueData::StringValue("greptime".to_string()).into(),
-            ValueData::StringValue("public".to_string()).into(),
-            ValueData::StringValue("view_name".to_string()).into(),
-            ValueData::U32Value(42).into(),
-        ]
     );
 }
 
@@ -122,28 +124,8 @@ fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
         EventTrigger::Poisoned,
     ];
 
-    let expected_schema = [
-        (CATALOG_NAME_COLUMN, api::v1::ColumnDataType::String),
-        (SCHEMA_NAME_COLUMN, api::v1::ColumnDataType::String),
-        (VIEW_NAME_COLUMN, api::v1::ColumnDataType::String),
-        (VIEW_ID_COLUMN, api::v1::ColumnDataType::Uint32),
-    ];
     let submitted_schema = submitted.extra_schema();
-    assert_eq!(
-        submitted_schema
-            .iter()
-            .map(|column| (column.column_name.as_str(), column.datatype))
-            .collect::<Vec<_>>(),
-        expected_schema
-            .iter()
-            .map(|(name, datatype)| (*name, i32::from(*datatype)))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        submitted_schema
-            .iter()
-            .all(|column| column.semantic_type == api::v1::SemanticType::Field as i32)
-    );
+    assert_eq!(submitted_schema, view_event_schema());
 
     for trigger in triggers {
         let event = event_for(&procedure, trigger);

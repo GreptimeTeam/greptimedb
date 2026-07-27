@@ -55,7 +55,6 @@ pub(crate) mod tests;
 pub mod truncate_table;
 pub mod undrop_table;
 pub mod utils;
-pub(crate) mod view_event;
 
 /// Metadata allocated to a table.
 #[derive(Default)]

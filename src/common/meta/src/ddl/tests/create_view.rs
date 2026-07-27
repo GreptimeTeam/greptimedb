@@ -17,9 +17,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
-use api::v1::{CreateViewExpr, TableName};
+use api::v1::{ColumnDataType, ColumnSchema, CreateViewExpr, Row, SemanticType, TableName};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_event_recorder::EventTypeFilter;
+use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN};
+use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{
     ChildSubmissionOutcome, Context as ProcedureContext, EventContext, EventTrigger, Procedure,
     ProcedureId, ProcedureState, RetryPhase, Status,
@@ -30,9 +33,9 @@ use table::metadata::{TableInfo, TableMeta, TableType};
 
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
+use crate::ddl::event::view::{CREATE_VIEW_EVENT_TYPE, VIEW_ID_COLUMN, VIEW_NAME_COLUMN};
 use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::tests::create_table::test_create_table_task;
-use crate::ddl::view_event::CREATE_VIEW_EVENT_TYPE;
 use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -98,6 +101,25 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
     }
 }
 
+pub(crate) fn view_event_schema() -> Vec<ColumnSchema> {
+    vec![
+        CATALOG_NAME_COLUMN.column_schema(),
+        SCHEMA_NAME_COLUMN.column_schema(),
+        ColumnSchema {
+            column_name: VIEW_NAME_COLUMN.to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Field.into(),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: VIEW_ID_COLUMN.to_string(),
+            datatype: ColumnDataType::Uint32.into(),
+            semantic_type: SemanticType::Field.into(),
+            ..Default::default()
+        },
+    ]
+}
+
 #[test]
 fn test_create_view_event_submitted() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
@@ -114,10 +136,23 @@ fn test_create_view_event_submitted() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
-    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
+    assert_event_contract(
+        event.as_ref(),
+        CREATE_VIEW_EVENT_TYPE,
+        &view_event_schema(),
+        &[Row {
+            values: vec![
+                ValueData::StringValue("greptime".to_string()).into(),
+                ValueData::StringValue("public".to_string()).into(),
+                ValueData::StringValue("v_metrics".to_string()).into(),
+                Default::default(),
+            ],
+        }],
+    );
     assert_eq!(
         event.json_payload().unwrap(),
         serde_json::json!({
@@ -133,17 +168,6 @@ fn test_create_view_event_submitted() {
     assert!(!payload.contains("SELECT"));
     assert!(!payload.contains("a_table"));
     assert!(!payload.contains("b_table"));
-
-    let values = event.extra_rows().unwrap().remove(0).values;
-    assert_eq!(
-        values[..3],
-        [
-            ValueData::StringValue("greptime".to_string()).into(),
-            ValueData::StringValue("public".to_string()).into(),
-            ValueData::StringValue("v_metrics".to_string()).into(),
-        ]
-    );
-    assert!(values[3].value_data.is_none());
 }
 
 #[test]
@@ -159,6 +183,7 @@ fn test_create_view_event_lifecycle_rows_have_fixed_schema() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
     let expected_schema = submitted.extra_schema();
@@ -191,6 +216,7 @@ fn test_create_view_event_lifecycle_rows_have_fixed_schema() {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger,
+                event_type_filter: Arc::new(EventTypeFilter::All),
             })
             .unwrap();
         assert_eq!(event.extra_schema(), expected_schema);
@@ -214,6 +240,7 @@ fn test_create_view_event_lifecycle_rows_have_fixed_schema() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &succeeded_state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
     assert_eq!(succeeded.extra_schema(), expected_schema);
@@ -236,6 +263,7 @@ fn test_create_view_event_succeeded_without_output_is_lifecycle() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -267,6 +295,7 @@ fn test_create_view_event_succeeded_with_wrong_output_type_is_lifecycle() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 

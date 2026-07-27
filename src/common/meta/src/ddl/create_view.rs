@@ -27,8 +27,8 @@ use table::metadata::{TableId, TableInfo, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
+use crate::ddl::event::view::{CREATE_VIEW_EVENT_TYPE, ViewDdlEvent};
 use crate::ddl::utils::map_to_procedure_error;
-use crate::ddl::view_event::ViewDdlEvent;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
@@ -272,6 +272,10 @@ impl Procedure for CreateViewProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        if !ctx.event_type_filter.allows(CREATE_VIEW_EVENT_TYPE) {
+            return None;
+        }
+
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let expr = &self.data.task.create_view;

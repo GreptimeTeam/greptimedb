@@ -15,17 +15,18 @@
 use std::any::Any;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
+use common_event_recorder::event_table::{
+    CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN, column_schemas, nullable_string, nullable_value,
+};
 use serde::Serialize;
 use snafu::ResultExt;
 
 pub(crate) const CREATE_VIEW_EVENT_TYPE: &str = "ddl_create_view";
 pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "ddl_drop_view";
 
-pub(crate) const CATALOG_NAME_COLUMN: &str = "catalog_name";
-pub(crate) const SCHEMA_NAME_COLUMN: &str = "schema_name";
 pub(crate) const VIEW_NAME_COLUMN: &str = "view_name";
 pub(crate) const VIEW_ID_COLUMN: &str = "view_id";
 
@@ -209,49 +210,36 @@ impl Event for ViewDdlEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        [
-            (CATALOG_NAME_COLUMN, ColumnDataType::String),
-            (SCHEMA_NAME_COLUMN, ColumnDataType::String),
-            (VIEW_NAME_COLUMN, ColumnDataType::String),
-            (VIEW_ID_COLUMN, ColumnDataType::Uint32),
-        ]
-        .into_iter()
-        .map(|(column_name, datatype)| ColumnSchema {
-            column_name: column_name.to_string(),
-            datatype: datatype.into(),
-            semantic_type: SemanticType::Field.into(),
-            ..Default::default()
-        })
-        .collect()
+        let mut schema = column_schemas([&CATALOG_NAME_COLUMN, &SCHEMA_NAME_COLUMN]);
+        schema.extend(
+            [
+                (VIEW_NAME_COLUMN, ColumnDataType::String),
+                (VIEW_ID_COLUMN, ColumnDataType::Uint32),
+            ]
+            .into_iter()
+            .map(|(column_name, datatype)| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: datatype.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            }),
+        );
+        schema
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
         Ok(vec![Row {
             values: vec![
-                nullable_string(&self.catalog_name),
-                nullable_string(&self.schema_name),
-                nullable_string(&self.view_name),
-                nullable_u32(self.view_id),
+                nullable_string(self.catalog_name.as_deref()),
+                nullable_string(self.schema_name.as_deref()),
+                nullable_string(self.view_name.as_deref()),
+                nullable_value(self.view_id.map(ValueData::U32Value)),
             ],
         }])
     }
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-fn nullable_string(value: &Option<String>) -> Value {
-    match value {
-        Some(value) => ValueData::StringValue(value.clone()).into(),
-        None => Value { value_data: None },
-    }
-}
-
-fn nullable_u32(value: Option<u32>) -> Value {
-    match value {
-        Some(value) => ValueData::U32Value(value).into(),
-        None => Value { value_data: None },
     }
 }
 
