@@ -78,7 +78,7 @@ use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequest,
+    BackgroundNotify, DdlRequest, OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequest,
     WorkerRequestWithTime,
 };
 use crate::schedule::remote_job_scheduler::{
@@ -558,21 +558,43 @@ impl CompactionScheduler {
         );
     }
 
-    /// Add ddl request to pending queue.
-    pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
+    /// Cancels the running compaction and queues its dependent DDL atomically.
+    /// Returns the sender and typed request unchanged if compaction is not running.
+    pub(crate) fn try_cancel_and_add_ddl<T>(
+        &mut self,
+        region_id: RegionId,
+        sender: OptionOutputTx,
+        request: T,
+        into_ddl_request: impl FnOnce(T) -> DdlRequest,
+    ) -> std::result::Result<(), (OptionOutputTx, T)> {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return Err((sender, request));
+        };
+        if status.request_cancel() == RequestCancelResult::NotRunning {
+            return Err((sender, request));
+        }
+
+        let request = SenderDdlRequest {
+            region_id,
+            sender,
+            request: into_ddl_request(request),
+        };
         debug!(
             "Added pending DDL request for region: {}, ddl: {:?}",
             request.region_id, request.request
         );
-        if let Some(status) = self.region_status.get_mut(&request.region_id) {
-            // The first queued DDL fences later regular triggers from creating more follow-ups.
-            status.pending_ddl_requests.push(request);
-        } else {
-            warn!(
-                "Failed to add pending DDL request for region: {}, ddl: {:?}, region is not compacting",
-                request.region_id, request.request
-            );
-        }
+        // The first queued DDL fences later regular triggers from creating more follow-ups.
+        status.pending_ddl_requests.push(request);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
+        self.region_status
+            .get_mut(&request.region_id)
+            .unwrap()
+            .pending_ddl_requests
+            .push(request);
     }
 
     #[cfg(test)]
@@ -589,6 +611,7 @@ impl CompactionScheduler {
         has_pending
     }
 
+    #[cfg(test)]
     pub(crate) fn request_cancel(&mut self, region_id: RegionId) -> RequestCancelResult {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return RequestCancelResult::NotRunning;
@@ -3243,6 +3266,72 @@ mod tests {
             RequestCancelResult::TooLateToCancel
         );
         assert!(status.is_busy());
+    }
+
+    #[tokio::test]
+    async fn test_try_cancel_and_add_ddl_returns_request_when_not_running() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let region_id = RegionId::new(1, 1);
+        let (ddl_tx, ddl_rx) = oneshot::channel();
+
+        let result = scheduler.try_cancel_and_add_ddl(
+            region_id,
+            OptionOutputTx::from(ddl_tx),
+            42_u64,
+            |_| {
+                crate::request::DdlRequest::EnterStaging(
+                    store_api::region_request::EnterStagingRequest {
+                        partition_directive:
+                            store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                    },
+                )
+            },
+        );
+
+        let Err((sender, payload)) = result else {
+            panic!("DDL was queued without a running compaction");
+        };
+        assert_eq!(payload, 42);
+        sender.send(Ok(0));
+        assert_eq!(ddl_rx.await.unwrap().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_try_cancel_and_add_ddl_cancels_and_queues_atomically() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut status =
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone());
+        status.start_picking(7);
+        scheduler.region_status.insert(region_id, status);
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+
+        let result = scheduler.try_cancel_and_add_ddl(
+            region_id,
+            OptionOutputTx::from(ddl_tx),
+            (),
+            |_| {
+                crate::request::DdlRequest::EnterStaging(
+                    store_api::region_request::EnterStagingRequest {
+                        partition_directive:
+                            store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                    },
+                )
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(scheduler.has_pending_ddls(region_id));
+        assert_eq!(
+            scheduler.request_cancel(region_id),
+            RequestCancelResult::AlreadyCancelling
+        );
     }
 
     #[tokio::test]

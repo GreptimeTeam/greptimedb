@@ -19,7 +19,6 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
-use crate::compaction::RequestCancelResult;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
@@ -99,26 +98,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        match self.compaction_scheduler.request_cancel(region_id) {
-            RequestCancelResult::CancelIssued
-            | RequestCancelResult::AlreadyCancelling
-            | RequestCancelResult::TooLateToCancel => {
-                // Safety: region is compacting or has entered the non-cancellable publish stage,
-                // keep the DDL pending until the current task finishes or acknowledges cancellation.
-                self.compaction_scheduler
-                    .add_ddl_request_to_pending(SenderDdlRequest {
-                        region_id,
-                        sender,
-                        request: DdlRequest::EnterStaging(EnterStagingRequest {
-                            partition_directive,
-                        }),
-                    });
+        let (sender, partition_directive) = match self
+            .compaction_scheduler
+            .try_cancel_and_add_ddl(region_id, sender, partition_directive, |partition_directive| {
+                DdlRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive,
+                })
+            }) {
+            Ok(()) => {
                 self.listener.on_compaction_cancel_requested(region_id);
-
                 return;
             }
-            RequestCancelResult::NotRunning => {}
-        }
+            Err(request) => request,
+        };
 
         self.handle_enter_staging(region, partition_directive, sender);
     }

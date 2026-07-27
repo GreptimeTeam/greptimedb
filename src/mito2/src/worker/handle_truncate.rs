@@ -19,11 +19,10 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::RegionId;
 
-use crate::compaction::RequestCancelResult;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
-use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, TruncateResult};
+use crate::request::{DdlRequest, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -41,24 +40,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        match self.compaction_scheduler.request_cancel(region_id) {
-            RequestCancelResult::CancelIssued
-            | RequestCancelResult::AlreadyCancelling
-            | RequestCancelResult::TooLateToCancel => {
-                // Safety: region is compacting or has entered the non-cancellable publish stage,
-                // keep the DDL pending until the current task finishes or acknowledges cancellation.
-                self.compaction_scheduler
-                    .add_ddl_request_to_pending(SenderDdlRequest {
-                        region_id,
-                        sender,
-                        request: DdlRequest::Truncate(req),
-                    });
+        let (sender, req) = match self.compaction_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            req,
+            DdlRequest::Truncate,
+        ) {
+            Ok(()) => {
                 self.listener.on_compaction_cancel_requested(region_id);
-
                 return;
             }
-            RequestCancelResult::NotRunning => {}
-        }
+            Err(request) => request,
+        };
 
         let version_data = region.version_control.current();
 
