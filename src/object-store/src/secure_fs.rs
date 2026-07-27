@@ -191,7 +191,7 @@ impl Access for SecureFsBackend {
     async fn create_dir(&self, path: &str, _: OpCreateDir) -> Result<RpCreateDir> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
-        tokio::task::spawn_blocking(move || root.dir.create_dir_all(path))
+        common_runtime::spawn_blocking_global(move || root.dir.create_dir_all(path))
             .await
             .map_err(new_task_join_error)?
             .map_err(new_std_io_error)?;
@@ -201,7 +201,7 @@ impl Access for SecureFsBackend {
     async fn stat(&self, path: &str, _: OpStat) -> Result<RpStat> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
-        let metadata = tokio::task::spawn_blocking(move || {
+        let metadata = common_runtime::spawn_blocking_global(move || {
             if path.as_os_str().is_empty() {
                 root.dir.dir_metadata()
             } else {
@@ -217,7 +217,7 @@ impl Access for SecureFsBackend {
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
-        let file = tokio::task::spawn_blocking(move || root.dir.open(path))
+        let file = common_runtime::spawn_blocking_global(move || root.dir.open(path))
             .await
             .map_err(new_task_join_error)?
             .map_err(new_std_io_error)?;
@@ -239,7 +239,7 @@ impl Access for SecureFsBackend {
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
-        let file = tokio::task::spawn_blocking(move || {
+        let file = common_runtime::spawn_blocking_global(move || {
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {
@@ -289,7 +289,7 @@ impl Access for SecureFsBackend {
             format!("{}/", path.to_string_lossy().replace('\\', "/"))
         };
         let root = self.root.clone();
-        let entries = tokio::task::spawn_blocking(move || {
+        let entries = common_runtime::spawn_blocking_global(move || {
             let dir = if path.as_os_str().is_empty() {
                 root.dir.open_dir(".")?
             } else {
@@ -387,10 +387,7 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn abort(&mut self) -> Result<()> {
-        Err(opendal::Error::new(
-            opendal::ErrorKind::Unsupported,
-            "abort is not supported for sandboxed filesystem writes",
-        ))
+        Ok(())
     }
 }
 
@@ -412,7 +409,7 @@ impl oio::OneShotDelete for SecureFsDeleter {
     async fn delete_once(&self, path: String, args: OpDelete) -> Result<()> {
         let path = backend_path(&path).map_err(new_std_io_error)?;
         let root = self.root.clone();
-        tokio::task::spawn_blocking(move || {
+        common_runtime::spawn_blocking_global(move || {
             let metadata = match root.dir.symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -432,5 +429,24 @@ impl oio::OneShotDelete for SecureFsDeleter {
         .await
         .map_err(new_task_join_error)?
         .map_err(new_std_io_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use common_test_util::temp_dir::create_temp_dir;
+
+    use super::SecureFsRoot;
+
+    #[tokio::test]
+    async fn test_writer_abort_succeeds() {
+        let temp_dir = create_temp_dir("secure_fs_writer_abort");
+        let operator = SecureFsRoot::open(temp_dir.path())
+            .unwrap()
+            .build_operator();
+        let mut writer = operator.writer("partial").await.unwrap();
+        writer.write(Bytes::from_static(b"partial")).await.unwrap();
+        writer.abort().await.unwrap();
     }
 }

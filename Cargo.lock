@@ -9359,6 +9359,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "derive_builder 0.20.2",

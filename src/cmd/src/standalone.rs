@@ -96,6 +96,9 @@ fn standalone_local_file_access(
         })?,
         None => {
             let Some(data_home) = &data_home else {
+                info!(
+                    "SQL access to local files is disabled because storage.data_home is not a local path and storage.copy_root is unset"
+                );
                 return Ok(LocalFileAccess::Disabled);
             };
             data_home.join("copy")

@@ -23,5 +23,7 @@ TO 'local_file_access/query.parquet';
 
 COPY DATABASE public TO 'local_file_access/database/';
 
+COPY local_file_access_source FROM '../escape.parquet';
+
 DROP TABLE local_file_access_external;
 DROP TABLE local_file_access_source;

@@ -41,6 +41,10 @@ COPY DATABASE public TO 'local_file_access/database/';
 
 Affected Rows: 4
 
+COPY local_file_access_source FROM '../escape.parquet';
+
+Error: 1004(InvalidArguments), Local filesystem path '../escape.parquet' is outside the configured copy root or is unsafe: '..' path components are not allowed; use a path relative to the copy root or use S3, OSS, GCS, or AzBlob
+
 DROP TABLE local_file_access_external;
 
 Affected Rows: 0

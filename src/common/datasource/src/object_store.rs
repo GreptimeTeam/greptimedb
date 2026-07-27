@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use lazy_static::lazy_static;
 use object_store::ObjectStore;
 use object_store::secure_fs::SecureFsRoot;
@@ -112,9 +113,9 @@ impl LocalFileAccess {
             .build()
         })?;
         let relative = if path.is_absolute() {
-            path.strip_prefix(root.configured_path.as_path())
-                .or_else(|_| path.strip_prefix(root.root.path()))
-                .map_err(|_| {
+            strip_local_prefix(&path, root.configured_path.as_path())
+                .or_else(|| strip_local_prefix(&path, root.root.path()))
+                .ok_or_else(|| {
                     error::LocalFileAccessDeniedSnafu {
                         path: location.to_string(),
                         reason: "absolute path is outside the configured copy root".to_string(),
@@ -164,7 +165,10 @@ impl LocalFileAccess {
         })
         .await
         .context(error::JoinHandleSnafu)?
-        .map_err(|_| {
+        .map_err(|error| {
+            debug!(
+                "Failed to open an authorized local SQL path inside the copy root, path: {location}, error: {error:?}"
+            );
             error::LocalFileAccessDeniedSnafu {
                 path: location.to_string(),
                 reason: "path could not be safely resolved within the configured copy root"
@@ -179,6 +183,11 @@ impl LocalFileAccess {
 ///
 /// Bare paths and `file://` URLs are local. Other URL schemes return `None`.
 pub fn configured_local_path(location: &str) -> Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    if Path::new(location).is_absolute() {
+        return Ok(Some(PathBuf::from(location)));
+    }
+
     let (schema, _, path) = parse_url(location)?;
     match schema.to_uppercase().as_str() {
         FS_SCHEMA => Ok(Some(PathBuf::from(path))),
@@ -196,6 +205,56 @@ pub fn configured_local_path(location: &str) -> Result<Option<PathBuf>> {
         }
         _ => Ok(None),
     }
+}
+
+fn strip_local_prefix<'a>(path: &'a Path, prefix: &Path) -> Option<&'a Path> {
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(prefix).ok()
+    }
+
+    #[cfg(windows)]
+    {
+        let mut path_components = path.components();
+        for prefix_component in prefix.components() {
+            let path_component = path_components.next()?;
+            if !windows_component_eq(path_component, prefix_component) {
+                return None;
+            }
+        }
+        Some(path_components.as_path())
+    }
+}
+
+#[cfg(windows)]
+fn windows_component_eq(left: Component<'_>, right: Component<'_>) -> bool {
+    match (left, right) {
+        (Component::Prefix(left), Component::Prefix(right)) => {
+            windows_os_str_eq(left.as_os_str(), right.as_os_str())
+        }
+        (Component::Normal(left), Component::Normal(right)) => windows_os_str_eq(left, right),
+        (Component::RootDir, Component::RootDir)
+        | (Component::CurDir, Component::CurDir)
+        | (Component::ParentDir, Component::ParentDir) => true,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn windows_os_str_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn ascii_lowercase(value: u16) -> u16 {
+        if (u16::from(b'A')..=u16::from(b'Z')).contains(&value) {
+            value + u16::from(b'a' - b'A')
+        } else {
+            value
+        }
+    }
+
+    left.encode_wide()
+        .map(ascii_lowercase)
+        .eq(right.encode_wide().map(ascii_lowercase))
 }
 
 fn normalize_untrusted_path(path: &Path) -> std::result::Result<PathBuf, String> {
@@ -216,7 +275,7 @@ fn normalize_untrusted_path(path: &Path) -> std::result::Result<PathBuf, String>
 pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
     #[cfg(windows)]
     {
-        // On Windows, the url may start with `C:/`.
+        // On Windows, the URL may start with `C:/` or `C:\`.
         if handle_windows_path(url).is_some() {
             return Ok((FS_SCHEMA.to_string(), None, url.to_string()));
         }
@@ -319,7 +378,7 @@ async fn build_backend_inner(
 }
 
 lazy_static! {
-    static ref DISK_SYMBOL_PATTERN: Regex = Regex::new("^([A-Za-z]:/)").unwrap();
+    static ref DISK_SYMBOL_PATTERN: Regex = Regex::new(r"^([A-Za-z]:[/\\])").unwrap();
 }
 
 pub fn handle_windows_path(url: &str) -> Option<String> {
@@ -347,8 +406,35 @@ mod tests {
             handle_windows_path("C:/to/path/file"),
             Some("C:/".to_string())
         );
+        assert_eq!(
+            handle_windows_path(r"C:\to\path\file"),
+            Some(r"C:\".to_string())
+        );
         assert_eq!(handle_windows_path("https://google.com"), None);
         assert_eq!(handle_windows_path("s3://bucket/path/to"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_local_path_detection_and_prefix() {
+        use std::path::{Path, PathBuf};
+
+        let location = r"C:\gtdata";
+        assert_eq!(
+            super::configured_local_path(location).unwrap(),
+            Some(PathBuf::from(location))
+        );
+        assert_eq!(
+            super::parse_url(location).unwrap(),
+            ("FS".to_string(), None, location.to_string())
+        );
+        assert_eq!(
+            super::strip_local_prefix(
+                Path::new(r"c:\Data\Copy\nested\data.parquet"),
+                Path::new(r"C:\data\copy"),
+            ),
+            Some(Path::new(r"nested\data.parquet"))
+        );
     }
 
     #[tokio::test]
