@@ -65,6 +65,37 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "SQL access to the local filesystem is disabled for '{}'; use S3, OSS, GCS, or AzBlob instead",
+        path
+    ))]
+    LocalFileAccessDisabled {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Local filesystem path '{}' is outside the configured copy root or is unsafe: {}; use a path relative to the copy root or use S3, OSS, GCS, or AzBlob",
+        path,
+        reason
+    ))]
+    LocalFileAccessDenied {
+        path: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid local filesystem copy root '{}'", root))]
+    InvalidLocalFileRoot {
+        root: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build backend"))]
     BuildBackend {
         #[snafu(source)]
@@ -231,6 +262,9 @@ impl ErrorExt for Error {
             | UnsupportedFormat { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
+            | LocalFileAccessDisabled { .. }
+            | LocalFileAccessDenied { .. }
+            | InvalidLocalFileRoot { .. }
             | EmptyHostPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }

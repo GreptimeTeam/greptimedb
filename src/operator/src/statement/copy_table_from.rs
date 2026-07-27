@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -28,7 +27,7 @@ use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
+use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
@@ -54,7 +53,7 @@ use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use crate::error::{self, IntoVectorsSnafu, PathNotFoundSnafu, Result};
+use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
@@ -99,14 +98,11 @@ impl StatementExecutor {
         &self,
         req: &CopyTableRequest,
     ) -> Result<(ObjectStore, Vec<Entry>)> {
-        let (schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+        let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
 
-        if schema.to_uppercase() == FS_SCHEMA {
-            ensure!(Path::new(&path).exists(), PathNotFoundSnafu { path });
-        }
-
-        let object_store =
-            build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
+        let object_store = build_backend(&req.location, &req.connection, &self.local_file_access)
+            .await
+            .context(error::BuildBackendSnafu)?;
 
         let (dir, filename) = find_dir_and_filename(&path);
         let regex = req

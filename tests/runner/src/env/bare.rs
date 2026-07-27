@@ -116,7 +116,10 @@ impl EnvController for Env {
         }
 
         unsafe {
-            std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
+            std::env::set_var(
+                "SQLNESS_HOME",
+                self.sqlness_home.join("copy").display().to_string(),
+            );
         }
         match mode {
             "standalone" => self.start_standalone(id).await,

@@ -1,0 +1,51 @@
+CREATE TABLE local_file_access_source (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE
+);
+
+Affected Rows: 0
+
+INSERT INTO local_file_access_source VALUES
+    (1, 'host-1', 1.0),
+    (2, 'host-2', 2.0);
+
+Affected Rows: 2
+
+COPY local_file_access_source TO 'local_file_access/table.parquet';
+
+Affected Rows: 2
+
+CREATE EXTERNAL TABLE local_file_access_external
+WITH (
+    location = 'local_file_access/table.parquet',
+    format = 'parquet'
+);
+
+Affected Rows: 0
+
+SELECT COUNT(*) FROM local_file_access_external;
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+COPY (SELECT * FROM local_file_access_source)
+TO 'local_file_access/query.parquet';
+
+Affected Rows: 2
+
+COPY DATABASE public TO 'local_file_access/database/';
+
+Affected Rows: 4
+
+DROP TABLE local_file_access_external;
+
+Affected Rows: 0
+
+DROP TABLE local_file_access_source;
+
+Affected Rows: 0
+

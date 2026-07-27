@@ -30,7 +30,7 @@ use common_catalog::consts::{
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::build_backend;
+use common_datasource::object_store::{LocalFileAccess, build_backend};
 use common_datasource::util::find_dir_and_filename;
 use common_meta::SchemaOptions;
 use common_meta::ddl::create_flow::FlowType;
@@ -1149,6 +1149,7 @@ fn describe_column_semantic_types(
 // lists files in the frontend to reduce unnecessary scan requests repeated in each datanode.
 pub async fn prepare_file_table_files(
     options: &HashMap<String, String>,
+    local_file_access: &LocalFileAccess,
 ) -> Result<(ObjectStore, Vec<String>)> {
     let url = options
         .get(FILE_TABLE_LOCATION_KEY)
@@ -1167,7 +1168,9 @@ pub async fn prepare_file_table_files(
         .map(|x| Regex::new(x))
         .transpose()
         .context(error::BuildRegexSnafu)?;
-    let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
+    let object_store = build_backend(url, options, local_file_access)
+        .await
+        .context(error::BuildBackendSnafu)?;
     let lister = Lister::new(object_store.clone(), source, dir, regex);
     // If we scan files in a directory every time the database restarts,
     // then it might lead to a potential undefined behavior:

@@ -194,7 +194,7 @@ pub enum Error {
         error: regex::Error,
     },
 
-    #[snafu(display("Failed to build data source backend"))]
+    #[snafu(display("Failed to build data source backend: {}", source))]
     BuildBackend {
         source: common_datasource::error::Error,
         #[snafu(implicit)]
@@ -424,7 +424,8 @@ impl ErrorExt for Error {
             | InvalidQueryContextExtension { .. }
             | ConflictingSnapshotSequence { .. } => StatusCode::InvalidArguments,
 
-            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            BuildBackend { source, .. } => source.status_code(),
+            ListObjects { .. } => StatusCode::StorageUnavailable,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
 

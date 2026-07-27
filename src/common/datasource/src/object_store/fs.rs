@@ -13,16 +13,11 @@
 // limitations under the License.
 
 use object_store::ObjectStore;
-use object_store::services::Fs;
+use object_store::secure_fs::SecureFsRoot;
 use object_store::util::with_instrument_layers;
-use snafu::ResultExt;
 
-use crate::error::{BuildBackendSnafu, Result};
+use crate::error::Result;
 
-pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
-    let builder = Fs::default();
-    let object_store = ObjectStore::new(builder.root(root))
-        .context(BuildBackendSnafu)?
-        .finish();
-    Ok(with_instrument_layers(object_store, true))
+pub fn build_fs_backend(root: &SecureFsRoot) -> Result<ObjectStore> {
+    Ok(with_instrument_layers(root.build_operator(), true))
 }

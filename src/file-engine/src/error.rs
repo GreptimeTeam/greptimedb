@@ -122,7 +122,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build backend"))]
+    #[snafu(display("Failed to build backend: {}", source))]
     BuildBackend {
         #[snafu(implicit)]
         location: Location,

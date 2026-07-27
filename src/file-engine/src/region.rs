@@ -107,7 +107,9 @@ impl FileRegion {
 mod tests {
     use std::assert_matches;
 
+    use common_datasource::object_store::LocalFileAccess;
     use store_api::region_request::PathType;
+    use store_api::storage::ScanRequest;
 
     use super::*;
     use crate::error::Error;
@@ -153,6 +155,34 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(err, Error::ManifestExists { .. });
+    }
+
+    #[tokio::test]
+    async fn test_persisted_local_region_rejected_when_disabled() {
+        let (_dir, object_store) = new_test_object_store("test_disabled_local_region");
+        let request = RegionCreateRequest {
+            engine: "file".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: new_test_options(),
+            table_dir: "disabled_local_region/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+        let region = FileRegion::create(RegionId::new(1, 0), request, &object_store)
+            .await
+            .unwrap();
+
+        let error = match region
+            .query(ScanRequest::default(), &LocalFileAccess::Disabled)
+            .await
+        {
+            Ok(_) => panic!("local file query must be rejected"),
+            Err(error) => error,
+        };
+        assert_matches!(&error, Error::BuildBackend { .. });
+        assert!(error.to_string().contains("local filesystem is disabled"));
     }
 
     #[tokio::test]

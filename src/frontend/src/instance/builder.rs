@@ -19,6 +19,7 @@ use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUT
 use catalog::CatalogManagerRef;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
@@ -65,6 +66,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
+    local_file_access: LocalFileAccess,
 }
 
 impl FrontendBuilder {
@@ -88,6 +90,7 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             process_manager,
+            local_file_access: LocalFileAccess::Disabled,
         }
     }
 
@@ -132,6 +135,11 @@ impl FrontendBuilder {
             local_cache_invalidator: Some(cache_invalidator),
             ..self
         }
+    }
+
+    pub fn with_local_file_access(mut self, local_file_access: LocalFileAccess) -> Self {
+        self.local_file_access = local_file_access;
+        self
     }
 
     pub fn options(&self) -> &FrontendOptions {
@@ -271,6 +279,7 @@ impl FrontendBuilder {
             partition_manager,
             Some(process_manager.clone()),
             frontend_peer_addr.clone(),
+            self.local_file_access,
         );
 
         let statement_executor =

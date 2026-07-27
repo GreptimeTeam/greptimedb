@@ -183,7 +183,9 @@ impl StatementExecutor {
         let filename = filename.context(error::UnexpectedSnafu {
             violated: format!("Expected filename, path: {path}"),
         })?;
-        let object_store = build_backend(location, connection).context(error::BuildBackendSnafu)?;
+        let object_store = build_backend(location, connection, &self.local_file_access)
+            .await
+            .context(error::BuildBackendSnafu)?;
         self.stream_to_file(stream, format, object_store, &filename)
             .await
     }

@@ -490,7 +490,7 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build data source backend"))]
+    #[snafu(display("Failed to build data source backend: {}", source))]
     BuildBackend {
         #[snafu(implicit)]
         location: Location,
@@ -852,13 +852,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Path not found: {path}"))]
-    PathNotFound {
-        path: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid time index type: {}", ty))]
     InvalidTimeIndexType {
         ty: arrow::datatypes::DataType,
@@ -1063,7 +1056,6 @@ impl ErrorExt for Error {
             }
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
-            Error::PathNotFound { .. } => StatusCode::InvalidArguments,
             Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
             #[cfg(feature = "enterprise")]

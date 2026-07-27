@@ -328,7 +328,10 @@ impl CompatCommand {
             .unwrap();
         let sqlness_home = temp_dir.keep();
         unsafe {
-            std::env::set_var("SQLNESS_HOME", sqlness_home.display().to_string());
+            std::env::set_var(
+                "SQLNESS_HOME",
+                sqlness_home.join("copy").display().to_string(),
+            );
         }
 
         // ---- 7. Build interceptor registry ----

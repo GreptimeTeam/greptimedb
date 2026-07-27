@@ -21,7 +21,7 @@ use client::{Output, OutputData, OutputMeta};
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::build_backend;
+use common_datasource::object_store::{LocalFileAccess, build_backend};
 use common_stat::get_total_cpu_cores;
 use common_telemetry::{debug, error, info, tracing};
 use futures::future::try_join_all;
@@ -66,6 +66,9 @@ impl StatementExecutor {
                 value: req.location,
             }
         );
+        build_backend(&req.location, &req.connection, &self.local_file_access)
+            .await
+            .context(error::BuildBackendSnafu)?;
 
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
@@ -170,7 +173,7 @@ impl StatementExecutor {
             .context(error::ParseFileFormatSnafu)?
             .suffix();
 
-        let entries = list_files_to_copy(&req, suffix).await?;
+        let entries = list_files_to_copy(&req, suffix, &self.local_file_access).await?;
 
         let continue_on_error = req
             .with
@@ -255,9 +258,14 @@ fn parse_file_name_to_copy(e: &Entry) -> error::Result<String> {
 }
 
 /// Lists all files with expected suffix that can be imported to database.
-async fn list_files_to_copy(req: &CopyDatabaseRequest, suffix: &str) -> error::Result<Vec<Entry>> {
-    let object_store =
-        build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
+async fn list_files_to_copy(
+    req: &CopyDatabaseRequest,
+    suffix: &str,
+    local_file_access: &LocalFileAccess,
+) -> error::Result<Vec<Entry>> {
+    let object_store = build_backend(&req.location, &req.connection, local_file_access)
+        .await
+        .context(error::BuildBackendSnafu)?;
 
     let pattern = Regex::try_from(format!(".*{}", suffix)).context(error::BuildRegexSnafu)?;
     let lister = Lister::new(
@@ -273,6 +281,7 @@ async fn list_files_to_copy(req: &CopyDatabaseRequest, suffix: &str) -> error::R
 mod tests {
     use std::collections::{HashMap, HashSet};
 
+    use common_datasource::object_store::LocalFileAccess;
     use common_stat::get_total_cpu_cores;
     use object_store::ObjectStore;
     use object_store::services::Fs;
@@ -307,7 +316,8 @@ mod tests {
             connection: Default::default(),
             time_range: None,
         };
-        let listed = list_files_to_copy(&request, ".parquet")
+        let local_file_access = LocalFileAccess::sandboxed(dir.path()).unwrap();
+        let listed = list_files_to_copy(&request, ".parquet", &local_file_access)
             .await
             .unwrap()
             .into_iter()
