@@ -216,6 +216,7 @@ fn test_load_metasrv_example_config() {
                     timeout: Duration::from_secs(10),
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
+                    ..Default::default()
                 },
             },
             backend_tls: Some(TlsOption {
