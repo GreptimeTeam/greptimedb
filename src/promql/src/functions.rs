@@ -16,6 +16,7 @@ mod aggr_over_time;
 mod changes;
 mod deriv;
 mod double_exponential_smoothing;
+mod edge_count;
 mod extrapolate_rate;
 mod idelta;
 mod predict_linear;
