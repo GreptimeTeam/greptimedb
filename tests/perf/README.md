@@ -9,6 +9,56 @@ automatic write, flush, SST, and query path. They do not replace controlled
 encoding experiments that explicitly compare `plain`/dictionary,
 `no_dictionary`, BYTE_STREAM_SPLIT, or Auto policies.
 
+## Workload scheduler benchmark
+
+`workload_scheduler_benchmark.py` measures the experimental query/write
+scheduler against an otherwise identical scheduler-disabled standalone server:
+
+```bash
+cargo build --release -p cmd --bin greptime
+python3 tests/perf/workload_scheduler_benchmark.py \
+  --output /tmp/greptime-workload-scheduler.json
+```
+
+Each sample starts a fresh server and separate, equivalently seeded query and
+write tables. Baseline and scheduled modes are interleaved for three iterations,
+with four warmup seconds followed by eight measured seconds. The default
+4-worker workload covers query-only, write-only, light-write, and saturated
+phases. Client-to-response mean, p50, and p95 latency and successful request
+throughput are reported alongside scheduler poll shares. In
+`scheduled_vs_baseline_percent`, positive throughput is an improvement while
+positive latency is a regression.
+
+Query and write requests do not represent equal work, so the raw sum of their
+request rates is not used as the overhead check. The report calibrates each
+iteration with its scheduler-disabled query-only and write-only capacities, then
+computes:
+
+```text
+capacity_normalized_work_rate =
+    query_rps / baseline_query_capacity
+    + write_rps / baseline_write_capacity
+```
+
+The scheduled and baseline mixed samples are compared using the capacities from
+the same iteration. `paired_capacity_normalized.within_five_percent` verifies
+that every paired sample stays within the 5% regression budget; the top-level
+`verification` object combines that check with the saturated 80% write-poll
+share check. This normalization prevents a policy-driven shift between
+differently priced request types from being reported as scheduler overhead.
+
+The saturated defaults are calibrated to keep both classes runnable on a
+32-logical-CPU development host. Adjust `--query-workers` and `--write-workers`
+when the output's minimum write poll share shows that a different host did not
+reach saturation. `workload_scheduler_runner.py` is the shorter correctness
+runner for checking the 80/20 share and work-conserving borrowing against an
+already-running server.
+
+When `max_concurrent_polls` is left at zero in GreptimeDB configuration, the
+scheduler uses four times `global_rt_size`. The benchmark resolves the same
+default explicitly. This keeps Tokio's worker queues fed while retaining a
+bounded admission window.
+
 ## Phase 1: direct readable SST fixtures
 
 Phase 1 should generate data by writing readable Mito SST files and matching
