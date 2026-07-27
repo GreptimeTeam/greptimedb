@@ -275,6 +275,7 @@ api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
+catio = { git = "https://github.com/waynexia/catio.git", rev = "ddcd3e9e5a5fdd1e58866ed4e6dbbc2062bae44a" }
 cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
