@@ -366,40 +366,6 @@ where
     }
 }
 
-pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
-    vector: &PrimitiveVector<T>,
-    offsets: &[usize],
-) -> PrimitiveVector<T> {
-    assert_eq!(offsets.len(), vector.len());
-
-    if offsets.is_empty() {
-        return vector.get_slice(0, 0);
-    }
-
-    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap());
-
-    let mut previous_offset = 0;
-
-    for (offset, value) in offsets.iter().zip(vector.array.iter()) {
-        let repeat_times = *offset - previous_offset;
-        match value {
-            Some(data) => {
-                unsafe {
-                    // Safety: std::iter::Repeat and std::iter::Take implement TrustedLen.
-                    builder
-                        .mutable_array
-                        .append_trusted_len_iter(std::iter::repeat_n(data, repeat_times));
-                }
-            }
-            None => {
-                builder.mutable_array.append_nulls(repeat_times);
-            }
-        }
-        previous_offset = *offset;
-    }
-    builder.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use std::vec;

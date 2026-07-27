@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use common_recordbatch::error::DataTypesSnafu;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -82,12 +82,18 @@ pub(crate) fn new_repeated_vector(
     value: &Value,
     num_rows: usize,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    let mut mutable_vector = data_type.create_mutable_vector(1);
-    mutable_vector
-        .try_push_value_ref(&value.as_value_ref())
-        .context(DataTypesSnafu)?;
-    let base_vector = mutable_vector.to_vector();
-    Ok(base_vector.replicate(&[num_rows]))
+    if let Ok(scalar) = value.try_to_scalar_value(data_type) {
+        return Helper::try_from_scalar_value(scalar, num_rows).context(DataTypesSnafu);
+    }
+
+    // Preserve extension types that cannot safely round-trip through ScalarValue.
+    let mut mutable_vector = data_type.create_mutable_vector(num_rows);
+    for _ in 0..num_rows {
+        mutable_vector
+            .try_push_value_ref(&value.as_value_ref())
+            .context(DataTypesSnafu)?;
+    }
+    Ok(mutable_vector.to_vector())
 }
 
 #[cfg(test)]

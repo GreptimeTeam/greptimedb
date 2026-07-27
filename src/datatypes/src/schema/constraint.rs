@@ -23,7 +23,7 @@ use crate::error::{self, Result};
 use crate::types::cast;
 use crate::value::Value;
 use crate::vectors::operations::VectorOp;
-use crate::vectors::{TimestampMillisecondVector, VectorRef};
+use crate::vectors::{Helper, TimestampMillisecondVector, VectorRef};
 
 pub const CURRENT_TIMESTAMP: &str = "current_timestamp";
 pub const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
@@ -151,12 +151,18 @@ impl ColumnDefaultConstraint {
             ColumnDefaultConstraint::Value(v) => {
                 ensure!(is_nullable || !v.is_null(), error::NullDefaultSnafu);
 
-                // TODO(yingwen): For null value, we could use NullVector once it supports custom
-                // logical type.
-                let mut mutable_vector = data_type.create_mutable_vector(1);
-                mutable_vector.try_push_value_ref(&v.as_value_ref())?;
-                let base_vector = mutable_vector.to_vector();
-                Ok(base_vector.replicate(&[num_rows]))
+                if let Ok(scalar) = v.try_to_scalar_value(data_type) {
+                    return Helper::try_from_scalar_value(scalar, num_rows);
+                }
+
+                // Some extension values, such as JSON nested in a struct, cannot safely
+                // round-trip through ScalarValue. Preserve their logical type with the
+                // type-specific vector builder instead.
+                let mut mutable_vector = data_type.create_mutable_vector(num_rows);
+                for _ in 0..num_rows {
+                    mutable_vector.try_push_value_ref(&v.as_value_ref())?;
+                }
+                Ok(mutable_vector.to_vector())
             }
         }
     }
