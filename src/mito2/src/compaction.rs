@@ -1810,6 +1810,14 @@ fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
 }
 
 /// Rebuilds picker output with current SST handles while preserving the picker's grouping.
+///
+/// Picking runs in background on a version snapshot that may be stale by the
+/// time the plan is accepted: a concurrent flush, compaction or index rebuild
+/// can replace a selected file with a new handle carrying updated metadata
+/// (e.g. `index_version`), or remove the file entirely. The handles in the
+/// picker output therefore cannot be used as-is; re-resolving them against the
+/// current version both detects gone files (aborting the plan) and ensures the
+/// execution reads and reserves the up-to-date handle.
 fn refresh_picker_output(output: PickerOutput, current: &SstVersion) -> Option<PickerOutput> {
     let refresh = |file: FileHandle| {
         current
