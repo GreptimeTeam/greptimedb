@@ -32,6 +32,7 @@ use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::prelude::ConcreteDataType;
+use partition::expr::PartitionExpr;
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -291,53 +292,18 @@ impl DistExtensionPlanner {
             return Ok(all_regions);
         }
 
-        let physical_table_info = if physical_table_id == table_info.table_id() {
-            table_info.clone()
-        } else {
-            match self
-                .catalog_manager
-                .table_info_by_id(physical_table_id)
-                .await
-            {
-                Ok(Some(table_info)) => table_info,
-                Ok(None) => {
-                    debug!(
-                        "DistExtensionPlanner: physical table info not found for table {} (id: {}), using all regions: {:?}",
-                        table_name, physical_table_id, all_regions
-                    );
-                    return Ok(all_regions);
-                }
-                Err(err) => {
-                    debug!(
-                        "DistExtensionPlanner: failed to load physical table info for table {} (id: {}): {}, using all regions: {:?}",
-                        table_name, physical_table_id, err, all_regions
-                    );
-                    return Ok(all_regions);
-                }
-            }
-        };
-        let physical_partition_columns = partition_column_types(&physical_table_info);
-        let partition_column_types = physical_partition_columns
-            .iter()
-            .cloned()
-            .collect::<HashMap<_, _>>();
-        let logical_partition_column_types = logical_partition_columns
-            .iter()
-            .cloned()
-            .collect::<HashMap<_, _>>();
-        let mut predicate_column_names = std::collections::HashSet::new();
-        for expression in &partition_expressions {
-            expression.collect_column_names(&mut predicate_column_names);
-        }
-        if predicate_column_names.iter().any(|name| {
-            logical_partition_column_types.get(name) != partition_column_types.get(name)
-        }) {
-            debug!(
-                "DistExtensionPlanner: logical and physical partition metadata mismatch for table {} (physical id: {}), using all regions: {:?}",
-                table_name, physical_table_id, all_regions
-            );
+        let Some(partition_column_types) = self
+            .partition_column_types_for_pruning(
+                table_name,
+                table_info.as_ref(),
+                physical_table_id,
+                &partition_expressions,
+                &all_regions,
+            )
+            .await
+        else {
             return Ok(all_regions);
-        }
+        };
 
         // Get partition information for the table if partition rule manager is available
         let partitions = match create_partitions_from_region_routes(
@@ -383,6 +349,65 @@ impl DistExtensionPlanner {
         );
 
         Ok(pruned_regions)
+    }
+
+    async fn partition_column_types_for_pruning(
+        &self,
+        table_name: &TableName,
+        logical_table_info: &TableInfo,
+        physical_table_id: u32,
+        partition_expressions: &[PartitionExpr],
+        all_regions: &[RegionId],
+    ) -> Option<HashMap<String, ConcreteDataType>> {
+        let physical_partition_columns = if physical_table_id == logical_table_info.table_id() {
+            partition_column_types(logical_table_info)
+        } else {
+            match self
+                .catalog_manager
+                .table_info_by_id(physical_table_id)
+                .await
+            {
+                Ok(Some(physical_table_info)) => {
+                    partition_column_types(physical_table_info.as_ref())
+                }
+                Ok(None) => {
+                    debug!(
+                        "DistExtensionPlanner: physical table info not found for table {} (id: {}), using all regions: {:?}",
+                        table_name, physical_table_id, all_regions
+                    );
+                    return None;
+                }
+                Err(err) => {
+                    debug!(
+                        "DistExtensionPlanner: failed to load physical table info for table {} (id: {}): {}, using all regions: {:?}",
+                        table_name, physical_table_id, err, all_regions
+                    );
+                    return None;
+                }
+            }
+        };
+        let physical_column_types = physical_partition_columns
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let logical_column_types = partition_column_types(logical_table_info)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut predicate_column_names = std::collections::HashSet::new();
+        for expression in partition_expressions {
+            expression.collect_column_names(&mut predicate_column_names);
+        }
+        if predicate_column_names
+            .iter()
+            .any(|name| logical_column_types.get(name) != physical_column_types.get(name))
+        {
+            debug!(
+                "DistExtensionPlanner: logical and physical partition metadata mismatch for table {} (physical id: {}), using all regions: {:?}",
+                table_name, physical_table_id, all_regions
+            );
+            return None;
+        }
+
+        Some(physical_column_types)
     }
 
     /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.
