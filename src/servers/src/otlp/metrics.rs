@@ -853,6 +853,7 @@ fn encode_summary(
 
 #[cfg(test)]
 mod tests {
+    use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
@@ -1051,6 +1052,47 @@ mod tests {
                 greptime_timestamp(),
                 greptime_value()
             ]
+        );
+    }
+
+    #[test]
+    fn test_encode_legacy_summary_keeps_legacy_column_names() {
+        set_default_prefix(Some("custom")).unwrap();
+        let mut tables = MultiTableData::default();
+        let summary = Summary {
+            data_points: vec![SummaryDataPoint {
+                attributes: vec![keyvalue("host", "testserver")],
+                time_unix_nano: 100,
+                count: 25,
+                quantile_values: vec![ValueAtQuantile {
+                    quantile: 0.90,
+                    value: 1000.0,
+                }],
+                ..Default::default()
+            }],
+        };
+
+        encode_summary(
+            &mut tables,
+            "datamon",
+            &summary,
+            None,
+            None,
+            &OtlpMetricCtx {
+                is_legacy: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let table = tables.get_or_default_table_data("datamon", 0, 0);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|column| column.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["host", "custom_timestamp", "greptime_p90", GREPTIME_COUNT,]
         );
     }
 

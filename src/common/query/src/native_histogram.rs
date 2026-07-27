@@ -106,8 +106,8 @@ pub fn native_histogram_value_type() -> &'static ConcreteDataType {
     &NATIVE_HISTOGRAM_VALUE_TYPE
 }
 
-pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
+pub fn is_native_histogram_value_type(data_type: &ConcreteDataType) -> bool {
+    data_type == native_histogram_value_type()
 }
 
 // ---------------------------------------------------------------------------

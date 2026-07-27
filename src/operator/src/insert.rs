@@ -37,9 +37,7 @@ use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
-use common_query::native_histogram::{
-    NATIVE_HISTOGRAM_FIELD, is_native_histogram_value_schema, native_histogram_value_type,
-};
+use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
@@ -1143,7 +1141,6 @@ fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
     };
 
     fields.next().is_none()
-        && col.column_name == NATIVE_HISTOGRAM_FIELD
         && api::helper::is_column_type_value_eq(
             col.datatype,
             col.datatype_extension.clone(),
@@ -1157,7 +1154,7 @@ fn table_is_native_histogram(table: &TableRef) -> bool {
         return false;
     };
 
-    fields.next().is_none() && is_native_histogram_value_schema(&col.name, &col.data_type)
+    fields.next().is_none() && is_native_histogram_value_type(&col.data_type)
 }
 
 fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
@@ -1431,12 +1428,15 @@ impl FlowMirrorTask {
 mod tests {
     use std::sync::Arc;
 
+    use api::helper::ColumnDataTypeWrapper;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
     use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::test_util::MockDatanodeManager;
+    use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
+    use common_query::prelude::{greptime_native_histogram, set_default_prefix};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use moka::future::Cache;
@@ -1448,7 +1448,11 @@ mod tests {
     use super::*;
     use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
 
-    fn make_table_ref_with_schema(ts_name: &str, field_name: &str) -> TableRef {
+    fn make_table_ref_with_schema(
+        ts_name: &str,
+        field_name: &str,
+        field_type: ConcreteDataType,
+    ) -> TableRef {
         let schema = datatypes::schema::SchemaBuilder::try_from_columns(vec![
             ColumnSchema::new(
                 ts_name,
@@ -1456,7 +1460,7 @@ mod tests {
                 false,
             )
             .with_time_index(true),
-            ColumnSchema::new(field_name, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(field_name, field_type, true),
         ])
         .unwrap()
         .build()
@@ -1495,7 +1499,8 @@ mod tests {
     async fn test_accommodate_existing_schema_logic() {
         let ts_name = "my_ts";
         let field_name = "my_field";
-        let table = make_table_ref_with_schema(ts_name, field_name);
+        let table =
+            make_table_ref_with_schema(ts_name, field_name, ConcreteDataType::float64_datatype());
 
         // The request uses different names for timestamp and field columns
         let mut req = RowInsertRequest {
@@ -1543,6 +1548,30 @@ mod tests {
         let req_schema = req.rows.as_ref().unwrap().schema.clone();
         assert_eq!(req_schema[0].column_name, ts_name);
         assert_eq!(req_schema[1].column_name, field_name);
+    }
+
+    #[test]
+    fn test_native_histogram_detection_survives_prefix_change() {
+        set_default_prefix(Some("custom")).unwrap();
+        let table = make_table_ref_with_schema(
+            "custom_timestamp",
+            NATIVE_HISTOGRAM_FIELD,
+            native_histogram_value_type().clone(),
+        );
+        let (datatype, datatype_extension) =
+            ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
+                .unwrap()
+                .into_parts();
+        let request_schema = [api::v1::ColumnSchema {
+            column_name: greptime_native_histogram().to_string(),
+            datatype: datatype as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension,
+            options: None,
+        }];
+
+        assert!(request_is_native_histogram(&request_schema));
+        assert!(table_is_native_histogram(&table));
     }
 
     #[test]
