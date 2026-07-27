@@ -285,7 +285,6 @@ impl CompactionScheduler {
         // Publish the picking phase before dispatching background planning.
         let mut status =
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
-        status.merge_waiter(waiter);
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             self.engine_config.clone(),
@@ -297,6 +296,7 @@ impl CompactionScheduler {
         );
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking(plan_id);
+        status.merge_waiter(waiter);
         self.region_status.insert(region_id, status);
         self.dispatch_compaction_planning(plan_id, request, compact_options);
         self.listener.on_compaction_scheduled(region_id);
@@ -361,10 +361,13 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return Vec::new();
         };
-        status.clear_running_task();
+        let Some(mut active) = status.take_active() else {
+            return Vec::new();
+        };
 
         // If there a pending compaction request, handle it first
         // and defer returning the pending DDL requests to the caller.
+        status.active = Some(active);
         if self.handle_pending_compaction_request(
             region_id,
             manifest_ctx,
@@ -378,8 +381,12 @@ impl CompactionScheduler {
             // So we return empty DDL requests.
             return Vec::new();
         };
+        let Some(restored_active) = status.take_active() else {
+            return Vec::new();
+        };
+        active = restored_active;
 
-        for waiter in std::mem::take(&mut status.waiters) {
+        for waiter in std::mem::take(&mut active.waiters) {
             waiter.send(Ok(0));
         }
 
@@ -389,7 +396,7 @@ impl CompactionScheduler {
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
         if !pending_ddl_requests.is_empty() {
             // The just-finished compaction satisfies any retained regular triggers.
-            for waiter in status.pending_regular.take().unwrap_or_default() {
+            for waiter in active.pending_regular.take().unwrap_or_default() {
                 waiter.send(Ok(0));
             }
             self.region_status.remove(&region_id);
@@ -398,8 +405,13 @@ impl CompactionScheduler {
             return pending_ddl_requests;
         }
 
-        if status.pending_regular.is_some() {
-            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
+        if active.pending_regular.is_some() {
+            self.schedule_next_compaction_with_active(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager,
+                Some(active),
+            );
             return Vec::new();
         }
         Vec::new()
@@ -442,7 +454,7 @@ impl CompactionScheduler {
 
     /// Removes the region status if it has no running task.
     ///
-    /// A finished compaction leaves an idle status (phase = None) behind when
+    /// A finished compaction leaves an idle status (`active = None`) behind when
     /// there is nothing more to schedule. If the caller decides not to chain
     /// the next compaction, it must remove the idle status; otherwise the
     /// status becomes a zombie that makes `schedule_compaction` swallow all
@@ -474,6 +486,24 @@ impl CompactionScheduler {
             return true;
         }
 
+        self.schedule_next_compaction_with_active(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager,
+            None,
+        )
+    }
+
+    fn schedule_next_compaction_with_active(
+        &mut self,
+        region_id: RegionId,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+        active: Option<ActiveCompaction>,
+    ) -> bool {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return false;
+        };
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
             self.request_sender.clone(),
@@ -488,7 +518,7 @@ impl CompactionScheduler {
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_regular_picking(plan_id);
+        status.start_regular_picking(plan_id, active);
         self.dispatch_compaction_planning(
             plan_id,
             request,
@@ -825,14 +855,14 @@ impl CompactionScheduler {
                 let Some(status) = self.region_status.get_mut(&region_id) else {
                     return Vec::new();
                 };
-                let waiters = std::mem::take(&mut status.waiters);
+                let waiters = status.take_waiters();
                 match self
                     .submit_prepared_compaction(prepared, files, waiters, plan_id)
                     .await
                 {
                     Ok(Some(phase)) => {
                         if let Some(status) = self.region_status.get_mut(&region_id) {
-                            status.phase = Some(phase);
+                            status.set_phase(phase);
                         }
                         Vec::new()
                     }
@@ -882,8 +912,10 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return Vec::new();
         };
-        status.clear_running_task();
-        for waiter in std::mem::take(&mut status.waiters) {
+        let Some(mut active) = status.take_active() else {
+            return Vec::new();
+        };
+        for waiter in std::mem::take(&mut active.waiters) {
             if let Some(err) = &err {
                 waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
             } else {
@@ -891,6 +923,7 @@ impl CompactionScheduler {
             }
         }
 
+        status.active = Some(active);
         if self.handle_pending_compaction_request(
             region_id,
             manifest_ctx,
@@ -899,12 +932,20 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
-        if self
+        let Some(active) = self
             .region_status
-            .get(&region_id)
-            .is_some_and(|status| status.pending_regular.is_some())
-        {
-            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
+            .get_mut(&region_id)
+            .and_then(CompactionStatus::take_active)
+        else {
+            return Vec::new();
+        };
+        if active.pending_regular.is_some() {
+            self.schedule_next_compaction_with_active(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager,
+                Some(active),
+            );
             return Vec::new();
         }
 
@@ -966,7 +1007,7 @@ impl CompactionScheduler {
                         if !dynamic_compaction_opts.fallback_to_local() {
                             error!(e; "Failed to schedule remote compaction job for region {}", region_id);
                             if let Some(status) = self.region_status.get_mut(&region_id) {
-                                status.waiters.extend(e.waiters);
+                                status.extend_waiters(e.waiters);
                             }
                             return RemoteCompactionSnafu {
                                 region_id,
@@ -1034,7 +1075,7 @@ impl CompactionScheduler {
                 if let (Some(status), Some(mut task)) =
                     (self.region_status.get_mut(&region_id), task)
                 {
-                    status.waiters.append(&mut task.waiters);
+                    status.append_waiters(&mut task.waiters);
                 }
                 Err(err)
             }
@@ -1120,6 +1161,98 @@ enum CompactionPhase {
     Remote {
         execution: CompactionExecution,
     },
+}
+
+#[derive(Debug)]
+struct ActiveCompaction {
+    phase: CompactionPhase,
+    waiters: Vec<OutputTx>,
+    pending_regular: Option<Vec<OutputTx>>,
+}
+
+impl ActiveCompaction {
+    fn picking(plan_id: u64, waiters: Vec<OutputTx>) -> Self {
+        Self {
+            phase: CompactionPhase::Picking {
+                plan_id,
+                cancelled: false,
+            },
+            waiters,
+            pending_regular: None,
+        }
+    }
+
+    fn start_picking(&mut self, plan_id: u64) {
+        self.phase = CompactionPhase::Picking {
+            plan_id,
+            cancelled: false,
+        };
+    }
+
+    fn start_regular_picking(&mut self, plan_id: u64) {
+        self.waiters
+            .extend(self.pending_regular.take().unwrap_or_default());
+        self.start_picking(plan_id);
+    }
+
+    fn is_picking(&self, expected_plan_id: u64) -> bool {
+        matches!(
+            self.phase,
+            CompactionPhase::Picking { plan_id, .. } if plan_id == expected_plan_id
+        )
+    }
+
+    fn accept_plan(&self, expected_plan_id: u64) -> bool {
+        matches!(
+            self.phase,
+            CompactionPhase::Picking {
+                plan_id,
+                cancelled: false,
+            } if plan_id == expected_plan_id
+        )
+    }
+
+    fn matches_execution(&self, execution: &CompactionExecution) -> bool {
+        match &self.phase {
+            CompactionPhase::Picking { .. } => None,
+            CompactionPhase::Local { execution, .. } | CompactionPhase::Remote { execution } => {
+                Some(execution)
+            }
+        }
+        .is_some_and(|current| current.matches(execution))
+    }
+
+    fn request_cancel(&mut self) -> RequestCancelResult {
+        match &mut self.phase {
+            CompactionPhase::Picking { cancelled, .. } => {
+                if *cancelled {
+                    RequestCancelResult::AlreadyCancelling
+                } else {
+                    *cancelled = true;
+                    RequestCancelResult::CancelIssued
+                }
+            }
+            CompactionPhase::Local { state, .. } => state.request_cancel(),
+            CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
+        }
+    }
+
+    fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx, ddl_fenced: bool) {
+        if matches!(self.phase, CompactionPhase::Picking { .. }) && !ddl_fenced {
+            let pending_regular = self.pending_regular.get_or_insert_default();
+            if let Some(waiter) = waiter.take_inner() {
+                pending_regular.push(waiter);
+            }
+        } else {
+            self.merge_waiter(waiter);
+        }
+    }
+
+    fn merge_waiter(&mut self, mut waiter: OptionOutputTx) {
+        if let Some(waiter) = waiter.take_inner() {
+            self.waiters.push(waiter);
+        }
+    }
 }
 
 /// Owns atomic reservations for every SST selected by a compaction plan.
@@ -1327,16 +1460,14 @@ struct CompactionStatus {
     version_control: VersionControlRef,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
-    /// Pending waiters for compaction.
-    waiters: Vec<OutputTx>,
+    /// Current compaction lifecycle. `None` is the existing transient idle state.
+    // TODO: Remove idle statuses and make ActiveCompaction non-optional once chained
+    // scheduling can recreate the status from region context.
+    active: Option<ActiveCompaction>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     pending_ddl_requests: Vec<SenderDdlRequest>,
-    /// Current compaction phase.
-    phase: Option<CompactionPhase>,
-    /// Waiters owned by a retained regular follow-up; `Some(empty)` records an automatic trigger.
-    pending_regular: Option<Vec<OutputTx>>,
 }
 
 impl CompactionStatus {
@@ -1350,119 +1481,137 @@ impl CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            waiters: Vec::new(),
+            active: None,
             pending_request: None,
             pending_ddl_requests: Vec::new(),
-            phase: None,
-            pending_regular: None,
         }
     }
 
     fn start_picking(&mut self, plan_id: u64) {
-        self.phase = Some(CompactionPhase::Picking {
-            plan_id,
-            cancelled: false,
+        if let Some(active) = &mut self.active {
+            active.start_picking(plan_id);
+        } else {
+            self.active = Some(ActiveCompaction::picking(plan_id, Vec::new()));
+        }
+    }
+
+    fn start_regular_picking(&mut self, plan_id: u64, active: Option<ActiveCompaction>) {
+        self.active = Some(if let Some(mut active) = active {
+            active.start_regular_picking(plan_id);
+            active
+        } else {
+            ActiveCompaction::picking(plan_id, Vec::new())
         });
     }
 
-    fn start_regular_picking(&mut self, plan_id: u64) {
-        self.waiters
-            .extend(self.pending_regular.take().unwrap_or_default());
-        self.start_picking(plan_id);
-    }
-
     fn is_picking(&self, expected_plan_id: u64) -> bool {
-        matches!(
-            self.phase,
-            Some(CompactionPhase::Picking { plan_id, .. }) if plan_id == expected_plan_id
-        )
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.is_picking(expected_plan_id))
     }
 
     fn accept_plan(&self, expected_plan_id: u64) -> bool {
-        matches!(
-            self.phase,
-            Some(CompactionPhase::Picking {
-                plan_id,
-                cancelled: false,
-            }) if plan_id == expected_plan_id
-        )
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.accept_plan(expected_plan_id))
     }
 
     fn is_busy(&self) -> bool {
-        self.phase.is_some()
+        self.active.is_some()
     }
 
     fn matches_execution(&self, execution: &CompactionExecution) -> bool {
-        self.phase
+        self.active
             .as_ref()
-            .and_then(|phase| match phase {
-                CompactionPhase::Picking { .. } => None,
-                CompactionPhase::Local { execution, .. }
-                | CompactionPhase::Remote { execution } => Some(execution),
-            })
-            .is_some_and(|current| current.matches(execution))
+            .is_some_and(|active| active.matches_execution(execution))
     }
 
     #[cfg(test)]
     fn start_local_task(&mut self) -> LocalCompactionState {
         let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
         let execution = CompactionExecution::new(0, CompactingFiles::empty());
-        self.phase = Some(CompactionPhase::Local {
+        let phase = CompactionPhase::Local {
             state: state.clone(),
             execution,
-        });
+        };
+        if let Some(active) = &mut self.active {
+            active.phase = phase;
+        } else {
+            self.active = Some(ActiveCompaction {
+                phase,
+                waiters: Vec::new(),
+                pending_regular: None,
+            });
+        }
         state
     }
 
     #[cfg(test)]
     fn start_remote_task(&mut self) {
         let execution = CompactionExecution::new(0, CompactingFiles::empty());
-        self.phase = Some(CompactionPhase::Remote { execution });
+        let phase = CompactionPhase::Remote { execution };
+        if let Some(active) = &mut self.active {
+            active.phase = phase;
+        } else {
+            self.active = Some(ActiveCompaction {
+                phase,
+                waiters: Vec::new(),
+                pending_regular: None,
+            });
+        }
     }
 
     fn request_cancel(&mut self) -> RequestCancelResult {
-        let Some(phase) = &mut self.phase else {
+        let Some(active) = &mut self.active else {
             return RequestCancelResult::NotRunning;
         };
-
-        match phase {
-            CompactionPhase::Picking { cancelled, .. } => {
-                if *cancelled {
-                    RequestCancelResult::AlreadyCancelling
-                } else {
-                    *cancelled = true;
-                    RequestCancelResult::CancelIssued
-                }
-            }
-            CompactionPhase::Local { state, .. } => state.request_cancel(),
-            CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
-        }
+        active.request_cancel()
     }
 
+    #[cfg(test)]
     fn clear_running_task(&mut self) -> bool {
-        self.phase.take().is_some()
+        self.active.take().is_some()
     }
 
-    fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx) {
-        if self.can_retain_regular_followup() {
-            let pending_regular = self.pending_regular.get_or_insert_default();
-            if let Some(waiter) = waiter.take_inner() {
-                pending_regular.push(waiter);
-            }
-        } else {
-            self.merge_waiter(waiter);
+    fn merge_regular_trigger(&mut self, waiter: OptionOutputTx) {
+        if let Some(active) = &mut self.active {
+            active.merge_regular_trigger(waiter, !self.pending_ddl_requests.is_empty());
         }
-    }
-
-    fn can_retain_regular_followup(&self) -> bool {
-        matches!(self.phase, Some(CompactionPhase::Picking { .. }))
-            && self.pending_ddl_requests.is_empty()
     }
 
     /// Merge the waiter to the pending compaction.
-    fn merge_waiter(&mut self, mut waiter: OptionOutputTx) {
-        if let Some(waiter) = waiter.take_inner() {
-            self.waiters.push(waiter);
+    fn merge_waiter(&mut self, waiter: OptionOutputTx) {
+        if let Some(active) = &mut self.active {
+            active.merge_waiter(waiter);
+        }
+    }
+
+    fn take_active(&mut self) -> Option<ActiveCompaction> {
+        self.active.take()
+    }
+
+    fn take_waiters(&mut self) -> Vec<OutputTx> {
+        self.active
+            .as_mut()
+            .map(|active| std::mem::take(&mut active.waiters))
+            .unwrap_or_default()
+    }
+
+    fn extend_waiters(&mut self, waiters: Vec<OutputTx>) {
+        if let Some(active) = &mut self.active {
+            active.waiters.extend(waiters);
+        }
+    }
+
+    fn append_waiters(&mut self, waiters: &mut Vec<OutputTx>) {
+        if let Some(active) = &mut self.active {
+            active.waiters.append(waiters);
+        }
+    }
+
+    fn set_phase(&mut self, phase: CompactionPhase) {
+        if let Some(active) = &mut self.active {
+            active.phase = phase;
         }
     }
 
@@ -1478,14 +1627,16 @@ impl CompactionStatus {
     }
 
     fn on_failure(mut self, err: Arc<Error>) {
-        for waiter in self
-            .waiters
-            .drain(..)
-            .chain(self.pending_regular.take().unwrap_or_default())
-        {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
-                region_id: self.region_id,
-            }));
+        if let Some(mut active) = self.active.take() {
+            for waiter in active
+                .waiters
+                .drain(..)
+                .chain(active.pending_regular.take().unwrap_or_default())
+            {
+                waiter.send(Err(err.clone()).context(CompactRegionSnafu {
+                    region_id: self.region_id,
+                }));
+            }
         }
 
         if let Some(pending_compaction) = self.pending_request {
@@ -1507,12 +1658,14 @@ impl CompactionStatus {
 
     #[must_use]
     fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
-        for waiter in self
-            .waiters
-            .drain(..)
-            .chain(self.pending_regular.take().unwrap_or_default())
-        {
-            waiter.send(CompactionCancelledSnafu.fail());
+        if let Some(mut active) = self.active.take() {
+            for waiter in active
+                .waiters
+                .drain(..)
+                .chain(active.pending_regular.take().unwrap_or_default())
+            {
+                waiter.send(CompactionCancelledSnafu.fail());
+            }
         }
 
         if let Some(pending_compaction) = self.pending_request {
@@ -2312,8 +2465,8 @@ mod tests {
         let (waiter_tx, waiter_rx) = oneshot::channel();
         let mut status =
             CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
-        status.merge_waiter(OptionOutputTx::from(waiter_tx));
         status.start_picking(7);
+        status.merge_waiter(OptionOutputTx::from(waiter_tx));
         scheduler.region_status.insert(region_id, status);
 
         CompactionScheduler::notify_planning_result(region_id, 7, tx, async {
@@ -2453,7 +2606,15 @@ mod tests {
 
         assert_eq!(job_scheduler.num_jobs(), 0);
         assert!(scheduler.region_status[&region_id].is_busy());
-        assert_eq!(scheduler.region_status[&region_id].waiters.len(), 1);
+        assert_eq!(
+            scheduler.region_status[&region_id]
+                .active
+                .as_ref()
+                .unwrap()
+                .waiters
+                .len(),
+            1
+        );
         assert_matches!(
             waiter_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -2610,7 +2771,10 @@ mod tests {
 
         assert_eq!(job_scheduler.num_jobs(), 1);
         assert!(matches!(
-            scheduler.region_status[&region_id].phase.as_ref(),
+            scheduler.region_status[&region_id]
+                .active
+                .as_ref()
+                .map(|active| &active.phase),
             Some(CompactionPhase::Local { .. })
         ));
         assert!(
@@ -2835,6 +2999,9 @@ mod tests {
                 .region_status
                 .get(&builder.region_id())
                 .unwrap()
+                .active
+                .as_ref()
+                .unwrap()
                 .waiters
                 .is_empty()
         );
@@ -2888,6 +3055,9 @@ mod tests {
             !scheduler
                 .region_status
                 .get(&builder.region_id())
+                .unwrap()
+                .active
+                .as_ref()
                 .unwrap()
                 .waiters
                 .is_empty()
