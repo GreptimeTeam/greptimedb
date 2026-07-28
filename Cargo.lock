@@ -2206,7 +2206,7 @@ dependencies = [
  "similar-asserts",
  "smallvec",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "standalone",
  "store-api",
  "table",
@@ -2778,7 +2778,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "sqlparser_derive 0.1.1",
  "store-api",
  "tokio",
@@ -2863,7 +2863,7 @@ dependencies = [
  "jsonb",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
 ]
 
 [[package]]
@@ -3774,7 +3774,7 @@ dependencies = [
  "object_store",
  "parking_lot 0.12.4",
  "parquet",
- "sqlparser 0.62.0",
+ "sqlparser",
  "tempfile",
  "tokio",
  "url",
@@ -3847,7 +3847,7 @@ dependencies = [
  "object_store",
  "parquet",
  "recursive",
- "sqlparser 0.62.0",
+ "sqlparser",
  "tokio",
  "uuid",
  "web-time",
@@ -4040,7 +4040,7 @@ dependencies = [
  "itertools 0.14.0",
  "recursive",
  "serde_json",
- "sqlparser 0.62.0",
+ "sqlparser",
 ]
 
 [[package]]
@@ -4420,7 +4420,7 @@ dependencies = [
  "log",
  "recursive",
  "regex",
- "sqlparser 0.62.0",
+ "sqlparser",
 ]
 
 [[package]]
@@ -4541,7 +4541,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "sqlparser_derive 0.1.1",
 ]
 
@@ -5607,7 +5607,7 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "sql",
- "sqlparser 0.61.0",
+ "sqlparser",
  "store-api",
  "strfmt",
  "table",
@@ -9979,7 +9979,7 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "sql",
- "sqlparser 0.61.0",
+ "sqlparser",
  "store-api",
  "substrait 1.2.0",
  "table",
@@ -10288,7 +10288,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "sql",
- "sqlparser 0.61.0",
+ "sqlparser",
  "store-api",
  "table",
 ]
@@ -11642,7 +11642,7 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "sql",
- "sqlparser 0.61.0",
+ "sqlparser",
  "store-api",
  "substrait 1.2.0",
  "table",
@@ -13792,7 +13792,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "sqlparser_derive 0.1.1",
  "store-api",
  "table",
@@ -13851,23 +13851,13 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
-version = "0.61.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbf5ea8d4d7c808e1af1cbabebca9a2abe603bcefc22294c5b95018d53200cb7"
-dependencies = [
- "log",
- "serde",
- "sqlparser_derive 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "sqlparser"
 version = "0.62.0"
 source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=9e9019bb1c7040ed956f654e39378dd42ab17884#9e9019bb1c7040ed956f654e39378dd42ab17884"
 dependencies = [
  "log",
  "recursive",
- "sqlparser_derive 0.5.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=9e9019bb1c7040ed956f654e39378dd42ab17884)",
+ "serde",
+ "sqlparser_derive 0.5.0",
 ]
 
 [[package]]
@@ -13879,17 +13869,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "sqlparser_derive"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6dd45d8fc1c79299bfbb7190e42ccbbdf6a5f52e4a6ad98d92357ea965bd289"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -14197,7 +14176,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "strum 0.27.1",
  "tokio",
  "uuid",
@@ -14516,7 +14495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser 0.61.0",
+ "sqlparser",
  "store-api",
  "tokio",
  "tokio-util",
@@ -14803,7 +14782,7 @@ dependencies = [
  "serde_yaml",
  "snafu 0.8.6",
  "sql",
- "sqlparser 0.61.0",
+ "sqlparser",
  "sqlx",
  "store-api",
  "strum 0.27.1",
