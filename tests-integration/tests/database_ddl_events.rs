@@ -165,7 +165,7 @@ async fn event_count_is_one(instance: &Arc<frontend::instance::Instance>, query:
         return false;
     };
 
-    actual.to_string()
+    actual
         == "\
 +-------------+
 | event_count |
