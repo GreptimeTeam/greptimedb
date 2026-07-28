@@ -26,7 +26,7 @@ order by table_schema, table_name;
 |greptime|information_schema|engines|LOCALTEMPORARY|5|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|events|LOCALTEMPORARY|13|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|files|LOCALTEMPORARY|14|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
-|greptime|information_schema|flow_statistics|LOCALTEMPORARY|44|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
+|greptime|information_schema|flow_statistics|LOCALTEMPORARY|45|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|flows|LOCALTEMPORARY|33|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|global_status|LOCALTEMPORARY|25|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|key_column_usage|LOCALTEMPORARY|16|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
