@@ -363,16 +363,14 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
-        let Some(status) = self.region_status.get_mut(&region_id) else {
+        if !self
+            .region_status
+            .get(&region_id)
+            .is_some_and(|s| s.is_busy())
+        {
             return Vec::new();
-        };
-        let Some(mut active) = status.take_active() else {
-            return Vec::new();
-        };
+        }
 
-        // If there a pending compaction request, handle it first
-        // and defer returning the pending DDL requests to the caller.
-        status.active = Some(active);
         if self.handle_pending_compaction_request(
             region_id,
             manifest_ctx,
@@ -381,15 +379,14 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
+        // The region status might be removed by the previous steps.
+        // So we return empty DDL requests.
         let Some(status) = self.region_status.get_mut(&region_id) else {
-            // The region status might be removed by the previous steps.
-            // So we return empty DDL requests.
             return Vec::new();
         };
-        let Some(restored_active) = status.take_active() else {
+        let Some(mut active) = status.take_active() else {
             return Vec::new();
         };
-        active = restored_active;
 
         for waiter in std::mem::take(&mut active.waiters) {
             waiter.send(Ok(0));
