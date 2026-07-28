@@ -90,7 +90,7 @@ impl JsonArray<'_> {
         Ok(value)
     }
 
-    /// Normalizes a JSON2 array to the wider `expect` data type without lossing
+    /// Normalizes a JSON2 array to the wider `expect` data type without losing
     /// information.
     ///
     /// This is mainly used for write/flush-time JSON2 schema alignment:
