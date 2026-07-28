@@ -624,7 +624,7 @@ mod test {
         let cases: [(ArrayRef, Value); 3] = [
             (Arc::new(UInt64Array::from(vec![u64::MAX])), json!(u64::MAX)),
             (Arc::new(Int64Array::from(vec![i64::MIN])), json!(i64::MIN)),
-            (Arc::new(Float64Array::from(vec![3.14])), json!(3.14)),
+            (Arc::new(Float64Array::from(vec![1.25])), json!(1.25)),
         ];
 
         for (values, expected) in cases {

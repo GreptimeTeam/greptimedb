@@ -80,16 +80,6 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
     Ok(builder)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum JsonGetCastMode {
-    /// Used by json_get(... )::type. Values are cast for query evaluation and
-    /// mismatches become NULL.
-    Project,
-    /// Used by json_get_int/json_get_float/json_get_bool/json_get_string.
-    /// These functions extract values of the requested JSON type.
-    Extract,
-}
-
 // TODO: refactor this to StringLikeArrayBuilder from Arrow 57
 struct StringResultBuilder(StringViewBuilder);
 
@@ -125,18 +115,12 @@ impl JsonGetResultBuilder for StringResultBuilder {
     }
 }
 
-#[derive(Display, Debug)]
+#[derive(Default, Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetString(JsonGetWithType);
 
 impl JsonGetString {
     pub const NAME: &'static str = "json_get_string";
-}
-
-impl Default for JsonGetString {
-    fn default() -> Self {
-        Self(JsonGetWithType::extract())
-    }
 }
 
 impl Function for JsonGetString {
@@ -205,18 +189,12 @@ impl JsonGetResultBuilder for Int32ResultBuilder {
     }
 }
 
-#[derive(Display, Debug)]
+#[derive(Default, Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetInt(JsonGetWithType);
 
 impl JsonGetInt {
     pub const NAME: &'static str = "json_get_int";
-}
-
-impl Default for JsonGetInt {
-    fn default() -> Self {
-        Self(JsonGetWithType::extract())
-    }
 }
 
 impl Function for JsonGetInt {
@@ -270,18 +248,12 @@ impl JsonGetResultBuilder for FloatResultBuilder {
     }
 }
 
-#[derive(Display, Debug)]
+#[derive(Default, Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetFloat(JsonGetWithType);
 
 impl JsonGetFloat {
     pub const NAME: &'static str = "json_get_float";
-}
-
-impl Default for JsonGetFloat {
-    fn default() -> Self {
-        Self(JsonGetWithType::extract())
-    }
 }
 
 impl Function for JsonGetFloat {
@@ -335,18 +307,12 @@ impl JsonGetResultBuilder for BoolResultBuilder {
     }
 }
 
-#[derive(Display, Debug)]
+#[derive(Default, Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetBool(JsonGetWithType);
 
 impl JsonGetBool {
     pub const NAME: &'static str = "json_get_bool";
-}
-
-impl Default for JsonGetBool {
-    fn default() -> Self {
-        Self(JsonGetWithType::extract())
-    }
 }
 
 impl Function for JsonGetBool {
@@ -390,12 +356,7 @@ fn jsonb_get(
     Ok(())
 }
 
-fn json_struct_get(
-    array: &ArrayRef,
-    path: &str,
-    with_type: &DataType,
-    cast_mode: JsonGetCastMode,
-) -> Result<ArrayRef> {
+fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result<ArrayRef> {
     let path = path.trim_start_matches("$");
 
     // Fast path: if the JSON array fields can be directly indexed into by the `path`, simply get
@@ -447,29 +408,9 @@ fn json_struct_get(
 
     if direct {
         let casted = if current.data_type() != with_type {
-            match cast_mode {
-                JsonGetCastMode::Project => JsonArray::from(current)
-                    .project_to(with_type)
-                    .map_err(|e| exec_datafusion_err!("{e}"))?,
-                JsonGetCastMode::Extract => match (current.data_type(), with_type) {
-                    (DataType::Binary, _) => {
-                        // Fall back to the slow path if the found JSON sub-array is serialized to
-                        // bytes (because of JSON type conflicting).
-                        build_with(current, with_type, |v| Some(v))?
-                    }
-                    (DataType::List(_) | DataType::Struct(_), with_type)
-                        if with_type.is_string() =>
-                    {
-                        // Special handle for wanted array is string because Arrow cast is not
-                        // working here if the datatype is list or struct.
-                        build_with(current, with_type, |v| Some(v))?
-                    }
-                    (_, with_type) if with_type.is_string() => {
-                        arrow_cast::cast(current.as_ref(), with_type)?
-                    }
-                    _ => new_null_array(with_type, current.len()),
-                },
-            }
+            JsonArray::from(current)
+                .project_to(with_type)
+                .map_err(|e| exec_datafusion_err!("{e}"))?
         } else {
             current.clone()
         };
@@ -492,25 +433,16 @@ fn json_struct_get(
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetWithType {
     signature: Signature,
-    cast_mode: JsonGetCastMode,
 }
 
 impl JsonGetWithType {
     pub const NAME: &'static str = "json_get";
-
-    fn extract() -> Self {
-        Self {
-            signature: Signature::variadic_any(Volatility::Immutable),
-            cast_mode: JsonGetCastMode::Extract,
-        }
-    }
 }
 
 impl Default for JsonGetWithType {
     fn default() -> Self {
         Self {
             signature: Signature::variadic_any(Volatility::Immutable),
-            cast_mode: JsonGetCastMode::Project,
         }
     }
 }
@@ -585,7 +517,7 @@ impl Function for JsonGetWithType {
                 jsonb_get(jsons, path, builder.as_mut())?;
                 builder.build()
             }
-            DataType::Struct(_) => json_struct_get(&arg0, path, &with_type, self.cast_mode)?,
+            DataType::Struct(_) => json_struct_get(&arg0, path, &with_type)?,
             _ => {
                 return exec_err!("JSON_GET not supported argument type {}", arg0.data_type());
             }
@@ -757,7 +689,7 @@ mod tests {
             ("$.c", None),
             ("$.kind", None),
             ("$.payload.code", Some(404)),
-            ("$.payload.success", None),
+            ("$.payload.success", Some(0)),
             ("$.payload.result.time_cost", None),
             ("$.payload.not-exists", None),
             ("$.not-exists", None),
@@ -825,8 +757,8 @@ mod tests {
             ("$.a", Some(4.4)),
             ("$.c", None),
             ("$.kind", None),
-            ("$.payload.code", None),
-            ("$.payload.success", None),
+            ("$.payload.code", Some(404.0)),
+            ("$.payload.success", Some(0.0)),
             ("$.payload.result.time_cost", Some(1.234)),
             ("$.payload.not-exists", None),
             ("$.not-exists", None),
@@ -894,7 +826,7 @@ mod tests {
             ("$.a", Some(false)),
             ("$.c", None),
             ("$.kind", None),
-            ("$.payload.code", None),
+            ("$.payload.code", Some(true)),
             ("$.payload.success", Some(false)),
             ("$.payload.result.time_cost", None),
             ("$.payload.not-exists", None),
