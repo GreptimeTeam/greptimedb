@@ -19,7 +19,7 @@ use arrow::compute;
 use arrow::datatypes::Float64Type;
 use arrow_schema::Field;
 use datafusion_common::arrow::array::{
-    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
+    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
@@ -69,7 +69,6 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
             Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
                 as Box<dyn JsonGetResultBuilder>
         }
-        DataType::Int32 => Box::new(Int32ResultBuilder(Int32Builder::with_capacity(len))),
         DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
         DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
         DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
@@ -154,29 +153,6 @@ impl JsonGetResultBuilder for IntResultBuilder {
             }
             JsonResultValue::JsonStructByValue(value) => self.0.append_option(value.as_i64()),
         }
-        Ok(())
-    }
-
-    fn append_null(&mut self) {
-        self.0.append_null();
-    }
-
-    fn build(&mut self) -> ArrayRef {
-        Arc::new(self.0.finish())
-    }
-}
-
-struct Int32ResultBuilder(Int32Builder);
-
-impl JsonGetResultBuilder for Int32ResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-        let value = match value {
-            JsonResultValue::Jsonb(value) => jsonb::to_i64(&value).ok(),
-            JsonResultValue::JsonStructByColumn(column, i) => int_array_value_at_index(column, i),
-            JsonResultValue::JsonStructByValue(value) => value.as_i64(),
-        }
-        .and_then(|value| i32::try_from(value).ok());
-        self.0.append_option(value);
         Ok(())
     }
 
