@@ -14,11 +14,9 @@
 
 use std::sync::Arc;
 
-use common_test_util::temp_dir::create_temp_dir;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
-use tests_integration::cluster::GreptimeDbClusterBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use uuid::Uuid;
 
 use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
@@ -27,23 +25,12 @@ const CREATE_FLOW_EVENT_TYPE: &str = "create_flow";
 const DROP_FLOW_EVENT_TYPE: &str = "drop_flow";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_flow_ddl_events_file() {
-    let store_type = StorageType::File;
-    if !store_type.test_on() {
-        return;
-    }
-
+async fn test_standalone_flow_ddl_events() {
     common_telemetry::init_default_ut_logging();
-    let (store_config, _guard) = get_test_store_config(&store_type);
-    let home_dir = create_temp_dir("test_flow_ddl_events_data_home");
-    let cluster = GreptimeDbClusterBuilder::new("test_flow_ddl_events")
-        .await
-        .with_datanodes(1)
-        .with_store_config(store_config)
-        .with_shared_home_dir(Arc::new(home_dir))
-        .build(true)
+    let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_flow_ddl_events")
+        .build()
         .await;
-    let instance = cluster.fe_instance();
+    let instance = standalone.fe_instance();
     let suffix = Uuid::new_v4().simple();
     let missing_source = format!("flow_ddl_event_missing_source_{suffix}");
     let sink = format!("flow_ddl_event_sink_{suffix}");
@@ -61,7 +48,7 @@ async fn test_flow_ddl_events_file() {
     instance
         .do_query(
             &format!(
-                "CREATE FLOW IF NOT EXISTS {flow} SINK TO {sink} EVAL INTERVAL '10s' \\
+                "CREATE FLOW IF NOT EXISTS {flow} SINK TO {sink} EVAL INTERVAL '10s' \
                  WITH (defer_on_missing_source = true) AS SELECT val, ts FROM {missing_source}"
             ),
             QueryContext::arc(),
@@ -164,9 +151,13 @@ async fn find_submitted_procedure_id(
     find_eventually_string(
         instance,
         &format!(
-            "SELECT procedure_id FROM greptime_private.events \\
-             WHERE type = '{event_type}' AND flow_name = '{flow_name}' \\
-             AND procedure_trigger = 'Submitted' ORDER BY timestamp DESC LIMIT 1"
+            r#"SELECT procedure_id
+FROM greptime_private.events
+WHERE type = '{event_type}'
+  AND flow_name = '{flow_name}'
+  AND procedure_trigger = 'Submitted'
+ORDER BY timestamp DESC
+LIMIT 1"#,
         ),
         "procedure_id",
     )

@@ -72,7 +72,7 @@ async fn event_count_is_one(instance: &Arc<Instance>, query: &str) -> bool {
     };
 
     actual
-        == "\\
+        == "\
 +-------------+
 | event_count |
 +-------------+
