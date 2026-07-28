@@ -268,56 +268,34 @@ impl NativeHistogram {
         result
     }
 
-    fn add_exact(&self, other: &Self) -> Option<Self> {
+    fn combine_exact(
+        &self,
+        other: &Self,
+        reset_hint: CounterResetHint,
+        op: impl Fn(f64, f64) -> f64 + Copy,
+    ) -> Option<Self> {
         if !self.compatible_with(other) {
             return None;
         }
 
         let mut result = self.clone();
-        result.count += other.count;
-        result.zero_count += other.zero_count;
-        result.sum += other.sum;
-        result.reset_hint = add_reset_hint(self.reset_hint, other.reset_hint);
+        result.count = op(result.count, other.count);
+        result.zero_count = op(result.zero_count, other.zero_count);
+        result.sum = op(result.sum, other.sum);
+        result.reset_hint = reset_hint;
         (result.positive_spans, result.positive_buckets) = merge_side(
             &self.positive_spans,
             &self.positive_buckets,
             &other.positive_spans,
             &other.positive_buckets,
-            |left, right| left + right,
+            op,
         )?;
         (result.negative_spans, result.negative_buckets) = merge_side(
             &self.negative_spans,
             &self.negative_buckets,
             &other.negative_spans,
             &other.negative_buckets,
-            |left, right| left + right,
-        )?;
-        Some(result)
-    }
-
-    fn sub_exact(&self, other: &Self) -> Option<Self> {
-        if !self.compatible_with(other) {
-            return None;
-        }
-
-        let mut result = self.clone();
-        result.count -= other.count;
-        result.zero_count -= other.zero_count;
-        result.sum -= other.sum;
-        result.reset_hint = CounterResetHint::Gauge;
-        (result.positive_spans, result.positive_buckets) = merge_side(
-            &self.positive_spans,
-            &self.positive_buckets,
-            &other.positive_spans,
-            &other.positive_buckets,
-            |left, right| left - right,
-        )?;
-        (result.negative_spans, result.negative_buckets) = merge_side(
-            &self.negative_spans,
-            &self.negative_buckets,
-            &other.negative_spans,
-            &other.negative_buckets,
-            |left, right| left - right,
+            op,
         )?;
         Some(result)
     }
@@ -334,7 +312,9 @@ impl NativeHistogram {
         }
 
         let (left, right) = self.reconcile(other)?;
-        left.add_exact(&right)?.compact()
+        let reset_hint = add_reset_hint(left.reset_hint, right.reset_hint);
+        left.combine_exact(&right, reset_hint, |left, right| left + right)?
+            .compact()
     }
 
     /// Subtracts `other` after reconciling compatible bucket layouts.
@@ -349,7 +329,8 @@ impl NativeHistogram {
         }
 
         let (left, right) = self.reconcile(other)?;
-        left.sub_exact(&right)?.compact()
+        left.combine_exact(&right, CounterResetHint::Gauge, |left, right| left - right)?
+            .compact()
     }
 
     /// Negates every payload value and marks the result as a gauge histogram.
