@@ -24,6 +24,7 @@ mod predict_linear;
 mod quantile;
 mod quantile_aggr;
 mod resets;
+mod rolling;
 mod round;
 #[cfg(test)]
 mod test_util;

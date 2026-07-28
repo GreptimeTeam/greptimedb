@@ -19,6 +19,7 @@ use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
@@ -81,16 +82,49 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 }
 
 /// The count of all values in the specified interval.
-#[range_fn(
-    name = CountOverTime,
-    ret = Float64Array,
-    display_name = prom_count_over_time
-)]
+#[allow(dead_code)]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
         None
     } else {
         Some(values.len() as f64)
+    }
+}
+
+#[derive(Debug)]
+pub struct CountOverTime {}
+
+impl CountOverTime {
+    pub const fn name() -> &'static str {
+        "prom_count_over_time"
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        create_udf(
+            Self::name(),
+            Self::input_type(),
+            Self::return_type(),
+            Volatility::Volatile,
+            Arc::new(Self::calc) as _,
+        )
+    }
+
+    fn input_type() -> Vec<DataType> {
+        vec![
+            RangeArray::convert_data_type(
+                TimestampMillisecondArray::new_null(0).data_type().clone(),
+            ),
+            RangeArray::convert_data_type(Float64Array::new_null(0).data_type().clone()),
+        ]
+    }
+
+    fn return_type() -> DataType {
+        Float64Array::new_null(0).data_type().clone()
+    }
+
+    fn calc(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        assert_eq!(input.len(), 2);
+        crate::functions::rolling::count::calc(input, Self::name())
     }
 }
 
