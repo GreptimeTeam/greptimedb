@@ -313,7 +313,8 @@ create_topic_timeout = "30s"
 ## TTL for the events table that will be used to store the events. Default is `90d`.
 ttl = "90d"
 ## Event types to record. Current available event types: `region_migration`,
-## `create_database`, `alter_database`, `drop_database`.
+## `create_database`, `alter_database`, `drop_database`, `create_flow`,
+## `drop_flow`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["region_migration"]
