@@ -64,7 +64,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
-use crate::events::region_migration_event::{REGION_MIGRATION_EVENT_TYPE, RegionMigrationEvent};
+use crate::event::region_migration_event::{REGION_MIGRATION_EVENT_TYPE, RegionMigrationEvent};
 use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,

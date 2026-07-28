@@ -17,6 +17,10 @@ use std::time::Duration;
 
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
+use common_event_recorder::event_table::{
+    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_SRC_NODE_ID_COLUMN,
+    REGION_MIGRATION_TRIGGER_REASON_COLUMN,
+};
 use common_event_recorder::{
     DEFAULT_EVENTS_TABLE_NAME, DEFAULT_FLUSH_INTERVAL_SECONDS, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
     EVENTS_TABLE_TYPE_COLUMN_NAME,
@@ -41,11 +45,7 @@ use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
-use meta_srv::events::region_migration_event::{
-    EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME, EVENTS_TABLE_REGION_ID_COLUMN_NAME,
-    EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME, EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME,
-    REGION_MIGRATION_EVENT_TYPE,
-};
+use meta_srv::event::region_migration_event::REGION_MIGRATION_EVENT_TYPE;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -1312,11 +1312,10 @@ impl Iden for RegionMigrationEvents {
                 Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
                 Self::Table => DEFAULT_EVENTS_TABLE_NAME,
                 Self::EventType => EVENTS_TABLE_TYPE_COLUMN_NAME,
-                Self::RegionMigrationTriggerReason =>
-                    EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME,
-                Self::RegionId => EVENTS_TABLE_REGION_ID_COLUMN_NAME,
-                Self::SrcNodeId => EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME,
-                Self::DstNodeId => EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME,
+                Self::RegionMigrationTriggerReason => REGION_MIGRATION_TRIGGER_REASON_COLUMN.name(),
+                Self::RegionId => REGION_ID_COLUMN.name(),
+                Self::SrcNodeId => REGION_MIGRATION_SRC_NODE_ID_COLUMN.name(),
+                Self::DstNodeId => REGION_MIGRATION_DST_NODE_ID_COLUMN.name(),
             }
         )
         .unwrap();

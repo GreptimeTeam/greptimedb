@@ -38,8 +38,8 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,7 @@ use store_api::storage::{RegionId, TableId};
 use uuid::Uuid;
 
 use crate::error::{self, Result};
+use crate::event::repartition_event::{REPARTITION_GROUP_EVENT_TYPE, RepartitionGroupEvent};
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
 use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::utils::get_datanode_table_value;
@@ -260,6 +261,19 @@ impl Procedure for RepartitionGroupProcedure {
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(REPARTITION_GROUP_EVENT_TYPE) {
+            return None;
+        }
+
+        let event = if matches!(ctx.trigger, EventTrigger::Submitted) {
+            RepartitionGroupEvent::submitted(&self.context.persistent_ctx)
+        } else {
+            RepartitionGroupEvent::lifecycle()
+        };
+        Some(Box::new(event))
+    }
 }
 
 pub struct Context {
@@ -318,12 +332,18 @@ pub struct GroupPrepareResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     pub group_id: GroupId,
+    /// The parent repartition procedure id, when the group was created by a live parent.
+    #[serde(default)]
+    pub parent_procedure_id: Option<common_procedure::ProcedureId>,
     /// The table id of the repartition group.
     pub table_id: TableId,
     /// The catalog name of the repartition group.
     pub catalog_name: String,
     /// The schema name of the repartition group.
     pub schema_name: String,
+    /// The table name of the repartition group.
+    #[serde(default)]
+    pub table_name: Option<String>,
     /// The source regions of the repartition group.
     pub sources: Vec<SourceRegionDescriptor>,
     /// The target regions of the repartition group.
@@ -352,9 +372,11 @@ impl PersistentContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: GroupId,
+        parent_procedure_id: common_procedure::ProcedureId,
         table_id: TableId,
         catalog_name: String,
         schema_name: String,
+        table_name: String,
         sources: Vec<SourceRegionDescriptor>,
         targets: Vec<TargetRegionDescriptor>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
@@ -365,9 +387,11 @@ impl PersistentContext {
     ) -> Self {
         Self {
             group_id,
+            parent_procedure_id: Some(parent_procedure_id),
             table_id,
             catalog_name,
             schema_name,
+            table_name: Some(table_name),
             sources,
             targets,
             region_mapping,
@@ -607,6 +631,7 @@ mod tests {
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
 
     use crate::error::Error;
+    use crate::procedure::repartition::group::PersistentContext;
     use crate::procedure::repartition::test_util::{TestingEnv, new_persistent_context};
 
     #[tokio::test]
@@ -655,5 +680,18 @@ mod tests {
         let ctx = env.create_context(persistent_context);
         let err = ctx.get_datanode_table_value(1024, 1).await.unwrap_err();
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_persistent_context_is_backward_compatible_without_event_fields() {
+        let persistent_context = new_persistent_context(1024, vec![], vec![]);
+        let mut serialized = serde_json::to_value(persistent_context).unwrap();
+        let object = serialized.as_object_mut().unwrap();
+        object.remove("parent_procedure_id");
+        object.remove("table_name");
+
+        let deserialized: PersistentContext = serde_json::from_value(serialized).unwrap();
+        assert_eq!(deserialized.parent_procedure_id, None);
+        assert_eq!(deserialized.table_name, None);
     }
 }

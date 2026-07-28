@@ -29,6 +29,7 @@ mod sql;
 mod region_migration;
 #[macro_use]
 mod repartition;
+mod repartition_event;
 #[macro_use]
 mod repartition_expr_version;
 mod mysql;

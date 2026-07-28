@@ -16,7 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use serde::Serialize;
@@ -26,15 +26,11 @@ use store_api::storage::RegionId;
 use crate::procedure::region_migration::{PersistentContext, RegionMigrationTriggerReason};
 
 pub const REGION_MIGRATION_EVENT_TYPE: &str = "region_migration";
-pub const EVENTS_TABLE_REGION_ID_COLUMN_NAME: &str = "region_id";
-pub const EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
-pub const EVENTS_TABLE_REGION_NUMBER_COLUMN_NAME: &str = "region_number";
-pub const EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME: &str =
-    "region_migration_trigger_reason";
-pub const EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME: &str = "region_migration_src_node_id";
-pub const EVENTS_TABLE_SRC_PEER_ADDR_COLUMN_NAME: &str = "region_migration_src_peer_addr";
-pub const EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME: &str = "region_migration_dst_node_id";
-pub const EVENTS_TABLE_DST_PEER_ADDR_COLUMN_NAME: &str = "region_migration_dst_peer_addr";
+use common_event_recorder::event_table::{
+    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
+};
 
 /// RegionMigrationEvent is the event of region migration.
 #[derive(Debug)]
@@ -81,56 +77,16 @@ impl Event for RegionMigrationEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        vec![
-            ColumnSchema {
-                column_name: EVENTS_TABLE_REGION_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint64.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_TABLE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint32.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_REGION_NUMBER_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint32.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint64.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_SRC_PEER_ADDR_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint64.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_DST_PEER_ADDR_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-        ]
+        column_schemas([
+            &REGION_ID_COLUMN,
+            &TABLE_ID_COLUMN,
+            &REGION_NUMBER_COLUMN,
+            &REGION_MIGRATION_TRIGGER_REASON_COLUMN,
+            &REGION_MIGRATION_SRC_NODE_ID_COLUMN,
+            &REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
+            &REGION_MIGRATION_DST_NODE_ID_COLUMN,
+            &REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+        ])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {

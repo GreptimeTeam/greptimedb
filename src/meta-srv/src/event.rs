@@ -21,6 +21,7 @@ use common_event_recorder::{Event, EventHandler, build_row_inserts_request, grou
 use snafu::ResultExt;
 
 pub mod region_migration_event;
+pub mod repartition_event;
 
 /// EventHandlerImpl is the default event handler implementation in metasrv.
 /// It sends the received events to the frontend instances.

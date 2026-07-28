@@ -125,6 +125,97 @@ pub const VIEW_NAME_COLUMN: EventTableColumn =
 pub const VIEW_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("view_id", ColumnDataType::Uint32, SemanticType::Field);
 
+/// The canonical table name field for table DDL events.
+pub const TABLE_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("table_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical table identifier field for table DDL events.
+pub const TABLE_ID_COLUMN: EventTableColumn =
+    EventTableColumn::new("table_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical region identifier field for region events.
+pub const REGION_ID_COLUMN: EventTableColumn =
+    EventTableColumn::new("region_id", ColumnDataType::Uint64, SemanticType::Field);
+/// The canonical region number field for region events.
+pub const REGION_NUMBER_COLUMN: EventTableColumn =
+    EventTableColumn::new("region_number", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical region migration trigger reason field.
+pub const REGION_MIGRATION_TRIGGER_REASON_COLUMN: EventTableColumn = EventTableColumn::new(
+    "region_migration_trigger_reason",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical region migration source node identifier field.
+pub const REGION_MIGRATION_SRC_NODE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "region_migration_src_node_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical region migration source peer address field.
+pub const REGION_MIGRATION_SRC_PEER_ADDR_COLUMN: EventTableColumn = EventTableColumn::new(
+    "region_migration_src_peer_addr",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical region migration destination node identifier field.
+pub const REGION_MIGRATION_DST_NODE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "region_migration_dst_node_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical region migration destination peer address field.
+pub const REGION_MIGRATION_DST_PEER_ADDR_COLUMN: EventTableColumn = EventTableColumn::new(
+    "region_migration_dst_peer_addr",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical parent procedure identifier field for child procedure events.
+pub const PARENT_PROCEDURE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "parent_procedure_id",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical repartition group identifier field.
+pub const REPARTITION_GROUP_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "repartition_group_id",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical repartition source region identifier field.
+pub const SOURCE_REGION_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "source_region_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical repartition source region number field.
+pub const SOURCE_REGION_NUMBER_COLUMN: EventTableColumn = EventTableColumn::new(
+    "source_region_number",
+    ColumnDataType::Uint32,
+    SemanticType::Field,
+);
+/// The canonical repartition source partition expression field.
+pub const SOURCE_PARTITION_EXPR_COLUMN: EventTableColumn = EventTableColumn::new(
+    "source_partition_expr",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical repartition target region identifier field.
+pub const TARGET_REGION_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "target_region_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical repartition target region number field.
+pub const TARGET_REGION_NUMBER_COLUMN: EventTableColumn = EventTableColumn::new(
+    "target_region_number",
+    ColumnDataType::Uint32,
+    SemanticType::Field,
+);
+/// The canonical repartition target partition expression field.
+pub const TARGET_PARTITION_EXPR_COLUMN: EventTableColumn = EventTableColumn::new(
+    "target_partition_expr",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+
 /// Builds API schemas from canonical event-table columns while preserving their order.
 pub fn column_schemas<'a>(
     columns: impl IntoIterator<Item = &'a EventTableColumn>,
