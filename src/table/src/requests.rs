@@ -439,6 +439,7 @@ pub struct CompactTableRequest {
     pub table_name: String,
     pub compact_options: compact_request::Options,
     pub parallelism: u32,
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for CompactTableRequest {
@@ -449,6 +450,7 @@ impl Default for CompactTableRequest {
             table_name: Default::default(),
             compact_options: compact_request::Options::Regular(Default::default()),
             parallelism: 1,
+            time_range: None,
         }
     }
 }

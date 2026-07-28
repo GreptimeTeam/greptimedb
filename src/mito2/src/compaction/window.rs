@@ -34,13 +34,21 @@ use crate::sst::file::FileHandle;
 #[derive(Debug)]
 pub struct WindowedCompactionPicker {
     compaction_time_window_seconds: Option<i64>,
+    time_range: Option<TimestampRange>,
 }
 
 impl WindowedCompactionPicker {
     pub fn new(window_seconds: Option<i64>) -> Self {
         Self {
             compaction_time_window_seconds: window_seconds,
+            time_range: None,
         }
+    }
+
+    /// Sets the time range used to select compaction windows.
+    pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
+        self.time_range = time_range;
+        self
     }
 
     // Computes compaction time window. First we respect user specified parameter, then
@@ -101,6 +109,7 @@ impl WindowedCompactionPicker {
                 .flat_map(|level| level.files.values())
                 .filter(|file| !expired_file_ids.contains(&file.file_id())),
         );
+        let windows = filter_time_windows(windows, self.time_range);
 
         (build_output(windows), expired_ssts, time_window)
     }
@@ -121,6 +130,53 @@ impl Picker for WindowedCompactionPicker {
             max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
         })
     }
+}
+
+fn filter_time_windows(
+    mut windows: BTreeMap<i64, (i64, Vec<FileHandle>)>,
+    time_range: Option<TimestampRange>,
+) -> BTreeMap<i64, (i64, Vec<FileHandle>)> {
+    let Some(time_range) = time_range else {
+        return windows;
+    };
+
+    let mut selected_windows = windows
+        .iter()
+        .filter_map(|(lower_bound, (upper_bound, _))| {
+            let window_start = Timestamp::new_second(*lower_bound);
+            let window_end = Timestamp::new_second(*upper_bound);
+            let starts_before_range_end = time_range
+                .end()
+                .is_none_or(|range_end| window_start < range_end);
+            let ends_after_range_start = time_range
+                .start()
+                .is_none_or(|range_start| range_start < window_end);
+            (starts_before_range_end && ends_after_range_start).then_some(*lower_bound)
+        })
+        .collect::<HashSet<_>>();
+
+    loop {
+        let selected_files = windows
+            .iter()
+            .filter(|(lower_bound, _)| selected_windows.contains(lower_bound))
+            .flat_map(|(_, (_, files))| files.iter().map(FileHandle::file_id))
+            .collect::<HashSet<_>>();
+        let previous_len = selected_windows.len();
+        for (lower_bound, (_, files)) in &windows {
+            if files
+                .iter()
+                .any(|file| selected_files.contains(&file.file_id()))
+            {
+                selected_windows.insert(*lower_bound);
+            }
+        }
+        if selected_windows.len() == previous_len {
+            break;
+        }
+    }
+
+    windows.retain(|lower_bound, _| selected_windows.contains(lower_bound));
+    windows
 }
 
 fn build_output(windows: BTreeMap<i64, (i64, Vec<FileHandle>)>) -> Vec<CompactionOutput> {
@@ -349,6 +405,45 @@ mod tests {
                 Timestamp::new_millisecond(3 * HOUR)
             ),
             outputs[2].output_time_range
+        );
+    }
+
+    #[test]
+    fn test_pick_time_range_expands_for_cross_window_files() {
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(HOUR / 2),
+            Timestamp::new_millisecond(HOUR * 3 / 4),
+        )
+        .unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(Some(time_range));
+        let files = vec![
+            (FileId::random(), 0, 2 * HOUR - 1, 0),
+            (FileId::random(), HOUR, HOUR * 3 - 1, 0),
+            (FileId::random(), 4 * HOUR, 5 * HOUR - 1, 0),
+        ];
+        let version = build_version(&files, None);
+
+        let (outputs, _, _) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(6 * HOUR),
+        );
+
+        assert_eq!(3, outputs.len());
+        assert_eq!(
+            Some(TimestampRange::new(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(HOUR),
+            )),
+            outputs.first().map(|output| output.output_time_range)
+        );
+        assert_eq!(
+            Some(TimestampRange::new(
+                Timestamp::new_millisecond(2 * HOUR),
+                Timestamp::new_millisecond(3 * HOUR),
+            )),
+            outputs.last().map(|output| output.output_time_range)
         );
     }
 

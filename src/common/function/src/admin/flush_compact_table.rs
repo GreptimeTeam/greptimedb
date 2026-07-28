@@ -23,6 +23,8 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use common_telemetry::info;
+use common_time::range::TimestampRange;
+use common_time::{Timestamp, Timezone};
 use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
@@ -121,6 +123,7 @@ fn compact_signature() -> Signature {
 /// - `[<table_name>, <type>, <options>]`: provides both type and type-specific options.
 ///   - For `twcs`, it accepts `parallelism=[N]` where N is an unsigned 32 bits number
 ///   - For `swcs`, it accepts two numeric parameter: `parallelism` and `window`.
+///   - Both types accept `start_time` and `end_time` to constrain compaction windows.
 fn parse_compact_request(
     params: &[ValueRef<'_>],
     query_ctx: &QueryContextRef,
@@ -129,26 +132,29 @@ fn parse_compact_request(
         !params.is_empty() && params.len() <= 3,
         InvalidFuncArgsSnafu {
             err_msg: format!(
-                "The length of the args is not correct, expect 1-4, have: {}",
+                "The length of the args is not correct, expect 1-3, have: {}",
                 params.len()
             ),
         }
     );
 
-    let (table_name, compact_type, parallelism) = match params {
+    let timezone = query_ctx.timezone();
+    let (table_name, compact_type, parallelism, time_range) = match params {
         // 1. Only table name, strategy defaults to twcs and default parallelism.
         [ValueRef::String(table_name)] => (
             table_name,
             compact_request::Options::Regular(Default::default()),
             DEFAULT_COMPACTION_PARALLELISM,
+            None,
         ),
         // 2. Both table name and strategy are provided.
         [
             ValueRef::String(table_name),
             ValueRef::String(compact_ty_str),
         ] => {
-            let (compact_type, parallelism) = parse_compact_options(compact_ty_str, None)?;
-            (table_name, compact_type, parallelism)
+            let (compact_type, parallelism, time_range) =
+                parse_compact_options(compact_ty_str, None, &timezone)?;
+            (table_name, compact_type, parallelism, time_range)
         }
         // 3. Table name, strategy and strategy specific options
         [
@@ -156,9 +162,9 @@ fn parse_compact_request(
             ValueRef::String(compact_ty_str),
             ValueRef::String(options_str),
         ] => {
-            let (compact_type, parallelism) =
-                parse_compact_options(compact_ty_str, Some(options_str))?;
-            (table_name, compact_type, parallelism)
+            let (compact_type, parallelism, time_range) =
+                parse_compact_options(compact_ty_str, Some(options_str), &timezone)?;
+            (table_name, compact_type, parallelism, time_range)
         }
         _ => {
             return UnsupportedInputDataTypeSnafu {
@@ -179,6 +185,7 @@ fn parse_compact_request(
         table_name,
         compact_options: compact_type,
         parallelism,
+        time_range,
     })
 }
 
@@ -187,118 +194,115 @@ fn parse_compact_request(
 fn parse_compact_options(
     type_str: &str,
     option: Option<&str>,
-) -> Result<(compact_request::Options, u32)> {
-    if type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW)
-        | type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW_SHORT)
-    {
-        let Some(option_str) = option else {
-            return Ok((
-                compact_request::Options::StrictWindow(StrictWindow { window_seconds: 0 }),
-                DEFAULT_COMPACTION_PARALLELISM,
-            ));
+    timezone: &Timezone,
+) -> Result<(compact_request::Options, u32, Option<TimestampRange>)> {
+    let strict_window = type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW)
+        || type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW_SHORT);
+    let Some(option_str) = option else {
+        let options = if strict_window {
+            compact_request::Options::StrictWindow(StrictWindow { window_seconds: 0 })
+        } else {
+            compact_request::Options::Regular(Default::default())
         };
+        return Ok((options, DEFAULT_COMPACTION_PARALLELISM, None));
+    };
 
-        // For compatibility, accepts single number as window size.
-        if let Ok(window_seconds) = i64::from_str(option_str) {
-            return Ok((
-                compact_request::Options::StrictWindow(StrictWindow { window_seconds }),
-                DEFAULT_COMPACTION_PARALLELISM,
-            ));
-        };
-
-        // Parse keyword arguments in forms: `key1=value1,key2=value2`
-        let mut window_seconds = 0i64;
-        let mut parallelism = DEFAULT_COMPACTION_PARALLELISM;
-
-        let pairs: Vec<&str> = option_str.split(',').collect();
-        for pair in pairs {
-            let kv: Vec<&str> = pair.trim().split('=').collect();
-            if kv.len() != 2 {
-                return InvalidFuncArgsSnafu {
-                    err_msg: format!("Invalid key-value pair: {}", pair.trim()),
-                }
-                .fail();
-            }
-
-            let key = kv[0].trim();
-            let value = kv[1].trim();
-
-            match key {
-                "window" | "window_seconds" => {
-                    window_seconds = i64::from_str(value).map_err(|_| {
-                        InvalidFuncArgsSnafu {
-                            err_msg: format!("Invalid value for window: {}", value),
-                        }
-                        .build()
-                    })?;
-                }
-                "parallelism" => {
-                    parallelism = value.parse::<u32>().map_err(|_| {
-                        InvalidFuncArgsSnafu {
-                            err_msg: format!("Invalid value for parallelism: {}", value),
-                        }
-                        .build()
-                    })?;
-                }
-                _ => {
-                    return InvalidFuncArgsSnafu {
-                        err_msg: format!("Unknown parameter: {}", key),
-                    }
-                    .fail();
-                }
-            }
-        }
-
-        Ok((
+    // For compatibility, strict-window compaction accepts a single number as window size.
+    if strict_window && let Ok(window_seconds) = i64::from_str(option_str) {
+        return Ok((
             compact_request::Options::StrictWindow(StrictWindow { window_seconds }),
-            parallelism,
-        ))
-    } else {
-        // TWCS strategy
-        let Some(option_str) = option else {
-            return Ok((
-                compact_request::Options::Regular(Default::default()),
-                DEFAULT_COMPACTION_PARALLELISM,
-            ));
-        };
+            DEFAULT_COMPACTION_PARALLELISM,
+            None,
+        ));
+    }
 
-        let mut parallelism = DEFAULT_COMPACTION_PARALLELISM;
-        let pairs: Vec<&str> = option_str.split(',').collect();
-        for pair in pairs {
-            let kv: Vec<&str> = pair.trim().split('=').collect();
-            if kv.len() != 2 {
+    let mut window_seconds = 0i64;
+    let mut parallelism = DEFAULT_COMPACTION_PARALLELISM;
+    let mut start_time = None;
+    let mut end_time = None;
+
+    for pair in option_str.split(',') {
+        let Some((key, value)) = pair.trim().split_once('=') else {
+            return InvalidFuncArgsSnafu {
+                err_msg: format!("Invalid key-value pair: {}", pair.trim()),
+            }
+            .fail();
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        match key {
+            "window" | "window_seconds" if strict_window => {
+                window_seconds = i64::from_str(value).map_err(|_| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!("Invalid value for window: {}", value),
+                    }
+                    .build()
+                })?;
+            }
+            "parallelism" => {
+                parallelism = value.parse::<u32>().map_err(|_| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!("Invalid value for parallelism: {}", value),
+                    }
+                    .build()
+                })?;
+            }
+            "start_time" => {
+                start_time = Some(Timestamp::from_str(value, Some(timezone)).map_err(|_| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!("Invalid value for start_time: {}", value),
+                    }
+                    .build()
+                })?);
+            }
+            "end_time" => {
+                end_time = Some(Timestamp::from_str(value, Some(timezone)).map_err(|_| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!("Invalid value for end_time: {}", value),
+                    }
+                    .build()
+                })?);
+            }
+            _ => {
                 return InvalidFuncArgsSnafu {
-                    err_msg: format!("Invalid key-value pair: {}", pair.trim()),
+                    err_msg: format!("Unknown parameter: {}", key),
                 }
                 .fail();
             }
-
-            let key = kv[0].trim();
-            let value = kv[1].trim();
-
-            match key {
-                "parallelism" => {
-                    parallelism = value.parse::<u32>().map_err(|_| {
-                        InvalidFuncArgsSnafu {
-                            err_msg: format!("Invalid value for parallelism: {}", value),
-                        }
-                        .build()
-                    })?;
-                }
-                _ => {
-                    return InvalidFuncArgsSnafu {
-                        err_msg: format!("Unknown parameter: {}", key),
-                    }
-                    .fail();
-                }
-            }
         }
-
-        Ok((
-            compact_request::Options::Regular(Default::default()),
-            parallelism,
-        ))
     }
+
+    let time_range = match (start_time, end_time) {
+        (None, None) => None,
+        (Some(start), Some(end)) if start < end => {
+            Some(TimestampRange::new(start, end).ok_or_else(|| {
+                InvalidFuncArgsSnafu {
+                    err_msg: "invalid compaction time range".to_string(),
+                }
+                .build()
+            })?)
+        }
+        (Some(_), Some(_)) => {
+            return InvalidFuncArgsSnafu {
+                err_msg: "start_time must be earlier than end_time".to_string(),
+            }
+            .fail();
+        }
+        _ => {
+            return InvalidFuncArgsSnafu {
+                err_msg: "start_time and end_time must be specified together".to_string(),
+            }
+            .fail();
+        }
+    };
+
+    let options = if strict_window {
+        compact_request::Options::StrictWindow(StrictWindow { window_seconds })
+    } else {
+        compact_request::Options::Regular(Default::default())
+    };
+    Ok((options, parallelism, time_range))
 }
 
 #[cfg(test)]
@@ -309,6 +313,8 @@ mod tests {
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_time::Timestamp;
+    use common_time::range::TimestampRange;
     use datafusion_expr::ColumnarValue;
     use session::context::QueryContext;
 
@@ -410,6 +416,90 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_compact_time_range() {
+        let params = [
+            "table",
+            "regular",
+            "start_time=2026-01-01T00:00:00Z,end_time=2026-02-01T00:00:00Z",
+        ]
+        .into_iter()
+        .map(ValueRef::String)
+        .collect::<Vec<_>>();
+
+        let request = parse_compact_request(&params, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::from_str_utc("2026-01-01T00:00:00Z").unwrap(),
+                    Timestamp::from_str_utc("2026-02-01T00:00:00Z").unwrap(),
+                )
+                .unwrap()
+            ),
+            request.time_range
+        );
+
+        let query_ctx = QueryContext::arc();
+        query_ctx.set_timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap());
+        let params = [
+            "table",
+            "regular",
+            "start_time=2026-01-01T00:00:00,end_time=2026-02-01T00:00:00",
+        ]
+        .into_iter()
+        .map(ValueRef::String)
+        .collect::<Vec<_>>();
+        let request = parse_compact_request(&params, &query_ctx).unwrap();
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::from_str_utc("2025-12-31T16:00:00Z").unwrap(),
+                    Timestamp::from_str_utc("2026-01-31T16:00:00Z").unwrap(),
+                )
+                .unwrap()
+            ),
+            request.time_range
+        );
+    }
+
+    #[test]
+    fn test_parse_strict_window_compact_time_range() {
+        let params = [
+            "table",
+            "strict_window",
+            "window=3600,parallelism=2,start_time=2026-01-01T00:00:00Z,end_time=2026-02-01T00:00:00Z",
+        ]
+        .into_iter()
+        .map(ValueRef::String)
+        .collect::<Vec<_>>();
+
+        let request = parse_compact_request(&params, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            Options::StrictWindow(StrictWindow {
+                window_seconds: 3600,
+            }),
+            request.compact_options
+        );
+        assert_eq!(2, request.parallelism);
+        assert!(request.time_range.is_some());
+    }
+
+    #[test]
+    fn test_parse_compact_time_range_requires_valid_bounds() {
+        for options in [
+            "start_time=2026-01-01T00:00:00Z",
+            "end_time=2026-02-01T00:00:00Z",
+            "start_time=2026-02-01T00:00:00Z,end_time=2026-01-01T00:00:00Z",
+            "start_time=2026-01-01T00:00:00Z,end_time=2026-01-01T00:00:00Z",
+        ] {
+            let params = ["table", "regular", options]
+                .into_iter()
+                .map(ValueRef::String)
+                .collect::<Vec<_>>();
+            assert!(parse_compact_request(&params, &QueryContext::arc()).is_err());
+        }
+    }
+
+    #[test]
     fn test_parse_compact_params() {
         check_parse_compact_params(&[
             (
@@ -420,6 +510,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -430,6 +521,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -443,6 +535,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -453,6 +546,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -463,6 +557,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::StrictWindow(StrictWindow { window_seconds: 0 }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -475,6 +570,7 @@ mod tests {
                         window_seconds: 3600,
                     }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -487,6 +583,7 @@ mod tests {
                         window_seconds: 120,
                     }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             // Test with parallelism parameter
@@ -498,6 +595,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 4,
+                    time_range: None,
                 },
             ),
             (
@@ -510,6 +608,7 @@ mod tests {
                         window_seconds: 3600,
                     }),
                     parallelism: 2,
+                    time_range: None,
                 },
             ),
             (
@@ -522,6 +621,7 @@ mod tests {
                         window_seconds: 3600,
                     }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -534,6 +634,7 @@ mod tests {
                         window_seconds: 7200,
                     }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -546,6 +647,7 @@ mod tests {
                         window_seconds: 1800,
                     }),
                     parallelism: 1,
+                    time_range: None,
                 },
             ),
             (
@@ -556,6 +658,7 @@ mod tests {
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                     parallelism: 8,
+                    time_range: None,
                 },
             ),
         ]);

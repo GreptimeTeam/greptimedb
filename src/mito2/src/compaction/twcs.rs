@@ -20,6 +20,7 @@ use std::num::NonZeroU64;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
+use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use rayon::prelude::*;
@@ -55,15 +56,28 @@ pub struct TwcsPicker {
     pub append_mode: bool,
     /// Max background compaction tasks.
     pub max_background_tasks: Option<usize>,
+    /// Optional time range that constrains candidate compaction windows.
+    pub(crate) time_range: Option<TimestampRange>,
 }
 
 impl TwcsPicker {
     /// Builds compaction output from files.
+    #[cfg(test)]
     fn build_output(
         &self,
         region_id: RegionId,
         time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
+    ) -> Vec<CompactionOutput> {
+        self.build_output_with_time_range(region_id, time_windows, active_window, None)
+    }
+
+    fn build_output_with_time_range(
+        &self,
+        region_id: RegionId,
+        time_windows: &mut BTreeMap<i64, Window>,
+        active_window: Option<i64>,
+        time_window_size: Option<i64>,
     ) -> Vec<CompactionOutput> {
         let find_inputs = |files: &Window,
                            windows: &BTreeMap<i64, Window>|
@@ -158,7 +172,18 @@ impl TwcsPicker {
         let mut output = vec![];
         let windows = time_windows
             .values()
-            .filter(|w| !w.files.is_empty())
+            .filter(|window| {
+                !window.files.is_empty()
+                    && self.time_range.as_ref().is_none_or(|time_range| {
+                        time_window_size.is_none_or(|time_window_size| {
+                            time_window_intersects_range(
+                                window.time_window,
+                                time_window_size,
+                                time_range,
+                            )
+                        })
+                    })
+            })
             .collect::<Vec<_>>();
         let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
         'chunks: for chunk in windows.chunks(chunk_size) {
@@ -279,7 +304,12 @@ impl Picker for TwcsPicker {
                 .filter(|file| !expired_file_ids.contains(&file.file_id())),
             time_window_size,
         );
-        let outputs = self.build_output(region_id, &mut windows, active_window);
+        let outputs = self.build_output_with_time_range(
+            region_id,
+            &mut windows,
+            active_window,
+            Some(time_window_size),
+        );
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             return None;
@@ -381,6 +411,26 @@ fn assign_to_windows<'a>(
     windows.into_iter().collect()
 }
 
+fn time_window_intersects_range(
+    window_end: i64,
+    time_window_size: i64,
+    time_range: &TimestampRange,
+) -> bool {
+    let first_window = time_range.start().map_or(i64::MIN, |start| {
+        start
+            .convert_to(TimeUnit::Second)
+            .and_then(|timestamp| timestamp.value().align_to_ceil_by_bucket(time_window_size))
+            .unwrap_or(i64::MIN)
+    });
+    let last_window = time_range.end().map_or(i64::MAX, |end| {
+        end.convert_to_ceil(TimeUnit::Second)
+            .and_then(|timestamp| timestamp.value().checked_sub(1))
+            .and_then(|timestamp| timestamp.align_to_ceil_by_bucket(time_window_size))
+            .unwrap_or(i64::MAX)
+    });
+    (first_window..=last_window).contains(&window_end)
+}
+
 fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
     windows
         .values()
@@ -426,6 +476,7 @@ mod tests {
 
     use bytes::Bytes;
     use common_base::Plugins;
+    use common_time::range::TimestampRange;
     use store_api::storage::FileId;
 
     use super::*;
@@ -490,6 +541,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         };
         let compaction_region = compaction_region_with_expired_sst().await;
 
@@ -887,6 +939,7 @@ mod tests {
                 max_output_file_size: None,
                 append_mode: false,
                 max_background_tasks: None,
+                time_range: None,
             }
             .build_output(RegionId::from_u64(0), &mut windows, active_window);
 
@@ -1028,6 +1081,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         }
         .build_output(RegionId::from_u64(0), &mut windows, active_window);
 
@@ -1098,6 +1152,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1139,6 +1194,7 @@ mod tests {
             max_output_file_size: Some(1000),
             append_mode: true,
             max_background_tasks: None,
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1181,6 +1237,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: Some(max_background_tasks),
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1201,6 +1258,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         };
 
         let mut windows_no_limit = assign_to_windows(files.iter(), 3);
@@ -1240,6 +1298,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: Some(max_background_tasks),
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1285,6 +1344,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1325,6 +1385,7 @@ mod tests {
             max_output_file_size: None,
             append_mode: false,
             max_background_tasks: None,
+            time_range: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -1332,6 +1393,65 @@ mod tests {
 
         assert_eq!(1, output.len());
         assert_eq!(output[0].inputs.len(), 32);
+    }
+
+    #[test]
+    fn test_filter_time_windows_by_time_range() {
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(1_200),
+            Timestamp::new_millisecond(1_800),
+        )
+        .unwrap();
+
+        assert!(time_window_intersects_range(3, 3, &time_range));
+        assert!(!time_window_intersects_range(9, 3, &time_range));
+
+        let boundary_range =
+            TimestampRange::new(Timestamp::new_second(0), Timestamp::new_second(3)).unwrap();
+        assert!(time_window_intersects_range(0, 3, &boundary_range));
+        assert!(time_window_intersects_range(3, 3, &boundary_range));
+        assert!(!time_window_intersects_range(6, 3, &boundary_range));
+    }
+
+    #[test]
+    fn test_time_range_filter_precedes_background_task_limit() {
+        let early_file_ids = [FileId::random(), FileId::random()];
+        let selected_file_ids = [FileId::random(), FileId::random()];
+        let files = [
+            new_file_handle_with_sequence(early_file_ids[0], 1_000, 1_999, 0, 1),
+            new_file_handle_with_sequence(early_file_ids[1], 1_000, 1_999, 0, 2),
+            new_file_handle_with_sequence(selected_file_ids[0], 7_000, 7_999, 0, 3),
+            new_file_handle_with_sequence(selected_file_ids[1], 7_000, 7_999, 0, 4),
+        ];
+        let mut windows = assign_to_windows(files.iter(), 3);
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: Some(1),
+            time_range: TimestampRange::new(
+                Timestamp::new_millisecond(7_200),
+                Timestamp::new_millisecond(7_800),
+            ),
+        };
+
+        let output = picker.build_output_with_time_range(
+            RegionId::from_u64(123),
+            &mut windows,
+            Some(9),
+            Some(3),
+        );
+
+        assert_eq!(1, output.len());
+        assert_eq!(
+            selected_file_ids.into_iter().collect::<HashSet<_>>(),
+            output[0]
+                .inputs
+                .iter()
+                .map(|file| file.file_id().file_id())
+                .collect::<HashSet<_>>()
+        );
     }
 
     // TODO(hl): TTL tester that checks if get_expired_ssts function works as expected.
