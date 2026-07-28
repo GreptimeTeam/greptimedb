@@ -12,4 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Events emitted by DDL procedures.
+
 pub(crate) mod database;
