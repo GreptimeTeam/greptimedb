@@ -581,7 +581,9 @@ fn record_explain_analyze_timeout(
     let Some(recorder) = recorder else {
         return;
     };
-    let metrics = plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok());
+    let metrics = plan
+        .and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
     recorder.force_record_with_payload(serde_json::json!({
         "timed_out": true,
         "metrics": metrics,
@@ -2040,6 +2042,28 @@ mod tests {
     }
 
     impl Unpin for PendingRecordBatchStream {}
+
+    #[test]
+    fn test_record_explain_analyze_timeout_uses_empty_metrics_without_plan() {
+        let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        let timer = SlowQueryTimer::new(
+            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            "public".to_string(),
+            Duration::from_secs(3600),
+            0.0,
+            SlowQueriesRecordType::SystemTable,
+            event_recorder.clone(),
+        );
+        let timeout_recorder = timer.recorder();
+
+        record_explain_analyze_timeout(Some(&timeout_recorder), None);
+        drop(timer);
+
+        let payloads = event_recorder.payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["timed_out"], true);
+        assert_eq!(payloads[0]["metrics"], serde_json::json!([]));
+    }
 
     #[tokio::test]
     async fn test_attach_timeout_records_explain_analyze_metrics() {
