@@ -458,7 +458,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use common_event_recorder::{Event, EventRecorder};
+    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_frontend::slow_query_event::SlowQueryEvent;
     use common_telemetry::logging::SlowQueriesRecordType;
     use serde_json::Value;
@@ -480,6 +480,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((event.query.clone(), event.payload.clone()));
+        }
+
+        fn event_type_filter(&self) -> EventTypeFilterRef {
+            Arc::new(EventTypeFilter::All)
         }
 
         fn close(&self) {}

@@ -1657,7 +1657,7 @@ mod tests {
     use common_base::Plugins;
     use common_error::ext::{BoxedError, PlainError};
     use common_error::status_code::StatusCode;
-    use common_event_recorder::{Event, EventRecorder};
+    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_frontend::slow_query_event::SlowQueryEvent;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1716,6 +1716,10 @@ mod tests {
                 .downcast_ref::<SlowQueryEvent>()
                 .expect("expected a slow query event");
             self.payloads.lock().unwrap().push(event.payload.clone());
+        }
+
+        fn event_type_filter(&self) -> EventTypeFilterRef {
+            Arc::new(EventTypeFilter::All)
         }
 
         fn close(&self) {}
