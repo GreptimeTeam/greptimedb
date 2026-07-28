@@ -1830,7 +1830,7 @@ mod tests {
             schema: 0,
             zero_threshold: 0.0,
             sum,
-            reset_hint: 0,
+            reset_hint: UNKNOWN_COUNTER_RESET_HINT,
             start_timestamp: None,
             custom_values: Vec::new(),
             positive_spans: vec![Span {
