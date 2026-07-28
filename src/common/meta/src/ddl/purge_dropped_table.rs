@@ -32,9 +32,7 @@ use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{
     convert_region_routes_to_detecting_regions, is_metric_engine_logical_table,
     map_to_procedure_error,
@@ -271,8 +269,7 @@ impl Procedure for PurgeDroppedTableProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let locator = TableDdlLocator::from_table_id(self.data.task.table_id);
-                let payload = versioned_table_ddl_payload_or_error(&self.data.task);
-                TableDdlEvent::submitted(TableDdlEventType::PurgeDroppedTable, locator, payload)
+                TableDdlEvent::purge_dropped_table_submitted(locator)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable),
         };

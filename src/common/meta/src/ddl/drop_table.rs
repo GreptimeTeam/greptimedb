@@ -39,9 +39,7 @@ use uuid::Uuid;
 
 use self::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{convert_region_routes_to_detecting_regions, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
@@ -381,8 +379,7 @@ impl Procedure for DropTableProcedure {
                 let task = &self.data.task;
                 let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
                     .with_table_id(task.table_id);
-                let payload = versioned_table_ddl_payload_or_error(task);
-                TableDdlEvent::submitted(TableDdlEventType::DropTable, locator, payload)
+                TableDdlEvent::drop_table_submitted(locator, task.drop_if_exists)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
         };

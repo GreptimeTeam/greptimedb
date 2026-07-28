@@ -37,7 +37,7 @@ use crate::ddl::alter_logical_tables::validator::{
     AlterLogicalTableValidator, ValidatorResult, retain_unskipped,
 };
 use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
 use crate::error::Result;
@@ -338,25 +338,18 @@ impl Procedure for AlterLogicalTablesProcedure {
             TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
                 .with_physical_table_id(self.data.physical_table_id)
         });
-        let payload = versioned_table_ddl_payload_or_error(AlterLogicalTablesEventPayload {
-            kind: "alter_logical_tables",
-            physical_table_id: self.data.physical_table_id,
-            tasks: &self.data.tasks,
-        });
-
-        Some(Box::new(TableDdlEvent::submitted_for_tables(
-            TableDdlEventType::AlterLogicalTables,
+        let kinds = self
+            .data
+            .tasks
+            .iter()
+            .filter_map(|task| task.alter_table.kind.as_ref())
+            .map(alter_table_kind_name);
+        Some(Box::new(TableDdlEvent::alter_logical_tables_submitted(
             locators,
-            payload,
+            self.data.tasks.len(),
+            kinds,
         )))
     }
-}
-
-#[derive(Serialize)]
-struct AlterLogicalTablesEventPayload<'a> {
-    kind: &'static str,
-    physical_table_id: TableId,
-    tasks: &'a [AlterTableTask],
 }
 
 #[derive(Debug, Serialize, Deserialize)]

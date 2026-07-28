@@ -39,9 +39,7 @@ use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 
 use crate::ddl::DdlContext;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{
     add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
     sync_follower_regions,
@@ -269,19 +267,6 @@ impl Procedure for CreateLogicalTablesProcedure {
         }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                #[derive(Serialize)]
-                struct LogicalTablePayload<'a> {
-                    task: &'a CreateTableTask,
-                    table_info: &'a TableInfo,
-                }
-
-                #[derive(Serialize)]
-                struct CreateLogicalTablesPayload<'a> {
-                    kind: &'static str,
-                    physical_table_id: TableId,
-                    tables: Vec<LogicalTablePayload<'a>>,
-                }
-
                 let locators = self.data.tasks.iter().map(|task| {
                     TableDdlLocator::new(
                         &task.create_table.catalog_name,
@@ -290,26 +275,7 @@ impl Procedure for CreateLogicalTablesProcedure {
                     )
                     .with_physical_table_id(self.data.physical_table_id)
                 });
-                let tables = self
-                    .data
-                    .tasks
-                    .iter()
-                    .map(|task| LogicalTablePayload {
-                        task,
-                        table_info: &task.table_info,
-                    })
-                    .collect();
-                let payload = versioned_table_ddl_payload_or_error(CreateLogicalTablesPayload {
-                    kind: "create_logical_tables",
-                    physical_table_id: self.data.physical_table_id,
-                    tables,
-                });
-
-                TableDdlEvent::submitted_for_tables(
-                    TableDdlEventType::CreateLogicalTables,
-                    locators,
-                    payload,
-                )
+                TableDdlEvent::create_logical_tables_submitted(locators, self.data.tasks.len())
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
                 ProcedureState::Done {

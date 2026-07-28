@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 
+use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
@@ -28,7 +30,7 @@ use snafu::ResultExt;
 use store_api::storage::TableId;
 
 /// Current version of table DDL event payloads.
-pub(crate) const TABLE_DDL_PAYLOAD_VERSION: u32 = 1;
+pub(crate) const TABLE_DDL_PAYLOAD_VERSION: u8 = 1;
 
 /// A table DDL event type and its fixed domain schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,34 +116,84 @@ impl TableDdlLocator {
     }
 }
 
-/// Wraps rich submitted data in the versioned table DDL payload envelope.
-pub(crate) fn versioned_table_ddl_payload<T: Serialize>(data: T) -> Result<JsonValue> {
-    #[derive(Serialize)]
-    struct VersionedPayload<T> {
-        version: u32,
-        data: T,
-    }
-
-    serde_json::to_value(VersionedPayload {
-        version: TABLE_DDL_PAYLOAD_VERSION,
-        data,
-    })
-    .context(SerializeEventSnafu)
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum TableDdlPayload {
+    CreateTable(CreateTablePayload),
+    CreateLogicalTables(CreateLogicalTablesPayload),
+    AlterTable(AlterTablePayload),
+    AlterLogicalTables(AlterLogicalTablesPayload),
+    DropTable(DropTablePayload),
+    UndropTable(UndropTablePayload),
+    PurgeDroppedTable(PurgeDroppedTablePayload),
+    TruncateTable(TruncateTablePayload),
 }
 
-/// Builds a versioned payload, replacing serialization failures with a fixed summary.
-///
-/// The fallback deliberately excludes the serializer error and input data so a
-/// submitted event can retain its locator rows without exposing internal details.
-pub(crate) fn versioned_table_ddl_payload_or_error<T: Serialize>(data: T) -> JsonValue {
-    versioned_table_ddl_payload(data).unwrap_or_else(|_| {
-        serde_json::json!({
-            "version": TABLE_DDL_PAYLOAD_VERSION,
-            "error": {
-                "code": "payload_serialization_failed"
-            }
-        })
-    })
+#[derive(Debug, Serialize)]
+struct CreateTablePayload {
+    version: u8,
+    create_if_not_exists: bool,
+    engine: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateLogicalTablesPayload {
+    version: u8,
+    table_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AlterTablePayload {
+    version: u8,
+    kind: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct AlterLogicalTablesPayload {
+    version: u8,
+    table_count: usize,
+    kinds: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct DropTablePayload {
+    version: u8,
+    drop_if_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UndropTablePayload {
+    version: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct PurgeDroppedTablePayload {
+    version: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct TruncateTablePayload {
+    version: u8,
+    time_range_count: usize,
+}
+
+/// Returns the stable kind stored in an Alter Table payload.
+pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> &'static str {
+    match kind {
+        AlterTableKind::AddColumns(_) => "add_columns",
+        AlterTableKind::DropColumns(_) => "drop_columns",
+        AlterTableKind::RenameTable(_) => "rename_table",
+        AlterTableKind::ModifyColumnTypes(_) => "modify_column_types",
+        AlterTableKind::SetTableOptions(_) => "set_table_options",
+        AlterTableKind::UnsetTableOptions(_) => "unset_table_options",
+        AlterTableKind::SetIndex(_) => "set_index",
+        AlterTableKind::UnsetIndex(_) => "unset_index",
+        AlterTableKind::DropDefaults(_) => "drop_defaults",
+        AlterTableKind::SetIndexes(_) => "set_indexes",
+        AlterTableKind::UnsetIndexes(_) => "unset_indexes",
+        AlterTableKind::SetDefaults(_) => "set_defaults",
+        AlterTableKind::Repartition(_) => "repartition",
+    }
 }
 
 /// Shared event representation used by table DDL procedures.
@@ -149,30 +201,126 @@ pub(crate) fn versioned_table_ddl_payload_or_error<T: Serialize>(data: T) -> Jso
 pub(crate) struct TableDdlEvent {
     event_type: TableDdlEventType,
     locators: Vec<TableDdlLocator>,
-    payload: JsonValue,
+    payload: Option<TableDdlPayload>,
 }
 
 impl TableDdlEvent {
-    /// Builds a rich submitted event for one table row.
-    pub(crate) fn submitted(
-        event_type: TableDdlEventType,
+    /// Builds the bounded event emitted when creating a table is submitted.
+    pub(crate) fn create_table_submitted(
         locator: TableDdlLocator,
-        payload: JsonValue,
+        create_if_not_exists: bool,
+        engine: &str,
     ) -> Self {
-        Self::submitted_for_tables(event_type, [locator], payload)
+        Self::submitted(
+            TableDdlEventType::CreateTable,
+            [locator],
+            TableDdlPayload::CreateTable(CreateTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                create_if_not_exists,
+                engine: engine.to_string(),
+            }),
+        )
     }
 
-    /// Builds a rich submitted event with one row per logical table locator.
-    pub(crate) fn submitted_for_tables(
-        event_type: TableDdlEventType,
+    /// Builds the bounded event emitted when creating logical tables is submitted.
+    pub(crate) fn create_logical_tables_submitted(
         locators: impl IntoIterator<Item = TableDdlLocator>,
-        payload: JsonValue,
+        table_count: usize,
     ) -> Self {
-        Self {
-            event_type,
-            locators: locators.into_iter().collect(),
-            payload,
-        }
+        Self::submitted(
+            TableDdlEventType::CreateLogicalTables,
+            locators,
+            TableDdlPayload::CreateLogicalTables(CreateLogicalTablesPayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                table_count,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when altering a table is submitted.
+    pub(crate) fn alter_table_submitted(
+        locator: TableDdlLocator,
+        kind: Option<&'static str>,
+    ) -> Self {
+        Self::submitted(
+            TableDdlEventType::AlterTable,
+            [locator],
+            TableDdlPayload::AlterTable(AlterTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                kind,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when altering logical tables is submitted.
+    pub(crate) fn alter_logical_tables_submitted(
+        locators: impl IntoIterator<Item = TableDdlLocator>,
+        table_count: usize,
+        kinds: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let kinds = kinds
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self::submitted(
+            TableDdlEventType::AlterLogicalTables,
+            locators,
+            TableDdlPayload::AlterLogicalTables(AlterLogicalTablesPayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                table_count,
+                kinds,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when dropping a table is submitted.
+    pub(crate) fn drop_table_submitted(locator: TableDdlLocator, drop_if_exists: bool) -> Self {
+        Self::submitted(
+            TableDdlEventType::DropTable,
+            [locator],
+            TableDdlPayload::DropTable(DropTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                drop_if_exists,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when restoring a dropped table is submitted.
+    pub(crate) fn undrop_table_submitted(locator: TableDdlLocator) -> Self {
+        Self::submitted(
+            TableDdlEventType::UndropTable,
+            [locator],
+            TableDdlPayload::UndropTable(UndropTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when purging a dropped table is submitted.
+    pub(crate) fn purge_dropped_table_submitted(locator: TableDdlLocator) -> Self {
+        Self::submitted(
+            TableDdlEventType::PurgeDroppedTable,
+            [locator],
+            TableDdlPayload::PurgeDroppedTable(PurgeDroppedTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+            }),
+        )
+    }
+
+    /// Builds the bounded event emitted when truncating a table is submitted.
+    pub(crate) fn truncate_table_submitted(
+        locator: TableDdlLocator,
+        time_range_count: usize,
+    ) -> Self {
+        Self::submitted(
+            TableDdlEventType::TruncateTable,
+            [locator],
+            TableDdlPayload::TruncateTable(TruncateTablePayload {
+                version: TABLE_DDL_PAYLOAD_VERSION,
+                time_range_count,
+            }),
+        )
     }
 
     /// Builds a lightweight lifecycle event with null domain columns and payload.
@@ -180,7 +328,7 @@ impl TableDdlEvent {
         Self {
             event_type,
             locators: vec![TableDdlLocator::default()],
-            payload: JsonValue::Null,
+            payload: None,
         }
     }
 
@@ -189,7 +337,7 @@ impl TableDdlEvent {
         Self {
             event_type: TableDdlEventType::CreateTable,
             locators: vec![TableDdlLocator::from_table_id(table_id)],
-            payload: JsonValue::Null,
+            payload: None,
         }
     }
 
@@ -200,7 +348,19 @@ impl TableDdlEvent {
         Self {
             event_type: TableDdlEventType::CreateLogicalTables,
             locators: locators.into_iter().collect(),
-            payload: JsonValue::Null,
+            payload: None,
+        }
+    }
+
+    fn submitted(
+        event_type: TableDdlEventType,
+        locators: impl IntoIterator<Item = TableDdlLocator>,
+        payload: TableDdlPayload,
+    ) -> Self {
+        Self {
+            event_type,
+            locators: locators.into_iter().collect(),
+            payload: Some(payload),
         }
     }
 
@@ -233,7 +393,10 @@ impl Event for TableDdlEvent {
     }
 
     fn json_payload(&self) -> Result<JsonValue> {
-        Ok(self.payload.clone())
+        match &self.payload {
+            Some(payload) => serde_json::to_value(payload).context(SerializeEventSnafu),
+            None => Ok(JsonValue::Null),
+        }
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {

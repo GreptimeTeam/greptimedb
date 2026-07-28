@@ -35,9 +35,7 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::ddl::drop_table::executor::DropTableExecutor;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
     is_metric_engine_logical_table, map_to_procedure_error, region_storage_path,
@@ -453,8 +451,7 @@ impl Procedure for UndropTableProcedure {
                     })
                     .unwrap_or_default()
                     .with_table_id(self.data.task.table_id);
-                let payload = versioned_table_ddl_payload_or_error(&self.data.task);
-                TableDdlEvent::submitted(TableDdlEventType::UndropTable, locator, payload)
+                TableDdlEvent::undrop_table_submitted(locator)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
         };

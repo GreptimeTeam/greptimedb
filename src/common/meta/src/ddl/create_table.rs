@@ -38,9 +38,7 @@ pub(crate) use template::{CreateRequestBuilder, build_template_from_raw_table_in
 
 use crate::ddl::create_table::executor::CreateTableExecutor;
 use crate::ddl::create_table::template::build_template;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
@@ -408,32 +406,16 @@ impl Procedure for CreateTableProcedure {
         {
             return None;
         }
-        #[derive(Serialize)]
-        struct CreateTableEventPayload<'a> {
-            kind: &'static str,
-            task: &'a CreateTableTask,
-            table_info: &'a TableInfo,
-            region_wal_options: &'a Option<RegionWalOptions>,
-            table_options: &'a table::requests::TableOptions,
-        }
-
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let table_ref = self.data.table_ref();
                 let locator =
                     TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table);
-                let payload = CreateTableEventPayload {
-                    kind: "create_table",
-                    task: &self.data.task,
-                    table_info: self.table_info(),
-                    region_wal_options: &self.data.region_wal_options,
-                    table_options: &self.table_info().meta.options,
-                };
-
-                TableDdlEvent::submitted(
-                    TableDdlEventType::CreateTable,
+                let create_table = &self.data.task.create_table;
+                TableDdlEvent::create_table_submitted(
                     locator,
-                    versioned_table_ddl_payload_or_error(payload),
+                    create_table.create_if_not_exists,
+                    &create_table.engine,
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {

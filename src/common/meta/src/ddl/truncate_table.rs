@@ -35,9 +35,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::ddl::DdlContext;
-use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
-};
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
 use crate::key::DeserializedValueWithBytes;
@@ -103,8 +101,7 @@ impl Procedure for TruncateTableProcedure {
                 let task = &self.data.task;
                 let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
                     .with_table_id(task.table_id);
-                let payload = versioned_table_ddl_payload_or_error(task);
-                TableDdlEvent::submitted(TableDdlEventType::TruncateTable, locator, payload)
+                TableDdlEvent::truncate_table_submitted(locator, task.time_ranges.len())
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable),
         };

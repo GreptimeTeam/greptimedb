@@ -22,14 +22,12 @@ use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
     TABLE_NAME_COLUMN,
 };
-use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
     ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
     RetryPhase,
 };
 use common_time::Timestamp;
-use serde::Serialize;
 use serde_json::json;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
@@ -39,7 +37,6 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::event::table::{
     TABLE_DDL_PAYLOAD_VERSION, TableDdlEvent, TableDdlEventType, TableDdlLocator,
-    versioned_table_ddl_payload, versioned_table_ddl_payload_or_error,
 };
 use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task as test_create_table_task_with_id;
@@ -51,9 +48,7 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
-use crate::rpc::ddl::{
-    AlterTableTask, DropTableTask, PurgeDroppedTableTask, TruncateTableTask, UndropTableTask,
-};
+use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, TruncateTableTask, UndropTableTask};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 const ALL_EVENT_TYPES: [TableDdlEventType; 8] = [
@@ -67,14 +62,34 @@ const ALL_EVENT_TYPES: [TableDdlEventType; 8] = [
     TableDdlEventType::TruncateTable,
 ];
 
+fn submitted_event(event_type: TableDdlEventType) -> TableDdlEvent {
+    let locator = TableDdlLocator::default();
+    match event_type {
+        TableDdlEventType::CreateTable => {
+            TableDdlEvent::create_table_submitted(locator, false, "mito")
+        }
+        TableDdlEventType::CreateLogicalTables => {
+            TableDdlEvent::create_logical_tables_submitted([locator], 1)
+        }
+        TableDdlEventType::AlterTable => {
+            TableDdlEvent::alter_table_submitted(locator, Some("add_columns"))
+        }
+        TableDdlEventType::AlterLogicalTables => {
+            TableDdlEvent::alter_logical_tables_submitted([locator], 1, ["add_columns"])
+        }
+        TableDdlEventType::DropTable => TableDdlEvent::drop_table_submitted(locator, false),
+        TableDdlEventType::UndropTable => TableDdlEvent::undrop_table_submitted(locator),
+        TableDdlEventType::PurgeDroppedTable => {
+            TableDdlEvent::purge_dropped_table_submitted(locator)
+        }
+        TableDdlEventType::TruncateTable => TableDdlEvent::truncate_table_submitted(locator, 0),
+    }
+}
+
 #[test]
 fn table_ddl_event_types_have_fixed_field_schemas() {
     for event_type in ALL_EVENT_TYPES {
-        let submitted = TableDdlEvent::submitted(
-            event_type,
-            TableDdlLocator::default(),
-            json!({"version": 1}),
-        );
+        let submitted = submitted_event(event_type);
         let lifecycle = TableDdlEvent::lifecycle(event_type);
         let schema = submitted.extra_schema();
 
@@ -95,83 +110,69 @@ fn table_ddl_event_types_have_fixed_field_schemas() {
 }
 
 #[test]
-fn submitted_event_keeps_locator_and_full_versioned_payload() {
-    let large_option = "x".repeat(128 * 1024);
-    let payload = versioned_table_ddl_payload(json!({
-        "kind": "create_table",
-        "table_options": {"large": large_option},
-    }))
-    .unwrap();
-    let event = TableDdlEvent::submitted(
-        TableDdlEventType::CreateTable,
-        TableDdlLocator::new("greptime", "public", "metrics").with_table_id(42),
-        payload.clone(),
-    );
+fn submitted_payloads_are_bounded_and_versioned() {
+    let cases = [
+        (
+            TableDdlEvent::create_table_submitted(TableDdlLocator::default(), true, "mito"),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "create_if_not_exists": true,
+                "engine": "mito",
+            }),
+        ),
+        (
+            TableDdlEvent::create_logical_tables_submitted([TableDdlLocator::default()], 2),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "table_count": 2,
+            }),
+        ),
+        (
+            TableDdlEvent::alter_table_submitted(TableDdlLocator::default(), Some("drop_columns")),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "kind": "drop_columns",
+            }),
+        ),
+        (
+            TableDdlEvent::alter_logical_tables_submitted(
+                [TableDdlLocator::default()],
+                3,
+                ["rename_table", "add_columns", "add_columns"],
+            ),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "table_count": 3,
+                "kinds": ["add_columns", "rename_table"],
+            }),
+        ),
+        (
+            TableDdlEvent::drop_table_submitted(TableDdlLocator::default(), true),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "drop_if_exists": true,
+            }),
+        ),
+        (
+            TableDdlEvent::undrop_table_submitted(TableDdlLocator::default()),
+            json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
+        ),
+        (
+            TableDdlEvent::purge_dropped_table_submitted(TableDdlLocator::default()),
+            json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
+        ),
+        (
+            TableDdlEvent::truncate_table_submitted(TableDdlLocator::default(), 4),
+            json!({
+                "version": TABLE_DDL_PAYLOAD_VERSION,
+                "time_range_count": 4,
+            }),
+        ),
+    ];
 
-    assert_eq!(event.json_payload().unwrap(), payload);
-    assert_eq!(
-        event.json_payload().unwrap()["version"],
-        TABLE_DDL_PAYLOAD_VERSION
-    );
-    assert_eq!(
-        event.json_payload().unwrap()["data"]["table_options"]["large"]
-            .as_str()
-            .unwrap()
-            .len(),
-        128 * 1024
-    );
-    let expected_rows = vec![api::v1::Row {
-        values: vec![
-            ValueData::StringValue("greptime".to_string()).into(),
-            ValueData::StringValue("public".to_string()).into(),
-            ValueData::StringValue("metrics".to_string()).into(),
-            ValueData::U32Value(42).into(),
-        ],
-    }];
-    assert_event_contract(
-        &event,
-        "create_table",
-        &event.extra_schema(),
-        &expected_rows,
-    );
-}
-
-#[test]
-fn submitted_event_keeps_locator_when_payload_serialization_fails() {
-    struct Unserializable;
-
-    impl Serialize for Unserializable {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(serde::ser::Error::custom("sensitive serializer detail"))
-        }
+    for (event, expected) in cases {
+        assert_eq!(event.json_payload().unwrap(), expected);
     }
-
-    let payload = versioned_table_ddl_payload_or_error(Unserializable);
-    let event = TableDdlEvent::submitted(
-        TableDdlEventType::CreateTable,
-        TableDdlLocator::new("greptime", "public", "metrics"),
-        payload,
-    );
-
-    assert_eq!(
-        event.json_payload().unwrap(),
-        json!({
-            "version": TABLE_DDL_PAYLOAD_VERSION,
-            "error": {"code": "payload_serialization_failed"}
-        })
-    );
-    assert_eq!(
-        event.extra_rows().unwrap()[0].values,
-        vec![
-            ValueData::StringValue("greptime".to_string()).into(),
-            ValueData::StringValue("public".to_string()).into(),
-            ValueData::StringValue("metrics".to_string()).into(),
-            Value::default(),
-        ]
-    );
 }
 
 #[test]
@@ -232,11 +233,7 @@ fn logical_table_submission_emits_one_row_per_locator() {
             .with_table_id(11)
             .with_physical_table_id(1),
     ];
-    let event = TableDdlEvent::submitted_for_tables(
-        TableDdlEventType::CreateLogicalTables,
-        locators,
-        versioned_table_ddl_payload(json!({"kind": "create_logical_tables"})).unwrap(),
-    );
+    let event = TableDdlEvent::create_logical_tables_submitted(locators, 2);
 
     let rows = event.extra_rows().unwrap();
     assert_eq!(rows.len(), 2);
@@ -271,12 +268,9 @@ fn expected_schema(event_type: TableDdlEventType) -> Vec<(&'static str, i32)> {
     schema
 }
 #[test]
-fn test_create_table_submitted_event_has_rich_payload_and_locators() {
+fn test_create_table_submitted_event_has_bounded_payload_and_locator() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let task = test_create_table_task("foo");
-    let expected_task = serde_json::to_value(&task).unwrap();
-    let expected_table_info = serde_json::to_value(&task.table_info).unwrap();
-    let expected_table_options = serde_json::to_value(&task.table_info.meta.options).unwrap();
     let procedure = CreateTableProcedure::new(task, new_ddl_context(node_manager)).unwrap();
 
     let state = ProcedureState::Running;
@@ -300,13 +294,14 @@ fn test_create_table_submitted_event_has_rich_payload_and_locators() {
             Value::default(),
         ]
     );
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], 1);
-    assert_eq!(payload["data"]["kind"], "create_table");
-    assert_eq!(payload["data"]["task"], expected_task);
-    assert_eq!(payload["data"]["table_info"], expected_table_info);
-    assert_eq!(payload["data"]["table_options"], expected_table_options);
-    assert!(payload["data"]["region_wal_options"].is_null());
+    assert_eq!(
+        event.json_payload().unwrap(),
+        json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "create_if_not_exists": false,
+            "engine": "mito2",
+        })
+    );
 }
 
 #[test]
@@ -367,15 +362,13 @@ fn test_create_table_succeeded_event_only_has_table_id() {
 }
 
 #[test]
-fn test_submitted_event_has_one_rich_row_per_logical_table() {
+fn test_create_logical_submitted_event_has_bounded_batch_payload() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let mut foo = test_create_logical_table_task("foo");
     foo.set_table_id(7);
     let mut bar = test_create_logical_table_task("bar");
     bar.set_table_id(8);
-    let expected_foo_task = serde_json::to_value(&foo).unwrap();
-    let expected_bar_task = serde_json::to_value(&bar).unwrap();
     let procedure = CreateLogicalTablesProcedure::new(vec![foo, bar], 1024, ddl_context);
 
     let lifecycle_state = ProcedureState::Running;
@@ -409,15 +402,13 @@ fn test_submitted_event_has_one_rich_row_per_logical_table() {
     assert_eq!(rows[1].values[3], Value::default());
     assert_eq!(rows[1].values[4], ValueData::U32Value(1024).into());
 
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], 1);
-    assert_eq!(payload["data"]["kind"], "create_logical_tables");
-    assert_eq!(payload["data"]["physical_table_id"], 1024);
-    let tables = payload["data"]["tables"].as_array().unwrap();
-    assert_eq!(tables.len(), 2);
-    assert_eq!(tables[0]["task"], expected_foo_task);
-    assert_eq!(tables[1]["task"], expected_bar_task);
-    assert!(tables[0]["table_info"].is_object());
+    assert_eq!(
+        event.json_payload().unwrap(),
+        json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "table_count": 2,
+        })
+    );
 }
 
 #[test]
@@ -492,12 +483,12 @@ fn test_succeeded_event_has_one_complete_locator_per_logical_table() {
 }
 
 #[test]
-fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
+fn test_alter_table_submitted_event_has_bounded_kind_and_locator() {
     let table_id = 1024;
     let task = test_alter_table_task("foo");
     let procedure = AlterTableProcedure::new(
         table_id,
-        task.clone(),
+        task,
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     )
     .unwrap();
@@ -535,10 +526,13 @@ fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
             api::v1::value::ValueData::U32Value(table_id).into(),
         ]
     );
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], TABLE_DDL_PAYLOAD_VERSION);
-    let payload_task: AlterTableTask = serde_json::from_value(payload["data"].clone()).unwrap();
-    assert_eq!(payload_task, task);
+    assert_eq!(
+        event.json_payload().unwrap(),
+        json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "kind": "drop_columns",
+        })
+    );
 }
 
 #[test]
@@ -597,7 +591,7 @@ fn test_alter_table_lifecycle_events_are_lightweight_with_fixed_schema() {
 }
 
 #[test]
-fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
+fn test_alter_logical_submitted_event_has_bounded_batch_payload() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let tasks = vec![
@@ -612,7 +606,6 @@ fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
             vec!["column2".to_string()],
         ),
     ];
-    let expected_tasks = serde_json::to_value(&tasks).unwrap();
     let physical_table_id = 1024;
     let procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
 
@@ -631,11 +624,8 @@ fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
         event.json_payload().unwrap(),
         serde_json::json!({
             "version": TABLE_DDL_PAYLOAD_VERSION,
-            "data": {
-                "kind": "alter_logical_tables",
-                "physical_table_id": physical_table_id,
-                "tasks": expected_tasks,
-            },
+            "table_count": 2,
+            "kinds": ["add_columns"],
         })
     );
     assert_eq!(
@@ -714,7 +704,40 @@ fn test_later_events_are_lightweight_without_dynamic_success_id() {
 }
 
 #[test]
-fn undrop_submitted_event_uses_id_only_locator_and_payload() {
+fn drop_submitted_event_keeps_only_bounded_intent_in_payload() {
+    let procedure = DropTableProcedure::new(
+        DropTableTask {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table: "metrics".to_string(),
+            table_id: 41,
+            drop_if_exists: true,
+        },
+        test_context(),
+    );
+
+    let event = event_for(&procedure, EventTrigger::Submitted);
+
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values,
+        vec![
+            ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+            ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
+            ValueData::StringValue("metrics".to_string()).into(),
+            ValueData::U32Value(41).into(),
+        ]
+    );
+    assert_eq!(
+        event.json_payload().unwrap(),
+        json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "drop_if_exists": true,
+        })
+    );
+}
+
+#[test]
+fn undrop_submitted_event_uses_id_locator_and_version_only_payload() {
     let procedure = UndropTableProcedure::new(UndropTableTask { table_id: 42 }, test_context());
 
     let event = event_for(&procedure, EventTrigger::Submitted);
@@ -731,12 +754,12 @@ fn undrop_submitted_event_uses_id_only_locator_and_payload() {
     );
     assert_eq!(
         event.json_payload().unwrap(),
-        serde_json::json!({"version": 1, "data": {"table_id": 42}})
+        json!({"version": TABLE_DDL_PAYLOAD_VERSION})
     );
 }
 
 #[test]
-fn purge_submitted_event_contains_only_table_id_without_metadata() {
+fn purge_submitted_event_uses_id_locator_and_version_only_payload() {
     let procedure =
         PurgeDroppedTableProcedure::new(PurgeDroppedTableTask { table_id: 43 }, test_context());
 
@@ -754,24 +777,23 @@ fn purge_submitted_event_contains_only_table_id_without_metadata() {
     );
     assert_eq!(
         event.json_payload().unwrap(),
-        serde_json::json!({"version": 1, "data": {"table_id": 43}})
+        json!({"version": TABLE_DDL_PAYLOAD_VERSION})
     );
 }
 
 #[test]
-fn truncate_submitted_event_uses_task_identity_and_time_ranges() {
-    let time_ranges = vec![(
-        Timestamp::new_millisecond(1_000),
-        Timestamp::new_millisecond(2_000),
-    )];
+fn truncate_submitted_event_has_bounded_time_range_count() {
     let task = TruncateTableTask {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
         schema: DEFAULT_SCHEMA_NAME.to_string(),
         table: "metrics".to_string(),
         table_id: 44,
-        time_ranges: time_ranges.clone(),
+        time_ranges: vec![(
+            Timestamp::new_millisecond(1_000),
+            Timestamp::new_millisecond(2_000),
+        )],
     };
-    let procedure = truncate_procedure(task.clone());
+    let procedure = truncate_procedure(task);
 
     let event = event_for(&procedure, EventTrigger::Submitted);
 
@@ -785,11 +807,12 @@ fn truncate_submitted_event_uses_task_identity_and_time_ranges() {
             ValueData::U32Value(44).into(),
         ]
     );
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], 1);
     assert_eq!(
-        serde_json::from_value::<TruncateTableTask>(payload["data"].clone()).unwrap(),
-        task
+        event.json_payload().unwrap(),
+        json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "time_range_count": 1,
+        })
     );
 }
 

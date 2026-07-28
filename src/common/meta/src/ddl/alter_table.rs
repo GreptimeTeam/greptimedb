@@ -41,7 +41,7 @@ use table::table_reference::TableReference;
 use crate::ddl::DdlContext;
 use crate::ddl::alter_table::executor::AlterTableExecutor;
 use crate::ddl::event::table::{
-    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{
     MultipleResults, extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
@@ -411,8 +411,14 @@ impl Procedure for AlterTableProcedure {
                 let locator =
                     TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
                         .with_table_id(self.data.table_id());
-                let payload = versioned_table_ddl_payload_or_error(&self.data.task);
-                TableDdlEvent::submitted(TableDdlEventType::AlterTable, locator, payload)
+                let kind = self
+                    .data
+                    .task
+                    .alter_table
+                    .kind
+                    .as_ref()
+                    .map(alter_table_kind_name);
+                TableDdlEvent::alter_table_submitted(locator, kind)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable),
         };
