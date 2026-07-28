@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::value::ValueData;
 use api::v1::{AlterDatabaseExpr, Row, SetDatabaseOptions as PbSetDatabaseOptions, Value};
+use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN,
     PROCEDURE_ERROR_COLUMN as EVENT_TABLE_PROCEDURE_ERROR_COLUMN,
@@ -27,11 +28,9 @@ use common_event_recorder::event_table::{
     SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
-use common_event_recorder::{Event, EventTypeFilter};
-use common_procedure::{
-    EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId, ProcedureState,
-};
+use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 
+use super::test_util::assert_event_filter;
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
@@ -221,7 +220,7 @@ fn test_create_database_event_filter() {
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
-    assert_database_event_filter(&procedure, CREATE_DATABASE_EVENT_TYPE);
+    assert_event_filter(&procedure, CREATE_DATABASE_EVENT_TYPE);
 }
 
 #[test]
@@ -242,7 +241,7 @@ fn test_alter_database_event_filter() {
     )
     .unwrap();
 
-    assert_database_event_filter(&procedure, ALTER_DATABASE_EVENT_TYPE);
+    assert_event_filter(&procedure, ALTER_DATABASE_EVENT_TYPE);
 }
 
 #[test]
@@ -254,37 +253,7 @@ fn test_drop_database_event_filter() {
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
-    assert_database_event_filter(&procedure, DROP_DATABASE_EVENT_TYPE);
-}
-
-fn assert_database_event_filter(procedure: &dyn Procedure, event_type: &str) {
-    let state = ProcedureState::Running;
-    let event_context = |event_type_filter| EventContext {
-        procedure_id: ProcedureId::random(),
-        lifecycle_state: &state,
-        trigger: EventTrigger::Submitted,
-        event_type_filter: Arc::new(event_type_filter),
-    };
-
-    let allowed = procedure
-        .event(&event_context(EventTypeFilter::Only(HashSet::from([
-            event_type.to_string(),
-        ]))))
-        .unwrap();
-    assert_eq!(allowed.event_type(), event_type);
-
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
-                String::from("other_event",)
-            ]))))
-            .is_none()
-    );
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::new())))
-            .is_none()
-    );
+    assert_event_filter(&procedure, DROP_DATABASE_EVENT_TYPE);
 }
 
 fn assert_event_locator(

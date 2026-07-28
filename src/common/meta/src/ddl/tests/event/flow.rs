@@ -12,23 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
     PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
-use common_event_recorder::{Event, EventTypeFilter};
-use common_procedure::{
-    EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId, ProcedureState,
-};
+use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 use table::table_name::TableName;
 
+use super::test_util::assert_event_filter;
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::event::flow::{
@@ -191,7 +189,7 @@ fn test_create_flow_event_filter() {
         test_query_context(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
-    assert_flow_event_filter(&procedure, CREATE_FLOW_EVENT_TYPE);
+    assert_event_filter(&procedure, CREATE_FLOW_EVENT_TYPE);
 }
 
 #[test]
@@ -200,7 +198,7 @@ fn test_drop_flow_event_filter() {
         test_drop_flow_task("flow", 42, false),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
-    assert_flow_event_filter(&procedure, DROP_FLOW_EVENT_TYPE);
+    assert_event_filter(&procedure, DROP_FLOW_EVENT_TYPE);
 }
 
 fn flow_schema() -> Vec<ColumnSchema> {
@@ -250,36 +248,6 @@ fn assert_procedure_event_contract(
                     .unwrap_or(Value { value_data: None }),
             ],
         }],
-    );
-}
-
-fn assert_flow_event_filter(procedure: &dyn Procedure, event_type: &str) {
-    let state = ProcedureState::Running;
-    let event_context = |event_type_filter| EventContext {
-        procedure_id: ProcedureId::random(),
-        lifecycle_state: &state,
-        trigger: EventTrigger::Submitted,
-        event_type_filter: Arc::new(event_type_filter),
-    };
-
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
-                event_type.to_string()
-            ]))))
-            .is_some()
-    );
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::new())))
-            .is_none()
-    );
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
-                "other_event".to_string(),
-            ]))))
-            .is_none()
     );
 }
 
