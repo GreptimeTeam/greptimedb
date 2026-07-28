@@ -562,6 +562,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Stale compaction execution for region {}, the region may have been reopened, truncated or the compaction was superseded",
+        region_id
+    ))]
+    StaleCompactionExecution {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is truncated", region_id))]
     RegionTruncated {
         region_id: RegionId,
@@ -1443,6 +1453,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            StaleCompactionExecution { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
