@@ -22,10 +22,10 @@ use std::sync::Arc;
 use common_query::native_histogram::*;
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Float64Builder, Int64Array,
-    StringBuilder, StructArray, TimestampMillisecondArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float64Array, Float64Builder, Int64Array, StringBuilder,
+    StructArray, TimestampMillisecondArray, UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, Int64Type, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
@@ -33,7 +33,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl, Signature, create_udaf, create_udf};
 
-use crate::functions::extract_array;
+use crate::functions::{extract_array, extract_range_dict};
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -1507,35 +1507,6 @@ fn idelta_value(
         }
         .into_gauge(),
     )
-}
-
-fn extract_range_dict(
-    columnar_value: &ColumnarValue,
-    func_name: &str,
-    arg_name: &str,
-    expected_value_type: &DataType,
-) -> DfResult<DictionaryArray<Int64Type>> {
-    let array = extract_array(columnar_value)?;
-    let dict = array
-        .as_any()
-        .downcast_ref::<DictionaryArray<Int64Type>>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "{func_name}: expect {arg_name} as DictionaryArray<Int64>, found {}",
-                array.data_type()
-            ))
-        })?
-        .clone();
-
-    if &dict.value_type() != expected_value_type {
-        return Err(DataFusionError::Execution(format!(
-            "{func_name}: expect {arg_name} values of type {expected_value_type}, found {}",
-            dict.value_type()
-        )));
-    }
-
-    RangeArray::try_new(dict.clone()).map_err(DataFusionError::from)?;
-    Ok(dict)
 }
 
 fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(

@@ -32,18 +32,16 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    DictionaryArray, Float64Array, Float64Builder, TimestampMillisecondArray,
-};
+use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::{Array, Int64Array};
-use datatypes::arrow::datatypes::{DataType, Int64Type};
+use datatypes::arrow::datatypes::DataType;
 
-use crate::functions::extract_array;
+use crate::functions::{extract_array, extract_range_dict};
 use crate::range_array::{RangeArray, unpack};
 
 pub type Delta = ExtrapolatedRate<false, false>;
@@ -286,35 +284,6 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
-}
-
-fn extract_range_dict(
-    columnar_value: &ColumnarValue,
-    func_name: &str,
-    arg_name: &str,
-    expected_value_type: &DataType,
-) -> DfResult<DictionaryArray<Int64Type>> {
-    let array = extract_array(columnar_value)?;
-    let dict = array
-        .as_any()
-        .downcast_ref::<DictionaryArray<Int64Type>>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "{func_name}: expect {arg_name} as DictionaryArray<Int64>, found {}",
-                array.data_type()
-            ))
-        })?
-        .clone();
-
-    if &dict.value_type() != expected_value_type {
-        return Err(DataFusionError::Execution(format!(
-            "{func_name}: expect {arg_name} values of type {expected_value_type}, found {}",
-            dict.value_type()
-        )));
-    }
-
-    RangeArray::try_new(dict.clone()).map_err(DataFusionError::from)?;
-    Ok(dict)
 }
 
 fn extract_eval_timestamps(
