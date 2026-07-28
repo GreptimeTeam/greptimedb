@@ -79,13 +79,15 @@ impl TwcsPicker {
                     .into_iter()
                     .partition(|fg| fg.size() <= max_size as usize);
                 files_to_merge = kept_files;
-                info!(
-                    "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
-                    ignored_files.len(),
-                    region_id,
-                    window,
-                    max_size
-                );
+                if !ignored_files.is_empty() {
+                    info!(
+                        "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
+                        ignored_files.len(),
+                        region_id,
+                        window,
+                        max_size
+                    );
+                }
             }
 
             let sorted_runs = if files_to_merge.len() < 1024 {
