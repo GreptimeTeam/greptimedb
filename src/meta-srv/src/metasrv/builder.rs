@@ -22,7 +22,6 @@ use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{DEFAULT_COMPACTION_TIME_WINDOW, EventRecorderImpl, EventRecorderRef};
-use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{
@@ -325,10 +324,7 @@ impl MetasrvBuilder {
 
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
-            let datanode_client_channel_config = ChannelConfig::new()
-                .timeout(Some(options.datanode.client.timeout))
-                .connect_timeout(options.datanode.client.connect_timeout)
-                .tcp_nodelay(options.datanode.client.tcp_nodelay);
+            let datanode_client_channel_config = options.datanode.client.channel_config();
             Arc::new(NodeClients::new(datanode_client_channel_config))
         });
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(

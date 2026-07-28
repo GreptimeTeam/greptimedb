@@ -336,6 +336,8 @@
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
+| `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
+| `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -420,6 +422,8 @@
 | `datanode.client.timeout` | String | `10s` | Operation timeout. |
 | `datanode.client.connect_timeout` | String | `10s` | Connect server timeout. |
 | `datanode.client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
+| `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
+| `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
