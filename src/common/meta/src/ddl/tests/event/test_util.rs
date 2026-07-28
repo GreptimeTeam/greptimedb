@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_event_recorder::EventTypeFilter;
 use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState};
 
-pub(super) fn assert_event_filter(procedure: &dyn Procedure, event_type: &str) {
+pub(crate) fn assert_event_filter(procedure: &dyn Procedure, event_type: &str) {
     let state = ProcedureState::Running;
     let event_context = |event_type_filter| EventContext {
         procedure_id: ProcedureId::random(),
