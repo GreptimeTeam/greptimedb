@@ -14,6 +14,7 @@
 
 #![recursion_limit = "256"]
 
+mod database_ddl_events;
 #[macro_use]
 mod grpc;
 #[macro_use]

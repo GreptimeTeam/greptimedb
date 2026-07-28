@@ -34,6 +34,7 @@ chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
 common-procedure.workspace = true
@@ -97,6 +98,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+common-event-recorder = { workspace = true, features = ["testing"] }
 common-procedure = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-test-util.workspace = true
