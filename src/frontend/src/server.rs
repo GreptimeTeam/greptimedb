@@ -345,10 +345,7 @@ where
             handlers.insert((Box::new(http_server), http_addr));
 
             if let Some(http_api_server) = http_api_server {
-                let http_api_addr = parse_addr(&format!(
-                    "{}:{}",
-                    http_options.api_server_host, http_options.api_server_port
-                ))?;
+                let http_api_addr = parse_addr(&http_options.api_server_addr)?;
                 info!("HTTP API server is enabled at {}", http_api_addr);
                 handlers.insert((Box::new(http_api_server), http_api_addr));
             }

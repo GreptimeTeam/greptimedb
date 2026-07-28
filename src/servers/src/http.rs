@@ -199,12 +199,11 @@ pub struct HttpOptions {
     /// Whether to start the dedicated public HTTP **API** server, which serves
     /// only the `v1` interfaces plus the dashboard. It shares every other
     /// `[http]` option with the main server and only differs by its bound
-    /// address (see `api_server_host` / `api_server_port`).
+    /// address (see `api_server_addr`).
     pub api_server_enable: bool,
-    /// Host of the dedicated HTTP API server. Defaults to `127.0.0.1`.
-    pub api_server_host: String,
-    /// Port of the dedicated HTTP API server. Defaults to `4006`.
-    pub api_server_port: u16,
+    /// The address to bind the dedicated HTTP API server, in the same form as
+    /// `addr` (e.g. `127.0.0.1:4006`).
+    pub api_server_addr: String,
 }
 
 impl Default for HttpOptions {
@@ -220,8 +219,7 @@ impl Default for HttpOptions {
             experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: true,
             api_server_enable: false,
-            api_server_host: "127.0.0.1".to_string(),
-            api_server_port: DEFAULT_HTTP_API_ADDR_PORT,
+            api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
         }
     }
 }
@@ -815,23 +813,20 @@ impl HttpServerBuilder {
 
     /// Builds the internal/full HTTP server (serves the `v1` interfaces **and**
     /// the internal interfaces such as health, status, metrics, config and debug).
-    /// When [`HttpOptions::api_server_enable`] is `true` (the default), it also
-    /// builds a dedicated HTTP **API** server that serves only the `v1`
-    /// interfaces plus the dashboard.
+    /// When [`HttpOptions::api_server_enable`] is `true`, it also builds a
+    /// dedicated HTTP **API** server that serves only the `v1` interfaces plus
+    /// the dashboard.
     ///
     /// The first returned server is bound to `self.options.addr` (e.g. port
     /// `4000`) and keeps the historical single-server behavior, so nothing that
     /// talks to it breaks. The optional second server is bound to
-    /// `api_server_host:api_server_port` (e.g. port `4006`) and is meant to be
-    /// the public-facing API surface. The API server inherits **every** option
-    /// from `[http]` except the bound address, so anything configured under
-    /// `[http]` is effective for both servers.
+    /// `api_server_addr` (e.g. `127.0.0.1:4006`) and is meant to be the
+    /// public-facing API surface. The API server inherits **every** option from
+    /// `[http]` except the bound address, so anything configured under `[http]`
+    /// is effective for both servers.
     pub fn build_servers(self) -> (HttpServer, Option<HttpServer>) {
         let api_enabled = self.options.api_server_enable;
-        let api_addr = format!(
-            "{}:{}",
-            self.options.api_server_host, self.options.api_server_port
-        );
+        let api_addr = self.options.api_server_addr.clone();
 
         let internal = HttpServer {
             options: self.options,
@@ -1612,8 +1607,7 @@ mod test {
         let opts = HttpOptions::default();
         // The API server is disabled by default.
         assert!(!opts.api_server_enable);
-        assert_eq!(opts.api_server_host, "127.0.0.1");
-        assert_eq!(opts.api_server_port, 4006);
+        assert_eq!(opts.api_server_addr, "127.0.0.1:4006");
     }
 
     #[tokio::test]

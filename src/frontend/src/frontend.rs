@@ -204,8 +204,7 @@ mod tests {
         // disabled by default (its port/host defaults are still 4006 / 127.0.0.1).
         let parsed: FrontendOptions = toml::from_str("").unwrap();
         assert!(!parsed.http.api_server_enable);
-        assert_eq!(parsed.http.api_server_port, 4006);
-        assert_eq!(parsed.http.api_server_host, "127.0.0.1");
+        assert_eq!(parsed.http.api_server_addr, "127.0.0.1:4006");
     }
 
     struct SuspendableHeartbeatServer {

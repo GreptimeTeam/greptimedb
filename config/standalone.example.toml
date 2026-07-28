@@ -88,10 +88,9 @@ experimental_enable_explain_analyze_stream = true
 ## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
 ## option with the main server. It is disabled by default; set to `true` to enable.
 api_server_enable = false
-## Host of the dedicated HTTP API server. Defaults to `127.0.0.1`.
-api_server_host = "127.0.0.1"
-## Port of the dedicated HTTP API server. Defaults to `4006`.
-api_server_port = 4006
+## The address to bind the dedicated HTTP API server, in the same form as `addr`.
+## Defaults to `127.0.0.1:4006`.
+api_server_addr = "127.0.0.1:4006"
 
 ## The gRPC server options.
 [grpc]
