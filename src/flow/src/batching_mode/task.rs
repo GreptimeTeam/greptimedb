@@ -658,10 +658,6 @@ impl BatchingTask {
         );
 
         let mut peer_desc = None;
-        {
-            let mut state = self.state.write().unwrap();
-            state.record_start_time_if_first();
-        }
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
@@ -725,6 +721,10 @@ impl BatchingTask {
             };
 
             let snapshot_seqs = coverage.snapshot_seqs();
+            {
+                let mut state = self.state.write().unwrap();
+                state.record_start_time_if_first();
+            }
             frontend_client
                 .query_with_terminal_metrics(
                     catalog,
