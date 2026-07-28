@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
 use toml::value::Table;
 
+use crate::env::bare::WalConfig;
 /// A dotted TOML path owned by the compatibility runner.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DottedPath(Vec<String>);
@@ -39,15 +40,6 @@ impl std::fmt::Display for DottedPath {
     }
 }
 
-/// WAL implementation selected by the compatibility runner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DatanodeWalMode {
-    /// Local raft WAL requires an isolated WAL directory.
-    Raft,
-    /// Kafka WAL requires runner-selected broker endpoints.
-    Kafka,
-}
-
 /// Runner-owned datanode configuration paths that an overlay cannot override.
 #[derive(Debug, Clone)]
 pub(crate) struct DatanodeProtectionPolicy {
@@ -55,8 +47,8 @@ pub(crate) struct DatanodeProtectionPolicy {
 }
 
 impl DatanodeProtectionPolicy {
-    /// Builds the policy for the runner-selected WAL mode.
-    pub(crate) fn for_wal_mode(wal_mode: DatanodeWalMode) -> Self {
+    /// Builds the policy for the runner-selected WAL configuration.
+    pub(crate) fn for_wal(wal: &WalConfig) -> Self {
         let mut protected_paths = vec![
             DottedPath::new(&["mode"]),
             DottedPath::new(&["node_id"]),
@@ -64,9 +56,9 @@ impl DatanodeProtectionPolicy {
             DottedPath::new(&["meta_client_options", "metasrv_addrs"]),
             DottedPath::new(&["wal", "provider"]),
         ];
-        protected_paths.push(match wal_mode {
-            DatanodeWalMode::Raft => DottedPath::new(&["wal", "dir"]),
-            DatanodeWalMode::Kafka => DottedPath::new(&["wal", "broker_endpoints"]),
+        protected_paths.push(match wal {
+            WalConfig::RaftEngine => DottedPath::new(&["wal", "dir"]),
+            WalConfig::Kafka { .. } => DottedPath::new(&["wal", "broker_endpoints"]),
         });
         protected_paths.sort();
 
@@ -417,9 +409,9 @@ mod tests {
         overlay
     }
 
-    fn prepared_overlay(content: &str, wal_mode: DatanodeWalMode) -> PreparedDatanodeOverlay {
+    fn prepared_overlay(content: &str, wal: &WalConfig) -> PreparedDatanodeOverlay {
         load_overlay(content)
-            .prepare(&DatanodeProtectionPolicy::for_wal_mode(wal_mode))
+            .prepare(&DatanodeProtectionPolicy::for_wal(wal))
             .unwrap()
     }
 
@@ -434,7 +426,7 @@ mod tests {
             new_key = true
             old_key = "replacement"
             "#,
-            DatanodeWalMode::Raft,
+            &WalConfig::RaftEngine,
         );
         let merged = prepared
             .apply_to_rendered_baseline(
@@ -475,7 +467,7 @@ mod tests {
             dir = "/overlay/wal"
             tuning = 42
             "#,
-            DatanodeWalMode::Raft,
+            &WalConfig::RaftEngine,
         );
         let merged = prepared
             .apply_to_rendered_baseline(
@@ -513,7 +505,10 @@ mod tests {
             broker_endpoints = ["overlay:9092"]
             provider = "raft_engine"
             "#,
-            DatanodeWalMode::Kafka,
+            &WalConfig::Kafka {
+                needs_kafka_cluster: false,
+                broker_endpoints: vec![],
+            },
         );
         let merged = prepared
             .apply_to_rendered_baseline(
@@ -537,9 +532,7 @@ mod tests {
     fn rejects_non_table_protected_ancestor() {
         let overlay = load_overlay("wal = \"not a table\"");
         let error = overlay
-            .prepare(&DatanodeProtectionPolicy::for_wal_mode(
-                DatanodeWalMode::Raft,
-            ))
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
             .unwrap_err();
 
         assert!(error.contains("ancestor wal"));
@@ -556,7 +549,7 @@ mod tests {
             dir = "/overlay/wal"
             provider = "kafka"
             "#,
-            DatanodeWalMode::Raft,
+            &WalConfig::RaftEngine,
         );
 
         let paths: Vec<_> = prepared
@@ -593,9 +586,7 @@ mod tests {
         let expected_key = overlay.profile_key;
         let expected_id = overlay.profile_id.clone();
         let prepared = overlay
-            .prepare(&DatanodeProtectionPolicy::for_wal_mode(
-                DatanodeWalMode::Raft,
-            ))
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
             .unwrap();
 
         assert_eq!(prepared.profile_key(), &expected_key);

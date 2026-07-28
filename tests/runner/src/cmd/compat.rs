@@ -768,8 +768,7 @@ async fn run_profile(profile: &CompatProfile, config: &ProfileRunConfig<'_>) -> 
     if progress.should_transition_to_current() {
         println!("Restarting cluster with new-version binary on preserved state...");
         env.activate_compat_current();
-        env.compat_restart(&db, config.to_bins_dir.clone())
-            .await;
+        env.compat_restart(&db, config.to_bins_dir.clone()).await;
 
         println!("Running verify phase...");
         for case_index in progress.successful_setup_indexes.clone() {

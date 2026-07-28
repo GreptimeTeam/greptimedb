@@ -1045,9 +1045,7 @@ impl GreptimeDBContext {
 mod tests {
     use super::*;
     use crate::cmd::bare::ServerAddr;
-    use crate::cmd::datanode_overlay::{
-        DatanodeOverlay, DatanodeProtectionPolicy, DatanodeWalMode,
-    };
+    use crate::cmd::datanode_overlay::{DatanodeOverlay, DatanodeProtectionPolicy};
 
     fn test_env(temp_dir: &Path) -> Env {
         Env::new(
@@ -1074,9 +1072,7 @@ mod tests {
         std::fs::write(temp_dir.path().join("overlay.toml"), "value = 1").unwrap();
         let overlay = DatanodeOverlay::load(temp_dir.path(), Path::new("overlay.toml"))
             .unwrap()
-            .prepare(&DatanodeProtectionPolicy::for_wal_mode(
-                DatanodeWalMode::Raft,
-            ))
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
             .unwrap();
         let env = test_env(temp_dir.path());
         let clone = env.clone();

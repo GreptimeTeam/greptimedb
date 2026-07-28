@@ -603,9 +603,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::cmd::datanode_overlay::{
-        DatanodeOverlay, DatanodeProtectionPolicy, DatanodeWalMode,
-    };
+    use crate::cmd::datanode_overlay::{DatanodeOverlay, DatanodeProtectionPolicy};
     use crate::env::bare::{StoreConfig, WalConfig};
 
     fn test_env(sqlness_home: &Path) -> (Env, GreptimeDBContext) {
@@ -639,9 +637,7 @@ mod tests {
         .unwrap();
         let overlay = DatanodeOverlay::load(temp_dir, Path::new("old-datanode.toml"))
             .unwrap()
-            .prepare(&DatanodeProtectionPolicy::for_wal_mode(
-                DatanodeWalMode::Raft,
-            ))
+            .prepare(&DatanodeProtectionPolicy::for_wal(&WalConfig::RaftEngine))
             .unwrap();
         CompatConfigStage::Old(Arc::new(overlay))
     }
