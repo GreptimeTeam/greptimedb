@@ -304,15 +304,19 @@ impl NativeHistogram {
     ///
     /// Returns `None` when the layouts are invalid or cannot be reconciled.
     pub fn add(&self, other: &Self) -> Option<Self> {
+        let reset_hint = add_reset_hint(self.reset_hint, other.reset_hint);
         if self.is_empty_payload() {
-            return other.clone().compact();
+            let mut result = other.clone();
+            result.reset_hint = reset_hint;
+            return result.compact();
         }
         if other.is_empty_payload() {
-            return self.clone().compact();
+            let mut result = self.clone();
+            result.reset_hint = reset_hint;
+            return result.compact();
         }
 
         let (left, right) = self.reconcile(other)?;
-        let reset_hint = add_reset_hint(left.reset_hint, right.reset_hint);
         left.combine_exact(&right, reset_hint, |left, right| left + right)?
             .compact()
     }
@@ -1697,6 +1701,29 @@ mod tests {
             ]
         );
         assert_eq!(result.positive_buckets, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn add_combines_reset_hints_for_empty_payloads() {
+        let mut empty = histogram(Vec::new(), Vec::new());
+        empty.reset_hint = CounterResetHint::Gauge;
+        let mut populated = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![1.0],
+        );
+        populated.reset_hint = CounterResetHint::NotCounterReset;
+
+        assert_eq!(
+            empty.add(&populated).unwrap().reset_hint,
+            CounterResetHint::Gauge
+        );
+        assert_eq!(
+            populated.add(&empty).unwrap().reset_hint,
+            CounterResetHint::Gauge
+        );
     }
 
     #[test]
