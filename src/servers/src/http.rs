@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::StatusCode as HttpStatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::Route;
 use axum::serve::ListenerExt;
@@ -130,6 +131,7 @@ const DEFAULT_HTTP_API_ADDR_PORT: u16 = 4006;
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
+// these APIs will bypass authentication.
 pub static PUBLIC_API_PREFIX: [&str; 4] = [
     "/v1/influxdb/ping",
     "/v1/influxdb/health",
@@ -137,12 +139,24 @@ pub static PUBLIC_API_PREFIX: [&str; 4] = [
     "/v1/splunk/services/collector/health",
 ];
 
+/// Listener mode for an [`HttpServer`].
+///
+/// Both modes share the *same* complete route registry; the [`HttpServerKind::Api`]
+/// listener additionally installs an outer guard that only exposes the `/v1` APIs
+/// and the dashboard, returning `404` for every other path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HttpServerKind {
+    /// Serves the complete historical HTTP surface (both `v1` APIs and internal
+    /// interfaces such as health, status, metrics, config and debug).
+    #[default]
+    Full,
+    /// Serves only the `v1` interfaces plus the dashboard.
+    Api,
+}
+
 #[derive(Default)]
 pub struct HttpServer {
     router: StdMutex<Router>,
-    /// Accumulated internal-only (non-`v1`) routes such as `/metrics` and `/config`.
-    /// They are mounted on the internal/full HTTP server but not on the API-only server.
-    internal_router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     memory_limiter: ServerMemoryLimiter,
@@ -150,24 +164,42 @@ pub struct HttpServer {
     // server configs
     options: HttpOptions,
     bind_addr: Option<SocketAddr>,
-    /// `true` when this server is the dedicated HTTP **API** server that serves
-    /// only the `v1` interfaces plus the dashboard. When `false` it is the
-    /// internal/full server that additionally serves health, status, metrics,
-    /// config and debug interfaces.
-    api_only: bool,
+    /// What this server instance exposes. See [`HttpServerKind`].
+    kind: HttpServerKind,
+}
+
+/// Returns `true` when `path` equals `root` or is nested directly under it
+/// (`root/...`). Uses an exact slash boundary so `/v1` does **not** match `/v10`
+/// or `/v1-internal`.
+pub(crate) fn is_namespace(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// Paths visible on the dedicated API listener: the `/v1` APIs and the dashboard.
+pub fn is_api_listener_path(path: &str) -> bool {
+    is_namespace(path, HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH) || is_namespace(path, "/dashboard")
+}
+
+/// Outer guard for the API listener. Rejects any path outside the API surface
+/// with `404 Not Found` before it can reach a handler (and before auth side
+/// effects). Reachability is kept separate from authentication.
+async fn enforce_api_surface(req: Request, next: Next) -> Response {
+    if !is_api_listener_path(req.uri().path()) {
+        return HttpStatusCode::NOT_FOUND.into_response();
+    }
+    next.run(req).await
 }
 
 impl HttpServer {
-    /// Returns `true` when this server also serves the internal-only interfaces
-    /// (health, ready, status, metrics, config, debug). Only the internal/full
-    /// server does; the API-only server does not.
-    fn serves_internal_routes(&self) -> bool {
-        !self.api_only
-    }
-
     /// A short human-readable label for this server instance, used in logs.
     fn kind(&self) -> &'static str {
-        if self.api_only { "HTTP API" } else { "HTTP" }
+        match self.kind {
+            HttpServerKind::Api => "HTTP API",
+            HttpServerKind::Full => "HTTP",
+        }
     }
 }
 
@@ -561,8 +593,6 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     user_provider: Option<UserProviderRef>,
     router: Router,
-    /// Accumulated internal (non-`v1`) routes such as `/metrics` and `/config`.
-    internal_router: Router,
     memory_limiter: ServerMemoryLimiter,
 }
 
@@ -572,7 +602,6 @@ impl HttpServerBuilder {
             options,
             user_provider: None,
             router: Router::new(),
-            internal_router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
         }
     }
@@ -691,9 +720,7 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            internal_router: self
-                .internal_router
-                .merge(HttpServer::route_metrics(handler)),
+            router: self.router.merge(HttpServer::route_metrics(handler)),
             ..self
         }
     }
@@ -752,7 +779,7 @@ impl HttpServerBuilder {
         });
 
         Self {
-            internal_router: self.internal_router.merge(config_router),
+            router: self.router.merge(config_router),
             ..self
         }
     }
@@ -804,26 +831,30 @@ impl HttpServerBuilder {
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router),
-            internal_router: StdMutex::new(self.internal_router),
             bind_addr: None,
             memory_limiter: self.memory_limiter,
-            api_only: false,
+            kind: HttpServerKind::Full,
         }
     }
 
-    /// Builds the internal/full HTTP server (serves the `v1` interfaces **and**
-    /// the internal interfaces such as health, status, metrics, config and debug).
+    /// Builds the full HTTP server (serves the `v1` interfaces **and** the
+    /// internal interfaces such as health, status, metrics, config and debug).
     /// When [`HttpOptions::api_server_enable`] is `true`, it also builds a
     /// dedicated HTTP **API** server that serves only the `v1` interfaces plus
     /// the dashboard.
     ///
+    /// Both servers are built from the **same** complete route registry (so every
+    /// built-in, plugin and downstream route registered via `with_extra_router()`
+    /// is present on both). The API server additionally installs an outer guard
+    /// that exposes only the `/v1` and `/dashboard` namespaces, returning `404`
+    /// for everything else. This means downstream projects (e.g. enterprise) do
+    /// not need to classify their routes as public/internal: non-`/v1`
+    /// operational routes are hidden from the API listener automatically.
+    ///
     /// The first returned server is bound to `self.options.addr` (e.g. port
-    /// `4000`) and keeps the historical single-server behavior, so nothing that
-    /// talks to it breaks. The optional second server is bound to
-    /// `api_server_addr` (e.g. `127.0.0.1:4006`) and is meant to be the
-    /// public-facing API surface. The API server inherits **every** option from
-    /// `[http]` except the bound address, so anything configured under `[http]`
-    /// is effective for both servers.
+    /// `4000`) and keeps the historical single-server behavior. The optional
+    /// second server is bound to `api_server_addr` (e.g. `127.0.0.1:4006`). The
+    /// API server inherits **every** option from `[http]` except the bound address.
     pub fn build_servers(self) -> (HttpServer, Option<HttpServer>) {
         let api_enabled = self.options.api_server_enable;
         let api_addr = self.options.api_server_addr.clone();
@@ -833,15 +864,14 @@ impl HttpServerBuilder {
             user_provider: self.user_provider.clone(),
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router.clone()),
-            internal_router: StdMutex::new(self.internal_router.clone()),
             bind_addr: None,
             memory_limiter: self.memory_limiter.clone(),
-            api_only: false,
+            kind: HttpServerKind::Full,
         };
 
         let api = if api_enabled {
-            // The API server shares every option with the internal/full server
-            // except the bound address.
+            // The API server shares every option with the full server except the
+            // bound address.
             let api_options = HttpOptions {
                 addr: api_addr,
                 ..internal.options.clone()
@@ -851,10 +881,9 @@ impl HttpServerBuilder {
                 user_provider: self.user_provider.clone(),
                 shutdown_tx: Mutex::new(None),
                 router: StdMutex::new(self.router),
-                internal_router: StdMutex::new(self.internal_router),
                 bind_addr: None,
                 memory_limiter: self.memory_limiter,
-                api_only: true,
+                kind: HttpServerKind::Api,
             })
         } else {
             None
@@ -865,35 +894,36 @@ impl HttpServerBuilder {
 }
 
 impl HttpServer {
-    /// Gets the router and adds necessary root routes (health, status, dashboard).
+    /// Builds the complete route registry shared by every HTTP server: all the
+    /// `v1` protocol routes, the root/health/status/metrics/config interfaces,
+    /// the dashboard and (via `build()`) the debug routes.
+    ///
+    /// Both [`HttpServerKind::Full`] and [`HttpServerKind::Api`] listeners are
+    /// built from this same router. The API listener hides the non-`v1` paths
+    /// later, in [`HttpServer::build`], via an outer guard. Keeping one router
+    /// means downstream routes added through `with_extra_router()` are present
+    /// on both listeners automatically, and the API guard decides exposure.
     pub fn make_app(&self) -> Router {
         let mut router = self.router.lock().unwrap().clone();
 
-        // The `v1` health check is available on every HTTP server (including the
-        // API-only server) so clients can probe it.
-        router = router.route(
-            &format!("/{HTTP_API_VERSION}/health"),
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                &format!("/{HTTP_API_VERSION}/health"),
+                routing::get(handler::health).post(handler::health),
+            )
+            .route("/", routing::get(handler::index))
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route("/status", routing::get(handler::status));
 
-        if self.serves_internal_routes() {
-            // Internal-only interfaces live on the internal/full HTTP server.
-            router = router.merge(self.internal_router.lock().unwrap().clone());
-            router = router
-                .route("/", routing::get(handler::index))
-                .route(
-                    "/health",
-                    routing::get(handler::health).post(handler::health),
-                )
-                .route(
-                    "/ready",
-                    routing::get(handler::health).post(handler::health),
-                )
-                .route("/status", routing::get(handler::status));
-        }
-
-        // The dashboard runs on top of the `v1` APIs, so it is served on every
-        // HTTP server (including the API-only server).
+        // The dashboard runs on top of the `v1` APIs, so it is exposed on every
+        // HTTP server (the API listener's namespace guard allows `/dashboard`).
         #[cfg(feature = "dashboard")]
         {
             if !self.options.disable_dashboard {
@@ -1007,39 +1037,46 @@ impl HttpServer {
                     )),
             );
 
-        // Debug handlers only live on the server that serves the internal interfaces.
-        if self.serves_internal_routes() {
-            Ok(router.nest(
-                "/debug",
-                Router::new()
-                    // handler for changing log level dynamically
-                    .route("/log_level", routing::post(dyn_log::dyn_log_handler))
-                    .route("/enable_trace", routing::post(dyn_trace::dyn_trace_handler))
-                    .nest(
-                        "/prof",
-                        Router::new()
-                            .route("/cpu", routing::post(pprof::pprof_handler))
-                            .route("/mem", routing::post(mem_prof::mem_prof_handler))
-                            .route("/mem/symbol", routing::post(mem_prof::symbolicate_handler))
-                            .route(
-                                "/mem/activate",
-                                routing::post(mem_prof::activate_heap_prof_handler),
-                            )
-                            .route(
-                                "/mem/deactivate",
-                                routing::post(mem_prof::deactivate_heap_prof_handler),
-                            )
-                            .route(
-                                "/mem/status",
-                                routing::get(mem_prof::heap_prof_status_handler),
-                            ) // jemalloc gdump flag status and toggle
-                            .route(
-                                "/mem/gdump",
-                                routing::get(mem_prof::gdump_status_handler)
-                                    .post(mem_prof::gdump_toggle_handler),
-                            ),
-                    ),
-            ))
+        // Debug handlers are part of the complete router; the API listener hides
+        // them through the outer namespace guard applied below.
+        let router = router.nest(
+            "/debug",
+            Router::new()
+                // handler for changing log level dynamically
+                .route("/log_level", routing::post(dyn_log::dyn_log_handler))
+                .route("/enable_trace", routing::post(dyn_trace::dyn_trace_handler))
+                .nest(
+                    "/prof",
+                    Router::new()
+                        .route("/cpu", routing::post(pprof::pprof_handler))
+                        .route("/mem", routing::post(mem_prof::mem_prof_handler))
+                        .route("/mem/symbol", routing::post(mem_prof::symbolicate_handler))
+                        .route(
+                            "/mem/activate",
+                            routing::post(mem_prof::activate_heap_prof_handler),
+                        )
+                        .route(
+                            "/mem/deactivate",
+                            routing::post(mem_prof::deactivate_heap_prof_handler),
+                        )
+                        .route(
+                            "/mem/status",
+                            routing::get(mem_prof::heap_prof_status_handler),
+                        ) // jemalloc gdump flag status and toggle
+                        .route(
+                            "/mem/gdump",
+                            routing::get(mem_prof::gdump_status_handler)
+                                .post(mem_prof::gdump_toggle_handler),
+                        ),
+                ),
+        );
+
+        // Seal the API listener last: this is the outermost layer, applied after
+        // all middleware, debug routes and any caller/plugin routes, so that only
+        // `/v1` and `/dashboard` paths can reach a handler. Excluded paths return
+        // 404 before auth or any other side effect.
+        if self.kind == HttpServerKind::Api {
+            Ok(router.layer(middleware::from_fn(enforce_api_surface)))
         } else {
             Ok(router)
         }
@@ -1453,10 +1490,9 @@ impl Server for HttpServer {
     }
 
     fn name(&self) -> &str {
-        if self.api_only {
-            HTTP_API_SERVER
-        } else {
-            HTTP_SERVER
+        match self.kind {
+            HttpServerKind::Api => HTTP_API_SERVER,
+            HttpServerKind::Full => HTTP_SERVER,
         }
     }
 
@@ -1694,6 +1730,78 @@ mod test {
         assert_eq!(
             api.options.cors_allowed_origins,
             http_opts.cors_allowed_origins
+        );
+    }
+
+    #[test]
+    fn test_is_api_listener_path() {
+        // `/v1` namespace (exact slash boundary).
+        assert!(is_api_listener_path("/v1"));
+        assert!(is_api_listener_path("/v1/"));
+        assert!(is_api_listener_path("/v1/sql"));
+        assert!(!is_api_listener_path("/v10/sql"));
+        assert!(!is_api_listener_path("/v1-internal"));
+        // `/dashboard` namespace.
+        assert!(is_api_listener_path("/dashboard"));
+        assert!(is_api_listener_path("/dashboard/app.js"));
+        assert!(!is_api_listener_path("/dashboard-admin"));
+        // Operational paths are never API-visible.
+        assert!(!is_api_listener_path("/metrics"));
+        assert!(!is_api_listener_path("/status/plugin"));
+        assert!(!is_api_listener_path("/health"));
+    }
+
+    #[tokio::test]
+    pub async fn test_extra_router_respects_api_surface() {
+        // Downstream routes added through `with_extra_router()` (e.g. enterprise
+        // plugins or the `RouterConfigurator`) are present on the full listener
+        // and on the API listener's router, but the API listener's outer guard
+        // hides every non-`/v1` path automatically. This is what keeps the
+        // feature correct for greptimedb-enterprise with no downstream changes.
+        let (tx, _rx) = mpsc::channel(100);
+        let instance = Arc::new(DummyInstance { _tx: tx });
+        let options = HttpOptions {
+            api_server_enable: true,
+            ..HttpOptions::default()
+        };
+        let builder = HttpServerBuilder::new(options)
+            .with_sql_handler(instance)
+            .with_extra_router(
+                Router::new()
+                    .route("/status/plugin", routing::get(|| async { "ok" }))
+                    .route("/v1/plugin", routing::get(|| async { "ok" })),
+            );
+        let (full, api) = builder.build_servers();
+        let api = api.expect("API server is explicitly enabled");
+
+        let full_client = TestClient::new(full.build(full.make_app()).unwrap()).await;
+        let api_client = TestClient::new(api.build(api.make_app()).unwrap()).await;
+
+        // A non-`/v1` route is reachable on the full listener...
+        assert_eq!(
+            full_client.get("/status/plugin").send().await.status(),
+            StatusCode::OK
+        );
+        // ...and hidden (404) on the API listener, without the caller classifying it.
+        assert_eq!(
+            api_client.get("/status/plugin").send().await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // A `/v1` route is reachable on both.
+        assert_eq!(
+            full_client.get("/v1/plugin").send().await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            api_client.get("/v1/plugin").send().await.status(),
+            StatusCode::OK
+        );
+
+        // Slash-boundary correctness on the API listener.
+        assert_eq!(
+            api_client.get("/v10/plugin").send().await.status(),
+            StatusCode::NOT_FOUND
         );
     }
 
