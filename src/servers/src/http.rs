@@ -121,6 +121,38 @@ pub mod test_helpers;
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 pub const HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH: &str = "/v1";
+
+/// Provides an extra router to merge into an HTTP server.
+pub trait ExtraHttpRouterProvider: Send + Sync {
+    /// Returns the extra HTTP router.
+    fn router(&self) -> Router;
+}
+
+pub type ExtraHttpRouterProviderRef = Arc<dyn ExtraHttpRouterProvider>;
+
+/// Collection of extra HTTP router providers.
+#[derive(Clone, Default)]
+pub struct ExtraHttpRouterProviders {
+    providers: Vec<ExtraHttpRouterProviderRef>,
+}
+
+impl ExtraHttpRouterProviders {
+    /// Creates an empty provider collection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds an extra HTTP router provider.
+    pub fn add(&mut self, provider: ExtraHttpRouterProviderRef) {
+        self.providers.push(provider);
+    }
+
+    /// Returns all registered providers.
+    pub fn iter(&self) -> impl Iterator<Item = &dyn ExtraHttpRouterProvider> {
+        self.providers.iter().map(|x| x.as_ref())
+    }
+}
+
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
