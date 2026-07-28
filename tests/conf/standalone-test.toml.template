@@ -46,3 +46,6 @@ runtime_size = 2
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
+
+[event_recorder]
+event_types = []
