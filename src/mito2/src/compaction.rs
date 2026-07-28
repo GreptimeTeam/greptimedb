@@ -254,29 +254,34 @@ impl CompactionScheduler {
         }
 
         if let Some(status) = self.region_status.get_mut(&region_id) {
+            // Pending Truncate/EnterStaging requests form a scheduling fence. Any later
+            // compaction with a waiter is an explicit request and receives CompactionCancelled;
+            // automatic triggers have no waiter, so sending the error is a no-op and the trigger
+            // is simply ignored.
+            if !status.pending_ddl_requests.is_empty() {
+                waiter.send(CompactionCancelledSnafu.fail());
+                info!(
+                    "Region {} has pending DDL requests, ignoring compaction: {:?}",
+                    region_id, compact_options
+                );
+                return Ok(false);
+            }
+
             match compact_options {
                 Options::Regular(_) => {
                     status.merge_regular_trigger(waiter);
                 }
                 options @ Options::StrictWindow(_) => {
                     // Incoming compaction request is manually triggered.
-                    if status.pending_ddl_requests.is_empty() {
-                        status.set_pending_request(PendingCompaction {
-                            options,
-                            waiter,
-                            max_parallelism,
-                        });
-                        info!(
-                            "Region {} is compacting, manually compaction will be re-scheduled.",
-                            region_id
-                        );
-                    } else {
-                        waiter.send(CompactionCancelledSnafu.fail());
-                        info!(
-                            "Region {} has pending DDL requests, cancelling manual compaction.",
-                            region_id
-                        );
-                    }
+                    status.set_pending_request(PendingCompaction {
+                        options,
+                        waiter,
+                        max_parallelism,
+                    });
+                    info!(
+                        "Region {} is compacting, manually compaction will be re-scheduled.",
+                        region_id
+                    );
                 }
             }
             return Ok(false);
@@ -396,7 +401,7 @@ impl CompactionScheduler {
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
         if !pending_ddl_requests.is_empty() {
             // The just-finished compaction satisfies any retained regular triggers.
-            for waiter in active.pending_regular.take().unwrap_or_default() {
+            for waiter in active.regular_followup_waiters.take().unwrap_or_default() {
                 waiter.send(Ok(0));
             }
             self.region_status.remove(&region_id);
@@ -405,7 +410,7 @@ impl CompactionScheduler {
             return pending_ddl_requests;
         }
 
-        if active.pending_regular.is_some() {
+        if active.regular_followup_waiters.is_some() {
             self.schedule_next_compaction_with_active(
                 region_id,
                 manifest_ctx,
@@ -589,6 +594,12 @@ impl CompactionScheduler {
     }
 
     /// Cancels the running compaction and queues its dependent DDL atomically.
+    ///
+    /// Production callers currently use this only for [`DdlRequest::Truncate`] and
+    /// [`DdlRequest::EnterStaging`]. If cancellation is still possible, the current picking or
+    /// local execution is asked to stop; otherwise the DDL waits for its terminal notification.
+    /// The worker dispatches the queued DDL only after that notification is handled, preventing
+    /// truncate or enter-staging from racing with compaction planning, execution, or commit.
     /// Returns the sender and typed request unchanged if compaction is not running.
     pub(crate) fn try_cancel_and_add_ddl<T>(
         &mut self,
@@ -613,7 +624,8 @@ impl CompactionScheduler {
             "Added pending DDL request for region: {}, ddl: {:?}",
             request.region_id, request.request
         );
-        // The first queued DDL fences later regular triggers from creating more follow-ups.
+        // The first queued Truncate/EnterStaging also fences later regular triggers from
+        // creating more follow-ups ahead of the DDL.
         status.pending_ddl_requests.push(request);
         Ok(())
     }
@@ -939,7 +951,7 @@ impl CompactionScheduler {
         else {
             return Vec::new();
         };
-        if active.pending_regular.is_some() {
+        if active.regular_followup_waiters.is_some() {
             self.schedule_next_compaction_with_active(
                 region_id,
                 manifest_ctx,
@@ -1166,8 +1178,13 @@ enum CompactionPhase {
 #[derive(Debug)]
 struct ActiveCompaction {
     phase: CompactionPhase,
+    /// Waiters satisfied by the current planning or execution cycle. Picking waiters move into
+    /// the submitted task; regular triggers coalesced during execution accumulate here.
     waiters: Vec<OutputTx>,
-    pending_regular: Option<Vec<OutputTx>>,
+    /// Requests one fresh regular picking cycle after the current cycle finishes. It is kept
+    /// separate because the current picker snapshot may predate the trigger; `Some(empty)` records
+    /// an automatic trigger without an explicit waiter.
+    regular_followup_waiters: Option<Vec<OutputTx>>,
 }
 
 impl ActiveCompaction {
@@ -1178,7 +1195,7 @@ impl ActiveCompaction {
                 cancelled: false,
             },
             waiters,
-            pending_regular: None,
+            regular_followup_waiters: None,
         }
     }
 
@@ -1191,7 +1208,7 @@ impl ActiveCompaction {
 
     fn start_regular_picking(&mut self, plan_id: u64) {
         self.waiters
-            .extend(self.pending_regular.take().unwrap_or_default());
+            .extend(self.regular_followup_waiters.take().unwrap_or_default());
         self.start_picking(plan_id);
     }
 
@@ -1237,11 +1254,11 @@ impl ActiveCompaction {
         }
     }
 
-    fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx, ddl_fenced: bool) {
-        if matches!(self.phase, CompactionPhase::Picking { .. }) && !ddl_fenced {
-            let pending_regular = self.pending_regular.get_or_insert_default();
+    fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx) {
+        if matches!(self.phase, CompactionPhase::Picking { .. }) {
+            let regular_followup_waiters = self.regular_followup_waiters.get_or_insert_default();
             if let Some(waiter) = waiter.take_inner() {
-                pending_regular.push(waiter);
+                regular_followup_waiters.push(waiter);
             }
         } else {
             self.merge_waiter(waiter);
@@ -1467,6 +1484,10 @@ struct CompactionStatus {
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
+    ///
+    /// Although [`SenderDdlRequest`] can wrap any DDL variant, production code only queues
+    /// [`DdlRequest::Truncate`] and [`DdlRequest::EnterStaging`] here. Both must serialize with
+    /// compaction so they observe the version after compaction terminates.
     pending_ddl_requests: Vec<SenderDdlRequest>,
 }
 
@@ -1540,7 +1561,7 @@ impl CompactionStatus {
             self.active = Some(ActiveCompaction {
                 phase,
                 waiters: Vec::new(),
-                pending_regular: None,
+                regular_followup_waiters: None,
             });
         }
         state
@@ -1556,7 +1577,7 @@ impl CompactionStatus {
             self.active = Some(ActiveCompaction {
                 phase,
                 waiters: Vec::new(),
-                pending_regular: None,
+                regular_followup_waiters: None,
             });
         }
     }
@@ -1575,7 +1596,7 @@ impl CompactionStatus {
 
     fn merge_regular_trigger(&mut self, waiter: OptionOutputTx) {
         if let Some(active) = &mut self.active {
-            active.merge_regular_trigger(waiter, !self.pending_ddl_requests.is_empty());
+            active.merge_regular_trigger(waiter);
         }
     }
 
@@ -1631,7 +1652,7 @@ impl CompactionStatus {
             for waiter in active
                 .waiters
                 .drain(..)
-                .chain(active.pending_regular.take().unwrap_or_default())
+                .chain(active.regular_followup_waiters.take().unwrap_or_default())
             {
                 waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                     region_id: self.region_id,
@@ -1662,7 +1683,7 @@ impl CompactionStatus {
             for waiter in active
                 .waiters
                 .drain(..)
-                .chain(active.pending_regular.take().unwrap_or_default())
+                .chain(active.regular_followup_waiters.take().unwrap_or_default())
             {
                 waiter.send(CompactionCancelledSnafu.fail());
             }
@@ -2566,6 +2587,10 @@ mod tests {
                 )
                 .unwrap()
         );
+        assert_matches!(
+            post_fence_rx.await.unwrap().unwrap_err(),
+            Error::CompactionCancelled { .. }
+        );
 
         followup_finished.result = CompactionPlanningResult::NoPlan;
         let pending_ddls = scheduler
@@ -2577,7 +2602,6 @@ mod tests {
             .await;
         assert_eq!(pending_ddls.len(), 1);
         assert_eq!(pre_fence_rx.await.unwrap().unwrap(), 0);
-        assert_eq!(post_fence_rx.await.unwrap().unwrap(), 0);
         assert!(!scheduler.region_status.contains_key(&region_id));
         assert!(rx.try_recv().is_err());
     }
@@ -3330,7 +3354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pending_ddl_rejects_later_manual_compaction() {
+    async fn test_pending_ddl_fences_later_compaction_triggers() {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
@@ -3365,28 +3389,53 @@ mod tests {
             ),
         });
 
-        let (later_manual_tx, mut later_manual_rx) = oneshot::channel();
+        // Automatic regular triggers have no waiter and are ignored by the DDL fence.
         assert!(
             !scheduler
                 .schedule_compaction(
                     region_id,
-                    compact_request::Options::StrictWindow(StrictWindow {
-                        window_seconds: 120,
-                    }),
+                    compact_request::Options::Regular(Default::default()),
                     &version_control,
                     &env.access_layer,
-                    OptionOutputTx::from(later_manual_tx),
+                    OptionOutputTx::none(),
                     &manifest_ctx,
-                    schema_metadata_manager,
+                    schema_metadata_manager.clone(),
                     1,
                 )
                 .unwrap()
         );
+        let active = scheduler.region_status[&region_id].active.as_ref().unwrap();
+        assert!(active.waiters.is_empty());
+        assert!(active.regular_followup_waiters.is_none());
 
-        let later_result = later_manual_rx
-            .try_recv()
-            .expect("manual compaction queued after DDL was not rejected");
-        assert_matches!(later_result.unwrap_err(), Error::CompactionCancelled { .. });
+        // Explicit regular and strict-window requests both have waiters and are rejected.
+        for options in [
+            compact_request::Options::Regular(Default::default()),
+            compact_request::Options::StrictWindow(StrictWindow {
+                window_seconds: 120,
+            }),
+        ] {
+            let (later_tx, later_rx) = oneshot::channel();
+            assert!(
+                !scheduler
+                    .schedule_compaction(
+                        region_id,
+                        options,
+                        &version_control,
+                        &env.access_layer,
+                        OptionOutputTx::from(later_tx),
+                        &manifest_ctx,
+                        schema_metadata_manager.clone(),
+                        1,
+                    )
+                    .unwrap()
+            );
+            assert_matches!(
+                later_rx.await.unwrap().unwrap_err(),
+                Error::CompactionCancelled { .. }
+            );
+        }
+
         assert_matches!(
             first_manual_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
