@@ -15,15 +15,17 @@
 //! A capability-based filesystem backend for untrusted object paths.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::vec::IntoIter;
 use std::{fmt, io};
 
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::{Dir, OpenOptions, ReadDir};
 use opendal::raw::*;
 use opendal::{Buffer, Capability, EntryMode, Metadata, Operator, OperatorBuilder, Result};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+const LIST_BATCH_SIZE: usize = 128;
 
 /// An opened filesystem root that confines all descendant path resolution.
 #[derive(Clone)]
@@ -289,51 +291,33 @@ impl Access for SecureFsBackend {
             format!("{}/", path.to_string_lossy().replace('\\', "/"))
         };
         let root = self.root.clone();
-        let entries = common_runtime::spawn_blocking_global(move || {
+        let read_dir = common_runtime::spawn_blocking_global(move || {
             let dir = if path.as_os_str().is_empty() {
                 root.dir.open_dir(".")?
             } else {
                 root.dir.open_dir(&path)?
             };
-            let mut entries = Vec::new();
-            entries.push(oio::Entry::new(
-                if display_prefix.is_empty() {
-                    "/"
-                } else {
-                    &display_prefix
-                },
-                Metadata::new(EntryMode::DIR),
-            ));
-
-            for entry in dir.entries()? {
-                let entry = entry?;
-                let file_type = entry.file_type()?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                let (path, mode) = if file_type.is_dir() {
-                    (format!("{display_prefix}{name}/"), EntryMode::DIR)
-                } else if file_type.is_file() {
-                    (format!("{display_prefix}{name}"), EntryMode::FILE)
-                } else {
-                    (format!("{display_prefix}{name}"), EntryMode::Unknown)
-                };
-                let metadata = if mode == EntryMode::Unknown {
-                    Metadata::new(mode)
-                } else {
-                    metadata_from_fs(entry.metadata()?)
-                        .map_err(|error| io::Error::other(error.to_string()))?
-                };
-                entries.push(oio::Entry::new(&path, metadata));
-            }
-            Ok::<_, io::Error>(entries)
+            dir.entries()
         })
         .await
         .map_err(new_task_join_error)?
         .map_err(new_std_io_error)?;
 
+        let current_path = oio::Entry::new(
+            if display_prefix.is_empty() {
+                "/"
+            } else {
+                &display_prefix
+            },
+            Metadata::new(EntryMode::DIR),
+        );
         Ok((
             RpList::default(),
             SecureFsLister {
-                entries: entries.into_iter(),
+                read_dir: Arc::new(Mutex::new(read_dir)),
+                display_prefix,
+                entries: vec![current_path].into_iter(),
+                done: false,
             },
         ))
     }
@@ -392,13 +376,67 @@ impl oio::Write for SecureFsWriter {
 }
 
 struct SecureFsLister {
+    read_dir: Arc<Mutex<ReadDir>>,
+    display_prefix: String,
     entries: IntoIter<oio::Entry>,
+    done: bool,
 }
 
 impl oio::List for SecureFsLister {
     async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        if let Some(entry) = self.entries.next() {
+            return Ok(Some(entry));
+        }
+        if self.done {
+            return Ok(None);
+        }
+
+        let read_dir = self.read_dir.clone();
+        let display_prefix = self.display_prefix.clone();
+        let (entries, done) = common_runtime::spawn_blocking_global(move || {
+            let mut read_dir = read_dir
+                .lock()
+                .map_err(|_| io::Error::other("filesystem directory iterator lock is poisoned"))?;
+            read_list_batch(&mut read_dir, &display_prefix)
+        })
+        .await
+        .map_err(new_task_join_error)?
+        .map_err(new_std_io_error)?;
+
+        self.entries = entries.into_iter();
+        self.done = done;
         Ok(self.entries.next())
     }
+}
+
+fn read_list_batch(
+    read_dir: &mut ReadDir,
+    display_prefix: &str,
+) -> io::Result<(Vec<oio::Entry>, bool)> {
+    let mut entries = Vec::with_capacity(LIST_BATCH_SIZE);
+    for _ in 0..LIST_BATCH_SIZE {
+        let Some(entry) = read_dir.next().transpose()? else {
+            return Ok((entries, true));
+        };
+
+        let file_type = entry.file_type()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let (path, mode) = if file_type.is_dir() {
+            (format!("{display_prefix}{name}/"), EntryMode::DIR)
+        } else if file_type.is_file() {
+            (format!("{display_prefix}{name}"), EntryMode::FILE)
+        } else {
+            (format!("{display_prefix}{name}"), EntryMode::Unknown)
+        };
+        let metadata = if mode == EntryMode::Unknown {
+            Metadata::new(mode)
+        } else {
+            metadata_from_fs(entry.metadata()?)
+                .map_err(|error| io::Error::other(error.to_string()))?
+        };
+        entries.push(oio::Entry::new(&path, metadata));
+    }
+    Ok((entries, false))
 }
 
 struct SecureFsDeleter {
@@ -436,8 +474,33 @@ impl oio::OneShotDelete for SecureFsDeleter {
 mod tests {
     use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
+    use opendal::raw::oio::List;
+    use opendal::raw::{Access, OpList};
 
-    use super::SecureFsRoot;
+    use super::{LIST_BATCH_SIZE, SecureFsBackend, SecureFsRoot};
+
+    #[tokio::test]
+    async fn test_lister_streams_entries() {
+        let temp_dir = create_temp_dir("secure_fs_lister_streams_entries");
+        for index in 0..129 {
+            std::fs::write(temp_dir.path().join(format!("{index}.parquet")), []).unwrap();
+        }
+
+        let root = SecureFsRoot::open(temp_dir.path()).unwrap();
+        let backend = SecureFsBackend::new(root);
+        let (_, mut lister) = backend.list("/", OpList::new()).await.unwrap();
+
+        assert_eq!(1, lister.entries.len());
+
+        let mut paths = Vec::new();
+        while let Some(entry) = lister.next().await.unwrap() {
+            paths.push(entry.path().to_string());
+            assert!(lister.entries.len() <= LIST_BATCH_SIZE);
+        }
+        assert_eq!(130, paths.len());
+        assert!(paths.iter().any(|path| path == "/"));
+        assert!(paths.iter().any(|path| path == "128.parquet"));
+    }
 
     #[tokio::test]
     async fn test_writer_abort_succeeds() {
