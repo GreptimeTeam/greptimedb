@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use arrow::compute::{can_cast_types, cast};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
@@ -30,6 +31,7 @@ use crate::error::{
 };
 use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::{DataType as _, Value as GreptimeValue};
+use crate::value::{ListValue, StructValue};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -232,6 +234,29 @@ impl JsonArray<'_> {
         .fail()
     }
 
+    fn encode_variant(&self) -> Result<ArrayRef> {
+        let len = self.inner.len();
+        let mut encoded = Vec::with_capacity(len);
+        let mut total_bytes = 0;
+
+        for i in 0..len {
+            let value = self.try_get_value(i)?;
+            if value.is_null() {
+                encoded.push(None);
+            } else {
+                let bytes = encode_serde_json_as_jsonb(value);
+                total_bytes += bytes.len();
+                encoded.push(Some(bytes));
+            }
+        }
+
+        let mut builder = MutableBinaryArray::with_capacity(len, total_bytes);
+        for value in encoded {
+            builder.append_option(value);
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
     /// Projects this JSON array to `target` for query evaluation.
     ///
     /// Unlike [`Self::widen_to`], projection tolerates lossy conversions:
@@ -261,18 +286,12 @@ impl JsonArray<'_> {
                         });
                     columns.push(column);
                 }
-                let projected = if target_fields.is_empty() {
-                    Ok(StructArray::new_empty_fields(
-                        struct_array.len(),
-                        struct_array.nulls().cloned(),
-                    ))
-                } else {
-                    StructArray::try_new(
-                        target_fields.clone(),
-                        columns,
-                        struct_array.nulls().cloned(),
-                    )
-                }
+                let projected = StructArray::try_new_with_length(
+                    target_fields.clone(),
+                    columns,
+                    struct_array.nulls().cloned(),
+                    struct_array.len(),
+                )
                 .context(ArrowComputeSnafu)?;
                 Ok(Arc::new(projected))
             }
@@ -290,39 +309,31 @@ impl JsonArray<'_> {
                     .context(ArrowComputeSnafu)?,
                 ))
             }
-            _ => self.cast_or_null_for_projection(target),
+            _ => self.project_values_to(target),
         }
     }
 
-    fn cast_or_null_for_projection(&self, to_type: &DataType) -> Result<ArrayRef> {
+    fn project_values_to(&self, to_type: &DataType) -> Result<ArrayRef> {
+        let from_type = self.inner.data_type();
+        if can_fast_cast_types(from_type, to_type) {
+            return cast(self.inner.as_ref(), to_type).context(ArrowComputeSnafu);
+        }
+
         let values = (0..self.inner.len())
             .map(|i| self.try_get_value(i))
             .collect::<Result<Vec<_>>>()?;
         project_json_values(values, to_type)
     }
+}
 
-    fn encode_variant(&self) -> Result<ArrayRef> {
-        let len = self.inner.len();
-        let mut encoded = Vec::with_capacity(len);
-        let mut total_bytes = 0;
+/// Returns whether Arrow can cast between the types without JSON-aware projection.
+/// Binary and nested types require JSONB decoding or recursive projection.
+fn can_fast_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
+    let is_scalar = |data_type: &DataType| {
+        data_type.is_numeric() || data_type.is_string() || data_type == &DataType::Boolean
+    };
 
-        for i in 0..len {
-            let value = self.try_get_value(i)?;
-            if value.is_null() {
-                encoded.push(None);
-            } else {
-                let bytes = encode_serde_json_as_jsonb(value);
-                total_bytes += bytes.len();
-                encoded.push(Some(bytes));
-            }
-        }
-
-        let mut builder = MutableBinaryArray::with_capacity(len, total_bytes);
-        for value in encoded {
-            builder.append_option(value);
-        }
-        Ok(Arc::new(builder.finish()))
-    }
+    is_scalar(from_type) && is_scalar(to_type) && can_cast_types(from_type, to_type)
 }
 
 fn project_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRef> {
@@ -369,7 +380,7 @@ fn project_json_value_to_type(value: Value, to_type: &ConcreteDataType) -> Resul
                     .map(|value| value.unwrap_or(GreptimeValue::Null))
             })
             .collect::<Result<Vec<_>>>()?;
-        return Ok(GreptimeValue::Struct(crate::value::StructValue::new(
+        return Ok(GreptimeValue::Struct(StructValue::new(
             values,
             struct_type.clone(),
         )));
@@ -384,7 +395,7 @@ fn project_json_value_to_type(value: Value, to_type: &ConcreteDataType) -> Resul
             .into_iter()
             .map(|value| project_json_value_to_type(value, &item_type))
             .collect::<Result<Vec<_>>>()?;
-        return Ok(GreptimeValue::List(crate::value::ListValue::new(
+        return Ok(GreptimeValue::List(ListValue::new(
             values,
             Arc::new(item_type),
         )));
@@ -549,6 +560,26 @@ mod test {
         assert_eq!(casted.value(1), r#"{"value":1}"#);
         assert_eq!(casted.value(2), "text");
         assert!(casted.is_null(3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_plain_scalars() -> Result<()> {
+        let integers: ArrayRef = Arc::new(Int64Array::from(vec![Some(42), Some(i64::MAX), None]));
+        let projected = JsonArray::from(&integers).project_to(&DataType::Int32)?;
+        let expected: ArrayRef = Arc::new(Int32Array::from(vec![Some(42), None, None]));
+        assert_eq!(&expected, &projected);
+
+        let booleans: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), Some(false), None]));
+        let projected = JsonArray::from(&booleans).project_to(&DataType::Float64)?;
+        let expected: ArrayRef = Arc::new(Float64Array::from(vec![Some(1.0), Some(0.0), None]));
+        assert_eq!(&expected, &projected);
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("42"), Some("bad"), None]));
+        let projected = JsonArray::from(&strings).project_to(&DataType::UInt64)?;
+        let expected: ArrayRef = Arc::new(UInt64Array::from(vec![Some(42), None, None]));
+        assert_eq!(&expected, &projected);
 
         Ok(())
     }
