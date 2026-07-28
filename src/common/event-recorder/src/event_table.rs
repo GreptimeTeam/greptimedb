@@ -355,6 +355,60 @@ mod tests {
     }
 
     #[test]
+    fn region_dimension_schema_preserves_names_types_semantics_and_order() {
+        assert_field_columns(
+            [
+                &REGION_ID_COLUMN,
+                &REGION_NUMBER_COLUMN,
+                &REGION_MIGRATION_TRIGGER_REASON_COLUMN,
+                &REGION_MIGRATION_SRC_NODE_ID_COLUMN,
+                &REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
+                &REGION_MIGRATION_DST_NODE_ID_COLUMN,
+                &REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+            ],
+            [
+                ("region_id", ColumnDataType::Uint64),
+                ("region_number", ColumnDataType::Uint32),
+                ("region_migration_trigger_reason", ColumnDataType::String),
+                ("region_migration_src_node_id", ColumnDataType::Uint64),
+                ("region_migration_src_peer_addr", ColumnDataType::String),
+                ("region_migration_dst_node_id", ColumnDataType::Uint64),
+                ("region_migration_dst_peer_addr", ColumnDataType::String),
+            ],
+        );
+    }
+
+    #[test]
+    fn repartition_dimension_schema_preserves_names_types_semantics_and_order() {
+        assert_field_columns(
+            [
+                &TABLE_NAME_COLUMN,
+                &TABLE_ID_COLUMN,
+                &PARENT_PROCEDURE_ID_COLUMN,
+                &REPARTITION_GROUP_ID_COLUMN,
+                &SOURCE_REGION_ID_COLUMN,
+                &SOURCE_REGION_NUMBER_COLUMN,
+                &SOURCE_PARTITION_EXPR_COLUMN,
+                &TARGET_REGION_ID_COLUMN,
+                &TARGET_REGION_NUMBER_COLUMN,
+                &TARGET_PARTITION_EXPR_COLUMN,
+            ],
+            [
+                ("table_name", ColumnDataType::String),
+                ("table_id", ColumnDataType::Uint32),
+                ("parent_procedure_id", ColumnDataType::String),
+                ("repartition_group_id", ColumnDataType::String),
+                ("source_region_id", ColumnDataType::Uint64),
+                ("source_region_number", ColumnDataType::Uint32),
+                ("source_partition_expr", ColumnDataType::String),
+                ("target_region_id", ColumnDataType::Uint64),
+                ("target_region_number", ColumnDataType::Uint32),
+                ("target_partition_expr", ColumnDataType::String),
+            ],
+        );
+    }
+
+    #[test]
     fn nullable_values_preserve_types_and_nulls() {
         assert_eq!(
             nullable_string(Some("catalog")),
@@ -368,6 +422,21 @@ mod tests {
             Value {
                 value_data: Some(ValueData::BoolValue(true))
             }
+        );
+    }
+
+    fn assert_field_columns<const N: usize>(
+        columns: [&EventTableColumn; N],
+        expected: [(&str, ColumnDataType); N],
+    ) {
+        assert_eq!(
+            column_schemas(columns),
+            expected.map(|(column_name, datatype)| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: datatype.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            })
         );
     }
 }

@@ -1073,6 +1073,18 @@ mod tests {
                 })
                 .collect()
         }
+
+        fn procedure_events(&self) -> Vec<(ProcedureId, EventTrigger)> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| {
+                    let event = event.as_any().downcast_ref::<ProcedureEvent>().unwrap();
+                    (event.procedure_id, event.trigger.clone())
+                })
+                .collect()
+        }
     }
 
     impl EventRecorder for CapturingEventRecorder {
@@ -1279,6 +1291,46 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ParentWithChildProcedure {
+        child_id: ProcedureId,
+        child_submitted: bool,
+    }
+
+    #[async_trait]
+    impl Procedure for ParentWithChildProcedure {
+        fn type_name(&self) -> &str {
+            "ParentWithChildProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            if self.child_submitted {
+                return Ok(Status::done());
+            }
+
+            self.child_submitted = true;
+            Ok(Status::suspended(
+                vec![ProcedureWithId {
+                    id: self.child_id,
+                    procedure: Box::new(ProcedureToLoad::new("child")),
+                }],
+                false,
+            ))
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            Some(Box::new(TestProcedureEvent))
+        }
+    }
+
     struct FilterCapturingProcedure {
         captured_filter: Arc<Mutex<Option<EventTypeFilterRef>>>,
     }
@@ -1372,6 +1424,47 @@ mod tests {
             .unwrap();
 
         assert!(event_recorder.triggers().contains(&EventTrigger::Submitted));
+    }
+
+    #[tokio::test]
+    async fn test_child_submission_emits_submitted_event_for_child() {
+        let dir = create_temp_dir("child_submission_event");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+
+        let parent_id = ProcedureId::random();
+        let child_id = ProcedureId::random();
+        let mut watcher = manager
+            .submit(ProcedureWithId {
+                id: parent_id,
+                procedure: Box::new(ParentWithChildProcedure {
+                    child_id,
+                    child_submitted: false,
+                }),
+            })
+            .await
+            .unwrap();
+        while !watcher.borrow().is_done() {
+            watcher.changed().await.unwrap();
+        }
+
+        assert!(
+            event_recorder
+                .procedure_events()
+                .contains(&(child_id, EventTrigger::Submitted))
+        );
     }
 
     #[tokio::test]

@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_recordbatch::RecordBatches;
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
@@ -23,6 +22,8 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
+
+use crate::event_recorder_test_util::{assert_eventually_eq, find_eventually_string};
 
 const TABLE_NAME: &str = "repartition_events";
 
@@ -57,21 +58,30 @@ async fn test_repartition_event() {
     let instance = cluster.fe_instance();
 
     execute_partition(instance).await;
-    assert_repartition_event(instance).await;
-    assert_repartition_group_event(instance).await;
+    let partition_procedure_id = assert_repartition_event(instance).await;
+    assert_repartition_group_event(instance, &partition_procedure_id).await;
     execute_merge(instance).await;
-    assert_merge_repartition_group_event(instance).await;
+    let merge_procedure_id = find_submitted_procedure_id(
+        instance,
+        "repartition",
+        &format!(
+            "table_name = '{TABLE_NAME}' \
+             AND json_path_match(payload, '$.source.type == \"partitioned\"')"
+        ),
+    )
+    .await;
+    assert_merge_repartition_group_event(instance, &merge_procedure_id).await;
 }
 
 async fn execute_partition(instance: &Arc<frontend::instance::Instance>) {
     for sql in [
         format!(
-            "CREATE TABLE {TABLE_NAME} (id INT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(id)) ENGINE = mito"
+            "CREATE TABLE {TABLE_NAME} (host INT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE = mito"
         ),
         format!(
             "INSERT INTO {TABLE_NAME} VALUES (1, '2024-01-01 00:00:00'), (10, '2024-01-01 00:00:00')"
         ),
-        format!("ALTER TABLE {TABLE_NAME} PARTITION ON COLUMNS (id) (id < 10, id >= 10)"),
+        format!("ALTER TABLE {TABLE_NAME} PARTITION ON COLUMNS (host) (host < 10, host >= 10)"),
     ] {
         instance
             .do_query(&sql, QueryContext::arc())
@@ -82,7 +92,7 @@ async fn execute_partition(instance: &Arc<frontend::instance::Instance>) {
 }
 
 async fn execute_merge(instance: &Arc<frontend::instance::Instance>) {
-    let sql = format!("ALTER TABLE {TABLE_NAME} MERGE PARTITION (id < 10, id >= 10)");
+    let sql = format!("ALTER TABLE {TABLE_NAME} MERGE PARTITION (host < 10, host >= 10)");
     instance
         .do_query(&sql, QueryContext::arc())
         .await
@@ -90,32 +100,54 @@ async fn execute_merge(instance: &Arc<frontend::instance::Instance>) {
         .unwrap();
 }
 
-async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) {
+async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) -> String {
+    let procedure_id = find_submitted_procedure_id(
+        instance,
+        "repartition",
+        &format!(
+            "table_name = '{TABLE_NAME}' \
+             AND json_path_match(payload, '$.source.type == \"unpartitioned\"')"
+        ),
+    )
+    .await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
     json_path_match(payload, '$.version == 1') AS payload_version,
     json_path_match(payload, '$.source.type == "unpartitioned"') AS unpartitioned_source,
-    json_path_match(payload, '$.source.partition_exprs == []') AS empty_source_exprs,
-    json_path_match(payload, '$.target_partition_columns[0] == "id"') AS target_column
+    json_path_match(payload, '$.target_partition_columns[0] == "host"') AS target_column
 FROM greptime_private.events
 WHERE type = 'repartition'
+  AND procedure_id = '{procedure_id}'
   AND procedure_trigger = 'Submitted'
   AND table_name = '{TABLE_NAME}'"#
     );
     let expected = "\
-+-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+--------------------+---------------+
-| type        | catalog_name | schema_name | table_name         | table_id | payload_version | unpartitioned_source | empty_source_exprs | target_column |
-+-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+--------------------+---------------+
-| repartition | greptime     | public      | repartition_events | 1024     | true            | true                 | true               | true          |
-+-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+--------------------+---------------+";
++-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+---------------+
+| type        | catalog_name | schema_name | table_name         | table_id | payload_version | unpartitioned_source | target_column |
++-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+---------------+
+| repartition | greptime     | public      | repartition_events | 1024     | true            | true                 | true          |
++-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+---------------+";
 
-    assert_eventually(instance, &query, expected).await;
+    assert_eventually_eq(instance, &query, expected).await;
+    procedure_id
 }
 
-async fn assert_repartition_group_event(instance: &Arc<frontend::instance::Instance>) {
+async fn assert_repartition_group_event(
+    instance: &Arc<frontend::instance::Instance>,
+    parent_procedure_id: &str,
+) {
+    let procedure_id = find_submitted_procedure_id(
+        instance,
+        "repartition_group",
+        &format!(
+            "table_name = '{TABLE_NAME}' \
+             AND source_partition_expr IS NULL"
+        ),
+    )
+    .await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
-    parent_procedure_id IS NOT NULL AS has_parent_procedure_id,
+    parent_procedure_id = '{parent_procedure_id}' AS matches_parent_procedure_id,
     repartition_group_id IS NOT NULL AS has_group_id,
     source_region_id,
     source_region_number,
@@ -125,25 +157,38 @@ async fn assert_repartition_group_event(instance: &Arc<frontend::instance::Insta
     target_partition_expr
 FROM greptime_private.events
 WHERE type = 'repartition_group'
+  AND procedure_id = '{procedure_id}'
   AND procedure_trigger = 'Submitted'
   AND table_name = '{TABLE_NAME}'
 ORDER BY target_region_id"#
     );
     let expected = "\
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+
-| type              | catalog_name | schema_name | table_name         | table_id | has_parent_procedure_id | has_group_id | source_region_id | source_region_number | default_source | target_region_id | target_region_number | target_partition_expr |
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+
-| repartition_group | greptime     | public      | repartition_events | 1024     | true                    | true         | 4398046511104    | 0                    | true           | 4398046511104    | 0                    | id < 10               |
-| repartition_group | greptime     | public      | repartition_events | 1024     | true                    | true         | 4398046511104    | 0                    | true           | 4398046511105    | 1                    | id >= 10              |
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+";
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+
+| type              | catalog_name | schema_name | table_name         | table_id | matches_parent_procedure_id | has_group_id | source_region_id | source_region_number | default_source | target_region_id | target_region_number | target_partition_expr |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+
+| repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511104    | 0                    | true           | 4398046511104    | 0                    | host < 10             |
+| repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511104    | 0                    | true           | 4398046511105    | 1                    | host >= 10            |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+";
 
-    assert_eventually(instance, &query, expected).await;
+    assert_eventually_eq(instance, &query, expected).await;
 }
 
-async fn assert_merge_repartition_group_event(instance: &Arc<frontend::instance::Instance>) {
+async fn assert_merge_repartition_group_event(
+    instance: &Arc<frontend::instance::Instance>,
+    parent_procedure_id: &str,
+) {
+    let procedure_id = find_submitted_procedure_id(
+        instance,
+        "repartition_group",
+        &format!(
+            "table_name = '{TABLE_NAME}' \
+             AND source_partition_expr IS NOT NULL"
+        ),
+    )
+    .await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
-    parent_procedure_id IS NOT NULL AS has_parent_procedure_id,
+    parent_procedure_id = '{parent_procedure_id}' AS matches_parent_procedure_id,
     repartition_group_id IS NOT NULL AS has_group_id,
     source_region_id,
     source_region_number,
@@ -153,46 +198,40 @@ async fn assert_merge_repartition_group_event(instance: &Arc<frontend::instance:
     target_partition_expr IS NOT NULL AS target_expr
 FROM greptime_private.events
 WHERE type = 'repartition_group'
+  AND procedure_id = '{procedure_id}'
   AND procedure_trigger = 'Submitted'
   AND table_name = '{TABLE_NAME}'
   AND source_partition_expr IS NOT NULL
 ORDER BY source_region_id"#
     );
     let expected = "\
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+
-| type              | catalog_name | schema_name | table_name         | table_id | has_parent_procedure_id | has_group_id | source_region_id | source_region_number | partitioned_source | target_region_id | target_region_number | target_expr |
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+
-| repartition_group | greptime     | public      | repartition_events | 1024     | true                    | true         | 4398046511104    | 0                    | true               | 4398046511104    | 0                    | true        |
-| repartition_group | greptime     | public      | repartition_events | 1024     | true                    | true         | 4398046511105    | 1                    | true               | 4398046511104    | 0                    | true        |
-+-------------------+--------------+-------------+--------------------+----------+-------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+";
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+
+| type              | catalog_name | schema_name | table_name         | table_id | matches_parent_procedure_id | has_group_id | source_region_id | source_region_number | partitioned_source | target_region_id | target_region_number | target_expr |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+
+| repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511104    | 0                    | true               | 4398046511104    | 0                    | true        |
+| repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511105    | 1                    | true               | 4398046511104    | 0                    | true        |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+--------------------+------------------+----------------------+-------------+";
 
-    assert_eventually(instance, &query, expected).await;
+    assert_eventually_eq(instance, &query, expected).await;
 }
 
-async fn assert_eventually(
+async fn find_submitted_procedure_id(
     instance: &Arc<frontend::instance::Instance>,
-    query: &str,
-    expected: &str,
-) {
-    for _ in 0..120 {
-        if event_output(instance, query).await.as_deref() == Some(expected) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    panic!("timed out waiting for repartition event: {query}");
-}
-
-async fn event_output(instance: &Arc<frontend::instance::Instance>, query: &str) -> Option<String> {
-    let output = instance
-        .do_query(query, QueryContext::arc())
-        .await
-        .remove(0)
-        .ok()?;
-    let client::OutputData::Stream(stream) = output.data else {
-        return None;
-    };
-    let batches = RecordBatches::try_collect(stream).await.ok()?;
-    batches.pretty_print().ok()
+    event_type: &str,
+    predicate: &str,
+) -> String {
+    find_eventually_string(
+        instance,
+        &format!(
+            r#"SELECT procedure_id
+FROM greptime_private.events
+WHERE type = '{event_type}'
+  AND procedure_trigger = 'Submitted'
+  AND {predicate}
+ORDER BY timestamp DESC
+LIMIT 1"#
+        ),
+        "procedure_id",
+    )
+    .await
 }

@@ -625,13 +625,18 @@ pub(crate) trait State: Sync + Send + Debug {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
+    use common_event_recorder::EventTypeFilter;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+    use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureState};
 
     use crate::error::Error;
-    use crate::procedure::repartition::group::PersistentContext;
+    use crate::event::repartition::REPARTITION_GROUP_EVENT_TYPE;
+    use crate::procedure::repartition::group::repartition_start::RepartitionStart;
+    use crate::procedure::repartition::group::{PersistentContext, RepartitionGroupProcedure};
     use crate::procedure::repartition::test_util::{TestingEnv, new_persistent_context};
 
     #[tokio::test]
@@ -693,5 +698,41 @@ mod tests {
         let deserialized: PersistentContext = serde_json::from_value(serialized).unwrap();
         assert_eq!(deserialized.parent_procedure_id, None);
         assert_eq!(deserialized.table_name, None);
+    }
+
+    #[test]
+    fn test_repartition_group_event_filter() {
+        let env = TestingEnv::new();
+        let procedure = RepartitionGroupProcedure {
+            state: Box::new(RepartitionStart),
+            context: env.create_context(new_persistent_context(1024, vec![], vec![])),
+        };
+        let state = ProcedureState::Running;
+        let event_context = |event_type_filter| EventContext {
+            procedure_id: common_procedure::ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(event_type_filter),
+        };
+
+        let allowed = procedure
+            .event(&event_context(EventTypeFilter::Only(HashSet::from([
+                REPARTITION_GROUP_EVENT_TYPE.to_string(),
+            ]))))
+            .unwrap();
+        assert_eq!(allowed.event_type(), REPARTITION_GROUP_EVENT_TYPE);
+
+        assert!(
+            procedure
+                .event(&event_context(EventTypeFilter::Only(HashSet::from([
+                    "another_event".to_string(),
+                ]))))
+                .is_none()
+        );
+        assert!(
+            procedure
+                .event(&event_context(EventTypeFilter::Only(HashSet::new())))
+                .is_none()
+        );
     }
 }

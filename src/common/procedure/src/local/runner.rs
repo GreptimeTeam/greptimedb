@@ -536,6 +536,8 @@ impl Runner {
             procedure_id,
         );
 
+        runner.record_event(EventTrigger::Submitted);
+
         let parent_id = self.meta.id;
 
         let tracing_context = TracingContext::from_current_span();

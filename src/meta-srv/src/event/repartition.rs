@@ -36,8 +36,8 @@ use crate::procedure::repartition::group::PersistentContext as GroupPersistentCo
 use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::repartition_start::RepartitionStart;
 
-pub const REPARTITION_EVENT_TYPE: &str = "repartition";
-pub const REPARTITION_GROUP_EVENT_TYPE: &str = "repartition_group";
+pub(crate) const REPARTITION_EVENT_TYPE: &str = "repartition";
+pub(crate) const REPARTITION_GROUP_EVENT_TYPE: &str = "repartition_group";
 
 const PAYLOAD_VERSION: u8 = 1;
 
@@ -352,18 +352,24 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnSchema, Row, Value};
     use common_event_recorder::Event;
-    use datatypes::value::Value;
-    use partition::expr::col;
+    use common_event_recorder::event_table::{
+        PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
+        PROCEDURE_TRIGGER_COLUMN,
+    };
+    use common_event_recorder::testing::assert_event_contract;
+    use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
     use table::table_name::TableName;
+    use uuid::Uuid;
 
     use super::*;
     use crate::procedure::repartition::repartition_start::RepartitionFrom;
+    use crate::procedure::repartition::test_util::{new_persistent_context, range_expr};
 
     fn expr(start: i64, end: i64) -> partition::expr::PartitionExpr {
-        col("host")
-            .gt_eq(Value::Int64(start))
-            .and(col("host").lt(Value::Int64(end)))
+        range_expr("host", start, end)
     }
 
     fn parent_persistent_ctx() -> RepartitionPersistentContext {
@@ -394,6 +400,20 @@ mod tests {
                 },
                 vec![expr(0, 50), expr(50, 100)],
             ),
+        );
+
+        assert_event_contract(
+            &unpartitioned,
+            REPARTITION_EVENT_TYPE,
+            &parent_schema(),
+            &[Row {
+                values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("public".to_string()).into(),
+                    ValueData::StringValue("repartition_events".to_string()).into(),
+                    ValueData::U32Value(1024).into(),
+                ],
+            }],
         );
 
         let unpartitioned_payload = unpartitioned.json_payload().unwrap();
@@ -449,6 +469,66 @@ mod tests {
         assert_eq!(rows[0].source_partition_expr, Some(source_expr.to_string()));
         assert_eq!(rows[0].target_region_id, Some(left));
         assert_eq!(rows[1].target_region_id, Some(right));
+    }
+
+    #[test]
+    fn test_group_submitted_event_contract() {
+        let table_id = 1024;
+        let source = RegionId::new(table_id, 1);
+        let left = RegionId::new(table_id, 2);
+        let right = RegionId::new(table_id, 3);
+        let source_expr = expr(0, 100);
+        let left_expr = expr(0, 50);
+        let right_expr = expr(50, 100);
+        let parent_procedure_id =
+            ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let group_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut persistent_ctx = new_persistent_context(
+            table_id,
+            vec![SourceRegionDescriptor::partitioned(
+                source,
+                source_expr.clone(),
+            )],
+            vec![
+                TargetRegionDescriptor {
+                    region_id: left,
+                    partition_expr: left_expr.clone(),
+                },
+                TargetRegionDescriptor {
+                    region_id: right,
+                    partition_expr: right_expr.clone(),
+                },
+            ],
+        );
+        persistent_ctx.parent_procedure_id = Some(parent_procedure_id);
+        persistent_ctx.group_id = group_id;
+        persistent_ctx.region_mapping = HashMap::from([(source, vec![left, right])]);
+
+        let event = RepartitionGroupEvent::submitted(&persistent_ctx);
+
+        assert_event_contract(
+            &event,
+            REPARTITION_GROUP_EVENT_TYPE,
+            &group_schema(),
+            &[
+                group_row(
+                    parent_procedure_id,
+                    group_id,
+                    source,
+                    &source_expr.to_string(),
+                    left,
+                    &left_expr.to_string(),
+                ),
+                group_row(
+                    parent_procedure_id,
+                    group_id,
+                    source,
+                    &source_expr.to_string(),
+                    right,
+                    &right_expr.to_string(),
+                ),
+            ],
+        );
     }
 
     #[test]
@@ -510,19 +590,128 @@ mod tests {
 
     #[test]
     fn test_lifecycle_events_are_lightweight() {
-        let events: Vec<Box<dyn Event>> = vec![
-            Box::new(RepartitionEvent::lifecycle()),
-            Box::new(RepartitionGroupEvent::lifecycle()),
-        ];
+        let parent = RepartitionEvent::lifecycle();
+        assert_event_contract(
+            &parent,
+            REPARTITION_EVENT_TYPE,
+            &parent_schema(),
+            &[null_row(parent_schema().len())],
+        );
+        assert_eq!(parent.json_payload().unwrap(), serde_json::Value::Null);
 
-        for event in events {
-            assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-            assert!(
-                event.extra_rows().unwrap()[0]
-                    .values
-                    .iter()
-                    .all(|value| value.value_data.is_none())
-            );
+        let group = RepartitionGroupEvent::lifecycle();
+        assert_event_contract(
+            &group,
+            REPARTITION_GROUP_EVENT_TYPE,
+            &group_schema(),
+            &[null_row(group_schema().len())],
+        );
+        assert_eq!(group.json_payload().unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_repartition_event_preserves_procedure_envelope_contract() {
+        let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let event = ProcedureEvent::new(
+            procedure_id,
+            Box::new(RepartitionEvent::submitted(
+                &parent_persistent_ctx(),
+                &RepartitionStart::new(
+                    RepartitionFrom::Unpartitioned {
+                        partition_columns: vec!["host".to_string()],
+                    },
+                    vec![expr(0, 100)],
+                ),
+            )),
+            ProcedureState::Running,
+            EventTrigger::Submitted,
+        );
+        let mut schema = procedure_schema();
+        schema.extend(parent_schema());
+
+        assert_event_contract(
+            &event,
+            REPARTITION_EVENT_TYPE,
+            &schema,
+            &[Row {
+                values: vec![
+                    ValueData::StringValue(procedure_id.to_string()).into(),
+                    ValueData::StringValue("Running".to_string()).into(),
+                    ValueData::StringValue(String::new()).into(),
+                    ValueData::StringValue("Submitted".to_string()).into(),
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("public".to_string()).into(),
+                    ValueData::StringValue("repartition_events".to_string()).into(),
+                    ValueData::U32Value(1024).into(),
+                ],
+            }],
+        );
+    }
+
+    fn parent_schema() -> Vec<ColumnSchema> {
+        column_schemas([
+            &CATALOG_NAME_COLUMN,
+            &SCHEMA_NAME_COLUMN,
+            &TABLE_NAME_COLUMN,
+            &TABLE_ID_COLUMN,
+        ])
+    }
+
+    fn group_schema() -> Vec<ColumnSchema> {
+        let mut schema = parent_schema();
+        schema.extend(column_schemas([
+            &PARENT_PROCEDURE_ID_COLUMN,
+            &REPARTITION_GROUP_ID_COLUMN,
+            &SOURCE_REGION_ID_COLUMN,
+            &SOURCE_REGION_NUMBER_COLUMN,
+            &SOURCE_PARTITION_EXPR_COLUMN,
+            &TARGET_REGION_ID_COLUMN,
+            &TARGET_REGION_NUMBER_COLUMN,
+            &TARGET_PARTITION_EXPR_COLUMN,
+        ]));
+        schema
+    }
+
+    fn procedure_schema() -> Vec<ColumnSchema> {
+        column_schemas([
+            &PROCEDURE_ID_COLUMN,
+            &PROCEDURE_STATE_COLUMN,
+            &PROCEDURE_ERROR_COLUMN,
+            &PROCEDURE_TRIGGER_COLUMN,
+        ])
+    }
+
+    fn group_row(
+        parent_procedure_id: ProcedureId,
+        group_id: Uuid,
+        source_region_id: RegionId,
+        source_partition_expr: &str,
+        target_region_id: RegionId,
+        target_partition_expr: &str,
+    ) -> Row {
+        Row {
+            values: vec![
+                ValueData::StringValue("test_catalog".to_string()).into(),
+                ValueData::StringValue("test_schema".to_string()).into(),
+                ValueData::StringValue("test_table".to_string()).into(),
+                ValueData::U32Value(source_region_id.table_id()).into(),
+                ValueData::StringValue(parent_procedure_id.to_string()).into(),
+                ValueData::StringValue(group_id.to_string()).into(),
+                ValueData::U64Value(source_region_id.as_u64()).into(),
+                ValueData::U32Value(source_region_id.region_number()).into(),
+                ValueData::StringValue(source_partition_expr.to_string()).into(),
+                ValueData::U64Value(target_region_id.as_u64()).into(),
+                ValueData::U32Value(target_region_id.region_number()).into(),
+                ValueData::StringValue(target_partition_expr.to_string()).into(),
+            ],
+        }
+    }
+
+    fn null_row(column_count: usize) -> Row {
+        Row {
+            values: (0..column_count)
+                .map(|_| Value { value_data: None })
+                .collect(),
         }
     }
 }

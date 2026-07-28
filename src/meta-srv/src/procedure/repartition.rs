@@ -1222,6 +1222,18 @@ mod tests {
         assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
         assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
 
+        let allowed = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
+                    REPARTITION_EVENT_TYPE.to_string(),
+                ]))),
+            })
+            .unwrap();
+        assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
+
         let succeeded = procedure
             .event(&EventContext {
                 procedure_id: ProcedureId::random(),
@@ -1241,6 +1253,14 @@ mod tests {
             ]))),
         });
         assert!(filtered.is_none());
+
+        let empty = procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+        });
+        assert!(empty.is_none());
     }
 
     #[test]

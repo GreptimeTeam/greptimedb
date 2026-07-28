@@ -257,7 +257,7 @@ pub struct EventContext<'a> {
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventTrigger {
-    /// The root procedure was submitted to the manager.
+    /// The procedure was submitted to the manager.
     Submitted,
     /// The root procedure was recovered from persisted state.
     Recovered,

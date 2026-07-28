@@ -53,43 +53,37 @@ pub(crate) async fn find_eventually_string(
     panic!("timed out waiting for event query: {query}");
 }
 
-async fn event_count_is_one(instance: &Arc<Instance>, query: &str) -> bool {
-    let Ok(output) = instance
-        .do_query(query, QueryContext::arc())
-        .await
-        .remove(0)
-    else {
-        return false;
-    };
-    let OutputData::Stream(stream) = output.data else {
-        unreachable!("event-count query must return a stream");
-    };
-    let Ok(batches) = RecordBatches::try_collect(stream).await else {
-        return false;
-    };
-    let Ok(actual) = batches.pretty_print() else {
-        return false;
-    };
+/// Asserts that the query eventually returns the expected pretty-printed rows.
+pub(crate) async fn assert_eventually_eq(instance: &Arc<Instance>, query: &str, expected: &str) {
+    let mut last_actual = None;
+    for _ in 0..MAX_ATTEMPTS {
+        last_actual = query_pretty_print(instance, query).await;
+        if last_actual.as_deref() == Some(expected) {
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 
-    actual
-        == "\
+    panic!(
+        "timed out waiting for event query: {query}\nexpected:\n{expected}\nactual:\n{}",
+        last_actual.as_deref().unwrap_or("<query failed>")
+    );
+}
+
+async fn event_count_is_one(instance: &Arc<Instance>, query: &str) -> bool {
+    query_pretty_print(instance, query).await.as_deref()
+        == Some(
+            "\
 +-------------+
 | event_count |
 +-------------+
 | 1           |
-+-------------+"
++-------------+",
+        )
 }
 
 async fn query_first_string(instance: &Arc<Instance>, query: &str, column: &str) -> Option<String> {
-    let output = instance
-        .do_query(query, QueryContext::arc())
-        .await
-        .remove(0)
-        .ok()?;
-    let OutputData::Stream(stream) = output.data else {
-        unreachable!("event query must return a stream");
-    };
-    let batches = RecordBatches::try_collect(stream).await.ok()?;
+    let batches = query_record_batches(instance, query).await?;
     let batch = batches.take().into_iter().next()?;
     batch
         .column_by_name(column)?
@@ -98,4 +92,23 @@ async fn query_first_string(instance: &Arc<Instance>, query: &str, column: &str)
         .next()
         .flatten()
         .map(ToString::to_string)
+}
+
+async fn query_pretty_print(instance: &Arc<Instance>, query: &str) -> Option<String> {
+    query_record_batches(instance, query)
+        .await?
+        .pretty_print()
+        .ok()
+}
+
+async fn query_record_batches(instance: &Arc<Instance>, query: &str) -> Option<RecordBatches> {
+    let output = instance
+        .do_query(query, QueryContext::arc())
+        .await
+        .remove(0)
+        .ok()?;
+    let OutputData::Stream(stream) = output.data else {
+        return None;
+    };
+    RecordBatches::try_collect(stream).await.ok()
 }

@@ -19,6 +19,11 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
+use common_event_recorder::event_table::{
+    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
+};
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -26,11 +31,6 @@ use store_api::storage::RegionId;
 use crate::procedure::region_migration::{PersistentContext, RegionMigrationTriggerReason};
 
 pub const REGION_MIGRATION_EVENT_TYPE: &str = "region_migration";
-use common_event_recorder::event_table::{
-    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
-    REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
-    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
-};
 
 /// RegionMigrationEvent is the event of region migration.
 #[derive(Debug)]
