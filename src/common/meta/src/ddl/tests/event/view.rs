@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN};
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -26,30 +26,18 @@ use common_procedure::{
 
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
-use crate::ddl::event::view::{
-    CREATE_VIEW_EVENT_TYPE, DROP_VIEW_EVENT_TYPE, VIEW_ID_COLUMN, VIEW_NAME_COLUMN,
-};
+use crate::ddl::event::view::{CREATE_VIEW_EVENT_TYPE, DROP_VIEW_EVENT_TYPE};
 use crate::ddl::tests::create_view::test_create_view_task;
 use crate::ddl::tests::drop_view::new_drop_view_task;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 fn view_event_schema() -> Vec<ColumnSchema> {
-    vec![
-        CATALOG_NAME_COLUMN.column_schema(),
-        SCHEMA_NAME_COLUMN.column_schema(),
-        ColumnSchema {
-            column_name: VIEW_NAME_COLUMN.to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Field.into(),
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: VIEW_ID_COLUMN.to_string(),
-            datatype: ColumnDataType::Uint32.into(),
-            semantic_type: SemanticType::Field.into(),
-            ..Default::default()
-        },
-    ]
+    common_event_recorder::event_table::column_schemas([
+        &CATALOG_NAME_COLUMN,
+        &SCHEMA_NAME_COLUMN,
+        &common_event_recorder::event_table::VIEW_NAME_COLUMN,
+        &common_event_recorder::event_table::VIEW_ID_COLUMN,
+    ])
 }
 
 fn event_for(procedure: &DropViewProcedure, trigger: EventTrigger) -> Box<dyn Event> {
@@ -390,6 +378,35 @@ fn test_view_event_procedure_envelope_contract() {
 
     let mut expected_schema = common_event_recorder::event_table::procedure_event_column_schemas();
     expected_schema.extend(view_event_schema());
-    assert_eq!(event.extra_schema(), expected_schema);
-    assert_eq!(event.extra_rows().unwrap()[0].values.len(), 8);
+    assert_event_contract(
+        &event,
+        CREATE_VIEW_EVENT_TYPE,
+        &expected_schema,
+        &[Row {
+            values: vec![
+                Value {
+                    value_data: Some(ValueData::StringValue(procedure_id.to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("Running".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue(String::new())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("Submitted".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("greptime".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("public".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::StringValue("view_name".to_string())),
+                },
+                Value { value_data: None },
+            ],
+        }],
+    );
 }

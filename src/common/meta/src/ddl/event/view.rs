@@ -15,11 +15,12 @@
 use std::any::Any;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN, column_schemas, nullable_string, nullable_value,
+    CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN, VIEW_NAME_COLUMN, column_schemas,
+    nullable_string, nullable_value,
 };
 use serde::Serialize;
 use snafu::ResultExt;
@@ -27,14 +28,11 @@ use snafu::ResultExt;
 pub(crate) const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
 pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
 
-pub(crate) const VIEW_NAME_COLUMN: &str = "view_name";
-pub(crate) const VIEW_ID_COLUMN: &str = "view_id";
-
 const PAYLOAD_VERSION: u8 = 1;
 
 /// The bounded, versioned intent recorded when a view creation is submitted.
 #[derive(Debug, Serialize)]
-pub(crate) struct CreateViewPayloadV1 {
+struct CreateViewPayload {
     version: u8,
     or_replace: bool,
     create_if_not_exists: bool,
@@ -42,8 +40,8 @@ pub(crate) struct CreateViewPayloadV1 {
     column_count: usize,
 }
 
-impl CreateViewPayloadV1 {
-    pub(crate) fn new(
+impl CreateViewPayload {
+    fn new(
         or_replace: bool,
         create_if_not_exists: bool,
         referenced_table_count: usize,
@@ -61,13 +59,13 @@ impl CreateViewPayloadV1 {
 
 /// The bounded, versioned intent recorded when a view drop is submitted.
 #[derive(Debug, Serialize)]
-pub(crate) struct DropViewPayloadV1 {
+struct DropViewPayload {
     version: u8,
     drop_if_exists: bool,
 }
 
-impl DropViewPayloadV1 {
-    pub(crate) fn new(drop_if_exists: bool) -> Self {
+impl DropViewPayload {
+    fn new(drop_if_exists: bool) -> Self {
         Self {
             version: PAYLOAD_VERSION,
             drop_if_exists,
@@ -88,8 +86,8 @@ pub(crate) struct ViewDdlEvent {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ViewDdlPayload {
-    Create(CreateViewPayloadV1),
-    Drop(DropViewPayloadV1),
+    Create(CreateViewPayload),
+    Drop(DropViewPayload),
 }
 
 impl ViewDdlEvent {
@@ -109,7 +107,7 @@ impl ViewDdlEvent {
             schema_name,
             view_name,
             None,
-            ViewDdlPayload::Create(CreateViewPayloadV1::new(
+            ViewDdlPayload::Create(CreateViewPayload::new(
                 or_replace,
                 create_if_not_exists,
                 referenced_table_count,
@@ -132,7 +130,7 @@ impl ViewDdlEvent {
             schema_name,
             view_name,
             Some(view_id),
-            ViewDdlPayload::Drop(DropViewPayloadV1::new(drop_if_exists)),
+            ViewDdlPayload::Drop(DropViewPayload::new(drop_if_exists)),
         )
     }
 
@@ -149,11 +147,6 @@ impl ViewDdlEvent {
     /// Builds a lightweight drop-view lifecycle event with no locator data.
     pub(crate) fn drop_lifecycle() -> Self {
         Self::lifecycle(DROP_VIEW_EVENT_TYPE)
-    }
-
-    /// Builds the successful drop-view row, which carries no locator data.
-    pub(crate) fn drop_succeeded() -> Self {
-        Self::drop_lifecycle()
     }
 
     fn submitted(
@@ -210,21 +203,12 @@ impl Event for ViewDdlEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        let mut schema = column_schemas([&CATALOG_NAME_COLUMN, &SCHEMA_NAME_COLUMN]);
-        schema.extend(
-            [
-                (VIEW_NAME_COLUMN, ColumnDataType::String),
-                (VIEW_ID_COLUMN, ColumnDataType::Uint32),
-            ]
-            .into_iter()
-            .map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            }),
-        );
-        schema
+        column_schemas([
+            &CATALOG_NAME_COLUMN,
+            &SCHEMA_NAME_COLUMN,
+            &VIEW_NAME_COLUMN,
+            &VIEW_ID_COLUMN,
+        ])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
@@ -245,6 +229,7 @@ impl Event for ViewDdlEvent {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
     use api::v1::value::ValueData;
     use common_event_recorder::Event;
 
@@ -298,7 +283,6 @@ mod tests {
             ViewDdlEvent::create_lifecycle(),
             ViewDdlEvent::create_succeeded(7),
             ViewDdlEvent::drop_lifecycle(),
-            ViewDdlEvent::drop_succeeded(),
         ];
 
         assert_eq!(submitted.extra_schema().len(), 4);
@@ -339,12 +323,12 @@ mod tests {
             Some(ValueData::U32Value(7))
         );
 
-        let drop_succeeded = ViewDdlEvent::drop_succeeded()
+        let drop_lifecycle = ViewDdlEvent::drop_lifecycle()
             .extra_rows()
             .unwrap()
             .remove(0);
         assert!(
-            drop_succeeded
+            drop_lifecycle
                 .values
                 .iter()
                 .all(|value| value.value_data.is_none())
