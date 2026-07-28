@@ -44,6 +44,12 @@ tests-integration/tests/main.rs
   s_9b4b6f01d7f1ad::t_6c353c9c01eab6 22
 src/common/meta/src/ddl/event.rs
   s_9b4b6f01d7f1ad::t_4fe8e0b663a917 1-14,18
+config/config.md
+  s_9b4b6f01d7f1ad::t_d9b9f3cc1627df 232,439
+config/standalone.example.toml
+  s_9b4b6f01d7f1ad::t_d9b9f3cc1627df 899-900
+config/metasrv.example.toml
+  s_9b4b6f01d7f1ad::t_d9b9f3cc1627df 310-311
 ---
 {
   "schema_version": "authorship/3.0.0",
