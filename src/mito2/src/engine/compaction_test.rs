@@ -1384,6 +1384,7 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
         .await
         .expect("local compaction did not reach its cancellable merge gate");
 
+    let pending_ddl_guard = gate.arm_pending_ddl_dispatch();
     let staging_engine = engine.clone();
     let mut staging_task = tokio::spawn(async move {
         staging_engine
@@ -1400,7 +1401,6 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
         .expect("enter-staging did not request local compaction cancellation");
     assert!(!staging_task.is_finished());
 
-    let pending_ddl_guard = gate.arm_pending_ddl_dispatch();
     merge_guard.release();
     tokio::time::timeout(
         Duration::from_secs(5),
