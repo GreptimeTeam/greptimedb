@@ -27,7 +27,7 @@ use table::metadata::{TableId, TableInfo, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::event::view::{CREATE_VIEW_EVENT_TYPE, ViewDdlEvent};
+use crate::ddl::event::view::{CREATE_VIEW_EVENT_TYPE, CreateViewEventIntent, ViewDdlEvent};
 use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
@@ -283,10 +283,12 @@ impl Procedure for CreateViewProcedure {
                     &expr.catalog_name,
                     &expr.schema_name,
                     &expr.view_name,
-                    expr.or_replace,
-                    expr.create_if_not_exists,
-                    self.data.task.table_names().len(),
-                    self.data.task.columns().len(),
+                    CreateViewEventIntent {
+                        or_replace: expr.or_replace,
+                        create_if_not_exists: expr.create_if_not_exists,
+                        referenced_table_count: self.data.task.table_names().len(),
+                        column_count: self.data.task.columns().len(),
+                    },
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {

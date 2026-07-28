@@ -30,7 +30,15 @@ pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
 
 const PAYLOAD_VERSION: u8 = 1;
 
-/// The bounded, versioned intent recorded when a view creation is submitted.
+/// The bounded Create View intent allowed in a submitted event payload.
+#[derive(Debug)]
+pub(crate) struct CreateViewEventIntent {
+    pub(crate) or_replace: bool,
+    pub(crate) create_if_not_exists: bool,
+    pub(crate) referenced_table_count: usize,
+    pub(crate) column_count: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateViewPayload {
     version: u8,
@@ -40,37 +48,10 @@ struct CreateViewPayload {
     column_count: usize,
 }
 
-impl CreateViewPayload {
-    fn new(
-        or_replace: bool,
-        create_if_not_exists: bool,
-        referenced_table_count: usize,
-        column_count: usize,
-    ) -> Self {
-        Self {
-            version: PAYLOAD_VERSION,
-            or_replace,
-            create_if_not_exists,
-            referenced_table_count,
-            column_count,
-        }
-    }
-}
-
-/// The bounded, versioned intent recorded when a view drop is submitted.
 #[derive(Debug, Serialize)]
 struct DropViewPayload {
     version: u8,
     drop_if_exists: bool,
-}
-
-impl DropViewPayload {
-    fn new(drop_if_exists: bool) -> Self {
-        Self {
-            version: PAYLOAD_VERSION,
-            drop_if_exists,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -91,15 +72,12 @@ enum ViewDdlPayload {
 }
 
 impl ViewDdlEvent {
-    /// Builds the rich event emitted when creating a view is submitted.
+    /// Builds the bounded event emitted when creating a View is submitted.
     pub(crate) fn create_submitted(
         catalog_name: &str,
         schema_name: &str,
         view_name: &str,
-        or_replace: bool,
-        create_if_not_exists: bool,
-        referenced_table_count: usize,
-        column_count: usize,
+        intent: CreateViewEventIntent,
     ) -> Self {
         Self::submitted(
             CREATE_VIEW_EVENT_TYPE,
@@ -107,16 +85,17 @@ impl ViewDdlEvent {
             schema_name,
             view_name,
             None,
-            ViewDdlPayload::Create(CreateViewPayload::new(
-                or_replace,
-                create_if_not_exists,
-                referenced_table_count,
-                column_count,
-            )),
+            ViewDdlPayload::Create(CreateViewPayload {
+                version: PAYLOAD_VERSION,
+                or_replace: intent.or_replace,
+                create_if_not_exists: intent.create_if_not_exists,
+                referenced_table_count: intent.referenced_table_count,
+                column_count: intent.column_count,
+            }),
         )
     }
 
-    /// Builds the rich event emitted when dropping a view is submitted.
+    /// Builds the bounded event emitted when dropping a View is submitted.
     pub(crate) fn drop_submitted(
         catalog_name: &str,
         schema_name: &str,
@@ -130,7 +109,10 @@ impl ViewDdlEvent {
             schema_name,
             view_name,
             Some(view_id),
-            ViewDdlPayload::Drop(DropViewPayload::new(drop_if_exists)),
+            ViewDdlPayload::Drop(DropViewPayload {
+                version: PAYLOAD_VERSION,
+                drop_if_exists,
+            }),
         )
     }
 
@@ -224,114 +206,5 @@ impl Event for ViewDdlEvent {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use api::v1::SemanticType;
-    use api::v1::value::ValueData;
-    use common_event_recorder::Event;
-
-    use super::*;
-
-    #[test]
-    fn create_submitted_event_contains_only_bounded_intent() {
-        let event =
-            ViewDdlEvent::create_submitted("greptime", "public", "v_metrics", true, false, 3, 5);
-
-        assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
-        assert_eq!(
-            event.json_payload().unwrap(),
-            serde_json::json!({
-                "version": 1,
-                "or_replace": true,
-                "create_if_not_exists": false,
-                "referenced_table_count": 3,
-                "column_count": 5,
-            })
-        );
-        assert!(!event.json_payload().unwrap().to_string().contains("SELECT"));
-
-        let row = event.extra_rows().unwrap().remove(0);
-        assert_eq!(
-            row.values[..3],
-            vec![
-                ValueData::StringValue("greptime".to_string()).into(),
-                ValueData::StringValue("public".to_string()).into(),
-                ValueData::StringValue("v_metrics".to_string()).into(),
-            ]
-        );
-        assert!(row.values[3].value_data.is_none());
-    }
-
-    #[test]
-    fn drop_submitted_event_contains_only_typed_intent() {
-        let event = ViewDdlEvent::drop_submitted("greptime", "public", "v_metrics", 42, true);
-
-        assert_eq!(event.event_type(), DROP_VIEW_EVENT_TYPE);
-        assert_eq!(
-            event.json_payload().unwrap(),
-            serde_json::json!({"version": 1, "drop_if_exists": true})
-        );
-    }
-
-    #[test]
-    fn lifecycle_rows_keep_fixed_schema_and_null_locators() {
-        let submitted = ViewDdlEvent::create_submitted("c", "s", "v", false, false, 0, 0);
-        let events = [
-            ViewDdlEvent::create_lifecycle(),
-            ViewDdlEvent::create_succeeded(7),
-            ViewDdlEvent::drop_lifecycle(),
-        ];
-
-        assert_eq!(submitted.extra_schema().len(), 4);
-        assert!(
-            submitted
-                .extra_schema()
-                .iter()
-                .all(|column| column.semantic_type == SemanticType::Field as i32)
-        );
-
-        for event in events {
-            assert_eq!(event.extra_schema(), submitted.extra_schema());
-            assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-        }
-
-        let create_lifecycle = ViewDdlEvent::create_lifecycle()
-            .extra_rows()
-            .unwrap()
-            .remove(0);
-        assert!(
-            create_lifecycle
-                .values
-                .iter()
-                .all(|value| value.value_data.is_none())
-        );
-
-        let create_succeeded = ViewDdlEvent::create_succeeded(7)
-            .extra_rows()
-            .unwrap()
-            .remove(0);
-        assert!(
-            create_succeeded.values[..3]
-                .iter()
-                .all(|value| value.value_data.is_none())
-        );
-        assert_eq!(
-            create_succeeded.values[3].value_data,
-            Some(ValueData::U32Value(7))
-        );
-
-        let drop_lifecycle = ViewDdlEvent::drop_lifecycle()
-            .extra_rows()
-            .unwrap()
-            .remove(0);
-        assert!(
-            drop_lifecycle
-                .values
-                .iter()
-                .all(|value| value.value_data.is_none())
-        );
     }
 }

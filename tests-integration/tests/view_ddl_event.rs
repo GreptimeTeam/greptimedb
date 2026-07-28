@@ -21,16 +21,15 @@ use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
+use uuid::Uuid;
 
-use crate::event_recorder_test_util::assert_single_event;
+use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
 
 const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
 const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
-const VIEW_NAME: &str = "ddl_view_procedure_event_view";
-const SOURCE_TABLE_NAME: &str = "ddl_view_procedure_event_source";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_view_procedure_events() {
+async fn test_view_ddl_events() {
     let store_type = StorageType::File;
     if !store_type.test_on() {
         return;
@@ -38,8 +37,8 @@ async fn test_view_procedure_events() {
 
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&store_type);
-    let home_dir = create_temp_dir("test_view_procedure_events_data_home");
-    let cluster = GreptimeDbClusterBuilder::new("test_view_procedure_events")
+    let home_dir = create_temp_dir("test_view_ddl_events_data_home");
+    let cluster = GreptimeDbClusterBuilder::new("test_view_ddl_events")
         .await
         .with_datanodes(1)
         .with_store_config(store_config)
@@ -48,25 +47,35 @@ async fn test_view_procedure_events() {
         .build(true)
         .await;
     let instance = cluster.fe_instance();
+    let suffix = Uuid::new_v4().simple();
+    let source_table = format!("view_ddl_event_source_{suffix}");
+    let view = format!("view_ddl_event_{suffix}");
 
-    execute_view_ddl(instance).await;
+    execute_view_ddl(instance, &source_table, &view).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_standalone_view_procedure_events() {
+async fn test_standalone_view_ddl_events() {
     common_telemetry::init_default_ut_logging();
-    let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_view_procedure_events")
+    let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_view_ddl_events")
         .build()
         .await;
+    let suffix = Uuid::new_v4().simple();
+    let source_table = format!("view_ddl_event_source_{suffix}");
+    let view = format!("view_ddl_event_{suffix}");
 
-    execute_view_ddl(standalone.fe_instance()).await;
+    execute_view_ddl(standalone.fe_instance(), &source_table, &view).await;
 }
 
-async fn execute_view_ddl(instance: &Arc<frontend::instance::Instance>) {
+async fn execute_view_ddl(
+    instance: &Arc<frontend::instance::Instance>,
+    source_table: &str,
+    view: &str,
+) {
     instance
         .do_query(
             &format!(
-                "CREATE TABLE {SOURCE_TABLE_NAME} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
+                "CREATE TABLE {source_table} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
             ),
             QueryContext::arc(),
         )
@@ -76,34 +85,36 @@ async fn execute_view_ddl(instance: &Arc<frontend::instance::Instance>) {
 
     instance
         .do_query(
-            &format!("CREATE VIEW {VIEW_NAME} AS SELECT amount FROM {SOURCE_TABLE_NAME}"),
+            &format!("CREATE VIEW {view} AS SELECT amount FROM {source_table}"),
             QueryContext::arc(),
         )
         .await
         .remove(0)
         .unwrap();
-    assert_create_events(instance).await;
+    assert_create_events(instance, view).await;
 
     instance
-        .do_query(&format!("DROP VIEW {VIEW_NAME}"), QueryContext::arc())
+        .do_query(&format!("DROP VIEW {view}"), QueryContext::arc())
         .await
         .remove(0)
         .unwrap();
-    assert_drop_events(instance).await;
+    assert_drop_events(instance, view).await;
 }
 
-async fn assert_create_events(instance: &Arc<frontend::instance::Instance>) {
+async fn assert_create_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
+    let procedure_id = find_submitted_procedure_id(instance, CREATE_VIEW_EVENT_TYPE, view).await;
     assert_single_event(
         instance,
         &format!(
             r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
   AND procedure_trigger = 'Submitted'
   AND catalog_name = 'greptime'
   AND schema_name = 'public'
-  AND view_name = '{VIEW_NAME}'
+  AND view_name = '{view}'
   AND view_id IS NULL
   AND json_path_match(payload, '$.version == 1')
   AND json_path_match(payload, '$.or_replace == false')
@@ -119,6 +130,7 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
             r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND procedure_trigger = 'Succeeded'
   AND catalog_name IS NULL
@@ -131,18 +143,20 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
     .await;
 }
 
-async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>) {
+async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
+    let procedure_id = find_submitted_procedure_id(instance, DROP_VIEW_EVENT_TYPE, view).await;
     assert_single_event(
         instance,
         &format!(
             r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{DROP_VIEW_EVENT_TYPE}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
   AND procedure_trigger = 'Submitted'
   AND catalog_name = 'greptime'
   AND schema_name = 'public'
-  AND view_name = '{VIEW_NAME}'
+  AND view_name = '{view}'
   AND view_id IS NOT NULL
   AND json_path_match(payload, '$.version == 1')
   AND json_path_match(payload, '$.drop_if_exists == false')"#,
@@ -155,6 +169,7 @@ WHERE type = '{DROP_VIEW_EVENT_TYPE}'
             r#"SELECT count(*) AS event_count
 FROM greptime_private.events
 WHERE type = '{DROP_VIEW_EVENT_TYPE}'
+  AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND procedure_trigger = 'Succeeded'
   AND catalog_name IS NULL
@@ -165,4 +180,25 @@ WHERE type = '{DROP_VIEW_EVENT_TYPE}'
         ),
     )
     .await;
+}
+
+async fn find_submitted_procedure_id(
+    instance: &Arc<frontend::instance::Instance>,
+    event_type: &str,
+    view_name: &str,
+) -> String {
+    find_eventually_string(
+        instance,
+        &format!(
+            r#"SELECT procedure_id
+FROM greptime_private.events
+WHERE type = '{event_type}'
+  AND view_name = '{view_name}'
+  AND procedure_trigger = 'Submitted'
+ORDER BY timestamp DESC
+LIMIT 1"#,
+        ),
+        "procedure_id",
+    )
+    .await
 }

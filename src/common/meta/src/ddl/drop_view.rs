@@ -229,7 +229,6 @@ impl Procedure for DropViewProcedure {
                     self.data.task.drop_if_exists,
                 )
             }
-            EventTrigger::Succeeded => ViewDdlEvent::drop_lifecycle(),
             _ => ViewDdlEvent::drop_lifecycle(),
         };
 
