@@ -203,6 +203,34 @@ impl TableProvider for DummyTableProvider {
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
+        if scanner.properties().is_logical_region() {
+            let current_metadata = self.engine.get_metadata(self.region_id).await.map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "failed to re-fetch logical region metadata after opening scanner: expected {:#?}; current metadata unavailable: {error}",
+                    self.metadata,
+                ))
+            })?;
+            if current_metadata.as_ref() != self.metadata.as_ref() {
+                return Err(DataFusionError::Plan(format!(
+                    "logical region metadata mismatch: expected {:#?}; current {:#?}",
+                    self.metadata, current_metadata,
+                )));
+            }
+        } else {
+            let scanner_metadata = scanner.metadata();
+            if scanner_metadata.region_id != self.metadata.region_id
+                || scanner_metadata.schema_version != self.metadata.schema_version
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "region scanner metadata mismatch: expected region_id={}, schema_version={}; current region_id={}, schema_version={}",
+                    self.metadata.region_id,
+                    self.metadata.schema_version,
+                    scanner_metadata.region_id,
+                    scanner_metadata.schema_version,
+                )));
+            }
+        }
+
         if request.snapshot_on_scan
             && let Some(query_ctx) = &self.query_ctx
             && let Some(snapshot_sequence) = scanner.snapshot_sequence()
@@ -641,11 +669,24 @@ impl CatalogManager for DummyCatalogManager {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
 
-    use common_error::ext::ErrorExt;
+    use api::region::RegionResponse;
+    use async_trait::async_trait;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_error::status_code::StatusCode;
+    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+    use datafusion::execution::SessionStateBuilder;
     use session::context::QueryContextBuilder;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::region_engine::{
+        RegionEngine, RegionRole, RegionScanner, RegionScannerRef, RegionStatistic,
+        RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+        SettableRegionRoleState, SinglePartitionScanner, SyncRegionFromRequest,
+        SyncRegionFromResponse,
+    };
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::{ConcreteDataType, SequenceNumber};
 
     use super::*;
     use crate::error::Error;
@@ -656,6 +697,237 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)
+    }
+
+    #[derive(Debug)]
+    struct MutableScannerMetadataEngine {
+        provider_metadata: Mutex<RegionMetadataRef>,
+        scanner_metadata: Mutex<RegionMetadataRef>,
+        scanner_is_logical_region: Mutex<bool>,
+    }
+
+    impl MutableScannerMetadataEngine {
+        fn new(metadata: RegionMetadataRef) -> Self {
+            Self {
+                provider_metadata: Mutex::new(metadata.clone()),
+                scanner_metadata: Mutex::new(metadata),
+                scanner_is_logical_region: Mutex::new(false),
+            }
+        }
+
+        fn set_scanner_metadata(&self, metadata: RegionMetadataRef) {
+            *self.scanner_metadata.lock().unwrap() = metadata;
+        }
+
+        fn set_scanner_is_logical_region(&self, is_logical_region: bool) {
+            *self.scanner_is_logical_region.lock().unwrap() = is_logical_region;
+        }
+
+        fn set_provider_metadata(&self, metadata: RegionMetadataRef) {
+            *self.provider_metadata.lock().unwrap() = metadata;
+        }
+    }
+
+    #[async_trait]
+    impl RegionEngine for MutableScannerMetadataEngine {
+        fn name(&self) -> &str {
+            "MutableScannerMetadataEngine"
+        }
+
+        async fn handle_request(
+            &self,
+            _region_id: RegionId,
+            _request: RegionRequest,
+        ) -> std::result::Result<RegionResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn get_committed_sequence(
+            &self,
+            _region_id: RegionId,
+        ) -> std::result::Result<SequenceNumber, BoxedError> {
+            Ok(SequenceNumber::default())
+        }
+
+        async fn handle_query(
+            &self,
+            _region_id: RegionId,
+            _request: ScanRequest,
+        ) -> std::result::Result<RegionScannerRef, BoxedError> {
+            let metadata = self.scanner_metadata.lock().unwrap().clone();
+            let stream: SendableRecordBatchStream =
+                Box::pin(EmptyRecordBatchStream::new(metadata.schema.clone()));
+            let mut scanner = SinglePartitionScanner::new(stream, false, metadata, None);
+            scanner.set_logical_region(*self.scanner_is_logical_region.lock().unwrap());
+            Ok(Box::new(scanner))
+        }
+
+        async fn get_metadata(
+            &self,
+            _region_id: RegionId,
+        ) -> std::result::Result<RegionMetadataRef, BoxedError> {
+            Ok(self.provider_metadata.lock().unwrap().clone())
+        }
+
+        fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
+            None
+        }
+
+        async fn stop(&self) -> std::result::Result<(), BoxedError> {
+            Ok(())
+        }
+
+        fn set_region_role(
+            &self,
+            _region_id: RegionId,
+            _role: RegionRole,
+        ) -> std::result::Result<(), BoxedError> {
+            unimplemented!()
+        }
+
+        async fn sync_region(
+            &self,
+            _region_id: RegionId,
+            _request: SyncRegionFromRequest,
+        ) -> std::result::Result<SyncRegionFromResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn remap_manifests(
+            &self,
+            _request: RemapManifestsRequest,
+        ) -> std::result::Result<RemapManifestsResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn set_region_role_state_gracefully(
+            &self,
+            _region_id: RegionId,
+            _region_role_state: SettableRegionRoleState,
+        ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        fn role(&self, _region_id: RegionId) -> Option<RegionRole> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn test_region_metadata(region_id: RegionId, schema_version: u64) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        });
+        for _ in 0..schema_version {
+            builder.bump_version();
+        }
+        Arc::new(builder.build().unwrap())
+    }
+
+    async fn provider_with_snapshot(
+        metadata: RegionMetadataRef,
+    ) -> (DummyTableProvider, Arc<MutableScannerMetadataEngine>) {
+        let engine = Arc::new(MutableScannerMetadataEngine::new(metadata));
+        let provider = DummyTableProviderFactory
+            .create_table_provider(test_region_id(), engine.clone(), None)
+            .await
+            .unwrap();
+        (provider, engine)
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_scanner_schema_version_changed_after_provider_snapshot() {
+        let region_id = test_region_id();
+        let (provider, engine) = provider_with_snapshot(test_region_metadata(region_id, 7)).await;
+
+        // Simulate compatible DDL after remote-plan decode captured the provider snapshot.
+        engine.set_scanner_metadata(test_region_metadata(region_id, 8));
+
+        let state = SessionStateBuilder::new().build();
+        let err = TableProvider::scan(&provider, &state, None, &[], None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(&format!(
+            "expected region_id={region_id}, schema_version=7; current region_id={region_id}, schema_version=8"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_scanner_region_id_mismatch() {
+        let region_id = test_region_id();
+        let (provider, engine) = provider_with_snapshot(test_region_metadata(region_id, 7)).await;
+        let current_region_id = RegionId::new(1024, 2);
+        engine.set_scanner_metadata(test_region_metadata(current_region_id, 7));
+
+        let state = SessionStateBuilder::new().build();
+        let err = TableProvider::scan(&provider, &state, None, &[], None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(&format!(
+            "expected region_id={region_id}, schema_version=7; current region_id={current_region_id}, schema_version=7"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_scan_accepts_matching_scanner_metadata() {
+        let metadata = test_region_metadata(test_region_id(), 7);
+        let (provider, _engine) = provider_with_snapshot(metadata).await;
+        let state = SessionStateBuilder::new().build();
+
+        let plan = TableProvider::scan(&provider, &state, None, &[], None)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.schema(), provider.schema());
+    }
+
+    #[tokio::test]
+    async fn test_scan_accepts_logical_scanner_with_physical_metadata() {
+        let logical_region_id = test_region_id();
+        let (provider, engine) =
+            provider_with_snapshot(test_region_metadata(logical_region_id, 7)).await;
+        let physical_region_id = RegionId::new(2048, 3);
+        engine.set_scanner_metadata(test_region_metadata(physical_region_id, 2));
+        engine.set_scanner_is_logical_region(true);
+
+        let state = SessionStateBuilder::new().build();
+        let plan = TableProvider::scan(&provider, &state, None, &[], None)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.schema(), provider.schema());
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_logical_metadata_changed_after_provider_snapshot() {
+        let logical_region_id = test_region_id();
+        let (provider, engine) =
+            provider_with_snapshot(test_region_metadata(logical_region_id, 7)).await;
+        engine.set_scanner_metadata(test_region_metadata(RegionId::new(2048, 3), 2));
+        engine.set_scanner_is_logical_region(true);
+        engine.set_provider_metadata(test_region_metadata(logical_region_id, 8));
+
+        let state = SessionStateBuilder::new().build();
+        let err = TableProvider::scan(&provider, &state, None, &[], None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("logical region metadata mismatch"));
+        assert!(err.to_string().contains("schema_version: 7"));
+        assert!(err.to_string().contains("schema_version: 8"));
     }
 
     #[test]

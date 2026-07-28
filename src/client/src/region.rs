@@ -37,9 +37,8 @@ use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::Stream;
 use prost::Message;
-use query::query_engine::DefaultSerializer;
+use query::query_engine::remote_plan_codec::encode_remote_plan;
 use snafu::{OptionExt, ResultExt, location};
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
 use crate::error::{
@@ -75,8 +74,7 @@ impl Datanode for RegionRequester {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
-        let plan = DFLogicalSubstraitConvertor
-            .encode(&request.plan, DefaultSerializer)
+        let plan = encode_remote_plan(&request.plan, request.region_id)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?
             .to_vec();

@@ -12,29 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::{BTreeSet, HashSet};
+use std::fmt;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
+use arrow::array::Int64Array;
+use arrow::datatypes::{DataType, Field, IntervalDayTime, Schema as ArrowSchema, TimeUnit};
+use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream, util,
+};
 use common_telemetry::init_default_ut_logging;
-use datafusion::datasource::DefaultTableSource;
+use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, TableProvider};
+use datafusion::datasource::{DefaultTableSource, MemTable, provider_as_source};
 use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
-use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::tree_node::{TreeNode as _, TreeNodeRecursion};
 use datafusion_common::{ExprSchema, JoinType, ScalarValue};
 use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
-    col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, LogicalPlan, LogicalPlanBuilder, Operator, Subquery,
+    binary_expr, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -46,7 +53,8 @@ use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
 use regex::Regex;
 use store_api::data_source::DataSource;
-use store_api::storage::ScanRequest;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+use store_api::storage::{RegionId, ScanRequest};
 use table::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMeta, TableType,
 };
@@ -55,6 +63,11 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+use crate::dummy_catalog::{DummyCatalogList, DummyTableProvider};
+use crate::optimizer::test_util::MetaRegionEngine;
+use crate::options::QueryOptions;
+use crate::query_engine::QueryEngineFactory;
+use crate::query_engine::remote_plan_codec::{decode_remote_plan, encode_remote_plan};
 
 fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
@@ -2821,5 +2834,472 @@ fn scheduled_none_falls_back_to_wall_clock() {
     assert!(
         remote_section.contains("TimestampNanosecond("),
         "Remote should contain TimestampNanosecond:\n{result_str}"
+    );
+}
+
+const QX_046_TABLE: &str = "qx_046_schema_race";
+
+/// Catalog resolver used by QX-046. The table slot is deliberately mutable so every
+/// decode observes the provider currently registered under the same table name.
+#[derive(Clone)]
+struct SchemaRaceCatalogList {
+    schema: SchemaRaceSchemaProvider,
+}
+
+impl SchemaRaceCatalogList {
+    fn new(table: Arc<dyn TableProvider>) -> Self {
+        Self {
+            schema: SchemaRaceSchemaProvider {
+                table: Arc::new(Mutex::new(Some(table))),
+            },
+        }
+    }
+
+    fn replace(&self, table: Arc<dyn TableProvider>) {
+        *self.schema.table.lock().unwrap() = Some(table);
+    }
+
+    fn drop_table(&self) {
+        *self.schema.table.lock().unwrap() = None;
+    }
+}
+
+impl fmt::Debug for SchemaRaceCatalogList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaRaceCatalogList").finish()
+    }
+}
+
+impl CatalogProviderList for SchemaRaceCatalogList {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn register_catalog(
+        &self,
+        _name: String,
+        _catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        None
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        vec![DEFAULT_CATALOG_NAME.to_string()]
+    }
+
+    fn catalog(&self, _name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        Some(Arc::new(SchemaRaceCatalogProvider {
+            schema: self.schema.clone(),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct SchemaRaceCatalogProvider {
+    schema: SchemaRaceSchemaProvider,
+}
+
+impl fmt::Debug for SchemaRaceCatalogProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaRaceCatalogProvider").finish()
+    }
+}
+
+impl CatalogProvider for SchemaRaceCatalogProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema_names(&self) -> Vec<String> {
+        vec![DEFAULT_SCHEMA_NAME.to_string()]
+    }
+
+    fn schema(&self, _name: &str) -> Option<Arc<dyn SchemaProvider>> {
+        Some(Arc::new(self.schema.clone()))
+    }
+}
+
+#[derive(Clone)]
+struct SchemaRaceSchemaProvider {
+    table: Arc<Mutex<Option<Arc<dyn TableProvider>>>>,
+}
+
+impl fmt::Debug for SchemaRaceSchemaProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaRaceSchemaProvider").finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl SchemaProvider for SchemaRaceSchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        self.table
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|_| vec![QX_046_TABLE.to_string()])
+            .unwrap_or_default()
+    }
+
+    async fn table(&self, name: &str) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        Ok((name == QX_046_TABLE)
+            .then(|| self.table.lock().unwrap().clone())
+            .flatten())
+    }
+
+    fn table_exist(&self, name: &str) -> bool {
+        name == QX_046_TABLE && self.table.lock().unwrap().is_some()
+    }
+}
+
+fn qx_046_provider(
+    nullable: bool,
+    values: Vec<Option<i64>>,
+    prefix: Option<(String, Vec<Option<String>>)>,
+) -> Arc<dyn TableProvider> {
+    let mut fields = Vec::new();
+    let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
+    if let Some((name, values)) = prefix {
+        fields.push(Field::new(name, DataType::Utf8, true));
+        columns.push(Arc::new(arrow::array::StringArray::from(values)));
+    }
+    fields.push(Field::new("x", DataType::Int64, nullable));
+    columns.push(Arc::new(Int64Array::from(values)));
+
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch = ArrowRecordBatch::try_new(schema.clone(), columns).unwrap();
+    Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap())
+}
+
+fn qx_046_incompatible_provider() -> Arc<dyn TableProvider> {
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "x",
+        DataType::Utf8,
+        true,
+    )]));
+    let batch = ArrowRecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(arrow::array::StringArray::from(vec![Some(
+            "not-an-i64",
+        )]))],
+    )
+    .unwrap();
+    Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap())
+}
+
+fn qx_046_plan(table: Arc<dyn TableProvider>) -> LogicalPlan {
+    LogicalPlanBuilder::scan(QX_046_TABLE, provider_as_source(table), None)
+        .unwrap()
+        .filter(col("x").is_not_null())
+        .unwrap()
+        .project(vec![col("x")])
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// This is the exact expression simplification and pre-MergeScan optimizer chain
+/// used by `DistPlannerAnalyzer::analyze` before distributed splitting.
+fn qx_046_simplify_before_distributed_split(plan: LogicalPlan) -> LogicalPlan {
+    let config = Arc::new(ConfigOptions::default());
+    let optimizer_context = PatchOptimizerContext {
+        inner: datafusion_optimizer::OptimizerContext::new(),
+        config: config.clone(),
+        scheduled_time: None,
+    };
+    let plan = plan
+        .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))
+        .unwrap()
+        .data;
+
+    let optimizer_context = PatchOptimizerContext {
+        inner: datafusion_optimizer::OptimizerContext::new(),
+        config,
+        scheduled_time: None,
+    };
+    pre_merge_scan_optimizer()
+        .optimize(plan, &optimizer_context, |_, _| {})
+        .unwrap()
+}
+
+fn qx_046_contains_is_not_null(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    plan.apply(|node| {
+        for expr in node.expressions_consider_join() {
+            expr.apply(|expr| {
+                if matches!(expr, Expr::IsNotNull(_)) {
+                    found = true;
+                    Ok(TreeNodeRecursion::Stop)
+                } else {
+                    Ok(TreeNodeRecursion::Continue)
+                }
+            })?;
+        }
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    })
+    .unwrap();
+    found
+}
+
+fn qx_046_table_info(nullable: bool, x_column_id: u32, version: u64) -> TableInfoRef {
+    let schema = Arc::new(
+        SchemaBuilder::try_from_columns(vec![ColumnSchema::new(
+            "x",
+            ConcreteDataType::int64_datatype(),
+            nullable,
+        )])
+        .unwrap()
+        .build()
+        .unwrap(),
+    );
+    let meta = TableMeta {
+        schema,
+        primary_key_indices: vec![],
+        value_indices: vec![0],
+        engine: "mito".to_string(),
+        next_column_id: x_column_id + 1,
+        options: Default::default(),
+        created_on: Default::default(),
+        updated_on: Default::default(),
+        partition_key_indices: vec![],
+        column_ids: vec![x_column_id],
+    };
+    Arc::new(
+        TableInfoBuilder::default()
+            .table_id(46)
+            .table_version(version)
+            .name(QX_046_TABLE)
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .table_type(TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap(),
+    )
+}
+
+async fn qx_046_execute_x(engine: &crate::QueryEngineRef, plan: LogicalPlan) -> Vec<Option<i64>> {
+    let output = engine
+        .execute(plan, session::context::QueryContext::arc())
+        .await
+        .unwrap();
+    let common_query::OutputData::Stream(stream) = output.data else {
+        panic!("QX-046 expected a record-batch stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let mut values = Vec::new();
+    for batch in batches {
+        let values_array = batch
+            .df_record_batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        values.extend(values_array.iter());
+    }
+    values
+}
+
+#[tokio::test]
+async fn qx_046_default_decoder_nullable_reincarnation_wrong_result() {
+    let old_metadata = qx_046_table_info(false, 7, 1);
+    let new_metadata = qx_046_table_info(true, 8, 2);
+    assert!(old_metadata.meta.primary_key_indices.is_empty());
+    assert!(old_metadata.meta.partition_key_indices.is_empty());
+    assert_eq!(old_metadata.meta.value_indices, vec![0]);
+    assert!(!old_metadata.meta.schema.column_schemas()[0].is_time_index());
+    assert_eq!(old_metadata.name_to_ids().unwrap()["x"], 7);
+    assert_eq!(new_metadata.name_to_ids().unwrap()["x"], 8);
+    assert_eq!(old_metadata.ident.version, 1);
+    assert_eq!(new_metadata.ident.version, 2);
+
+    let old_provider = qx_046_provider(false, vec![Some(7)], None);
+    let old_plan = qx_046_simplify_before_distributed_split(qx_046_plan(old_provider.clone()));
+    assert!(
+        !qx_046_contains_is_not_null(&old_plan),
+        "the old non-null schema must simplify x IS NOT NULL before distributed splitting"
+    );
+    let stale_bytes = substrait::DFLogicalSubstraitConvertor
+        .encode(&old_plan, crate::query_engine::DefaultSerializer)
+        .unwrap();
+
+    let factory = QueryEngineFactory::new(
+        catalog::memory::new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    );
+    let engine = factory.query_engine();
+    let decoder = engine
+        .engine_context(session::context::QueryContext::arc())
+        .new_plan_decoder()
+        .unwrap();
+    let catalog = Arc::new(SchemaRaceCatalogList::new(old_provider));
+
+    // Old encode -> old decode is the control for the real serializer/decoder path.
+    let old_decoded = decoder
+        .decode(stale_bytes.clone(), catalog.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(qx_046_execute_x(&engine, old_decoded).await, vec![Some(7)]);
+
+    // DROP x; ADD x BIGINT: the name remains, but its TableMeta identity, version,
+    // nullability, and provider data change. MemTable is only the DataFusion provider;
+    // the TableInfo fixtures above prove the closest real ordinary-column DDL metadata.
+    let new_provider = qx_046_provider(true, vec![None, Some(9)], None);
+    catalog.replace(new_provider.clone());
+    // Frozen red evidence: the generic decoder remains intentionally unchanged
+    // for persisted views and flow plans, and therefore exposes the original
+    // wrong-result behavior. Remote reads use the dedicated guarded codec.
+    let stale_decoded = decoder
+        .decode(stale_bytes.clone(), catalog.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        qx_046_execute_x(&engine, stale_decoded).await,
+        vec![None, Some(9)],
+        "the frozen generic decoder oracle must retain the pre-fix wrong result"
+    );
+
+    let fresh_plan = qx_046_simplify_before_distributed_split(qx_046_plan(new_provider));
+    assert!(
+        qx_046_contains_is_not_null(&fresh_plan),
+        "the nullable reincarnated x must retain x IS NOT NULL structurally"
+    );
+    let fresh_bytes = substrait::DFLogicalSubstraitConvertor
+        .encode(&fresh_plan, crate::query_engine::DefaultSerializer)
+        .unwrap();
+    let fresh_decoded = decoder
+        .decode(fresh_bytes, catalog.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        qx_046_execute_x(&engine, fresh_decoded).await,
+        vec![Some(9)]
+    );
+
+    // A direct drop is still rejected by the real DefaultPlanDecoder catalog path.
+    catalog.drop_table();
+    assert!(
+        decoder
+            .decode(stale_bytes.clone(), catalog.clone(), false)
+            .await
+            .is_err()
+    );
+
+    // Arrow-incompatible replacements are rejected before execution.
+    catalog.replace(qx_046_incompatible_provider());
+    assert!(
+        decoder
+            .decode(stale_bytes.clone(), catalog.clone(), false)
+            .await
+            .is_err()
+    );
+
+    // Reordering x while adding an unrelated field remains compatible because the
+    // decoder resolves the serialized field by name and projects it from the provider.
+    catalog.replace(qx_046_provider(
+        false,
+        vec![Some(11)],
+        Some(("unrelated".to_string(), vec![Some("safe".to_string())])),
+    ));
+    let reordered_decoded = decoder.decode(stale_bytes, catalog, false).await.unwrap();
+    assert_eq!(
+        qx_046_execute_x(&engine, reordered_decoded).await,
+        vec![Some(11)]
+    );
+}
+
+fn qx_046_adapter_plan(table_info: TableInfoRef) -> LogicalPlan {
+    let table = Arc::new(Table::new(
+        table_info.clone(),
+        FilterPushDownType::Unsupported,
+        Arc::new(TestDataSource::new(table_info.meta.schema.clone())),
+    ));
+    LogicalPlanBuilder::scan(
+        QX_046_TABLE,
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        ))),
+        None,
+    )
+    .unwrap()
+    .filter(col("x").is_not_null())
+    .unwrap()
+    .project(vec![col("x")])
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+fn qx_046_dummy_provider(nullable: bool, column_id: u32) -> DummyTableProvider {
+    let region_id = RegionId::new(46, 1);
+    let mut metadata = RegionMetadataBuilder::new(region_id);
+    metadata.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new("x", ConcreteDataType::int64_datatype(), nullable),
+        semantic_type: api::v1::SemanticType::Field,
+        column_id,
+    });
+    metadata.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+        semantic_type: api::v1::SemanticType::Timestamp,
+        column_id: column_id + 1,
+    });
+    let metadata = Arc::new(metadata.build().unwrap());
+    let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+    DummyTableProvider::new(region_id, engine, metadata)
+}
+
+#[tokio::test]
+async fn qx_046_remote_codec_rejects_simplified_nullable_reincarnation() {
+    let old_plan = qx_046_simplify_before_distributed_split(qx_046_adapter_plan(
+        qx_046_table_info(false, 7, 1),
+    ));
+    assert!(
+        !qx_046_contains_is_not_null(&old_plan),
+        "the real pre-split simplifier must erase x IS NOT NULL on the old required schema"
+    );
+
+    let region_id = RegionId::new(46, 1);
+    let encoded = encode_remote_plan(&old_plan, region_id).unwrap();
+    let factory = QueryEngineFactory::new(
+        catalog::memory::new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    );
+    let decoder = factory
+        .query_engine()
+        .engine_context(session::context::QueryContext::arc())
+        .new_plan_decoder()
+        .unwrap();
+    let catalog: Arc<dyn CatalogProviderList> = Arc::new(DummyCatalogList::with_table_provider(
+        Arc::new(qx_046_dummy_provider(true, 8)),
+    ));
+
+    // This is deliberately only a decode assertion: validation must reject the
+    // stale nullable/current-column-ID provider before the plan can execute.
+    assert!(
+        decode_remote_plan(decoder.as_ref(), encoded, catalog)
+            .await
+            .is_err()
     );
 }

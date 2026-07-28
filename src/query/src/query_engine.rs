@@ -15,6 +15,7 @@
 mod context;
 mod default_serializer;
 pub mod options;
+pub mod remote_plan_codec;
 pub mod runtime;
 mod state;
 use std::any::Any;

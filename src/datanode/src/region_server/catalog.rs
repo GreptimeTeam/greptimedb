@@ -25,6 +25,7 @@ use datafusion_common::DataFusionError;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
+use query::query_engine::remote_plan_codec::is_reserved_internal_table_name;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_info::RegionInfoEntry;
@@ -48,6 +49,9 @@ enum InternalTableKind {
 impl InternalTableKind {
     /// Determine if the name is a reserved internal table (case-insensitive).
     pub fn from_table_name(name: &str) -> Option<Self> {
+        if !is_reserved_internal_table_name(name) {
+            return None;
+        }
         if name.eq_ignore_ascii_case(ManifestSstEntry::reserved_table_name_for_inspection()) {
             return Some(Self::InspectSstManifest);
         }
@@ -60,7 +64,7 @@ impl InternalTableKind {
         if name.eq_ignore_ascii_case(RegionInfoEntry::reserved_table_name_for_inspection()) {
             return Some(Self::InspectRegionInfo);
         }
-        None
+        unreachable!("shared reserved inspection-name predicate must match an internal table kind")
     }
 
     /// Return the `TableProvider` for the internal table.

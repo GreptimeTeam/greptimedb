@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::region::RegionResponse;
+#[cfg(test)]
+use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function_factory::ScalarFunctionFactory;
@@ -25,17 +27,43 @@ use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
+#[cfg(test)]
+use datafusion::datasource::TableProvider;
+#[cfg(test)]
+use datafusion::execution::SessionStateBuilder;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
+#[cfg(test)]
+use datatypes::prelude::ConcreteDataType;
+#[cfg(test)]
+use datatypes::schema::ColumnSchema;
+#[cfg(test)]
+use metric_engine::config::EngineConfig as MetricEngineConfig;
+#[cfg(test)]
+use metric_engine::engine::MetricEngine;
+#[cfg(test)]
+use mito2::config::MitoConfig;
+#[cfg(test)]
+use mito2::test_util::TestEnv as MitoTestEnv;
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
 use servers::grpc::FlightCompression;
 use session::context::QueryContextRef;
+#[cfg(test)]
+use store_api::metadata::ColumnMetadata;
 use store_api::metadata::RegionMetadataRef;
+#[cfg(test)]
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
     RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
     SyncRegionFromRequest, SyncRegionFromResponse,
+};
+#[cfg(test)]
+use store_api::region_request::{
+    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -45,6 +73,132 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::error::{Error, NotYetImplementedSnafu};
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
+
+#[cfg(test)]
+#[tokio::test]
+async fn test_metric_logical_region_scan_revalidates_current_metadata() {
+    let mut mito_env = MitoTestEnv::with_prefix("dummy_catalog_metric_metadata").await;
+    let mito = mito_env.create_engine(MitoConfig::default()).await;
+    let metric = MetricEngine::try_new(mito, MetricEngineConfig::default()).unwrap();
+    let physical_region_id = RegionId::new(1, 2);
+    let logical_region_id = RegionId::new(3, 2);
+
+    metric
+        .handle_request(
+            physical_region_id,
+            RegionRequest::Create(RegionCreateRequest {
+                engine: METRIC_ENGINE_NAME.to_string(),
+                column_metadatas: vec![
+                    metric_column(0, "ts", SemanticType::Timestamp, true),
+                    metric_column(1, "val", SemanticType::Field, false),
+                ],
+                primary_key: vec![],
+                options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                    .into_iter()
+                    .collect(),
+                table_dir: "dummy_catalog_metric_metadata".to_string(),
+                path_type: PathType::Bare,
+                partition_expr_json: Some(String::new()),
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    metric
+        .handle_request(
+            logical_region_id,
+            RegionRequest::Create(RegionCreateRequest {
+                engine: METRIC_ENGINE_NAME.to_string(),
+                column_metadatas: vec![
+                    metric_column(0, "ts", SemanticType::Timestamp, true),
+                    metric_column(1, "val", SemanticType::Field, false),
+                    metric_column(2, "job", SemanticType::Tag, false),
+                ],
+                primary_key: vec![],
+                options: [(
+                    LOGICAL_TABLE_METADATA_KEY.to_string(),
+                    physical_region_id.as_u64().to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                table_dir: "dummy_catalog_metric_metadata".to_string(),
+                path_type: PathType::Bare,
+                partition_expr_json: Some(String::new()),
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let scanner = metric
+        .handle_query(logical_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert!(scanner.properties().is_logical_region());
+    assert_ne!(scanner.metadata().region_id, logical_region_id);
+
+    let provider = query::dummy_catalog::DummyTableProviderFactory
+        .create_table_provider(logical_region_id, Arc::new(metric.clone()), None)
+        .await
+        .unwrap();
+    let state = SessionStateBuilder::new().build();
+    TableProvider::scan(&provider, &state, None, &[], None)
+        .await
+        .unwrap();
+
+    metric
+        .handle_request(
+            logical_region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: metric_column(3, "instance", SemanticType::Tag, false),
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let err = TableProvider::scan(&provider, &state, None, &[], None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("logical region metadata mismatch"));
+
+    let current_provider = query::dummy_catalog::DummyTableProviderFactory
+        .create_table_provider(logical_region_id, Arc::new(metric), None)
+        .await
+        .unwrap();
+    TableProvider::scan(&current_provider, &state, None, &[], None)
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+fn metric_column(
+    column_id: u32,
+    name: &str,
+    semantic_type: SemanticType,
+    is_timestamp: bool,
+) -> ColumnMetadata {
+    let data_type = if is_timestamp {
+        ConcreteDataType::timestamp_millisecond_datatype()
+    } else if semantic_type == SemanticType::Field {
+        ConcreteDataType::float64_datatype()
+    } else {
+        ConcreteDataType::string_datatype()
+    };
+    let mut column_schema = ColumnSchema::new(name, data_type, false);
+    if is_timestamp {
+        column_schema = column_schema.with_time_index(true);
+    }
+    ColumnMetadata {
+        column_schema,
+        semantic_type,
+        column_id,
+    }
+}
 
 pub struct MockQueryEngine;
 

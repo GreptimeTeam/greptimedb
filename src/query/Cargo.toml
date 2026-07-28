@@ -61,6 +61,7 @@ object-store.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
+pbjson-types = "0.8"
 prometheus.workspace = true
 promql.workspace = true
 promql-parser.workspace = true

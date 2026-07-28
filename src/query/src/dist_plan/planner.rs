@@ -245,6 +245,7 @@ impl DistExtensionPlanner {
             })?;
 
         let table_info = table.table_info();
+        ensure_planned_table_routing_coherence(logical_plan, &table_info)?;
         let (physical_table_id, physical_table_route) = self
             .partition_rule_manager
             .find_physical_table_route_with_id(table_info.table_id())
@@ -436,6 +437,81 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
+/// Reject a stale analysis result before it is used to choose regions.  This is
+/// intentionally limited to the table identity and partition columns that the
+/// FE uses for routing; DN schema validation cannot prove route completeness.
+fn ensure_planned_table_routing_coherence(
+    plan: &LogicalPlan,
+    current: &table::metadata::TableInfo,
+) -> Result<()> {
+    let mut planned = None;
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node
+            && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+            && let Some(provider) = source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+            && provider.table().table_type() == TableType::Base
+        {
+            planned = Some(provider.table().table_info());
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+
+    let Some(planned) = planned else {
+        return Err(DataFusionError::Plan(
+            "distributed routing requires a planned Greptime base-table provider".to_string(),
+        ));
+    };
+    if planned.table_id() != current.table_id()
+        || partition_signature(&planned)? != partition_signature(current)?
+    {
+        return Err(DataFusionError::Plan(format!(
+            "planned table {} partition metadata no longer matches current table {}",
+            planned.table_id(),
+            current.table_id()
+        )));
+    }
+    Ok(())
+}
+
+/// The FE uses this ordered signature while extracting partition predicates and
+/// pruning regions. A missing stable ID is unsafe: names alone could describe a
+/// dropped-and-recreated partition column.
+fn partition_signature(
+    table: &table::metadata::TableInfo,
+) -> Result<Vec<(String, u32, datatypes::prelude::ConcreteDataType)>> {
+    let ids = table.name_to_ids().ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "table {} has incomplete column IDs for distributed routing",
+            table.table_id()
+        ))
+    })?;
+    if ids.len() != table.meta.schema.num_columns()
+        || ids.values().collect::<std::collections::HashSet<_>>().len() != ids.len()
+    {
+        return Err(DataFusionError::Plan(format!(
+            "table {} has partial or duplicate column IDs for distributed routing",
+            table.table_id()
+        )));
+    }
+    table
+        .meta
+        .partition_columns()
+        .map(|column| {
+            let id = ids.get(&column.name).copied().ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "partition column {} has no stable ID for distributed routing",
+                    column.name
+                ))
+            })?;
+            Ok((column.name.clone(), id, column.data_type.clone()))
+        })
+        .collect()
+}
+
 /// Visitor to extract table name from logical plan (TableScan node)
 #[derive(Default)]
 struct TableNameExtractor {
@@ -521,7 +597,7 @@ mod tests {
     use datafusion::datasource::DefaultTableSource;
     use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use datatypes::value::Value;
     use moka::future::CacheBuilder;
     use partition::cache::new_partition_info_cache;
@@ -571,41 +647,61 @@ mod tests {
         }
     }
 
+    use super::*;
+
+    fn base_columns() -> Vec<ColumnSchema> {
+        vec![
+            ColumnSchema::new("partition_a", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("partition_b", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]
+    }
+
     fn table_info(
         table_id: u32,
+        table_version: u64,
         name: &str,
-        columns: &[&str],
-        partition_keys: Vec<usize>,
+        columns: Vec<ColumnSchema>,
+        partition_key_indices: Vec<usize>,
+        column_ids: Vec<u32>,
     ) -> TableInfo {
-        let schema = Arc::new(Schema::new(
-            columns
-                .iter()
-                .map(|name| ColumnSchema::new(*name, ConcreteDataType::string_datatype(), true))
-                .collect(),
-        ));
+        let schema = Arc::new(
+            SchemaBuilder::try_from_columns(columns)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let primary_key_indices = partition_key_indices.clone();
+        let value_indices = (0..schema.column_schemas().len())
+            .filter(|idx| !primary_key_indices.contains(idx))
+            .collect();
         let meta = TableMeta {
             schema,
-            primary_key_indices: vec![],
-            value_indices: vec![],
-            engine: "metric".to_string(),
-            next_column_id: columns.len() as u32,
+            primary_key_indices,
+            value_indices,
+            engine: "test".to_string(),
+            next_column_id: column_ids.iter().max().copied().unwrap() + 1,
             options: Default::default(),
             created_on: Default::default(),
             updated_on: Default::default(),
-            partition_key_indices: partition_keys,
-            column_ids: (0..columns.len() as u32).collect(),
+            partition_key_indices,
+            column_ids,
         };
         TableInfoBuilder::default()
             .table_id(table_id)
-            .table_version(0)
-            .name(name.to_string())
-            .catalog_name(DEFAULT_CATALOG_NAME.to_string())
-            .schema_name(DEFAULT_SCHEMA_NAME.to_string())
-            .desc(None)
-            .table_type(TableType::Base)
+            .table_version(table_version)
+            .name(name)
             .meta(meta)
+            .table_type(TableType::Base)
             .build()
             .unwrap()
+    }
+
+    fn string_columns(names: &[&str]) -> Vec<ColumnSchema> {
+        names
+            .iter()
+            .map(|name| ColumnSchema::new(*name, ConcreteDataType::string_datatype(), true))
+            .collect()
     }
 
     fn region_route(region_number: u32, expression: Option<PartitionExpr>) -> RegionRoute {
@@ -625,12 +721,21 @@ mod tests {
         physical_partition_keys: Vec<usize>,
         expressions: Vec<Option<PartitionExpr>>,
     ) -> (DistExtensionPlanner, LogicalPlan, TableName) {
-        let logical_info = table_info(LOGICAL_TABLE_ID, "logical", &["host"], vec![0]);
+        let logical_info = table_info(
+            LOGICAL_TABLE_ID,
+            0,
+            "logical",
+            string_columns(&["host"]),
+            vec![0],
+            vec![0],
+        );
         let physical_info = table_info(
             PHYSICAL_TABLE_ID,
+            0,
             "physical",
-            &["host", "rack"],
+            string_columns(&["host", "rack"]),
             physical_partition_keys,
+            vec![0, 1],
         );
         let logical_table = EmptyTable::from_table_info(&logical_info);
         let physical_table = EmptyTable::from_table_info(&physical_info);
@@ -774,6 +879,116 @@ mod tests {
                 RegionId::new(LOGICAL_TABLE_ID, 3),
             ],
             regions
+        );
+    }
+
+    fn planned_table_scan(planned: &TableInfo) -> LogicalPlan {
+        let provider = Arc::new(DfTableProviderAdapter::new(EmptyTable::from_table_info(
+            planned,
+        )));
+        let source = Arc::new(DefaultTableSource::new(provider));
+        LogicalPlanBuilder::scan("test", source, None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn planned_routing_coherence_accepts_matching_partition_signature() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let current = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current).is_ok()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_rejects_different_table_id() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let current = table_info(2, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_rejects_changed_partition_column_id() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let current = table_info(1, 2, "test", base_columns(), vec![0, 1], vec![20, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_rejects_renamed_partition_column() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let mut columns = base_columns();
+        columns[0] = ColumnSchema::new(
+            "partition_a_renamed",
+            ConcreteDataType::string_datatype(),
+            false,
+        );
+        let current = table_info(1, 2, "test", columns, vec![0, 1], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_rejects_reordered_partition_columns() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let current = table_info(1, 2, "test", base_columns(), vec![1, 0], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_rejects_changed_partition_column_type() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let mut columns = base_columns();
+        columns[1] = ColumnSchema::new("partition_b", ConcreteDataType::int64_datatype(), false);
+        let current = table_info(1, 2, "test", columns, vec![0, 1], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_accepts_unrelated_column_addition() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let mut columns = base_columns();
+        columns.push(ColumnSchema::new(
+            "unrelated",
+            ConcreteDataType::boolean_datatype(),
+            true,
+        ));
+        let current = table_info(1, 2, "test", columns, vec![0, 1], vec![10, 11, 12, 13]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current).is_ok()
+        );
+    }
+
+    #[test]
+    fn planned_routing_coherence_accepts_table_version_change() {
+        let planned = table_info(1, 1, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+        let current = table_info(1, 2, "test", base_columns(), vec![0, 1], vec![10, 11, 12]);
+
+        assert!(
+            ensure_planned_table_routing_coherence(&planned_table_scan(&planned), &current).is_ok()
         );
     }
 }

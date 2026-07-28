@@ -11553,6 +11553,7 @@ dependencies = [
  "parking_lot 0.12.4",
  "partition",
  "paste",
+ "pbjson-types",
  "pretty_assertions",
  "prometheus 0.14.0",
  "promql",

@@ -61,6 +61,7 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::options::should_collect_region_watermark_from_extensions;
+use query::query_engine::remote_plan_codec::decode_remote_plan;
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -310,8 +311,7 @@ impl RegionServer {
             .new_plan_decoder()
             .context(NewPlanDecoderSnafu)?;
 
-        let plan = decoder
-            .decode(Bytes::from(request.plan), catalog_list, false)
+        let plan = decode_remote_plan(&*decoder, Bytes::from(request.plan), catalog_list)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
