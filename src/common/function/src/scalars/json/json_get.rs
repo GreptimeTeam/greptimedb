@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BinaryViewArray, new_null_array};
 use arrow::compute;
-use arrow::datatypes::Float64Type;
 use arrow_schema::Field;
 use datafusion_common::arrow::array::{
     Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
@@ -25,10 +24,8 @@ use datafusion_common::arrow::array::{
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result, ScalarValue, exec_datafusion_err, exec_err};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
 use datatypes::vectors::json::array::JsonArray;
 use derive_more::Display;
-use serde_json::Value;
 
 use crate::function::{Function, extract_args};
 use crate::helper;
@@ -48,15 +45,8 @@ fn get_json_by_path(json: &[u8], path: &str) -> Option<Vec<u8>> {
     }
 }
 
-enum JsonResultValue<'a> {
-    Jsonb(Vec<u8>),
-    #[expect(unused)]
-    JsonStructByColumn(&'a ArrayRef, usize),
-    JsonStructByValue(&'a Value),
-}
-
 trait JsonGetResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()>;
+    fn append_value(&mut self, value: &[u8]) -> Result<()>;
 
     fn append_null(&mut self);
 
@@ -83,25 +73,8 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
 struct StringResultBuilder(StringViewBuilder);
 
 impl JsonGetResultBuilder for StringResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-        match value {
-            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_str(&value).ok()),
-            JsonResultValue::JsonStructByColumn(column, i) => {
-                if let Some(v) = string_array_value_at_index(column, i) {
-                    self.0.append_value(v);
-                } else {
-                    self.0
-                        .append_value(arrow_cast::display::array_value_to_string(column, i)?);
-                }
-            }
-            JsonResultValue::JsonStructByValue(value) => {
-                if let Some(s) = value.as_str() {
-                    self.0.append_value(s)
-                } else {
-                    self.0.append_value(value.to_string())
-                }
-            }
-        }
+    fn append_value(&mut self, value: &[u8]) -> Result<()> {
+        self.0.append_option(jsonb::to_str(value).ok());
         Ok(())
     }
 
@@ -145,14 +118,8 @@ impl Function for JsonGetString {
 struct IntResultBuilder(Int64Builder);
 
 impl JsonGetResultBuilder for IntResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-        match value {
-            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_i64(&value).ok()),
-            JsonResultValue::JsonStructByColumn(column, i) => {
-                self.0.append_option(int_array_value_at_index(column, i))
-            }
-            JsonResultValue::JsonStructByValue(value) => self.0.append_option(value.as_i64()),
-        }
+    fn append_value(&mut self, value: &[u8]) -> Result<()> {
+        self.0.append_option(jsonb::to_i64(value).ok());
         Ok(())
     }
 
@@ -196,22 +163,8 @@ impl Function for JsonGetInt {
 struct FloatResultBuilder(Float64Builder);
 
 impl JsonGetResultBuilder for FloatResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-        match value {
-            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_f64(&value).ok()),
-            JsonResultValue::JsonStructByColumn(column, i) => {
-                let result = if column.data_type() == &DataType::Float64 {
-                    column
-                        .as_primitive::<Float64Type>()
-                        .is_valid(i)
-                        .then(|| column.as_primitive::<Float64Type>().value(i))
-                } else {
-                    None
-                };
-                self.0.append_option(result);
-            }
-            JsonResultValue::JsonStructByValue(value) => self.0.append_option(value.as_f64()),
-        }
+    fn append_value(&mut self, value: &[u8]) -> Result<()> {
+        self.0.append_option(jsonb::to_f64(value).ok());
         Ok(())
     }
 
@@ -255,22 +208,8 @@ impl Function for JsonGetFloat {
 struct BoolResultBuilder(BooleanBuilder);
 
 impl JsonGetResultBuilder for BoolResultBuilder {
-    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-        match value {
-            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_bool(&value).ok()),
-            JsonResultValue::JsonStructByColumn(column, i) => {
-                let result = if column.data_type() == &DataType::Boolean {
-                    column
-                        .as_boolean()
-                        .is_valid(i)
-                        .then(|| column.as_boolean().value(i))
-                } else {
-                    None
-                };
-                self.0.append_option(result);
-            }
-            JsonResultValue::JsonStructByValue(value) => self.0.append_option(value.as_bool()),
-        }
+    fn append_value(&mut self, value: &[u8]) -> Result<()> {
+        self.0.append_option(jsonb::to_bool(value).ok());
         Ok(())
     }
 
@@ -324,7 +263,7 @@ fn jsonb_get(
             _ => None,
         };
         if let Some(v) = result {
-            builder.append_value(JsonResultValue::Jsonb(v))?;
+            builder.append_value(&v)?;
         } else {
             builder.append_null();
         }
@@ -333,73 +272,49 @@ fn jsonb_get(
 }
 
 fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result<ArrayRef> {
-    let path = path.trim_start_matches("$");
+    let segments = path
+        .trim_start_matches("$")
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let mut curr = array.clone();
 
-    // Fast path: if the JSON array fields can be directly indexed into by the `path`, simply get
-    // the sub-array (`column_by_name`).
-    let mut direct = true;
-    let mut current = array;
-    for segment in path.split(".").filter(|s| !s.is_empty()) {
-        if matches!(current.data_type(), DataType::Binary) {
-            direct = false;
-            break;
+    for (idx, segment) in segments.iter().enumerate() {
+        if curr.data_type().is_binary() {
+            let target = nested_projection_type(&segments[idx..], with_type);
+            curr = JsonArray::from(&curr)
+                .project_to(&target)
+                .map_err(|e| exec_datafusion_err!("{e}"))?;
         }
 
-        let Some(json) = current.as_struct_opt() else {
-            return exec_err!("unknown JSON array datatype: {}", current.data_type());
+        let Some(json) = curr.as_struct_opt() else {
+            return exec_err!("unknown JSON array datatype: {}", curr.data_type());
         };
         let Some(sub_json) = json.column_by_name(segment) else {
             return Ok(new_null_array(with_type, array.len()));
         };
-        current = sub_json;
+        curr = sub_json.clone();
     }
 
-    // Build the result array with optional value mapper.
-    fn build_with<F>(input: &ArrayRef, with_type: &DataType, value_mapper: F) -> Result<ArrayRef>
-    where
-        for<'a> F: Fn(&'a Value) -> Option<&'a Value>,
-    {
-        let json_array = JsonArray::from(input);
-
-        let mut builder = result_builder(input.len(), with_type)?;
-        for i in 0..input.len() {
-            if input.is_null(i) {
-                builder.append_null();
-                continue;
-            }
-
-            let value = json_array
-                .try_get_value(i)
-                .map_err(|e| exec_datafusion_err!("{e}"))?;
-            let value = value_mapper(&value);
-
-            if let Some(value) = value {
-                builder.append_value(JsonResultValue::JsonStructByValue(value))?;
-            } else {
-                builder.append_null();
-            }
-        }
-        Ok(builder.build())
+    if curr.data_type() == with_type {
+        Ok(curr)
+    } else {
+        JsonArray::from(&curr)
+            .project_to(with_type)
+            .map_err(|e| exec_datafusion_err!("{e}"))
     }
+}
 
-    if direct {
-        let casted = if current.data_type() != with_type {
-            JsonArray::from(current)
-                .project_to(with_type)
-                .map_err(|e| exec_datafusion_err!("{e}"))?
-        } else {
-            current.clone()
-        };
-        return Ok(casted);
-    }
-
-    // Slow path: reconstruct the JSON array from serialized representation of conflicting JSON
-    // values: `serde_json::Value`.
-    let mut pointer = path.replace(".", "/");
-    if !pointer.starts_with("/") {
-        pointer = format!("/{}", pointer);
-    }
-    build_with(array, with_type, |value| value.pointer(&pointer))
+/// Builds a nested struct type for projecting the remaining JSON path.
+///
+/// For example, path `["a", "b"]` with an `Int64` leaf produces
+/// `Struct<a: Struct<b: Int64>>`.
+fn nested_projection_type(path: &[&str], leaf_type: &DataType) -> DataType {
+    path.iter()
+        .rev()
+        .fold(leaf_type.clone(), |data_type, name| {
+            DataType::Struct(vec![Arc::new(Field::new(*name, data_type, true))].into())
+        })
 }
 
 /// This function is mostly called as `json_get(value, 'attr')::type` and rewritten by
@@ -666,7 +581,7 @@ mod tests {
             ("$.kind", None),
             ("$.payload.code", Some(404)),
             ("$.payload.success", Some(0)),
-            ("$.payload.result.time_cost", None),
+            ("$.payload.result.time_cost", Some(1)),
             ("$.payload.not-exists", None),
             ("$.not-exists", None),
             ("$", None),
@@ -804,7 +719,7 @@ mod tests {
             ("$.kind", None),
             ("$.payload.code", Some(true)),
             ("$.payload.success", Some(false)),
-            ("$.payload.result.time_cost", None),
+            ("$.payload.result.time_cost", Some(true)),
             ("$.payload.not-exists", None),
             ("$.not-exists", None),
             ("$", None),
