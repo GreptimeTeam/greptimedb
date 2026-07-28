@@ -328,8 +328,23 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
     let file = File::open(path).context(IoSnafu)?;
     let credential = io::BufReader::new(file)
         .lines()
-        .map_while(std::result::Result::ok)
         .enumerate()
+        .map_while(|(idx, line)| match line {
+            Ok(line) => Some((idx, line)),
+            Err(err) => {
+                // A read error (I/O failure or invalid UTF-8) ends the iterator,
+                // so every remaining credential is dropped. Warn instead of
+                // vanishing silently, matching the malformed-line handling below.
+                warn!(
+                    "Failed to read line {} of user provider file {}: {}; \
+                     all remaining credentials are ignored",
+                    idx + 1,
+                    filepath,
+                    err
+                );
+                None
+            }
+        })
         .filter_map(|(idx, line)| {
             // The line format is:
             // - `username=password` - Basic user with default permissions
