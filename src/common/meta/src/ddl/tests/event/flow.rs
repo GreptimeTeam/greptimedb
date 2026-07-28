@@ -20,7 +20,7 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
-    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN,
+    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -43,7 +43,6 @@ use crate::test_util::{MockFlownodeManager, new_ddl_context};
 fn test_flow_submitted_event_contracts() {
     let create = FlowDdlEvent::create_submitted(
         "greptime",
-        "public",
         "metrics",
         CreateFlowEventIntent {
             or_replace: true,
@@ -59,7 +58,6 @@ fn test_flow_submitted_event_contracts() {
         &[Row {
             values: vec![
                 ValueData::StringValue("greptime".to_string()).into(),
-                ValueData::StringValue("public".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
             ],
@@ -84,7 +82,6 @@ fn test_flow_submitted_event_contracts() {
         &[Row {
             values: vec![
                 ValueData::StringValue("greptime".to_string()).into(),
-                Value { value_data: None },
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
             ],
@@ -112,7 +109,6 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
                     Value { value_data: None },
                     Value { value_data: None },
                     Value { value_data: None },
-                    Value { value_data: None },
                 ],
             }],
         );
@@ -128,7 +124,6 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
             values: vec![
                 Value { value_data: None },
                 Value { value_data: None },
-                Value { value_data: None },
                 ValueData::U32Value(42).into(),
             ],
         }],
@@ -142,7 +137,6 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
         procedure_id,
         Box::new(FlowDdlEvent::create_submitted(
             "greptime",
-            "public",
             "metrics",
             CreateFlowEventIntent {
                 or_replace: false,
@@ -168,7 +162,6 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
         "Submitted",
         FlowEventLocator {
             catalog_name: Some("greptime"),
-            schema_name: Some("public"),
             flow_name: Some("metrics"),
             flow_id: None,
         },
@@ -180,7 +173,6 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
         "Succeeded",
         FlowEventLocator {
             catalog_name: None,
-            schema_name: None,
             flow_name: None,
             flow_id: Some(42),
         },
@@ -214,7 +206,6 @@ fn test_drop_flow_event_filter() {
 fn flow_schema() -> Vec<ColumnSchema> {
     vec![
         CATALOG_NAME_COLUMN.column_schema(),
-        SCHEMA_NAME_COLUMN.column_schema(),
         FLOW_NAME_COLUMN.column_schema(),
         FLOW_ID_COLUMN.column_schema(),
     ]
@@ -222,7 +213,6 @@ fn flow_schema() -> Vec<ColumnSchema> {
 
 struct FlowEventLocator<'a> {
     catalog_name: Option<&'a str>,
-    schema_name: Option<&'a str>,
     flow_name: Option<&'a str>,
     flow_id: Option<u32>,
 }
@@ -252,7 +242,6 @@ fn assert_procedure_event_contract(
                 ValueData::StringValue(String::new()).into(),
                 ValueData::StringValue(trigger.to_string()).into(),
                 optional_string(locator.catalog_name),
-                optional_string(locator.schema_name),
                 optional_string(locator.flow_name),
                 locator
                     .flow_id

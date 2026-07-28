@@ -91,7 +91,6 @@ WHERE type = '{CREATE_FLOW_EVENT_TYPE}'
   AND procedure_state = 'Running'
   AND procedure_trigger = 'Submitted'
   AND catalog_name = 'greptime'
-  AND schema_name = 'public'
   AND flow_name = '{flow}'
   AND flow_id IS NULL
   AND json_path_match(payload, '$.version == 1')
@@ -112,7 +111,6 @@ WHERE type = '{CREATE_FLOW_EVENT_TYPE}'
   AND procedure_state = 'Done'
   AND procedure_trigger = 'Succeeded'
   AND catalog_name IS NULL
-  AND schema_name IS NULL
   AND flow_name IS NULL
   AND flow_id IS NOT NULL
   AND json_is_null(payload)"#,
@@ -133,7 +131,6 @@ WHERE type = '{DROP_FLOW_EVENT_TYPE}'
   AND procedure_state = 'Running'
   AND procedure_trigger = 'Submitted'
   AND catalog_name = 'greptime'
-  AND schema_name IS NULL
   AND flow_name = '{flow}'
   AND flow_id IS NOT NULL
   AND json_path_match(payload, '$.version == 1')
@@ -151,7 +148,6 @@ WHERE type = '{DROP_FLOW_EVENT_TYPE}'
   AND procedure_state = 'Done'
   AND procedure_trigger = 'Succeeded'
   AND catalog_name IS NULL
-  AND schema_name IS NULL
   AND flow_name IS NULL
   AND flow_id IS NULL
   AND json_is_null(payload)"#,

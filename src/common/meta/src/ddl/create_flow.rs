@@ -412,7 +412,6 @@ impl Procedure for CreateFlowProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => FlowDdlEvent::create_submitted(
                 &self.data.task.catalog_name,
-                &self.data.flow_context.schema,
                 &self.data.task.flow_name,
                 CreateFlowEventIntent {
                     or_replace: self.data.task.or_replace,

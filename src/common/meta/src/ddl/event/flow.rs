@@ -19,8 +19,8 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, SCHEMA_NAME_COLUMN, column_schemas,
-    nullable_string, nullable_value,
+    CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, column_schemas, nullable_string,
+    nullable_value,
 };
 use serde::Serialize;
 use snafu::ResultExt;
@@ -66,7 +66,6 @@ enum FlowDdlPayload {
 pub(crate) struct FlowDdlEvent {
     event_type: &'static str,
     catalog_name: Option<String>,
-    schema_name: Option<String>,
     flow_name: Option<String>,
     flow_id: Option<u32>,
     payload: Option<FlowDdlPayload>,
@@ -76,14 +75,12 @@ impl FlowDdlEvent {
     /// Builds the bounded event emitted when creating a Flow is submitted.
     pub(crate) fn create_submitted(
         catalog_name: &str,
-        schema_name: &str,
         flow_name: &str,
         intent: CreateFlowEventIntent,
     ) -> Self {
         Self {
             event_type: CREATE_FLOW_EVENT_TYPE,
             catalog_name: Some(catalog_name.to_string()),
-            schema_name: Some(schema_name.to_string()),
             flow_name: Some(flow_name.to_string()),
             flow_id: None,
             payload: Some(FlowDdlPayload::Create(CreateFlowPayload {
@@ -106,7 +103,6 @@ impl FlowDdlEvent {
         Self {
             event_type: DROP_FLOW_EVENT_TYPE,
             catalog_name: Some(catalog_name.to_string()),
-            schema_name: None,
             flow_name: Some(flow_name.to_string()),
             flow_id: Some(flow_id),
             payload: Some(FlowDdlPayload::Drop(DropFlowPayload {
@@ -138,7 +134,6 @@ impl FlowDdlEvent {
         Self {
             event_type,
             catalog_name: None,
-            schema_name: None,
             flow_name: None,
             flow_id: None,
             payload: None,
@@ -159,19 +154,13 @@ impl Event for FlowDdlEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        column_schemas([
-            &CATALOG_NAME_COLUMN,
-            &SCHEMA_NAME_COLUMN,
-            &FLOW_NAME_COLUMN,
-            &FLOW_ID_COLUMN,
-        ])
+        column_schemas([&CATALOG_NAME_COLUMN, &FLOW_NAME_COLUMN, &FLOW_ID_COLUMN])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
         Ok(vec![Row {
             values: vec![
                 nullable_string(self.catalog_name.as_deref()),
-                nullable_string(self.schema_name.as_deref()),
                 nullable_string(self.flow_name.as_deref()),
                 nullable_value(self.flow_id.map(ValueData::U32Value)),
             ],
