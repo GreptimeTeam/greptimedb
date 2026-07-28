@@ -32,7 +32,7 @@ mod repartition;
 #[macro_use]
 mod repartition_expr_version;
 mod mysql;
-mod view_procedure_events;
+mod view_procedure_event;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
