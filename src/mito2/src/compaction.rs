@@ -1479,6 +1479,12 @@ struct CompactionStatus {
     // scheduling can recreate the status from region context.
     active: Option<ActiveCompaction>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
+    ///
+    /// In production code, this can only hold a manual `Options::StrictWindow` compaction.
+    /// When a `Options::Regular` compaction request arrives while the region is already
+    /// compacting, it goes to `ActiveCompaction::regular_followup_waiters` or `waiters`
+    /// instead — it does not become a `pending_request`. See `schedule_compaction` for
+    /// the branching logic.
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     ///
@@ -2025,7 +2031,8 @@ fn refresh_picker_output(output: PickerOutput, current: &SstVersion) -> Option<P
 /// Pending compaction request that is supposed to run after current task is finished,
 /// typically used for manual compactions.
 struct PendingCompaction {
-    /// Compaction options. Currently, it can only be [StrictWindow].
+    /// Compaction options. In production code this can only be [`compact_request::Options::StrictWindow`];
+    /// see the [`CompactionStatus::pending_request`] field for why.
     pub(crate) options: compact_request::Options,
     /// Waiters of pending requests.
     pub(crate) waiter: OptionOutputTx,
