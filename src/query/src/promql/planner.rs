@@ -5092,11 +5092,7 @@ impl PromPlanner {
                 if source_type == target_type {
                     expr
                 } else {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_type.clone(),
-                    })
-                    .alias(col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_type.clone())).alias(col.clone())
                 }
             } else {
                 DfExpr::Literal(
@@ -5109,13 +5105,13 @@ impl PromPlanner {
         };
         let left_proj_exprs = all_columns.iter().map(|col| {
             if col == left_field_col && left_field.1 != target_field_type {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(DfExpr::Column(Column::new(
+                DfExpr::Cast(Cast::new(
+                    Box::new(DfExpr::Column(Column::new(
                         left_field.0.clone(),
                         left_field_col,
                     ))),
-                    data_type: target_field_type.clone(),
-                })
+                    target_field_type.clone(),
+                ))
                 .alias(left_field_col.clone())
             } else if target_tag_types.contains_key(col) {
                 aligned_label_expr(col, &left_tag_types)
@@ -5136,11 +5132,8 @@ impl PromPlanner {
             if col == left_field_col {
                 let expr = DfExpr::Column(Column::new(right_field.0.clone(), right_field_col));
                 if right_field.1 != target_field_type {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_field_type.clone(),
-                    })
-                    .alias(left_field_col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_field_type.clone()))
+                        .alias(left_field_col.clone())
                 } else if left_field_col != right_field_col {
                     expr.alias(left_field_col.clone())
                 } else {
@@ -5279,10 +5272,7 @@ impl PromPlanner {
                     let column = if data_type == value_type {
                         column
                     } else {
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(column),
-                            data_type: value_type.clone(),
-                        })
+                        DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
                     };
                     DfExpr::ScalarFunction(ScalarFunction {
                         func: coalesce(),
