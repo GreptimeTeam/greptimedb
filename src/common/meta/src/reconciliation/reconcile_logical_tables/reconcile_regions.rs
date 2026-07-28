@@ -27,6 +27,7 @@ use table::metadata::TableInfo;
 use crate::ddl::utils::{add_peer_context_if_needed, region_storage_path};
 use crate::ddl::{CreateRequestBuilder, build_template_from_raw_table_info};
 use crate::error::Result;
+use crate::reconciliation::reconcile_logical_tables::resolve_table_metadatas::ResolveTableMetadatas;
 use crate::reconciliation::reconcile_logical_tables::update_table_infos::UpdateTableInfos;
 use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};
 use crate::rpc::router::{find_leaders, region_distribution};
@@ -93,7 +94,10 @@ impl State for ReconcileRegions {
             table_name
         );
         ctx.persistent_ctx.create_tables.clear();
-        return Ok((Box::new(UpdateTableInfos), Status::executing(true)));
+        ctx.persistent_ctx.verifying_after_create = true;
+        // Newly created regions must be resolved again before metadata updates. This keeps the
+        // legacy-ID migration gate tied to metadata actually reported by all replicas.
+        Ok((Self::next_state_after_create(), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -102,6 +106,10 @@ impl State for ReconcileRegions {
 }
 
 impl ReconcileRegions {
+    fn next_state_after_create() -> Box<dyn State> {
+        Box::new(ResolveTableMetadatas)
+    }
+
     fn make_request(
         &self,
         region_numbers: &[u32],
@@ -140,6 +148,17 @@ impl ReconcileRegions {
             }),
             body: Some(region_request::Body::Creates(CreateRequests { requests })),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_post_create_transition_re_resolves_table_metadata() {
+        let next_state = ReconcileRegions::next_state_after_create();
+        assert!(next_state.as_any().is::<ResolveTableMetadatas>());
     }
 }
 

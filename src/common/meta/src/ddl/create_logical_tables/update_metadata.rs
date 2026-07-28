@@ -81,6 +81,42 @@ impl CreateLogicalTablesProcedure {
         Ok(())
     }
 
+    /// Copies stable column IDs from the physical table to newly created logical tables.
+    pub(crate) async fn populate_logical_table_column_ids(&mut self) -> Result<()> {
+        // Fetch after updating the physical metadata. Datanodes can return either the
+        // complete physical schema or no new columns, so this is the authoritative source
+        // of IDs in both cases.
+        let physical_table_info = self
+            .context
+            .table_metadata_manager
+            .table_info_manager()
+            .get(self.data.physical_table_id)
+            .await?
+            .with_context(|| TableInfoNotFoundSnafu {
+                table: format!("table id - {}", self.data.physical_table_id),
+            })?;
+        let physical_table_info = &physical_table_info.table_info;
+        for (task, already_exists) in self
+            .data
+            .tasks
+            .iter_mut()
+            .zip(&self.data.table_ids_already_exists)
+        {
+            // `create_if_not_exists` tasks refer to persisted metadata and must remain
+            // untouched even when this procedure creates other logical tables.
+            if already_exists.is_some() {
+                continue;
+            }
+
+            raw_table_info::populate_logical_table_column_ids(
+                physical_table_info,
+                &mut task.table_info,
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn create_logical_tables_metadata(&mut self) -> Result<Vec<TableId>> {
         let remaining_tasks = self.data.remaining_tasks();
         let num_tables = remaining_tasks.len();

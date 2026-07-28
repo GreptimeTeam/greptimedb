@@ -144,6 +144,7 @@ impl CreateLogicalTablesProcedure {
     /// - Failed to create table metadata.
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
         self.update_physical_table_metadata().await?;
+        self.populate_logical_table_column_ids().await?;
         let table_ids = self.create_logical_tables_metadata().await?;
 
         Ok(Status::done_with_output(table_ids))

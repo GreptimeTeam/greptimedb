@@ -40,6 +40,7 @@ use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
     TestCreateTableExprBuilder, build_raw_table_info_from_expr,
 };
+use crate::ddl::utils::raw_table_info;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::table_route::TableRouteValue;
@@ -88,14 +89,23 @@ pub async fn create_physical_table(ddl_context: &DdlContext, name: &str) -> Tabl
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
+    let table_info = test_physical_table_info(create_physical_table_task.table_info.clone());
     create_physical_table_metadata(
         ddl_context,
-        create_physical_table_task.table_info.clone(),
+        table_info,
         TableRouteValue::Physical(table_route),
     )
     .await;
 
     table_id
+}
+
+/// Builds physical metadata after the datanode has added the default logical columns.
+pub fn test_physical_table_info(table_info: TableInfo) -> TableInfo {
+    raw_table_info::build_new_physical_table_info(
+        table_info,
+        &test_column_metadatas(&["host", "cpu"]),
+    )
 }
 
 pub async fn create_logical_table(

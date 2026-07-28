@@ -15,20 +15,22 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 
+use crate::ddl::utils::raw_table_info;
 use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use crate::ddl::utils::table_info::get_all_table_info_values_by_table_ids;
-use crate::error::{self, Result};
+use crate::error::{self, Result, TableInfoNotFoundSnafu};
 use crate::metrics;
 use crate::reconciliation::reconcile_logical_tables::reconcile_regions::ReconcileRegions;
 use crate::reconciliation::reconcile_logical_tables::{
     ReconcileLogicalTablesContext, ReconcileLogicalTablesProcedure, State,
 };
 use crate::reconciliation::utils::{
-    check_column_metadatas_consistent, need_update_logical_table_info,
+    check_region_metadatas_consistent, logical_table_info_matches_region_metadata,
+    validate_logical_region_metadata,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,9 +51,18 @@ impl State for ResolveTableMetadatas {
             .map(|t| t.table_ref())
             .collect::<Vec<_>>();
         let table_ids = &ctx.persistent_ctx.logical_table_ids;
+        let physical_table_info = ctx
+            .table_metadata_manager
+            .table_info_manager()
+            .get(ctx.table_id())
+            .await?
+            .with_context(|| TableInfoNotFoundSnafu {
+                table: format!("table id - {}", ctx.table_id()),
+            })?;
+        let physical_table_info = &physical_table_info.table_info;
 
         let mut create_tables = vec![];
-        let mut update_table_infos = vec![];
+        let mut update_region_metadatas = vec![];
 
         let table_info_values = get_all_table_info_values_by_table_ids(
             ctx.table_metadata_manager.table_info_manager(),
@@ -99,6 +110,11 @@ impl State for ResolveTableMetadatas {
             });
 
             if region_metadatas.iter().any(|r| r.is_none()) {
+                Self::ensure_can_create_missing_regions(
+                    ctx.persistent_ctx.verifying_after_create,
+                    &table_info_value.table_info.name,
+                    *table_id,
+                )?;
                 create_tables_count += 1;
                 create_tables.push((*table_id, table_info_value.table_info.clone()));
                 continue;
@@ -109,18 +125,36 @@ impl State for ResolveTableMetadatas {
                 .into_iter()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>();
-            if let Some(column_metadatas) = check_column_metadatas_consistent(&region_metadatas) {
+            if let Some(region_metadata) = check_region_metadatas_consistent(&region_metadatas) {
                 metadata_consistent_count += 1;
-                if need_update_logical_table_info(&table_info_value.table_info, &column_metadatas) {
-                    update_table_infos.push((*table_id, column_metadatas));
+                validate_logical_region_metadata(physical_table_info, &region_metadata)?;
+
+                // Always check a complete persisted mapping before scheduling a repair. A
+                // complete conflict is corruption, not a legacy value that may be replaced.
+                let mut table_info_with_restored_ids = table_info_value.table_info.clone();
+                raw_table_info::populate_logical_table_column_ids(
+                    physical_table_info,
+                    &mut table_info_with_restored_ids,
+                )?;
+                let ids_need_update = table_info_with_restored_ids.meta.column_ids
+                    != table_info_value.table_info.meta.column_ids;
+                if !logical_table_info_matches_region_metadata(
+                    &table_info_with_restored_ids,
+                    &region_metadata,
+                ) || ids_need_update
+                {
+                    update_region_metadatas.push((*table_id, region_metadata));
                 }
             } else {
                 metadata_inconsistent_count += 1;
-                // If the logical regions have inconsistent column metadatas, it won't affect read and write.
-                // It's safe to continue if the column metadatas of the logical table are inconsistent.
-                warn!(
-                    "Found inconsistent column metadatas for table: {}, table_id: {}. Remaining the inconsistent column metadatas",
-                    table_info_value.table_info.name, table_id
+                ensure!(
+                    false,
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Logical region column metadatas are inconsistent for table: {}, table_id: {}",
+                            table_info_value.table_info.name, table_id
+                        ),
+                    }
                 );
             }
         }
@@ -131,7 +165,7 @@ impl State for ResolveTableMetadatas {
             "Resolving table metadatas for physical table: {}, table_id: {}, updating table infos: {:?}, creating tables: {:?}",
             table_name,
             table_id,
-            update_table_infos
+            update_region_metadatas
                 .iter()
                 .map(|(table_id, _)| *table_id)
                 .collect::<Vec<_>>(),
@@ -140,8 +174,12 @@ impl State for ResolveTableMetadatas {
                 .map(|(table_id, _)| *table_id)
                 .collect::<Vec<_>>(),
         );
-        ctx.persistent_ctx.update_table_infos = update_table_infos;
+        // Replace all transient resolution output atomically so a recovered procedure does not
+        // apply pre-migration column-only authority.
+        ctx.persistent_ctx.update_table_infos.clear();
+        ctx.persistent_ctx.update_region_metadatas = update_region_metadatas;
         ctx.persistent_ctx.create_tables = create_tables;
+        ctx.persistent_ctx.verifying_after_create = false;
         // Update metrics.
         let metrics = ctx.mut_metrics();
         metrics.column_metadata_consistent_count = metadata_consistent_count;
@@ -152,5 +190,39 @@ impl State for ResolveTableMetadatas {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl ResolveTableMetadatas {
+    fn ensure_can_create_missing_regions(
+        verifying_after_create: bool,
+        table_name: &str,
+        table_id: u32,
+    ) -> Result<()> {
+        ensure!(
+            !verifying_after_create,
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "Logical regions are still absent after create verification for table: {}, table_id: {}",
+                    table_name, table_id
+                ),
+            }
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_post_create_absence_does_not_schedule_another_create() {
+        assert!(
+            ResolveTableMetadatas::ensure_can_create_missing_regions(false, "logical", 1).is_ok()
+        );
+        assert!(
+            ResolveTableMetadatas::ensure_can_create_missing_regions(true, "logical", 1).is_err()
+        );
     }
 }

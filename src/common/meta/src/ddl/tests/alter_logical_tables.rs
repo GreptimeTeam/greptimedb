@@ -37,7 +37,7 @@ use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
 use crate::ddl::test_util::{
     assert_column_name, create_logical_table, create_physical_table,
     create_physical_table_metadata, get_raw_table_info, test_column_metadatas,
-    test_create_physical_table_task,
+    test_create_physical_table_task, test_physical_table_info,
 };
 use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
 use crate::error::Result;
@@ -256,7 +256,7 @@ async fn test_on_prepare() {
 async fn test_on_update_metadata() {
     common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(8);
-    let test_column_metadatas = test_column_metadatas(&["new_col", "mew_col"]);
+    let test_column_metadatas = test_column_metadatas(&["host", "cpu", "new_col", "mew_col"]);
     let datanode_handler =
         DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(test_column_metadatas));
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
@@ -325,7 +325,16 @@ async fn test_on_update_metadata() {
     let table_info = get_raw_table_info(&ddl_context, phy_id).await;
     assert_column_name(
         &table_info,
-        &["ts", "value", "__table_id", "__tsid", "new_col", "mew_col"],
+        &[
+            "ts",
+            "value",
+            "__table_id",
+            "__tsid",
+            "host",
+            "cpu",
+            "new_col",
+            "mew_col",
+        ],
     );
     assert_eq!(
         table_info.meta.column_ids,
@@ -335,8 +344,31 @@ async fn test_on_update_metadata() {
             ReservedColumnId::table_id(),
             ReservedColumnId::tsid(),
             2,
-            3
+            3,
+            4,
+            5
         ]
+    );
+    assert_eq!(
+        get_raw_table_info(&ddl_context, logical_table1_id)
+            .await
+            .meta
+            .column_ids,
+        vec![3, 2, 4, 0]
+    );
+    assert_eq!(
+        get_raw_table_info(&ddl_context, logical_table2_id)
+            .await
+            .meta
+            .column_ids,
+        vec![3, 2, 5, 0]
+    );
+    assert_eq!(
+        get_raw_table_info(&ddl_context, logical_table3_id)
+            .await
+            .meta
+            .column_ids,
+        vec![3, 2, 4, 0]
     );
 }
 
@@ -344,7 +376,7 @@ async fn test_on_update_metadata() {
 async fn test_on_part_duplicate_alter_request() {
     common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(8);
-    let column_metadatas = test_column_metadatas(&["col_0"]);
+    let column_metadatas = test_column_metadatas(&["host", "cpu", "col_0"]);
     let handler =
         DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
     let node_manager = Arc::new(MockDatanodeManager::new(handler));
@@ -408,7 +440,15 @@ async fn test_on_part_duplicate_alter_request() {
     let table_info = get_raw_table_info(&ddl_context, phy_id).await;
     assert_column_name(
         &table_info,
-        &["ts", "value", "__table_id", "__tsid", "col_0"],
+        &[
+            "ts",
+            "value",
+            "__table_id",
+            "__tsid",
+            "host",
+            "cpu",
+            "col_0",
+        ],
     );
     assert_eq!(
         table_info.meta.column_ids,
@@ -417,12 +457,15 @@ async fn test_on_part_duplicate_alter_request() {
             1,
             ReservedColumnId::table_id(),
             ReservedColumnId::tsid(),
-            2
+            2,
+            3,
+            4
         ]
     );
 
     let (tx, mut rx) = mpsc::channel(8);
-    let column_metadatas = test_column_metadatas(&["col_0", "new_col_1", "new_col_2"]);
+    let column_metadatas =
+        test_column_metadatas(&["host", "cpu", "col_0", "new_col_1", "new_col_2"]);
     let handler =
         DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
     let node_manager = Arc::new(MockDatanodeManager::new(handler));
@@ -499,6 +542,8 @@ async fn test_on_part_duplicate_alter_request() {
             "value",
             "__table_id",
             "__tsid",
+            "host",
+            "cpu",
             "col_0",
             "new_col_1",
             "new_col_2",
@@ -514,6 +559,8 @@ async fn test_on_part_duplicate_alter_request() {
             2,
             3,
             4,
+            5,
+            6,
         ]
     );
 
@@ -560,6 +607,7 @@ async fn test_on_part_duplicate_alter_request() {
             "ts".to_string()
         ]
     );
+    assert_eq!(table1.table_info.meta.column_ids, vec![4, 3, 2, 5, 0]);
 
     let table2_cols = table2
         .table_info
@@ -580,6 +628,7 @@ async fn test_on_part_duplicate_alter_request() {
             "ts".to_string()
         ]
     );
+    assert_eq!(table2.table_info.meta.column_ids, vec![4, 3, 2, 5, 6, 0]);
 }
 
 #[tokio::test]
@@ -605,7 +654,7 @@ async fn test_on_submit_alter_region_request() {
     create_physical_table_task.set_table_id(phy_id);
     create_physical_table_metadata(
         &ddl_context,
-        create_physical_table_task.table_info.clone(),
+        test_physical_table_info(create_physical_table_task.table_info.clone()),
         TableRouteValue::Physical(PhysicalTableRouteValue::new(region_routes)),
     )
     .await;

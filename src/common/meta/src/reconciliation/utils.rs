@@ -32,8 +32,9 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
+use crate::ddl::utils::raw_table_info;
 use crate::error::{
-    ColumnIdMismatchSnafu, ColumnNotFoundSnafu, MismatchColumnIdSnafu,
+    ColumnIdMismatchSnafu, ColumnNotFoundSnafu, MetadataCorruptionSnafu, MismatchColumnIdSnafu,
     MissingColumnInColumnMetadataSnafu, ProcedureStateReceiverNotFoundSnafu,
     ProcedureStateReceiverSnafu, Result, TimestampMismatchSnafu, UnexpectedSnafu,
     WaitProcedureSnafu,
@@ -83,6 +84,19 @@ pub(crate) fn check_column_metadatas_consistent(
     }
 
     Some(region_metadatas[0].column_metadatas.clone())
+}
+
+/// Returns complete authoritative region metadata when all replicas agree on logical authority.
+///
+/// This retains the ordered primary-key IDs in addition to column metadata.
+pub(crate) fn check_region_metadatas_consistent(
+    region_metadatas: &[RegionMetadata],
+) -> Option<RegionMetadata> {
+    let is_column_metadata_consistent = region_metadatas
+        .windows(2)
+        .all(|w| PartialRegionMetadata::from(&w[0]) == PartialRegionMetadata::from(&w[1]));
+
+    is_column_metadata_consistent.then(|| region_metadatas[0].clone())
 }
 
 /// Resolves column metadata inconsistencies among the given region metadatas
@@ -397,15 +411,161 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     Ok(new_raw_table_meta)
 }
 
-/// Returns true if the logical table info needs to be updated.
-///
-/// The logical table only support to add columns, so we can check the length of column metadatas
-/// to determine whether the logical table info needs to be updated.
-pub(crate) fn need_update_logical_table_info(
-    table_info: &TableInfo,
+/// Validates complete authoritative logical region metadata against the physical table.
+pub(crate) fn validate_logical_region_metadata(
+    physical_table_info: &TableInfo,
+    region_metadata: &RegionMetadata,
+) -> Result<()> {
+    validate_logical_column_metadatas(
+        physical_table_info,
+        &region_metadata.column_metadatas,
+        &region_metadata.primary_key,
+    )
+}
+
+/// Validates logical columns and their ordered primary-key IDs without requiring a constructed
+/// [`RegionMetadata`]. This allows callers to reject malformed authority before attempting a
+/// schema reconstruction.
+pub(crate) fn validate_logical_column_metadatas(
+    physical_table_info: &TableInfo,
     column_metadatas: &[ColumnMetadata],
+    primary_key: &[u32],
+) -> Result<()> {
+    let mut ids_by_name = HashMap::with_capacity(column_metadatas.len());
+    let mut tag_ids = HashSet::with_capacity(column_metadatas.len());
+    let mut seen_ids = HashSet::with_capacity(column_metadatas.len());
+    let mut timestamp_count = 0;
+    for column_metadata in column_metadatas {
+        ensure!(
+            ids_by_name
+                .insert(
+                    column_metadata.column_schema.name.as_str(),
+                    column_metadata.column_id
+                )
+                .is_none(),
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Logical region metadata has duplicate column name {}",
+                    column_metadata.column_schema.name,
+                ),
+            }
+        );
+        ensure!(
+            seen_ids.insert(column_metadata.column_id),
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Logical region metadata has duplicate column ID {}",
+                    column_metadata.column_id,
+                ),
+            }
+        );
+        ensure!(
+            (column_metadata.semantic_type == SemanticType::Timestamp)
+                == column_metadata.column_schema.is_time_index(),
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Logical region column {} has mismatched timestamp semantic and time-index role",
+                    column_metadata.column_schema.name,
+                ),
+            }
+        );
+        if column_metadata.semantic_type == SemanticType::Timestamp {
+            timestamp_count += 1;
+        }
+        if column_metadata.semantic_type == SemanticType::Tag {
+            tag_ids.insert(column_metadata.column_id);
+        }
+    }
+    ensure!(
+        timestamp_count == 1,
+        MetadataCorruptionSnafu {
+            err_msg: format!(
+                "Logical region metadata has {} timestamp columns, expected exactly one",
+                timestamp_count,
+            ),
+        }
+    );
+
+    let mut seen_primary_key_ids = HashSet::with_capacity(primary_key.len());
+    for column_id in primary_key {
+        ensure!(
+            seen_primary_key_ids.insert(*column_id),
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Logical region metadata has duplicate primary-key ID {}",
+                    column_id,
+                ),
+            }
+        );
+        ensure!(
+            tag_ids.contains(column_id),
+            MetadataCorruptionSnafu {
+                err_msg: format!(
+                    "Logical region primary-key ID {} is not a Tag column",
+                    column_id,
+                ),
+            }
+        );
+    }
+    ensure!(
+        seen_primary_key_ids == tag_ids,
+        MetadataCorruptionSnafu {
+            err_msg: "Logical region primary-key IDs do not contain every Tag column exactly once"
+                .to_string(),
+        }
+    );
+
+    raw_table_info::validate_logical_column_metadata_ids(physical_table_info, column_metadatas)
+}
+
+/// Returns whether the logical table schema and roles match authoritative region metadata.
+///
+/// The comparison joins columns by name, so harmless datanode ordering differences do not cause
+/// a rebuild. The caller validates `region_metadata` before calling this function.
+pub(crate) fn logical_table_info_matches_region_metadata(
+    table_info: &TableInfo,
+    region_metadata: &RegionMetadata,
 ) -> bool {
-    table_info.meta.schema.column_schemas().len() != column_metadatas.len()
+    let columns = table_info.meta.schema.column_schemas();
+    if columns.len() != region_metadata.column_metadatas.len()
+        || table_info.meta.column_ids.len() != columns.len()
+    {
+        return false;
+    }
+
+    let region_columns = region_metadata
+        .column_metadatas
+        .iter()
+        .map(|column_metadata| (column_metadata.column_schema.name.as_str(), column_metadata))
+        .collect::<HashMap<_, _>>();
+    if region_columns.len() != region_metadata.column_metadatas.len() {
+        return false;
+    }
+
+    let mut table_primary_key_ids = Vec::with_capacity(table_info.meta.primary_key_indices.len());
+    for index in &table_info.meta.primary_key_indices {
+        let Some(column_id) = table_info.meta.column_ids.get(*index) else {
+            return false;
+        };
+        table_primary_key_ids.push(*column_id);
+    }
+    if table_primary_key_ids != region_metadata.primary_key {
+        return false;
+    }
+
+    columns.iter().enumerate().all(|(index, column)| {
+        let Some(column_metadata) = region_columns.get(column.name.as_str()) else {
+            return false;
+        };
+        let semantic_type = if table_info.meta.primary_key_indices.contains(&index) {
+            SemanticType::Tag
+        } else if column.is_time_index() {
+            SemanticType::Timestamp
+        } else {
+            SemanticType::Field
+        };
+        column == &column_metadata.column_schema && semantic_type == column_metadata.semantic_type
+    })
 }
 
 /// The result of waiting for inflight subprocedures.
@@ -963,6 +1123,9 @@ mod tests {
 
     use super::*;
     use crate::ddl::test_util::region_metadata::build_region_metadata;
+    use crate::ddl::test_util::{
+        test_column_metadatas, test_create_physical_table_task, test_physical_table_info,
+    };
     use crate::error::Error;
     use crate::reconciliation::utils::check_column_metadatas_consistent;
 
@@ -1193,6 +1356,91 @@ mod tests {
         let region_metadata2 = build_region_metadata(RegionId::new(1024, 1), &column_metadatas);
         let result = check_column_metadatas_consistent(&[region_metadata1, region_metadata2]);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_logical_column_metadatas_rejects_duplicate_name_and_id() {
+        let physical_table_info =
+            test_physical_table_info(test_create_physical_table_task("physical").table_info);
+        let column_metadatas = test_column_metadatas(&["host", "cpu"]);
+        let primary_key = column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Tag)
+            .map(|column| column.column_id)
+            .collect::<Vec<_>>();
+
+        let mut duplicate_name = column_metadatas.clone();
+        duplicate_name.push(column_metadatas[0].clone());
+        assert!(
+            validate_logical_column_metadatas(&physical_table_info, &duplicate_name, &primary_key,)
+                .is_err()
+        );
+
+        let mut duplicate_id = column_metadatas.clone();
+        duplicate_id[1].column_id = duplicate_id[0].column_id;
+        assert!(
+            validate_logical_column_metadatas(&physical_table_info, &duplicate_id, &primary_key,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_logical_column_metadatas_rejects_timestamp_and_primary_key_violations() {
+        let physical_table_info =
+            test_physical_table_info(test_create_physical_table_task("physical").table_info);
+        let column_metadatas = test_column_metadatas(&["host", "cpu"]);
+        let primary_key = column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Tag)
+            .map(|column| column.column_id)
+            .collect::<Vec<_>>();
+
+        let mut missing_timestamp = column_metadatas.clone();
+        missing_timestamp.retain(|column| column.semantic_type != SemanticType::Timestamp);
+        assert!(
+            validate_logical_column_metadatas(
+                &physical_table_info,
+                &missing_timestamp,
+                &primary_key,
+            )
+            .is_err()
+        );
+
+        let mut multiple_timestamps = column_metadatas.clone();
+        let mut extra_timestamp = column_metadatas[0].clone();
+        extra_timestamp.column_schema.name = "another_ts".to_string();
+        extra_timestamp.column_id = 999;
+        multiple_timestamps.push(extra_timestamp);
+        assert!(
+            validate_logical_column_metadatas(
+                &physical_table_info,
+                &multiple_timestamps,
+                &primary_key,
+            )
+            .is_err()
+        );
+
+        let mut misflagged_timestamp = column_metadatas.clone();
+        misflagged_timestamp[1].semantic_type = SemanticType::Timestamp;
+        assert!(
+            validate_logical_column_metadatas(
+                &physical_table_info,
+                &misflagged_timestamp,
+                &primary_key,
+            )
+            .is_err()
+        );
+
+        let mut invalid_primary_key = primary_key.clone();
+        invalid_primary_key.push(column_metadatas[0].column_id);
+        assert!(
+            validate_logical_column_metadatas(
+                &physical_table_info,
+                &column_metadatas,
+                &invalid_primary_key,
+            )
+            .is_err()
+        );
     }
 
     #[test]

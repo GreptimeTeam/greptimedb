@@ -356,6 +356,22 @@ async fn test_on_create_metadata() {
             3
         ]
     );
+
+    let logical_table_info = get_raw_table_info(&ddl_context, 1025).await;
+    assert_column_name(&logical_table_info, &["cpu", "host", "ts"]);
+    assert_eq!(logical_table_info.meta.column_ids, vec![3, 2, 0]);
+    assert!(
+        !logical_table_info
+            .meta
+            .column_ids
+            .contains(&ReservedColumnId::table_id())
+    );
+    assert!(
+        !logical_table_info
+            .meta
+            .column_ids
+            .contains(&ReservedColumnId::tsid())
+    );
 }
 
 #[tokio::test]
@@ -388,6 +404,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     // Creates the logical table metadata.
     let mut task = test_create_logical_table_task("exists");
     task.set_table_id(8192);
+    let existing_table_info = task.table_info.clone();
     ddl_context
         .table_metadata_manager
         .create_logical_tables_metadata(vec![(
@@ -400,7 +417,13 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     let physical_table_id = table_id;
     // Sets `create_if_not_exists`
     task.create_table.create_if_not_exists = true;
-    let non_exist_task = test_create_logical_table_task("non_exists");
+    let mut non_exist_task = test_create_logical_table_task("non_exists");
+    non_exist_task.create_table.column_defs[2].semantic_type = api::v1::SemanticType::Tag as i32;
+    non_exist_task
+        .create_table
+        .primary_keys
+        .push("cpu".to_string());
+    non_exist_task.table_info.meta.primary_key_indices.push(2);
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, non_exist_task],
         physical_table_id,
@@ -443,6 +466,15 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
             2,
             3
         ]
+    );
+
+    let logical_table_info = get_raw_table_info(&ddl_context, 1025).await;
+    assert_column_name(&logical_table_info, &["cpu", "host", "ts"]);
+    assert_eq!(logical_table_info.meta.primary_key_indices, vec![0, 1]);
+    assert_eq!(logical_table_info.meta.column_ids, vec![3, 2, 0]);
+    assert_eq!(
+        get_raw_table_info(&ddl_context, 8192).await,
+        existing_table_info
     );
 }
 

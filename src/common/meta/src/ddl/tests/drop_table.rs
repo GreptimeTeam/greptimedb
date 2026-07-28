@@ -42,6 +42,7 @@ use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHand
 use crate::ddl::test_util::{
     create_logical_table, create_physical_table, create_physical_table_metadata,
     put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
+    test_physical_table_info,
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
@@ -2538,7 +2539,7 @@ async fn test_on_rollback() {
     create_physical_table_task.set_table_id(table_id);
     create_physical_table_metadata(
         &ddl_context,
-        create_physical_table_task.table_info.clone(),
+        test_physical_table_info(create_physical_table_task.table_info.clone()),
         TableRouteValue::Physical(table_route),
     )
     .await;

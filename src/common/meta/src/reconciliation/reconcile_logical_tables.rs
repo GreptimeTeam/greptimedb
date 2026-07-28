@@ -29,7 +29,7 @@ use common_procedure::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 use table::table_name::TableName;
@@ -103,11 +103,21 @@ pub(crate) struct PersistentContext {
     // The value will be set in `ReconciliationStart` state.
     pub(crate) physical_table_route: Option<PhysicalTableRouteValue>,
     // The table infos to be updated.
+    //
+    // Kept for deserializing procedures persisted before complete region metadata was retained.
+    // Such procedures are re-resolved before an update is attempted.
+    #[serde(default)]
     // The value will be set in `ResolveTableMetadatas` state.
     pub(crate) update_table_infos: Vec<(TableId, Vec<ColumnMetadata>)>,
+    /// Complete authoritative logical region metadata used to update table infos.
+    #[serde(default)]
+    pub(crate) update_region_metadatas: Vec<(TableId, RegionMetadata)>,
     // The table infos to be created.
     // The value will be set in `ResolveTableMetadatas` state.
     pub(crate) create_tables: Vec<(TableId, TableInfo)>,
+    /// Whether the next metadata resolution verifies regions created by this procedure.
+    #[serde(default)]
+    pub(crate) verifying_after_create: bool,
     // Whether the procedure is a subprocedure.
     pub(crate) is_subprocedure: bool,
 }
@@ -129,7 +139,9 @@ impl PersistentContext {
             table_info_value: None,
             physical_table_route: None,
             update_table_infos: vec![],
+            update_region_metadatas: vec![],
             create_tables: vec![],
+            verifying_after_create: false,
             is_subprocedure,
         }
     }
