@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -170,6 +171,8 @@ fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
     let expected_tasks = serde_json::to_value(&tasks).unwrap();
     let physical_table_id = 1024;
     let procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+
+    assert_event_filter_rejects(&procedure);
     let lifecycle_state = ProcedureState::Running;
     let event = procedure
         .event(&EventContext {
@@ -763,5 +766,19 @@ async fn test_on_submit_alter_region_request() {
             })),
             ..
         })
+    );
+}
+
+fn assert_event_filter_rejects(procedure: &dyn Procedure) {
+    let state = ProcedureState::Running;
+    assert!(
+        procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            })
+            .is_none()
     );
 }

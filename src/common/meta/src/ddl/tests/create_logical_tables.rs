@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -107,6 +108,8 @@ fn test_submitted_event_has_one_rich_row_per_logical_table() {
     let expected_foo_task = serde_json::to_value(&foo).unwrap();
     let expected_bar_task = serde_json::to_value(&bar).unwrap();
     let procedure = CreateLogicalTablesProcedure::new(vec![foo, bar], 1024, ddl_context);
+
+    assert_event_filter_rejects(&procedure);
     let lifecycle_state = ProcedureState::Running;
 
     let event = procedure
@@ -687,5 +690,19 @@ async fn test_on_submit_create_request() {
             })),
             ..
         })
+    );
+}
+
+fn assert_event_filter_rejects(procedure: &dyn Procedure) {
+    let state = ProcedureState::Running;
+    assert!(
+        procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            })
+            .is_none()
     );
 }

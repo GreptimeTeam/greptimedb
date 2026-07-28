@@ -146,6 +146,8 @@ fn test_create_table_submitted_event_has_rich_payload_and_locators() {
     let expected_table_info = serde_json::to_value(&task.table_info).unwrap();
     let expected_table_options = serde_json::to_value(&task.table_info.meta.options).unwrap();
     let procedure = CreateTableProcedure::new(task, new_ddl_context(node_manager)).unwrap();
+
+    assert_event_filter_rejects(&procedure);
     let state = ProcedureState::Running;
 
     let event = procedure
@@ -492,5 +494,19 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
         !ddl_context
             .memory_region_keeper
             .contains(datanode_id, region_id)
+    );
+}
+
+fn assert_event_filter_rejects(procedure: &dyn Procedure) {
+    let state = ProcedureState::Running;
+    assert!(
+        procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            })
+            .is_none()
     );
 }

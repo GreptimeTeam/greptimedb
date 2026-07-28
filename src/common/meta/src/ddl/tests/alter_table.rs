@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -167,6 +167,8 @@ fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     )
     .unwrap();
+
+    assert_event_filter_rejects(&procedure);
     let lifecycle_state = ProcedureState::Running;
     let event = procedure
         .event(&EventContext {
@@ -862,4 +864,18 @@ async fn test_on_submit_alter_request_with_exist_poison() {
         .await
         .unwrap_err();
     assert_matches!(err, Error::PutPoison { .. });
+}
+
+fn assert_event_filter_rejects(procedure: &dyn Procedure) {
+    let state = ProcedureState::Running;
+    assert!(
+        procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            })
+            .is_none()
+    );
 }
