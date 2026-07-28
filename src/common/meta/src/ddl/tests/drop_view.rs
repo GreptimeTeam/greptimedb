@@ -15,125 +15,29 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::Row;
-use api::v1::value::ValueData;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_event_recorder::testing::assert_event_contract;
-use common_event_recorder::{Event, EventTypeFilter};
-use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
-    RetryPhase,
-};
 use common_procedure_test::execute_procedure_until_done;
 use store_api::storage::TableId;
 
 use crate::ddl::drop_view::{DropViewProcedure, DropViewState};
-use crate::ddl::event::view::DROP_VIEW_EVENT_TYPE;
 use crate::ddl::test_util::create_table::test_create_table_task;
-use crate::ddl::tests::create_view::{test_create_view_task, test_table_names, view_event_schema};
+use crate::ddl::tests::create_view::{test_create_view_task, test_table_names};
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
-fn new_drop_view_task(view: &str, view_id: TableId, drop_if_exists: bool) -> DropViewTask {
+pub(crate) fn new_drop_view_task(
+    view: &str,
+    view_id: TableId,
+    drop_if_exists: bool,
+) -> DropViewTask {
     DropViewTask {
         catalog: "greptime".to_string(),
         schema: "public".to_string(),
         view: view.to_string(),
         view_id,
         drop_if_exists,
-    }
-}
-
-fn event_for(procedure: &DropViewProcedure, trigger: EventTrigger) -> Box<dyn Event> {
-    let state = ProcedureState::Running;
-    procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap()
-}
-
-#[test]
-fn test_drop_view_event_submission() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, true),
-        new_ddl_context(node_manager),
-    );
-    let event = event_for(&procedure, EventTrigger::Submitted);
-
-    assert_event_contract(
-        event.as_ref(),
-        DROP_VIEW_EVENT_TYPE,
-        &view_event_schema(),
-        &[Row {
-            values: vec![
-                ValueData::StringValue("greptime".to_string()).into(),
-                ValueData::StringValue("public".to_string()).into(),
-                ValueData::StringValue("view_name".to_string()).into(),
-                ValueData::U32Value(42).into(),
-            ],
-        }],
-    );
-    assert_eq!(
-        event.json_payload().unwrap(),
-        serde_json::json!({"version": 1, "drop_if_exists": true})
-    );
-    assert!(
-        !event
-            .json_payload()
-            .unwrap()
-            .to_string()
-            .contains("Prepare")
-    );
-    assert!(
-        !event
-            .json_payload()
-            .unwrap()
-            .to_string()
-            .contains("view_name")
-    );
-}
-
-#[test]
-fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, false),
-        new_ddl_context(node_manager),
-    );
-    let submitted = event_for(&procedure, EventTrigger::Submitted);
-    let triggers = [
-        EventTrigger::Recovered,
-        EventTrigger::ChildSubmitted {
-            procedure_id: ProcedureId::random(),
-            outcome: ChildSubmissionOutcome::Accepted,
-        },
-        EventTrigger::Retrying {
-            phase: RetryPhase::Execute,
-            attempt: 1,
-        },
-        EventTrigger::RollingBack,
-        EventTrigger::Succeeded,
-        EventTrigger::Failed,
-        EventTrigger::Poisoned,
-    ];
-
-    let submitted_schema = submitted.extra_schema();
-    assert_eq!(submitted_schema, view_event_schema());
-
-    for trigger in triggers {
-        let event = event_for(&procedure, trigger);
-        assert_eq!(event.event_type(), DROP_VIEW_EVENT_TYPE);
-        assert_eq!(event.extra_schema(), submitted_schema);
-        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-        let row = event.extra_rows().unwrap().remove(0);
-        assert!(row.values.iter().all(|value| value.value_data.is_none()));
     }
 }
 
