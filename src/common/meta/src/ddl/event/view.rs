@@ -24,8 +24,8 @@ use common_event_recorder::event_table::{
 use serde::Serialize;
 use snafu::ResultExt;
 
-pub(crate) const CREATE_VIEW_EVENT_TYPE: &str = "ddl_create_view";
-pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "ddl_drop_view";
+pub(crate) const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
+pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
 
 pub(crate) const VIEW_NAME_COLUMN: &str = "view_name";
 pub(crate) const VIEW_ID_COLUMN: &str = "view_id";

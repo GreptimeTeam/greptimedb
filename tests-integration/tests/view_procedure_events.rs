@@ -38,8 +38,8 @@ use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
 
-const CREATE_VIEW_EVENT_TYPE: &str = "ddl_create_view";
-const DROP_VIEW_EVENT_TYPE: &str = "ddl_drop_view";
+const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
+const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
 const CREATE_VIEW_PROCEDURE_TYPE: &str = "metasrv-procedure::CreateView";
 const DROP_VIEW_PROCEDURE_TYPE: &str = "metasrv-procedure::DropView";
 
@@ -66,6 +66,22 @@ async fn test_view_procedure_events() {
         .await;
     let instance = cluster.fe_instance().clone();
 
+    assert_view_procedure_events(instance).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_standalone_view_procedure_events() {
+    common_telemetry::init_default_ut_logging();
+    let standalone = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "test_standalone_view_procedure_events",
+    )
+    .build()
+    .await;
+
+    assert_view_procedure_events(standalone.fe_instance().clone()).await;
+}
+
+async fn assert_view_procedure_events(instance: Arc<Instance>) {
     run_sql(
         &instance,
         &format!(

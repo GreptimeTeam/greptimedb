@@ -20,8 +20,8 @@ use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
-    RetryPhase,
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId,
+    ProcedureState, RetryPhase,
 };
 
 use crate::ddl::create_view::CreateViewProcedure;
@@ -333,4 +333,63 @@ fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
         let row = event.extra_rows().unwrap().remove(0);
         assert!(row.values.iter().all(|value| value.value_data.is_none()));
     }
+}
+
+#[test]
+fn test_view_event_filter() {
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let create = CreateViewProcedure::new(test_create_view_task("view_name"), context.clone());
+    let drop = DropViewProcedure::new(new_drop_view_task("view_name", 42, false), context);
+    let state = ProcedureState::Running;
+
+    for (procedure, event_type) in [
+        (&create as &dyn Procedure, CREATE_VIEW_EVENT_TYPE),
+        (&drop as &dyn Procedure, DROP_VIEW_EVENT_TYPE),
+    ] {
+        let context = |event_type_filter| EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(event_type_filter),
+        };
+
+        assert!(
+            procedure
+                .event(&context(EventTypeFilter::Only(
+                    std::collections::HashSet::from([event_type.to_string(),])
+                )))
+                .is_some()
+        );
+        assert!(
+            procedure
+                .event(&context(EventTypeFilter::Only(
+                    std::collections::HashSet::from(["other_event".to_string(),])
+                )))
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn test_view_event_procedure_envelope_contract() {
+    let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let event = ProcedureEvent::new(
+        procedure_id,
+        Box::new(crate::ddl::event::view::ViewDdlEvent::create_submitted(
+            "greptime",
+            "public",
+            "view_name",
+            false,
+            false,
+            1,
+            1,
+        )),
+        ProcedureState::Running,
+        EventTrigger::Submitted,
+    );
+
+    let mut expected_schema = common_event_recorder::event_table::procedure_event_column_schemas();
+    expected_schema.extend(view_event_schema());
+    assert_eq!(event.extra_schema(), expected_schema);
+    assert_eq!(event.extra_rows().unwrap()[0].values.len(), 8);
 }
