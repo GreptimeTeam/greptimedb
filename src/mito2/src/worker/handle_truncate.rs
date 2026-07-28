@@ -22,9 +22,7 @@ use store_api::storage::RegionId;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionEdit, RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
-use crate::request::{
-    DdlRequest, DiscardUnflushedResult, OptionOutputTx, TruncateResult,
-};
+use crate::request::{DdlRequest, DiscardUnflushedResult, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -272,6 +270,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .on_region_truncated(region_id)
             .await;
         self.update_topic_latest_entry_id(&region);
+
+        // Discarding memtables releases write buffer memory. Notify other workers and
+        // retry requests stalled on this worker before WAL cleanup, which may fail even
+        // though the memory has already been released.
+        self.notify_group();
+        self.handle_stalled_requests().await;
 
         if let Err(e) = self
             .wal

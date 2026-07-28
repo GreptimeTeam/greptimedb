@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -67,6 +68,33 @@ impl EventListener for FlushCommitListener {
         self.cancel_requested.notify_one();
     }
 }
+
+#[derive(Default)]
+struct CountingStallListener {
+    count: AtomicUsize,
+    notify: Notify,
+}
+
+impl CountingStallListener {
+    async fn wait_for_count(&self, expected: usize) {
+        loop {
+            let notified = self.notify.notified();
+            if self.count.load(Ordering::Relaxed) >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventListener for CountingStallListener {
+    fn on_write_stall(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+}
+
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
     test_engine_truncate_region_basic_with_format(false).await;
@@ -541,6 +569,121 @@ async fn test_engine_discard_unflushed_with_format(flat_format: bool) {
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(
         5,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+#[tokio::test]
+async fn test_engine_discard_unflushed_wakes_stalled_writes() {
+    let mut env = TestEnv::with_prefix("discard-unflushed-wake-stalled").await;
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let listener = Arc::new(CountingStallListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 2,
+                ..Default::default()
+            },
+            Some(write_buffer_manager.clone()),
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    // These region IDs are routed to different workers when num_workers is 2.
+    let discarded_region_id = RegionId::new(1, 1);
+    let peer_region_id = RegionId::new(2, 1);
+    let discarded_request = CreateRequestBuilder::new().build();
+    let discarded_schema = rows_schema(&discarded_request);
+    engine
+        .handle_request(
+            discarded_region_id,
+            RegionRequest::Create(discarded_request),
+        )
+        .await
+        .unwrap();
+    let peer_request = CreateRequestBuilder::new().table_dir("peer").build();
+    let peer_schema = rows_schema(&peer_request);
+    engine
+        .handle_request(peer_region_id, RegionRequest::Create(peer_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        discarded_region_id,
+        Rows {
+            schema: discarded_schema.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    write_buffer_manager.set_should_stall(true);
+    let discarded_engine = engine.clone();
+    let discarded_write = tokio::spawn(async move {
+        put_rows(
+            &discarded_engine,
+            discarded_region_id,
+            Rows {
+                schema: discarded_schema,
+                rows: build_rows(3, 6),
+            },
+        )
+        .await;
+    });
+    let peer_engine = engine.clone();
+    let peer_write = tokio::spawn(async move {
+        put_rows(
+            &peer_engine,
+            peer_region_id,
+            Rows {
+                schema: peer_schema,
+                rows: build_rows(6, 8),
+            },
+        )
+        .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), listener.wait_for_count(2))
+        .await
+        .expect("writes should stall on both workers");
+    assert!(!discarded_write.is_finished());
+    assert!(!peer_write.is_finished());
+
+    write_buffer_manager.set_should_stall(false);
+    engine
+        .handle_request(
+            discarded_region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        discarded_write.await.unwrap();
+        peer_write.await.unwrap();
+    })
+    .await
+    .expect("discard should wake stalled writes on both workers");
+
+    let stream = engine
+        .scan_to_stream(discarded_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+
+    let stream = engine
+        .scan_to_stream(peer_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        2,
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
     );
 }
