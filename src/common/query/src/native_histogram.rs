@@ -16,6 +16,8 @@
 //!
 //! Prom remote-write v2 stores these names as children of one Struct field, while
 //! metric-engine uses the same contract to recognize native histogram tables.
+//! [`NativeHistogram`] is the query-time representation and therefore normalizes
+//! integer and floating-point payloads to absolute `f64` counts.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, DataType as ArrowDataType, Float64Type, Int32Type, Int64Type,
+    ArrowPrimitiveType, DataType as ArrowDataType, Field, Float64Type, Int32Type, Int64Type,
     TimestampMillisecondType, UInt32Type, UInt64Type,
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
@@ -115,75 +117,147 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     }
 }
 
+/// Returns the exact Greptime type for a complete native histogram value.
 pub fn native_histogram_value_type() -> &'static ConcreteDataType {
     &NATIVE_HISTOGRAM_VALUE_TYPE
 }
 
+/// Returns whether `data_type` matches the native histogram value contract.
 pub fn is_native_histogram_value_type(data_type: &ConcreteDataType) -> bool {
     data_type == native_histogram_value_type()
 }
 
+/// Returns whether a named column matches the configured native histogram contract.
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
     name == greptime_native_histogram() && is_native_histogram_value_type(data_type)
 }
 
+/// Schema identifier for native histograms with explicit custom bucket bounds.
 pub const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 const MIN_EXPONENTIAL_SCHEMA: i32 = -4;
 const MAX_EXPONENTIAL_SCHEMA: i32 = 8;
-pub const UNKNOWN_COUNTER_RESET_HINT: i32 = 0;
-pub const COUNTER_RESET_HINT: i32 = 1;
-pub const NOT_COUNTER_RESET_HINT: i32 = 2;
-pub const GAUGE_RESET_HINT: i32 = 3;
 
+/// Information carried by a native histogram about a possible counter reset.
+///
+/// The persisted and protobuf representation remains an `i32`. Unrecognized
+/// values are retained so data written by a newer producer can still round-trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CounterResetHint {
+    /// The payload must be inspected to determine whether a reset occurred.
+    Unknown,
+    /// This is the first histogram after a counter reset.
+    CounterReset,
+    /// No counter reset occurred since the previous histogram.
+    NotCounterReset,
+    /// This is a gauge histogram, so counter resets do not apply.
+    Gauge,
+    /// A value not understood by this version.
+    Unrecognized(i32),
+}
+
+impl From<i32> for CounterResetHint {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => Self::Unknown,
+            1 => Self::CounterReset,
+            2 => Self::NotCounterReset,
+            3 => Self::Gauge,
+            value => Self::Unrecognized(value),
+        }
+    }
+}
+
+impl From<CounterResetHint> for i32 {
+    fn from(value: CounterResetHint) -> Self {
+        match value {
+            CounterResetHint::Unknown => 0,
+            CounterResetHint::CounterReset => 1,
+            CounterResetHint::NotCounterReset => 2,
+            CounterResetHint::Gauge => 3,
+            CounterResetHint::Unrecognized(value) => value,
+        }
+    }
+}
+
+/// Reset hint indicating that the payload must be inspected.
+pub const UNKNOWN_COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::Unknown;
+/// Reset hint indicating the first histogram after a counter reset.
+pub const COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::CounterReset;
+/// Reset hint indicating that no counter reset occurred.
+pub const NOT_COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::NotCounterReset;
+/// Reset hint identifying a gauge histogram.
+pub const GAUGE_RESET_HINT: CounterResetHint = CounterResetHint::Gauge;
+
+/// A contiguous run of populated sparse buckets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
+    /// The first bucket index, or the gap after the preceding span.
     pub offset: i32,
+    /// Number of consecutive buckets in the span.
     pub length: u32,
 }
 
+/// Inclusion rules for a materialized bucket's lower and upper bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BoundaryRule {
+enum BoundaryRule {
     OpenLeft = 0,
     OpenRight = 1,
-    OpenBoth = 2,
     ClosedBoth = 3,
 }
 
+/// A materialized bucket used by query-time estimators and renderers.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Bucket {
-    pub lower: f64,
-    pub upper: f64,
-    pub count: f64,
-    pub boundary_rule: BoundaryRule,
+struct Bucket {
+    lower: f64,
+    upper: f64,
+    count: f64,
+    boundary_rule: BoundaryRule,
 }
 
+/// Query-time representation of a Prometheus native histogram.
+///
+/// Bucket counts are absolute `f64` values even when the persisted payload used
+/// integer counts or deltas.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeHistogram {
+    /// Exponential bucket schema, or [`CUSTOM_BUCKETS_SCHEMA`].
     pub schema: i32,
+    /// Absolute width of the zero bucket.
     pub zero_threshold: f64,
+    /// Sum of all observations.
     pub sum: f64,
-    pub reset_hint: i32,
+    /// Counter reset information associated with this sample.
+    pub reset_hint: CounterResetHint,
+    /// Optional time in milliseconds when this histogram started counting.
     pub start_timestamp: Option<i64>,
+    /// Inclusive upper bounds used when `schema` is [`CUSTOM_BUCKETS_SCHEMA`].
     pub custom_values: Vec<f64>,
+    /// Sparse spans describing positive or custom buckets.
     pub positive_spans: Vec<Span>,
+    /// Sparse spans describing negative buckets.
     pub negative_spans: Vec<Span>,
+    /// Total number of observations.
     pub count: f64,
+    /// Number of observations in the zero bucket.
     pub zero_count: f64,
+    /// Absolute counts for positive or custom buckets.
     pub positive_buckets: Vec<f64>,
+    /// Absolute counts for negative buckets.
     pub negative_buckets: Vec<f64>,
 }
 
 impl NativeHistogram {
-    pub fn uses_custom_buckets(&self) -> bool {
+    fn uses_custom_buckets(&self) -> bool {
         self.schema == CUSTOM_BUCKETS_SCHEMA
     }
 
-    pub fn compatible_with(&self, other: &Self) -> bool {
+    fn compatible_with(&self, other: &Self) -> bool {
         self.schema == other.schema
             && self.zero_threshold == other.zero_threshold
             && self.custom_values == other.custom_values
     }
 
+    /// Returns a histogram with the same layout and metadata but zeroed payload values.
     pub fn zero_like(&self) -> Self {
         let mut result = self.clone();
         result.count = 0.0;
@@ -194,7 +268,7 @@ impl NativeHistogram {
         result
     }
 
-    pub fn add_exact(&self, other: &Self) -> Option<Self> {
+    fn add_exact(&self, other: &Self) -> Option<Self> {
         if !self.compatible_with(other) {
             return None;
         }
@@ -221,7 +295,7 @@ impl NativeHistogram {
         Some(result)
     }
 
-    pub fn sub_exact(&self, other: &Self) -> Option<Self> {
+    fn sub_exact(&self, other: &Self) -> Option<Self> {
         if !self.compatible_with(other) {
             return None;
         }
@@ -230,7 +304,7 @@ impl NativeHistogram {
         result.count -= other.count;
         result.zero_count -= other.zero_count;
         result.sum -= other.sum;
-        result.reset_hint = GAUGE_RESET_HINT;
+        result.reset_hint = CounterResetHint::Gauge;
         (result.positive_spans, result.positive_buckets) = merge_side(
             &self.positive_spans,
             &self.positive_buckets,
@@ -248,53 +322,71 @@ impl NativeHistogram {
         Some(result)
     }
 
+    /// Adds two histograms after reconciling compatible bucket layouts.
+    ///
+    /// Returns `None` when the layouts are invalid or cannot be reconciled.
     pub fn add(&self, other: &Self) -> Option<Self> {
         if self.is_empty_payload() {
-            return Some(other.clone().compact());
+            return other.clone().compact();
         }
         if other.is_empty_payload() {
-            return Some(self.clone().compact());
+            return self.clone().compact();
         }
 
         let (left, right) = self.reconcile(other)?;
-        left.add_exact(&right).map(Self::compact)
+        left.add_exact(&right)?.compact()
     }
 
+    /// Subtracts `other` after reconciling compatible bucket layouts.
+    ///
+    /// Returns `None` when the layouts are invalid or cannot be reconciled.
     pub fn sub(&self, other: &Self) -> Option<Self> {
         if self.is_empty_payload() {
-            return Some(other.clone().negated().compact());
+            return other.clone().negated().compact();
         }
         if other.is_empty_payload() {
-            return Some(self.clone().into_gauge().compact());
+            return self.clone().into_gauge().compact();
         }
 
         let (left, right) = self.reconcile(other)?;
-        left.sub_exact(&right).map(Self::compact)
+        left.sub_exact(&right)?.compact()
     }
 
+    /// Negates every payload value and marks the result as a gauge histogram.
     pub fn negated(self) -> Self {
         self.scale(-1.0)
     }
 
+    /// Marks this histogram as a gauge without changing its payload.
     pub fn into_gauge(mut self) -> Self {
-        self.reset_hint = GAUGE_RESET_HINT;
+        self.reset_hint = CounterResetHint::Gauge;
         self
     }
 
+    /// Returns whether the histograms carry explicit, contradictory reset hints.
     pub fn counter_reset_hints_contradict(&self, other: &Self) -> bool {
         matches!(
             (self.reset_hint, other.reset_hint),
-            (COUNTER_RESET_HINT, NOT_COUNTER_RESET_HINT)
-                | (NOT_COUNTER_RESET_HINT, COUNTER_RESET_HINT)
+            (
+                CounterResetHint::CounterReset,
+                CounterResetHint::NotCounterReset
+            ) | (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::CounterReset
+            )
         )
     }
 
+    /// Returns whether two custom histograms use different bucket bounds.
     pub fn needs_custom_reconciliation(&self, other: &Self) -> bool {
         self.uses_custom_buckets()
             && other.uses_custom_buckets()
             && self.custom_values != other.custom_values
     }
 
+    /// Compares PromQL-visible payload values by their exact bit patterns.
+    ///
+    /// Reset hints, start timestamps, and sparse zero placement are ignored.
     pub fn promql_eq(&self, other: &Self) -> bool {
         self.schema == other.schema
             && self.zero_threshold == other.zero_threshold
@@ -316,6 +408,7 @@ impl NativeHistogram {
             )
     }
 
+    /// Formats this histogram using PromQL native histogram sample notation.
     pub fn promql_string(&self) -> String {
         let mut parts = vec![format!("count:{}", self.count), format!("sum:{}", self.sum)];
         if let Some(buckets) = self.all_buckets() {
@@ -327,7 +420,6 @@ impl NativeHistogram {
                         let (left, right) = match bucket.boundary_rule {
                             BoundaryRule::OpenLeft => ("(", "]"),
                             BoundaryRule::OpenRight => ("[", ")"),
-                            BoundaryRule::OpenBoth => ("(", ")"),
                             BoundaryRule::ClosedBoth => ("[", "]"),
                         };
                         format!(
@@ -340,6 +432,7 @@ impl NativeHistogram {
         format!("{{{}}}", parts.join(", "))
     }
 
+    /// Estimates the population variance using each populated bucket's midpoint.
     pub fn estimated_stdvar(&self) -> f64 {
         if self.count == 0.0 {
             return f64::NAN;
@@ -358,10 +451,14 @@ impl NativeHistogram {
             / self.count
     }
 
+    /// Estimates the population standard deviation from [`Self::estimated_stdvar`].
     pub fn estimated_stddev(&self) -> f64 {
         self.estimated_stdvar().sqrt()
     }
 
+    /// Multiplies every payload value by `factor`.
+    ///
+    /// A negative factor marks the result as a gauge histogram.
     pub fn scale(mut self, factor: f64) -> Self {
         self.count *= factor;
         self.zero_count *= factor;
@@ -373,11 +470,14 @@ impl NativeHistogram {
             *count *= factor;
         }
         if factor < 0.0 {
-            self.reset_hint = GAUGE_RESET_HINT;
+            self.reset_hint = CounterResetHint::Gauge;
         }
         self
     }
 
+    /// Divides every payload value by `divisor`.
+    ///
+    /// A negative divisor marks the result as a gauge histogram.
     pub fn divide_by(mut self, divisor: f64) -> Self {
         self.count /= divisor;
         self.zero_count /= divisor;
@@ -396,26 +496,29 @@ impl NativeHistogram {
             }
         }
         if divisor < 0.0 {
-            self.reset_hint = GAUGE_RESET_HINT;
+            self.reset_hint = CounterResetHint::Gauge;
         }
         self
     }
 
-    pub fn compact(mut self) -> Self {
-        let (spans, buckets) = compact_side(&self.positive_spans, &self.positive_buckets);
+    fn compact(mut self) -> Option<Self> {
+        let (spans, buckets) = compact_side(&self.positive_spans, &self.positive_buckets)?;
         self.positive_spans = spans;
         self.positive_buckets = buckets;
-        let (spans, buckets) = compact_side(&self.negative_spans, &self.negative_buckets);
+        let (spans, buckets) = compact_side(&self.negative_spans, &self.negative_buckets)?;
         self.negative_spans = spans;
         self.negative_buckets = buckets;
-        self
+        Some(self)
     }
 
+    /// Detects a reset from the explicit hint and histogram payload.
     pub fn detect_reset(&self, previous: &Self) -> bool {
         match self.reset_hint {
-            COUNTER_RESET_HINT => return true,
-            NOT_COUNTER_RESET_HINT => return false,
-            _ => {}
+            CounterResetHint::CounterReset => return true,
+            CounterResetHint::NotCounterReset => return false,
+            CounterResetHint::Unknown
+            | CounterResetHint::Gauge
+            | CounterResetHint::Unrecognized(_) => {}
         }
 
         if self.count < previous.count {
@@ -460,7 +563,7 @@ impl NativeHistogram {
         }
     }
 
-    pub fn detect_start_timestamp_reset(
+    fn detect_start_timestamp_reset(
         &self,
         previous: &Self,
         previous_ts: i64,
@@ -478,12 +581,13 @@ impl NativeHistogram {
         previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
     }
 
+    /// Detects a counter reset using start timestamps, hints, and payload values.
     pub fn detect_counter_reset(&self, previous: &Self, previous_ts: i64, current_ts: i64) -> bool {
         self.detect_start_timestamp_reset(previous, previous_ts, current_ts)
             || self.detect_reset(previous)
     }
 
-    pub fn all_buckets(&self) -> Option<Vec<Bucket>> {
+    fn all_buckets(&self) -> Option<Vec<Bucket>> {
         let mut buckets = self.side_buckets(false)?;
         buckets.reverse();
         if self.zero_count != 0.0 {
@@ -498,7 +602,7 @@ impl NativeHistogram {
         Some(buckets)
     }
 
-    pub fn side_buckets(&self, positive: bool) -> Option<Vec<Bucket>> {
+    fn side_buckets(&self, positive: bool) -> Option<Vec<Bucket>> {
         let (spans, counts) = if positive {
             (&self.positive_spans, &self.positive_buckets)
         } else {
@@ -528,6 +632,10 @@ impl NativeHistogram {
         Some(result)
     }
 
+    /// Estimates the value at quantile `q`.
+    ///
+    /// Returns negative or positive infinity outside `[0, 1]`, and `NaN` when
+    /// the quantile cannot be estimated.
     pub fn quantile(&self, q: f64) -> f64 {
         if q < 0.0 {
             return f64::NEG_INFINITY;
@@ -587,6 +695,7 @@ impl NativeHistogram {
         f64::NAN
     }
 
+    /// Estimates the fraction of observations between `lower` and `upper`.
     pub fn fraction(&self, lower: f64, upper: f64) -> f64 {
         if self.count == 0.0 || lower.is_nan() || upper.is_nan() {
             return f64::NAN;
@@ -655,6 +764,7 @@ impl NativeHistogram {
         (upper_rank - lower_rank) / self.count
     }
 
+    /// Converts populated buckets to `(boundary rule, lower, upper, count)` strings.
     pub fn to_prometheus_buckets(&self) -> Option<Vec<(u8, String, String, String)>> {
         Some(
             self.all_buckets()?
@@ -775,7 +885,7 @@ fn reconcile_exponential(
     }
     left.grow_zero_threshold(zero_threshold)?;
     right.grow_zero_threshold(zero_threshold)?;
-    Some((left.compact(), right.compact()))
+    Some((left.compact()?, right.compact()?))
 }
 
 fn reconcile_custom(
@@ -793,8 +903,9 @@ fn reconcile_custom(
     };
 
     Some((
-        left.copy_to_custom_values(custom_values.clone())?.compact(),
-        right.copy_to_custom_values(custom_values)?.compact(),
+        left.copy_to_custom_values(custom_values.clone())?
+            .compact()?,
+        right.copy_to_custom_values(custom_values)?.compact()?,
     ))
 }
 
@@ -896,13 +1007,13 @@ impl NativeHistogram {
     }
 }
 
-fn add_reset_hint(left: i32, right: i32) -> i32 {
-    if left == GAUGE_RESET_HINT || right == GAUGE_RESET_HINT {
-        GAUGE_RESET_HINT
+fn add_reset_hint(left: CounterResetHint, right: CounterResetHint) -> CounterResetHint {
+    if left == CounterResetHint::Gauge || right == CounterResetHint::Gauge {
+        CounterResetHint::Gauge
     } else if left == right {
         left
     } else {
-        UNKNOWN_COUNTER_RESET_HINT
+        CounterResetHint::Unknown
     }
 }
 
@@ -925,39 +1036,37 @@ fn side_bucket_indices(spans: &[Span]) -> Option<Vec<i32>> {
     Some(indices)
 }
 
-fn spans_from_indices_counts(values: Vec<(i32, f64)>) -> (Vec<Span>, Vec<f64>) {
-    let mut spans = Vec::new();
+fn spans_from_indices_counts(values: Vec<(i32, f64)>) -> Option<(Vec<Span>, Vec<f64>)> {
+    let mut spans = Vec::<Span>::new();
     let mut buckets = Vec::new();
-    let mut current_span_start = None::<i32>;
-    let mut previous_index = 0i32;
+    let mut previous_index = None::<i32>;
 
     for (idx, count) in values {
         if count == 0.0 {
             continue;
         }
-        match current_span_start {
-            None => {
+        match (spans.last_mut(), previous_index) {
+            (Some(span), Some(previous)) if previous.checked_add(1) == Some(idx) => {
+                span.length = span.length.checked_add(1)?;
+            }
+            (_, Some(previous)) => {
                 spans.push(Span {
-                    offset: idx,
+                    offset: idx.checked_sub(previous)?.checked_sub(1)?,
                     length: 1,
                 });
-                current_span_start = Some(idx);
             }
-            Some(_) if idx == previous_index + 1 => {
-                spans.last_mut().expect("span exists").length += 1;
-            }
-            Some(_) => {
+            (_, None) => {
                 spans.push(Span {
-                    offset: idx - previous_index - 1,
+                    offset: idx,
                     length: 1,
                 });
             }
         }
         buckets.push(count);
-        previous_index = idx;
+        previous_index = Some(idx);
     }
 
-    (spans, buckets)
+    Some((spans, buckets))
 }
 
 fn side_counts(spans: &[Span], buckets: &[f64]) -> Option<BTreeMap<i32, f64>> {
@@ -1012,7 +1121,7 @@ fn merge_side(
             ),
         );
     }
-    Some(spans_from_indices_counts(values.into_iter().collect()))
+    spans_from_indices_counts(values.into_iter().collect())
 }
 
 fn reduce_side(
@@ -1027,13 +1136,11 @@ fn reduce_side(
         let target_idx = ceil_div(idx, factor);
         *values.entry(target_idx).or_default() += *count;
     }
-    Some(spans_from_indices_counts(values.into_iter().collect()))
+    spans_from_indices_counts(values.into_iter().collect())
 }
 
-fn compact_side(spans: &[Span], buckets: &[f64]) -> (Vec<Span>, Vec<f64>) {
-    let Some(indices) = side_bucket_indices(spans) else {
-        return (Vec::new(), Vec::new());
-    };
+fn compact_side(spans: &[Span], buckets: &[f64]) -> Option<(Vec<Span>, Vec<f64>)> {
+    let indices = side_bucket_indices(spans)?;
     spans_from_indices_counts(indices.into_iter().zip(buckets.iter().copied()).collect())
 }
 
@@ -1052,7 +1159,7 @@ fn map_custom_side(
             .unwrap_or(new_values.len()) as i32;
         *values.entry(target_idx).or_default() += *count;
     }
-    Some(spans_from_indices_counts(values.into_iter().collect()))
+    spans_from_indices_counts(values.into_iter().collect())
 }
 
 fn fold_zero_side(
@@ -1070,7 +1177,7 @@ fn fold_zero_side(
             kept.push((idx, *count));
         }
     }
-    let (spans, buckets) = spans_from_indices_counts(kept);
+    let (spans, buckets) = spans_from_indices_counts(kept)?;
     Some((spans, buckets, zero_count))
 }
 
@@ -1097,7 +1204,7 @@ fn ceil_div(value: i32, divisor: i32) -> i32 {
     value.div_euclid(divisor) + i32::from(value.rem_euclid(divisor) != 0)
 }
 
-pub fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
+fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
     if schema == CUSTOM_BUCKETS_SCHEMA {
         return match idx {
             -1 => Some(f64::NEG_INFINITY),
@@ -1118,15 +1225,9 @@ pub fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
     Some(2.0_f64.powf(idx as f64 / (1u32 << schema) as f64))
 }
 
+/// Returns the Arrow type for a complete native histogram value.
 pub fn native_histogram_arrow_type() -> ArrowDataType {
     native_histogram_value_type().as_arrow_type()
-}
-
-fn native_histogram_fields() -> datafusion::arrow::datatypes::Fields {
-    match native_histogram_arrow_type() {
-        ArrowDataType::Struct(fields) => fields,
-        _ => unreachable!("native histogram must be a struct"),
-    }
 }
 
 fn struct_child<'a>(array: &'a StructArray, name: &str) -> DfResult<&'a ArrayRef> {
@@ -1249,6 +1350,10 @@ fn check_span_bucket_count(spans: &[Span], buckets: usize, name: &str) -> DfResu
     Ok(())
 }
 
+/// Decodes one native histogram row into the query-time [`NativeHistogram`] model.
+///
+/// A null struct returns `Ok(None)`. Integer payloads are converted to absolute
+/// `f64` counts, and malformed child fields or span layouts return an error.
 pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<NativeHistogram>> {
     if array.is_null(row) {
         return Ok(None);
@@ -1298,7 +1403,7 @@ pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<Native
         schema,
         zero_threshold: required_primitive::<Float64Type>(array, ZERO_THRESHOLD_FIELD, row)?,
         sum: required_primitive::<Float64Type>(array, SUM_FIELD, row)?,
-        reset_hint: required_primitive::<Int32Type>(array, RESET_HINT_FIELD, row)?,
+        reset_hint: required_primitive::<Int32Type>(array, RESET_HINT_FIELD, row)?.into(),
         start_timestamp: optional_primitive::<TimestampMillisecondType>(
             array,
             START_TIMESTAMP_FIELD,
@@ -1318,6 +1423,11 @@ fn list_opt<T>(values: Vec<T>) -> Option<Vec<Option<T>>> {
     Some(values.into_iter().map(Some).collect())
 }
 
+/// Builds a native histogram Struct array from query-time values.
+///
+/// The result uses the canonical `f64` payload fields. Integer count and bucket
+/// fields remain empty because [`NativeHistogram`] no longer tracks the source
+/// payload family after decoding.
 pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
     let mut schemas = Vec::with_capacity(values.len());
     let mut zero_thresholds = Vec::with_capacity(values.len());
@@ -1345,7 +1455,7 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
             schemas.push(Some(histogram.schema));
             zero_thresholds.push(Some(histogram.zero_threshold));
             sums.push(Some(histogram.sum));
-            reset_hints.push(Some(histogram.reset_hint));
+            reset_hints.push(Some(i32::from(histogram.reset_hint)));
             start_timestamps.push(histogram.start_timestamp);
             custom_values.push(list_opt(histogram.custom_values.clone()));
             positive_span_offsets.push(list_opt(
@@ -1406,47 +1516,90 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
         }
     }
 
-    let arrays: Vec<ArrayRef> = vec![
-        Arc::new(Int32Array::from(schemas)),
-        Arc::new(Float64Array::from(zero_thresholds)),
-        Arc::new(Float64Array::from(sums)),
-        Arc::new(Int32Array::from(reset_hints)),
-        Arc::new(TimestampMillisecondArray::from_iter(start_timestamps)),
-        Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
-            custom_values,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
-            positive_span_offsets,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
-            positive_span_lengths,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
-            negative_span_offsets,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
-            negative_span_lengths,
-        )),
-        Arc::new(UInt64Array::from(count_u64)),
-        Arc::new(UInt64Array::from(zero_count_u64)),
-        Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
-            positive_buckets_i64,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
-            negative_buckets_i64,
-        )),
-        Arc::new(Float64Array::from(count_f64)),
-        Arc::new(Float64Array::from(zero_count_f64)),
-        Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
-            positive_buckets_f64,
-        )),
-        Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
-            negative_buckets_f64,
-        )),
+    let named_arrays: Vec<(&str, ArrayRef)> = vec![
+        (SCHEMA_FIELD, Arc::new(Int32Array::from(schemas))),
+        (
+            ZERO_THRESHOLD_FIELD,
+            Arc::new(Float64Array::from(zero_thresholds)),
+        ),
+        (SUM_FIELD, Arc::new(Float64Array::from(sums))),
+        (RESET_HINT_FIELD, Arc::new(Int32Array::from(reset_hints))),
+        (
+            START_TIMESTAMP_FIELD,
+            Arc::new(TimestampMillisecondArray::from_iter(start_timestamps)),
+        ),
+        (
+            CUSTOM_VALUES_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                custom_values,
+            )),
+        ),
+        (
+            POSITIVE_SPAN_OFFSETS_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
+                positive_span_offsets,
+            )),
+        ),
+        (
+            POSITIVE_SPAN_LENGTHS_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                positive_span_lengths,
+            )),
+        ),
+        (
+            NEGATIVE_SPAN_OFFSETS_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
+                negative_span_offsets,
+            )),
+        ),
+        (
+            NEGATIVE_SPAN_LENGTHS_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                negative_span_lengths,
+            )),
+        ),
+        (COUNT_U64_FIELD, Arc::new(UInt64Array::from(count_u64))),
+        (
+            ZERO_COUNT_U64_FIELD,
+            Arc::new(UInt64Array::from(zero_count_u64)),
+        ),
+        (
+            POSITIVE_BUCKETS_I64_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
+                positive_buckets_i64,
+            )),
+        ),
+        (
+            NEGATIVE_BUCKETS_I64_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
+                negative_buckets_i64,
+            )),
+        ),
+        (COUNT_F64_FIELD, Arc::new(Float64Array::from(count_f64))),
+        (
+            ZERO_COUNT_F64_FIELD,
+            Arc::new(Float64Array::from(zero_count_f64)),
+        ),
+        (
+            POSITIVE_BUCKETS_F64_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                positive_buckets_f64,
+            )),
+        ),
+        (
+            NEGATIVE_BUCKETS_F64_FIELD,
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                negative_buckets_f64,
+            )),
+        ),
     ];
+    let (fields, arrays): (Vec<_>, Vec<_>) = named_arrays
+        .into_iter()
+        .map(|(name, array)| (Field::new(name, array.data_type().clone(), true), array))
+        .unzip();
 
     Arc::new(StructArray::new(
-        native_histogram_fields(),
+        fields.into(),
         arrays,
         Some(NullBuffer::from(validity)),
     ))
@@ -1462,7 +1615,7 @@ mod tests {
             schema: 0,
             zero_threshold: 0.0,
             sum: count,
-            reset_hint: COUNTER_RESET_HINT,
+            reset_hint: CounterResetHint::CounterReset,
             start_timestamp: None,
             custom_values: Vec::new(),
             positive_spans,
@@ -1472,6 +1625,63 @@ mod tests {
             positive_buckets,
             negative_buckets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn span_rebuild_checks_offsets_and_preserves_empty_input() {
+        assert_eq!(
+            spans_from_indices_counts(Vec::new()),
+            Some((Vec::new(), Vec::new()))
+        );
+        assert_eq!(
+            spans_from_indices_counts(vec![(2, 1.0), (3, 2.0), (5, 3.0)]),
+            Some((
+                vec![
+                    Span {
+                        offset: 2,
+                        length: 2,
+                    },
+                    Span {
+                        offset: 1,
+                        length: 1,
+                    },
+                ],
+                vec![1.0, 2.0, 3.0],
+            ))
+        );
+        assert_eq!(
+            spans_from_indices_counts(vec![(i32::MIN, 1.0), (i32::MAX, 2.0)]),
+            None
+        );
+    }
+
+    #[test]
+    fn arrow_round_trip_preserves_unrecognized_reset_hint() {
+        let mut expected = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![1.0],
+        );
+        expected.reset_hint = CounterResetHint::Unrecognized(42);
+
+        let array = build_histogram_array(&[Some(expected.clone())]);
+        assert_eq!(array.data_type(), &native_histogram_arrow_type());
+        let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+
+        assert_eq!(read_histogram(array, 0).unwrap(), Some(expected));
+        assert!(
+            primitive_child::<UInt64Type>(array, COUNT_U64_FIELD)
+                .unwrap()
+                .is_null(0)
+        );
+        assert_eq!(
+            primitive_child::<Float64Type>(array, COUNT_F64_FIELD)
+                .unwrap()
+                .value(0),
+            1.0
+        );
     }
 
     #[test]
@@ -1580,7 +1790,7 @@ mod tests {
             }],
             vec![1.0, 0.0],
         );
-        left.reset_hint = COUNTER_RESET_HINT;
+        left.reset_hint = CounterResetHint::CounterReset;
         left.start_timestamp = Some(1000);
 
         let mut right = histogram(
@@ -1590,7 +1800,7 @@ mod tests {
             }],
             vec![1.0],
         );
-        right.reset_hint = NOT_COUNTER_RESET_HINT;
+        right.reset_hint = CounterResetHint::NotCounterReset;
         right.start_timestamp = Some(2000);
 
         assert!(left.promql_eq(&right));
@@ -1654,7 +1864,7 @@ mod tests {
             }],
             vec![1.0],
         );
-        previous.reset_hint = UNKNOWN_COUNTER_RESET_HINT;
+        previous.reset_hint = CounterResetHint::Unknown;
 
         let mut higher_resolution = previous.clone();
         higher_resolution.schema = 1;
@@ -1665,7 +1875,7 @@ mod tests {
         lower_resolution.schema = 0;
         lower_resolution.positive_spans[0].offset = 1;
         let mut previous_higher_resolution = higher_resolution;
-        previous_higher_resolution.reset_hint = UNKNOWN_COUNTER_RESET_HINT;
+        previous_higher_resolution.reset_hint = CounterResetHint::Unknown;
         assert!(!lower_resolution.detect_reset(&previous_higher_resolution));
 
         let mut smaller_zero_threshold = previous.clone();
@@ -1680,9 +1890,9 @@ mod tests {
             }],
             vec![1.0],
         );
-        previous.reset_hint = UNKNOWN_COUNTER_RESET_HINT;
+        previous.reset_hint = CounterResetHint::Unknown;
         let mut split_bucket = histogram(Vec::new(), Vec::new());
-        split_bucket.reset_hint = UNKNOWN_COUNTER_RESET_HINT;
+        split_bucket.reset_hint = CounterResetHint::Unknown;
         split_bucket.count = 1.0;
         split_bucket.zero_count = 1.0;
         split_bucket.zero_threshold = 0.75;
@@ -1743,7 +1953,7 @@ mod tests {
         );
 
         let result = left.sub(&right).unwrap();
-        assert_eq!(result.reset_hint, GAUGE_RESET_HINT);
+        assert_eq!(result.reset_hint, CounterResetHint::Gauge);
         assert_eq!(result.positive_buckets, vec![2.0]);
     }
 
@@ -1763,7 +1973,7 @@ mod tests {
         let result = left.sub(&right).unwrap();
 
         assert_eq!(result.schema, CUSTOM_BUCKETS_SCHEMA);
-        assert_eq!(result.reset_hint, GAUGE_RESET_HINT);
+        assert_eq!(result.reset_hint, CounterResetHint::Gauge);
         assert_eq!(result.count, -2.0);
         assert_eq!(result.sum, -2.0);
         assert_eq!(result.positive_buckets, vec![-2.0]);
