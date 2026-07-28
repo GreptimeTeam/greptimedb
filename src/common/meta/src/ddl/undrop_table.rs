@@ -432,6 +432,12 @@ impl Procedure for UndropTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::UndropTable.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let locator = self

@@ -261,6 +261,12 @@ impl Procedure for CreateLogicalTablesProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::CreateLogicalTables.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 #[derive(Serialize)]

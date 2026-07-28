@@ -92,6 +92,12 @@ impl Procedure for TruncateTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::TruncateTable.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let task = &self.data.task;

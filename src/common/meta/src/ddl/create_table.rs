@@ -402,6 +402,12 @@ impl Procedure for CreateTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::CreateTable.as_str())
+        {
+            return None;
+        }
         #[derive(Serialize)]
         struct CreateTableEventPayload<'a> {
             kind: &'static str,

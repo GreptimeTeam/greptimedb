@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::Value;
 use api::v1::value::ValueData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_event_recorder::Event;
+use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
     ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
     RetryPhase,
@@ -114,6 +115,28 @@ fn truncate_submitted_event_uses_task_identity_and_time_ranges() {
 }
 
 #[test]
+fn table_procedures_honor_event_type_filter() {
+    let undrop = UndropTableProcedure::new(UndropTableTask { table_id: 42 }, test_context());
+    let purge =
+        PurgeDroppedTableProcedure::new(PurgeDroppedTableTask { table_id: 43 }, test_context());
+    let truncate = truncate_procedure(TruncateTableTask {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table: "metrics".to_string(),
+        table_id: 44,
+        time_ranges: vec![],
+    });
+
+    for (procedure, event_type) in [
+        (&undrop as &dyn Procedure, "undrop_table"),
+        (&purge as &dyn Procedure, "purge_dropped_table"),
+        (&truncate as &dyn Procedure, "truncate_table"),
+    ] {
+        assert_event_filter(procedure, event_type);
+    }
+}
+
+#[test]
 fn later_lifecycle_events_are_lightweight_without_success_ids() {
     let undrop = UndropTableProcedure::new(UndropTableTask { table_id: 42 }, test_context());
     let purge =
@@ -173,6 +196,36 @@ fn test_context() -> crate::ddl::DdlContext {
     new_ddl_context(Arc::new(MockDatanodeManager::new(())))
 }
 
+fn assert_event_filter(procedure: &dyn Procedure, event_type: &str) {
+    let state = ProcedureState::Running;
+    let event_context = |event_type_filter| EventContext {
+        procedure_id: ProcedureId::random(),
+        lifecycle_state: &state,
+        trigger: EventTrigger::Submitted,
+        event_type_filter: Arc::new(event_type_filter),
+    };
+
+    let allowed = procedure
+        .event(&event_context(EventTypeFilter::Only(HashSet::from([
+            event_type.to_string(),
+        ]))))
+        .unwrap();
+    assert_eq!(allowed.event_type(), event_type);
+
+    assert!(
+        procedure
+            .event(&event_context(EventTypeFilter::Only(HashSet::from([
+                "other_event".to_string(),
+            ]))))
+            .is_none()
+    );
+    assert!(
+        procedure
+            .event(&event_context(EventTypeFilter::Only(HashSet::new())))
+            .is_none()
+    );
+}
+
 fn event_for(procedure: &dyn Procedure, trigger: EventTrigger) -> Box<dyn Event> {
     let lifecycle_state = ProcedureState::Running;
     procedure
@@ -180,6 +233,7 @@ fn event_for(procedure: &dyn Procedure, trigger: EventTrigger) -> Box<dyn Event>
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap()
 }

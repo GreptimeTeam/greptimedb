@@ -399,6 +399,12 @@ impl Procedure for AlterTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::AlterTable.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let table_ref = self.data.table_ref();

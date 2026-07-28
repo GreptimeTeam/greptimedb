@@ -321,6 +321,12 @@ impl Procedure for AlterLogicalTablesProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::AlterLogicalTables.as_str())
+        {
+            return None;
+        }
         if ctx.trigger != EventTrigger::Submitted {
             return Some(Box::new(TableDdlEvent::lifecycle(
                 TableDdlEventType::AlterLogicalTables,

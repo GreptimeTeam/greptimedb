@@ -23,6 +23,7 @@ use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_req
 use api::v1::value::ValueData;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_event_recorder::EventTypeFilter;
 use common_procedure::{
     Context as ProcedureContext, EventContext, EventTrigger, Procedure, ProcedureId,
     ProcedureState, Status,
@@ -113,6 +114,7 @@ fn test_submitted_event_has_one_rich_row_per_logical_table() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -163,6 +165,7 @@ fn test_later_event_is_lightweight() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Recovered,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -192,6 +195,7 @@ fn test_succeeded_event_has_one_id_only_row_per_logical_table() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 

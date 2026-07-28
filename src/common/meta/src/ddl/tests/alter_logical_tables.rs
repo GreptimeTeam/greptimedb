@@ -22,6 +22,7 @@ use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_req
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, SemanticType, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_event_recorder::EventTypeFilter;
 use common_procedure::{
     ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
     RetryPhase, Status,
@@ -175,6 +176,7 @@ fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -253,6 +255,7 @@ fn test_later_events_are_lightweight_without_dynamic_success_id() {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &lifecycle_state,
                 trigger,
+                event_type_filter: Arc::new(EventTypeFilter::All),
             })
             .unwrap();
         assert_eq!(event.event_type(), "alter_logical_tables");

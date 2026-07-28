@@ -370,6 +370,12 @@ impl Procedure for DropTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::DropTable.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let task = &self.data.task;

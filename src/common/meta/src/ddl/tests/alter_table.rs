@@ -27,6 +27,8 @@ use api::v1::{
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_event_recorder::EventTypeFilter;
+use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN};
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{
     ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
@@ -46,7 +48,6 @@ use tokio::sync::mpsc::{self};
 
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::event::table::{
-    EVENTS_TABLE_CATALOG_NAME_COLUMN_NAME, EVENTS_TABLE_SCHEMA_NAME_COLUMN_NAME,
     EVENTS_TABLE_TABLE_ID_COLUMN_NAME, EVENTS_TABLE_TABLE_NAME_COLUMN_NAME,
     TABLE_DDL_PAYLOAD_VERSION,
 };
@@ -172,6 +173,7 @@ fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -183,8 +185,8 @@ fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
             .map(|column| column.column_name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            EVENTS_TABLE_CATALOG_NAME_COLUMN_NAME,
-            EVENTS_TABLE_SCHEMA_NAME_COLUMN_NAME,
+            CATALOG_NAME_COLUMN.name(),
+            SCHEMA_NAME_COLUMN.name(),
             EVENTS_TABLE_TABLE_NAME_COLUMN_NAME,
             EVENTS_TABLE_TABLE_ID_COLUMN_NAME,
         ]
@@ -219,6 +221,7 @@ fn test_alter_table_lifecycle_events_are_lightweight_with_fixed_schema() {
             procedure_id,
             lifecycle_state: &lifecycle_state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
     let expected_schema = submitted.extra_schema();
@@ -244,6 +247,7 @@ fn test_alter_table_lifecycle_events_are_lightweight_with_fixed_schema() {
                 procedure_id,
                 lifecycle_state: &lifecycle_state,
                 trigger,
+                event_type_filter: Arc::new(EventTypeFilter::All),
             })
             .unwrap();
 

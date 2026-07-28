@@ -15,13 +15,13 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, SemanticType, Value};
 use common_event_recorder::Event;
+use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN};
 use common_event_recorder::testing::assert_event_contract;
 use serde::Serialize;
 use serde_json::json;
 
 use crate::ddl::event::table::{
-    EVENTS_TABLE_CATALOG_NAME_COLUMN_NAME, EVENTS_TABLE_PHYSICAL_TABLE_ID_COLUMN_NAME,
-    EVENTS_TABLE_SCHEMA_NAME_COLUMN_NAME, EVENTS_TABLE_TABLE_ID_COLUMN_NAME,
+    EVENTS_TABLE_PHYSICAL_TABLE_ID_COLUMN_NAME, EVENTS_TABLE_TABLE_ID_COLUMN_NAME,
     EVENTS_TABLE_TABLE_NAME_COLUMN_NAME, TABLE_DDL_PAYLOAD_VERSION, TableDdlEvent,
     TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload,
     versioned_table_ddl_payload_or_error,
@@ -214,14 +214,8 @@ fn logical_table_submission_emits_one_row_per_locator() {
 
 fn expected_schema(event_type: TableDdlEventType) -> Vec<(&'static str, i32)> {
     let mut schema = vec![
-        (
-            EVENTS_TABLE_CATALOG_NAME_COLUMN_NAME,
-            ColumnDataType::String as i32,
-        ),
-        (
-            EVENTS_TABLE_SCHEMA_NAME_COLUMN_NAME,
-            ColumnDataType::String as i32,
-        ),
+        (CATALOG_NAME_COLUMN.name(), ColumnDataType::String as i32),
+        (SCHEMA_NAME_COLUMN.name(), ColumnDataType::String as i32),
         (
             EVENTS_TABLE_TABLE_NAME_COLUMN_NAME,
             ColumnDataType::String as i32,

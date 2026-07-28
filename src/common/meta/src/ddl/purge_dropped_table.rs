@@ -262,6 +262,12 @@ impl Procedure for PurgeDroppedTableProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::PurgeDroppedTable.as_str())
+        {
+            return None;
+        }
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let locator = TableDdlLocator::from_table_id(self.data.task.table_id);

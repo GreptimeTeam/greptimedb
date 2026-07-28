@@ -29,8 +29,6 @@ use store_api::storage::TableId;
 /// Current version of table DDL event payloads.
 pub const TABLE_DDL_PAYLOAD_VERSION: u32 = 1;
 
-pub const EVENTS_TABLE_CATALOG_NAME_COLUMN_NAME: &str = CATALOG_NAME_COLUMN.name();
-pub const EVENTS_TABLE_SCHEMA_NAME_COLUMN_NAME: &str = SCHEMA_NAME_COLUMN.name();
 pub const EVENTS_TABLE_TABLE_NAME_COLUMN_NAME: &str = "table_name";
 pub const EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
 pub const EVENTS_TABLE_PHYSICAL_TABLE_ID_COLUMN_NAME: &str = "physical_table_id";

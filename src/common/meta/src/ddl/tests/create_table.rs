@@ -23,6 +23,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, SemanticType, Value};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_event_recorder::EventTypeFilter;
 use common_procedure::{
     Context as ProcedureContext, EventContext, EventTrigger, Procedure, ProcedureId,
     ProcedureState, Status,
@@ -152,6 +153,7 @@ fn test_create_table_submitted_event_has_rich_payload_and_locators() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -187,6 +189,7 @@ fn test_create_table_non_success_lifecycle_event_is_lightweight() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Recovered,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
@@ -213,6 +216,7 @@ fn test_create_table_succeeded_event_only_has_table_id() {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,
+            event_type_filter: Arc::new(EventTypeFilter::All),
         })
         .unwrap();
 
