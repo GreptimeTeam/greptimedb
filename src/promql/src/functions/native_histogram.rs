@@ -252,11 +252,18 @@ fn record_counter_reset_contradiction(
     rhs: &NativeHistogram,
 ) {
     if lhs.counter_reset_hints_contradict(rhs) {
-        record_warning(
-            collector,
-            format!("{name}: native histogram counter reset hints contradict"),
-        );
+        record_counter_reset_contradiction_warning(collector, name);
     }
+}
+
+fn record_counter_reset_contradiction_warning(
+    collector: &Option<PromqlAnnotationCollector>,
+    name: &'static str,
+) {
+    record_warning(
+        collector,
+        format!("{name}: native histogram counter reset hints contradict"),
+    );
 }
 
 fn scalar_histogram_udf(
@@ -339,7 +346,7 @@ fn histogram_pair_udf_with_collector(
                         (Some(lhs), Some(rhs)) => {
                             record_custom_reconciliation(&collector, name, &lhs, &rhs);
                             let result = op(&lhs, &rhs);
-                            if result.is_some() && name == NativeHistogramAdd::name() {
+                            if result.is_some() {
                                 record_counter_reset_contradiction(&collector, name, &lhs, &rhs);
                             }
                             if result.is_none() {
@@ -788,6 +795,8 @@ struct NativeHistogramAggregateAccumulator {
     value: Option<NativeHistogram>,
     count: u64,
     dropped_incompatible: bool,
+    counter_reset_seen: bool,
+    not_counter_reset_seen: bool,
     collector: Option<PromqlAnnotationCollector>,
 }
 
@@ -801,6 +810,8 @@ impl NativeHistogramAggregateAccumulator {
             value: None,
             count: 0,
             dropped_incompatible: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
             collector,
         }
     }
@@ -813,20 +824,26 @@ impl NativeHistogramAggregateAccumulator {
         Ok(Box::new(Self::new(kind, collector)))
     }
 
+    fn observe_reset_hints(&mut self, counter_reset_seen: bool, not_counter_reset_seen: bool) {
+        self.counter_reset_seen |= counter_reset_seen;
+        self.not_counter_reset_seen |= not_counter_reset_seen;
+        if self.counter_reset_seen && self.not_counter_reset_seen {
+            record_counter_reset_contradiction_warning(&self.collector, self.kind.name());
+        }
+    }
+
     fn push_histogram(&mut self, histogram: NativeHistogram, count: u64) {
         if self.dropped_incompatible {
             return;
         }
 
+        self.observe_reset_hints(
+            histogram.reset_hint == COUNTER_RESET_HINT,
+            histogram.reset_hint == NOT_COUNTER_RESET_HINT,
+        );
         let value = match self.value.take() {
             Some(value) => {
                 record_custom_reconciliation(&self.collector, self.kind.name(), &value, &histogram);
-                record_counter_reset_contradiction(
-                    &self.collector,
-                    self.kind.name(),
-                    &value,
-                    &histogram,
-                );
                 match value.add(&histogram) {
                     Some(value) => Some(value),
                     None => {
@@ -867,11 +884,17 @@ fn range_sum_histograms(
     collector: &Option<PromqlAnnotationCollector>,
 ) -> Option<NativeHistogram> {
     let mut value = None;
+    let mut counter_reset_seen = false;
+    let mut not_counter_reset_seen = false;
     for histogram in samples {
+        counter_reset_seen |= histogram.reset_hint == COUNTER_RESET_HINT;
+        not_counter_reset_seen |= histogram.reset_hint == NOT_COUNTER_RESET_HINT;
+        if counter_reset_seen && not_counter_reset_seen {
+            record_counter_reset_contradiction_warning(collector, name);
+        }
         value = match value {
             Some(value) => {
                 record_custom_reconciliation(collector, name, &value, &histogram);
-                record_counter_reset_contradiction(collector, name, &value, &histogram);
                 match value.add(&histogram) {
                     Some(value) => Some(value),
                     None => {
@@ -966,6 +989,15 @@ fn native_histogram_range_histogram(
             result.push(None);
             continue;
         }
+        if matches!(kind, NativeHistogramRangeHistogramKind::Last) {
+            let histogram = if (offset..offset + length).any(|row| histograms.is_null(row)) {
+                None
+            } else {
+                read_histogram(histograms, offset + length - 1)?
+            };
+            result.push(histogram);
+            continue;
+        }
         let Some(samples) = collect_window_histograms(histograms, offset, length)? else {
             result.push(None);
             continue;
@@ -1039,6 +1071,23 @@ fn native_histogram_range_float(
             }
             continue;
         }
+        if matches!(kind, NativeHistogramRangeFloatKind::Absent) {
+            result.append_null();
+            continue;
+        }
+        if matches!(
+            kind,
+            NativeHistogramRangeFloatKind::Count | NativeHistogramRangeFloatKind::Present
+        ) {
+            if (offset..offset + length).any(|row| histograms.is_null(row)) {
+                result.append_null();
+            } else if matches!(kind, NativeHistogramRangeFloatKind::Count) {
+                result.append_value(length as f64);
+            } else {
+                result.append_value(1.0);
+            }
+            continue;
+        }
         let Some(samples) = collect_window_histograms(histograms, offset, length)? else {
             result.append_null();
             continue;
@@ -1058,7 +1107,9 @@ fn native_histogram_range_float(
                 .windows(2)
                 .zip(timestamps[offset..offset + length].windows(2))
                 .filter(|(pair, ts_pair)| {
-                    pair[1].detect_counter_reset(&pair[0], ts_pair[0], ts_pair[1])
+                    (pair[0].reset_hint == GAUGE_RESET_HINT)
+                        != (pair[1].reset_hint == GAUGE_RESET_HINT)
+                        || pair[1].detect_counter_reset(&pair[0], ts_pair[0], ts_pair[1])
                 })
                 .count() as f64,
         };
@@ -1232,9 +1283,16 @@ fn native_histogram_aggregate_udf(
             native_histogram_arrow_type(),
             DataType::UInt64,
             DataType::Boolean,
+            DataType::Boolean,
+            DataType::Boolean,
         ]
     } else {
-        vec![native_histogram_arrow_type(), DataType::Boolean]
+        vec![
+            native_histogram_arrow_type(),
+            DataType::Boolean,
+            DataType::Boolean,
+            DataType::Boolean,
+        ]
     };
 
     create_udaf(
@@ -1302,6 +1360,8 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
             state.push(ScalarValue::UInt64(Some(self.count)));
         }
         state.push(ScalarValue::Boolean(Some(self.dropped_incompatible)));
+        state.push(ScalarValue::Boolean(Some(self.counter_reset_seen)));
+        state.push(ScalarValue::Boolean(Some(self.not_counter_reset_seen)));
         Ok(state)
     }
 
@@ -1344,12 +1404,37 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
                     self.kind.name()
                 ))
             })?;
+        let counter_reset_seen = states
+            .get(dropped_index + 1)
+            .and_then(|array| array.as_any().downcast_ref::<BooleanArray>())
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "{}: expected Boolean counter reset state",
+                    self.kind.name()
+                ))
+            })?;
+        let not_counter_reset_seen = states
+            .get(dropped_index + 2)
+            .and_then(|array| array.as_any().downcast_ref::<BooleanArray>())
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "{}: expected Boolean not-counter-reset state",
+                    self.kind.name()
+                ))
+            })?;
 
         for row in 0..histograms.len() {
             if dropped.value(row) {
                 self.mark_incompatible();
                 continue;
             }
+            if self.dropped_incompatible {
+                continue;
+            }
+            self.observe_reset_hints(
+                counter_reset_seen.value(row),
+                not_counter_reset_seen.value(row),
+            );
             let Some(histogram) = read_histogram(histograms, row)? else {
                 continue;
             };
@@ -1530,6 +1615,22 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         if has_null {
             result.push(None);
             continue;
+        }
+
+        let wrong_flavor = if IS_COUNTER {
+            samples
+                .iter()
+                .any(|histogram| histogram.reset_hint == GAUGE_RESET_HINT)
+        } else {
+            samples[0].reset_hint != GAUGE_RESET_HINT
+                || samples[samples.len() - 1].reset_hint != GAUGE_RESET_HINT
+        };
+        if wrong_flavor {
+            let expected = if IS_COUNTER { "counter" } else { "gauge" };
+            record_warning(
+                &collector,
+                format!("{func_name}: native histogram input should be a {expected} histogram"),
+            );
         }
 
         let timestamps = &all_timestamps[offset..offset + length];
@@ -1742,6 +1843,21 @@ fn native_idelta<const IS_RATE: bool>(
             continue;
         }
 
+        let wrong_flavor = samples.iter().any(|histogram| {
+            if IS_RATE {
+                histogram.reset_hint == GAUGE_RESET_HINT
+            } else {
+                histogram.reset_hint != GAUGE_RESET_HINT
+            }
+        });
+        if wrong_flavor {
+            let expected = if IS_RATE { "counter" } else { "gauge" };
+            record_warning(
+                &collector,
+                format!("{func_name}: native histogram input should be a {expected} histogram"),
+            );
+        }
+
         let sampled_interval_secs =
             (ts_values[offset + length - 1] - ts_values[offset + length - 2]) as f64 / 1000.0;
         if sampled_interval_secs <= 0.0 {
@@ -1883,11 +1999,7 @@ mod tests {
         read_histogram(&array, 0).unwrap().unwrap()
     }
 
-    fn run_histogram_range_udf(
-        udf: ScalarUDF,
-        histograms: Vec<NativeHistogram>,
-    ) -> NativeHistogram {
-        let values = histograms.into_iter().map(Some).collect::<Vec<_>>();
+    fn histogram_range_input(values: Vec<Option<NativeHistogram>>) -> Vec<ColumnarValue> {
         let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
             (0..values.len()).map(|idx| Some((idx as i64 + 1) * 1000)),
         ));
@@ -1896,13 +2008,51 @@ mod tests {
         let ts_range = RangeArray::from_ranges(timestamps, range).unwrap();
         let value_range = RangeArray::from_ranges(histograms, range).unwrap();
 
+        vec![
+            ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+            ColumnarValue::Array(Arc::new(value_range.into_dict())),
+        ]
+    }
+
+    fn run_histogram_range_udf(
+        udf: ScalarUDF,
+        histograms: Vec<NativeHistogram>,
+    ) -> NativeHistogram {
         run_histogram_udf(
             udf,
-            vec![
-                ColumnarValue::Array(Arc::new(ts_range.into_dict())),
-                ColumnarValue::Array(Arc::new(value_range.into_dict())),
-            ],
+            histogram_range_input(histograms.into_iter().map(Some).collect()),
         )
+    }
+
+    fn run_float_range_udf(
+        udf: ScalarUDF,
+        histograms: Vec<Option<NativeHistogram>>,
+    ) -> Option<f64> {
+        let result = run_udf(udf, histogram_range_input(histograms), DataType::Float64);
+        let result = extract_array(&result).unwrap();
+        let result = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        (!result.is_null(0)).then(|| result.value(0))
+    }
+
+    fn run_extrapolated_histogram_udf(
+        udf: ScalarUDF,
+        histograms: Vec<NativeHistogram>,
+    ) -> NativeHistogram {
+        let range_length = histograms.len() as i64 * 1000;
+        let mut input = histogram_range_input(histograms.into_iter().map(Some).collect::<Vec<_>>());
+        input.push(ColumnarValue::Array(Arc::new(
+            TimestampMillisecondArray::from(vec![range_length]),
+        )));
+        input.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
+            range_length,
+        ]))));
+        run_histogram_udf(udf, input)
+    }
+
+    fn collected_warnings(collector: &PromqlAnnotationCollector) -> Vec<String> {
+        let mut warnings = Vec::new();
+        collector.append_to(&mut warnings, &mut Vec::new());
+        warnings
     }
 
     #[test]
@@ -1999,6 +2149,201 @@ mod tests {
         assert_eq!(result.count, 2.0);
         assert_eq!(result.sum, 2.0);
         assert_eq!(result.positive_buckets, vec![2.0]);
+    }
+
+    #[test]
+    fn presence_only_range_functions_preserve_null_semantics() {
+        let first = sample_histogram(1.0, 1.0, vec![1.0]);
+        let second = sample_histogram(2.0, 2.0, vec![2.0]);
+        assert_eq!(
+            run_float_range_udf(
+                NativeHistogramCountOverTime::scalar_udf(),
+                vec![Some(first.clone()), Some(second.clone())],
+            ),
+            Some(2.0)
+        );
+        assert_eq!(
+            run_float_range_udf(
+                NativeHistogramPresentOverTime::scalar_udf(),
+                vec![Some(first.clone()), Some(second.clone())],
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            run_float_range_udf(
+                NativeHistogramCountOverTime::scalar_udf(),
+                vec![None, Some(second.clone())],
+            ),
+            None
+        );
+
+        let result = run_udf(
+            NativeHistogramLastOverTime::scalar_udf(),
+            histogram_range_input(vec![None, Some(second)]),
+            native_histogram_arrow_type(),
+        );
+        let result = extract_array(&result).unwrap();
+        let result = result.as_any().downcast_ref::<StructArray>().unwrap();
+        assert!(result.is_null(0));
+    }
+
+    #[test]
+    fn resets_counts_histogram_flavor_transitions() {
+        let mut counter = sample_histogram(1.0, 1.0, vec![1.0]);
+        counter.reset_hint = NOT_COUNTER_RESET_HINT;
+        let mut gauge = sample_histogram(2.0, 2.0, vec![2.0]);
+        gauge.reset_hint = GAUGE_RESET_HINT;
+        assert_eq!(
+            run_float_range_udf(
+                NativeHistogramResets::scalar_udf(),
+                vec![Some(counter), Some(gauge)],
+            ),
+            Some(1.0)
+        );
+
+        let mut gauge = sample_histogram(1.0, 1.0, vec![1.0]);
+        gauge.reset_hint = GAUGE_RESET_HINT;
+        let mut counter = sample_histogram(2.0, 2.0, vec![2.0]);
+        counter.reset_hint = NOT_COUNTER_RESET_HINT;
+        assert_eq!(
+            run_float_range_udf(
+                NativeHistogramResets::scalar_udf(),
+                vec![Some(gauge), Some(counter)],
+            ),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn wrong_flavor_functions_record_warnings() {
+        let mut gauge_first = sample_histogram(1.0, 1.0, vec![1.0]);
+        gauge_first.reset_hint = GAUGE_RESET_HINT;
+        let mut gauge_last = sample_histogram(2.0, 2.0, vec![2.0]);
+        gauge_last.reset_hint = GAUGE_RESET_HINT;
+        let mut counter_first = sample_histogram(1.0, 1.0, vec![1.0]);
+        counter_first.reset_hint = NOT_COUNTER_RESET_HINT;
+        let mut counter_last = sample_histogram(2.0, 2.0, vec![2.0]);
+        counter_last.reset_hint = NOT_COUNTER_RESET_HINT;
+        let collector = PromqlAnnotationCollector::default();
+
+        run_extrapolated_histogram_udf(
+            NativeHistogramRate::scalar_udf_with_collector(Some(collector.clone())),
+            vec![gauge_first.clone(), gauge_last.clone()],
+        );
+        run_extrapolated_histogram_udf(
+            NativeHistogramDelta::scalar_udf_with_collector(Some(collector.clone())),
+            vec![counter_first.clone(), counter_last.clone()],
+        );
+        run_histogram_range_udf(
+            NativeHistogramIRate::scalar_udf_with_collector(Some(collector.clone())),
+            vec![gauge_first, gauge_last],
+        );
+        run_histogram_range_udf(
+            NativeHistogramIDelta::scalar_udf_with_collector(Some(collector.clone())),
+            vec![counter_first, counter_last],
+        );
+
+        let warnings = collected_warnings(&collector);
+        for expected in [
+            format!(
+                "{}: native histogram input should be a counter histogram",
+                NativeHistogramRate::name()
+            ),
+            format!(
+                "{}: native histogram input should be a gauge histogram",
+                NativeHistogramDelta::name()
+            ),
+            format!(
+                "{}: native histogram input should be a counter histogram",
+                NativeHistogramIRate::name()
+            ),
+            format!(
+                "{}: native histogram input should be a gauge histogram",
+                NativeHistogramIDelta::name()
+            ),
+        ] {
+            assert!(warnings.contains(&expected), "missing warning: {expected}");
+        }
+    }
+
+    #[test]
+    fn subtraction_records_reset_hint_contradictions() {
+        let mut left = sample_histogram(2.0, 2.0, vec![2.0]);
+        left.reset_hint = COUNTER_RESET_HINT;
+        let mut right = sample_histogram(1.0, 1.0, vec![1.0]);
+        right.reset_hint = NOT_COUNTER_RESET_HINT;
+        let collector = PromqlAnnotationCollector::default();
+
+        run_histogram_udf(
+            NativeHistogramSub::scalar_udf_with_collector(Some(collector.clone())),
+            vec![
+                ColumnarValue::Array(build_histogram_array(&[Some(left)])),
+                ColumnarValue::Array(build_histogram_array(&[Some(right)])),
+            ],
+        );
+
+        assert!(collected_warnings(&collector).contains(&format!(
+            "{}: native histogram counter reset hints contradict",
+            NativeHistogramSub::name()
+        )));
+    }
+
+    #[test]
+    fn counter_reset_hint_history_survives_folds_and_state_merges() {
+        let mut reset = sample_histogram(1.0, 1.0, vec![1.0]);
+        reset.reset_hint = COUNTER_RESET_HINT;
+        let mut unknown = sample_histogram(2.0, 2.0, vec![2.0]);
+        unknown.reset_hint = UNKNOWN_COUNTER_RESET_HINT;
+        let mut not_reset = sample_histogram(3.0, 3.0, vec![3.0]);
+        not_reset.reset_hint = NOT_COUNTER_RESET_HINT;
+
+        let range_collector = PromqlAnnotationCollector::default();
+        assert!(
+            range_sum_histograms(
+                vec![reset.clone(), unknown.clone(), not_reset.clone()],
+                NativeHistogramSumOverTime::name(),
+                &Some(range_collector.clone()),
+            )
+            .is_some()
+        );
+        assert!(collected_warnings(&range_collector).contains(&format!(
+            "{}: native histogram counter reset hints contradict",
+            NativeHistogramSumOverTime::name()
+        )));
+
+        for kind in [
+            NativeHistogramAggregateKind::Sum,
+            NativeHistogramAggregateKind::Avg,
+        ] {
+            let mut first_partial = NativeHistogramAggregateAccumulator::new(kind, None);
+            first_partial.push_histogram(reset.clone(), 1);
+            first_partial.push_histogram(unknown.clone(), 1);
+            let first_states = first_partial
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+
+            let mut second_partial = NativeHistogramAggregateAccumulator::new(kind, None);
+            second_partial.push_histogram(not_reset.clone(), 1);
+            let second_states = second_partial
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+
+            let collector = PromqlAnnotationCollector::default();
+            let mut merged =
+                NativeHistogramAggregateAccumulator::new(kind, Some(collector.clone()));
+            merged.merge_batch(&first_states).unwrap();
+            merged.merge_batch(&second_states).unwrap();
+            assert!(collected_warnings(&collector).contains(&format!(
+                "{}: native histogram counter reset hints contradict",
+                kind.name()
+            )));
+        }
     }
 
     #[test]
