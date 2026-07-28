@@ -389,8 +389,8 @@ mod tests {
             .decode_datafusion_expr(&TaskContext::default(), &schema, 1024)
             .unwrap();
 
-        let original = expr.as_any().downcast_ref::<Column>().unwrap();
-        let decoded = decoded.as_any().downcast_ref::<Column>().unwrap();
+        let original = expr.downcast_ref::<Column>().unwrap();
+        let decoded = decoded.downcast_ref::<Column>().unwrap();
 
         assert_eq!(decoded.name(), original.name());
         assert_eq!(decoded.index(), original.index());
@@ -455,7 +455,7 @@ mod tests {
         )) as Arc<dyn PhysicalExpr>;
         let lookup = Arc::new(HashTableLookupExpr::new(
             vec![Arc::clone(&device_id)],
-            SeededRandomState::with_seeds(0, 0, 0, 0),
+            SeededRandomState::with_seed(0),
             Arc::new(Map::HashMap(Box::new(JoinHashMapU32::with_capacity(0)))),
             "hash_lookup".to_string(),
         )) as Arc<dyn PhysicalExpr>;
@@ -537,10 +537,10 @@ mod tests {
         ));
     }
 
-    fn contains_expr<T: 'static>(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    fn contains_expr<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> bool {
         let mut found = false;
         expr.apply(|node| {
-            if node.as_any().is::<T>() {
+            if node.is::<T>() {
                 found = true;
                 Ok(TreeNodeRecursion::Stop)
             } else {
