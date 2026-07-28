@@ -5749,7 +5749,9 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::native_histogram::{NativeHistogram, build_histogram_array};
+    use common_query::native_histogram::{
+        CounterResetHint, NativeHistogram, build_histogram_array,
+    };
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_query::test_util::DummyDecoder;
     use datafusion::arrow::array::{
@@ -5932,7 +5934,7 @@ mod test {
             schema: 0,
             zero_threshold: 0.0,
             sum: 1.0,
-            reset_hint: 0,
+            reset_hint: CounterResetHint::Unknown,
             start_timestamp: None,
             custom_values: vec![],
             positive_spans: vec![],
