@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -22,18 +22,13 @@ use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{RegionRequest, region_request};
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
-    DropColumns, SemanticType, SetTableOptions, Value,
+    DropColumns, SemanticType, SetTableOptions,
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_event_recorder::EventTypeFilter;
-use common_event_recorder::event_table::{CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN};
 use common_procedure::store::poison_store::PoisonStore;
-use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
-    RetryPhase, Status,
-};
+use common_procedure::{ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -47,10 +42,6 @@ use table::requests::TTL_KEY;
 use tokio::sync::mpsc::{self};
 
 use crate::ddl::alter_table::AlterTableProcedure;
-use crate::ddl::event::table::{
-    EVENTS_TABLE_TABLE_ID_COLUMN_NAME, EVENTS_TABLE_TABLE_NAME_COLUMN_NAME,
-    TABLE_DDL_PAYLOAD_VERSION,
-};
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{
@@ -142,7 +133,7 @@ async fn test_on_prepare_table_not_exists_err() {
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
 
-fn test_alter_table_task(table_name: &str) -> AlterTableTask {
+pub(crate) fn test_alter_table_task(table_name: &str) -> AlterTableTask {
     AlterTableTask {
         alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -154,112 +145,6 @@ fn test_alter_table_task(table_name: &str) -> AlterTableTask {
                 }],
             })),
         },
-    }
-}
-
-#[test]
-fn test_alter_table_submitted_event_has_locator_and_full_versioned_task() {
-    let table_id = 1024;
-    let task = test_alter_table_task("foo");
-    let procedure = AlterTableProcedure::new(
-        table_id,
-        task.clone(),
-        new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
-    )
-    .unwrap();
-
-    assert_event_filter_rejects(&procedure);
-    let lifecycle_state = ProcedureState::Running;
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &lifecycle_state,
-            trigger: EventTrigger::Submitted,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), "alter_table");
-    assert_eq!(
-        event
-            .extra_schema()
-            .iter()
-            .map(|column| column.column_name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            CATALOG_NAME_COLUMN.name(),
-            SCHEMA_NAME_COLUMN.name(),
-            EVENTS_TABLE_TABLE_NAME_COLUMN_NAME,
-            EVENTS_TABLE_TABLE_ID_COLUMN_NAME,
-        ]
-    );
-    assert_eq!(
-        event.extra_rows().unwrap()[0].values,
-        vec![
-            api::v1::value::ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
-            api::v1::value::ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
-            api::v1::value::ValueData::StringValue("foo".to_string()).into(),
-            api::v1::value::ValueData::U32Value(table_id).into(),
-        ]
-    );
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], TABLE_DDL_PAYLOAD_VERSION);
-    let payload_task: AlterTableTask = serde_json::from_value(payload["data"].clone()).unwrap();
-    assert_eq!(payload_task, task);
-}
-
-#[test]
-fn test_alter_table_lifecycle_events_are_lightweight_with_fixed_schema() {
-    let procedure = AlterTableProcedure::new(
-        1024,
-        test_alter_table_task("foo"),
-        new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
-    )
-    .unwrap();
-    let lifecycle_state = ProcedureState::Running;
-    let procedure_id = ProcedureId::random();
-    let submitted = procedure
-        .event(&EventContext {
-            procedure_id,
-            lifecycle_state: &lifecycle_state,
-            trigger: EventTrigger::Submitted,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-    let expected_schema = submitted.extra_schema();
-    let triggers = [
-        EventTrigger::Recovered,
-        EventTrigger::ChildSubmitted {
-            procedure_id: ProcedureId::random(),
-            outcome: ChildSubmissionOutcome::Accepted,
-        },
-        EventTrigger::Retrying {
-            phase: RetryPhase::Execute,
-            attempt: 1,
-        },
-        EventTrigger::RollingBack,
-        EventTrigger::Succeeded,
-        EventTrigger::Failed,
-        EventTrigger::Poisoned,
-    ];
-
-    for trigger in triggers {
-        let event = procedure
-            .event(&EventContext {
-                procedure_id,
-                lifecycle_state: &lifecycle_state,
-                trigger,
-                event_type_filter: Arc::new(EventTypeFilter::All),
-            })
-            .unwrap();
-
-        assert_eq!(event.event_type(), "alter_table");
-        assert_eq!(event.extra_schema(), expected_schema);
-        assert_eq!(
-            event.extra_rows().unwrap()[0].values,
-            vec![Value::default(); 4]
-        );
-        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
     }
 }
 
@@ -864,18 +749,4 @@ async fn test_on_submit_alter_request_with_exist_poison() {
         .await
         .unwrap_err();
     assert_matches!(err, Error::PutPoison { .. });
-}
-
-fn assert_event_filter_rejects(procedure: &dyn Procedure) {
-    let state = ProcedureState::Running;
-    assert!(
-        procedure
-            .event(&EventContext {
-                procedure_id: ProcedureId::random(),
-                lifecycle_state: &state,
-                trigger: EventTrigger::Submitted,
-                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
-            })
-            .is_none()
-    );
 }

@@ -19,15 +19,10 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::meta::{Partition, Peer};
 use api::v1::region::{RegionRequest, region_request};
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, SemanticType, Value};
+use api::v1::{ColumnDataType, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_event_recorder::EventTypeFilter;
-use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, Procedure, ProcedureId,
-    ProcedureState, Status,
-};
+use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::{
     MockContextProvider, execute_procedure_until, execute_procedure_until_done,
 };
@@ -135,103 +130,6 @@ fn test_deserialize_legacy_create_table_data_region_wal_options() {
             0,
             WalOptions::Kafka(KafkaWalOptions::new("topic_a".to_string())),
         )])
-    );
-}
-
-#[test]
-fn test_create_table_submitted_event_has_rich_payload_and_locators() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let task = test_create_table_task("foo");
-    let expected_task = serde_json::to_value(&task).unwrap();
-    let expected_table_info = serde_json::to_value(&task.table_info).unwrap();
-    let expected_table_options = serde_json::to_value(&task.table_info.meta.options).unwrap();
-    let procedure = CreateTableProcedure::new(task, new_ddl_context(node_manager)).unwrap();
-
-    assert_event_filter_rejects(&procedure);
-    let state = ProcedureState::Running;
-
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Submitted,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), "create_table");
-    assert_eq!(
-        event.extra_rows().unwrap()[0].values,
-        vec![
-            ValueData::StringValue("greptime".to_string()).into(),
-            ValueData::StringValue("public".to_string()).into(),
-            ValueData::StringValue("foo".to_string()).into(),
-            Value::default(),
-        ]
-    );
-    let payload = event.json_payload().unwrap();
-    assert_eq!(payload["version"], 1);
-    assert_eq!(payload["data"]["kind"], "create_table");
-    assert_eq!(payload["data"]["task"], expected_task);
-    assert_eq!(payload["data"]["table_info"], expected_table_info);
-    assert_eq!(payload["data"]["table_options"], expected_table_options);
-    assert!(payload["data"]["region_wal_options"].is_null());
-}
-
-#[test]
-fn test_create_table_non_success_lifecycle_event_is_lightweight() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let procedure =
-        CreateTableProcedure::new(test_create_table_task("foo"), new_ddl_context(node_manager))
-            .unwrap();
-    let state = ProcedureState::Running;
-
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Recovered,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), "create_table");
-    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-    assert_eq!(
-        event.extra_rows().unwrap()[0].values,
-        vec![Value::default(); 4]
-    );
-}
-
-#[test]
-fn test_create_table_succeeded_event_only_has_table_id() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let mut task = test_create_table_task("foo");
-    task.table_info.ident.table_id = 7;
-    let procedure = CreateTableProcedure::new(task, new_ddl_context(node_manager)).unwrap();
-    let state = ProcedureState::Done {
-        output: Some(Arc::new(42_u32)),
-    };
-
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Succeeded,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), "create_table");
-    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-    assert_eq!(
-        event.extra_rows().unwrap()[0].values,
-        vec![
-            Value::default(),
-            Value::default(),
-            Value::default(),
-            ValueData::U32Value(42).into(),
-        ]
     );
 }
 
@@ -494,19 +392,5 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
         !ddl_context
             .memory_region_keeper
             .contains(datanode_id, region_id)
-    );
-}
-
-fn assert_event_filter_rejects(procedure: &dyn Procedure) {
-    let state = ProcedureState::Running;
-    assert!(
-        procedure
-            .event(&EventContext {
-                procedure_id: ProcedureId::random(),
-                lifecycle_state: &state,
-                trigger: EventTrigger::Submitted,
-                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
-            })
-            .is_none()
     );
 }

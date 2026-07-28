@@ -24,10 +24,7 @@ use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_event_recorder::EventTypeFilter;
-use common_procedure::{
-    EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState, StringKey,
-};
+use common_procedure::{Procedure, StringKey};
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
@@ -151,26 +148,6 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
 
     assert_eq!(recovered_data["soft_drop_enabled"], false);
     assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
-}
-
-#[test]
-fn test_drop_table_event_respects_filter() {
-    let procedure = DropTableProcedure::new(
-        new_drop_table_task("foo", 1024, false),
-        new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
-    );
-    let state = ProcedureState::Running;
-
-    assert!(
-        procedure
-            .event(&EventContext {
-                procedure_id: ProcedureId::random(),
-                lifecycle_state: &state,
-                trigger: EventTrigger::Submitted,
-                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
-            })
-            .is_none()
-    );
 }
 
 #[test]

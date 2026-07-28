@@ -317,7 +317,22 @@ impl Procedure for CreateLogicalTablesProcedure {
                 } => output
                     .downcast_ref::<Vec<TableId>>()
                     .map(|table_ids| {
-                        TableDdlEvent::create_logical_tables_succeeded(table_ids.iter().copied())
+                        debug_assert_eq!(self.data.tasks.len(), table_ids.len());
+                        let locators =
+                            self.data
+                                .tasks
+                                .iter()
+                                .zip(table_ids)
+                                .map(|(task, table_id)| {
+                                    TableDdlLocator::new(
+                                        &task.create_table.catalog_name,
+                                        &task.create_table.schema_name,
+                                        &task.create_table.table_name,
+                                    )
+                                    .with_table_id(*table_id)
+                                    .with_physical_table_id(self.data.physical_table_id)
+                                });
+                        TableDdlEvent::create_logical_tables_succeeded(locators)
                     })
                     .unwrap_or_else(|| {
                         TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables)

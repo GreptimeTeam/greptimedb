@@ -112,6 +112,18 @@ pub const CATALOG_NAME_COLUMN: EventTableColumn =
 /// The canonical schema name dimension.
 pub const SCHEMA_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("schema_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical table name dimension.
+pub const TABLE_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("table_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical table identifier dimension.
+pub const TABLE_ID_COLUMN: EventTableColumn =
+    EventTableColumn::new("table_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical physical table identifier dimension.
+pub const PHYSICAL_TABLE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "physical_table_id",
+    ColumnDataType::Uint32,
+    SemanticType::Field,
+);
 /// The canonical Flow name dimension.
 pub const FLOW_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("flow_name", ColumnDataType::String, SemanticType::Field);
@@ -327,6 +339,28 @@ mod tests {
             [
                 ("flow_name", ColumnDataType::String),
                 ("flow_id", ColumnDataType::Uint32),
+            ]
+            .map(|(column_name, datatype)| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: datatype.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn table_dimension_schema_preserves_names_types_semantics_and_order() {
+        assert_eq!(
+            column_schemas([
+                &TABLE_NAME_COLUMN,
+                &TABLE_ID_COLUMN,
+                &PHYSICAL_TABLE_ID_COLUMN,
+            ]),
+            [
+                ("table_name", ColumnDataType::String),
+                ("table_id", ColumnDataType::Uint32),
+                ("physical_table_id", ColumnDataType::Uint32),
             ]
             .map(|(column_name, datatype)| ColumnSchema {
                 column_name: column_name.to_string(),

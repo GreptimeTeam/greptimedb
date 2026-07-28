@@ -15,11 +15,12 @@
 use std::any::Any;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN, column_schemas, nullable_string, nullable_value,
+    CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
+    TABLE_NAME_COLUMN, column_schemas, nullable_string, nullable_value,
 };
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -27,15 +28,11 @@ use snafu::ResultExt;
 use store_api::storage::TableId;
 
 /// Current version of table DDL event payloads.
-pub const TABLE_DDL_PAYLOAD_VERSION: u32 = 1;
-
-pub const EVENTS_TABLE_TABLE_NAME_COLUMN_NAME: &str = "table_name";
-pub const EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
-pub const EVENTS_TABLE_PHYSICAL_TABLE_ID_COLUMN_NAME: &str = "physical_table_id";
+pub(crate) const TABLE_DDL_PAYLOAD_VERSION: u32 = 1;
 
 /// A table DDL event type and its fixed domain schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TableDdlEventType {
+pub(crate) enum TableDdlEventType {
     CreateTable,
     CreateLogicalTables,
     AlterTable,
@@ -48,7 +45,7 @@ pub enum TableDdlEventType {
 
 impl TableDdlEventType {
     /// Returns the stable event type stored in the events table.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CreateTable => "create_table",
             Self::CreateLogicalTables => "create_logical_tables",
@@ -68,22 +65,22 @@ impl TableDdlEventType {
 
 /// Nullable table locator columns stored alongside a table DDL event.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TableDdlLocator {
+pub(crate) struct TableDdlLocator {
     /// Catalog containing the table.
-    pub catalog_name: Option<String>,
+    pub(crate) catalog_name: Option<String>,
     /// Schema containing the table.
-    pub schema_name: Option<String>,
+    pub(crate) schema_name: Option<String>,
     /// Table name.
-    pub table_name: Option<String>,
+    pub(crate) table_name: Option<String>,
     /// Table ID when known at this lifecycle point.
-    pub table_id: Option<TableId>,
+    pub(crate) table_id: Option<TableId>,
     /// Physical table ID for a logical table event.
-    pub physical_table_id: Option<TableId>,
+    pub(crate) physical_table_id: Option<TableId>,
 }
 
 impl TableDdlLocator {
     /// Creates a locator from a fully qualified table name.
-    pub fn new(
+    pub(crate) fn new(
         catalog_name: impl Into<String>,
         schema_name: impl Into<String>,
         table_name: impl Into<String>,
@@ -97,7 +94,7 @@ impl TableDdlLocator {
     }
 
     /// Creates a locator containing only a table ID.
-    pub fn from_table_id(table_id: TableId) -> Self {
+    pub(crate) fn from_table_id(table_id: TableId) -> Self {
         Self {
             table_id: Some(table_id),
             ..Default::default()
@@ -105,20 +102,20 @@ impl TableDdlLocator {
     }
 
     /// Adds a table ID to the locator.
-    pub fn with_table_id(mut self, table_id: TableId) -> Self {
+    pub(crate) fn with_table_id(mut self, table_id: TableId) -> Self {
         self.table_id = Some(table_id);
         self
     }
 
     /// Adds a physical table ID to a logical-table locator.
-    pub fn with_physical_table_id(mut self, physical_table_id: TableId) -> Self {
+    pub(crate) fn with_physical_table_id(mut self, physical_table_id: TableId) -> Self {
         self.physical_table_id = Some(physical_table_id);
         self
     }
 }
 
 /// Wraps rich submitted data in the versioned table DDL payload envelope.
-pub fn versioned_table_ddl_payload<T: Serialize>(data: T) -> Result<JsonValue> {
+pub(crate) fn versioned_table_ddl_payload<T: Serialize>(data: T) -> Result<JsonValue> {
     #[derive(Serialize)]
     struct VersionedPayload<T> {
         version: u32,
@@ -136,7 +133,7 @@ pub fn versioned_table_ddl_payload<T: Serialize>(data: T) -> Result<JsonValue> {
 ///
 /// The fallback deliberately excludes the serializer error and input data so a
 /// submitted event can retain its locator rows without exposing internal details.
-pub fn versioned_table_ddl_payload_or_error<T: Serialize>(data: T) -> JsonValue {
+pub(crate) fn versioned_table_ddl_payload_or_error<T: Serialize>(data: T) -> JsonValue {
     versioned_table_ddl_payload(data).unwrap_or_else(|_| {
         serde_json::json!({
             "version": TABLE_DDL_PAYLOAD_VERSION,
@@ -149,7 +146,7 @@ pub fn versioned_table_ddl_payload_or_error<T: Serialize>(data: T) -> JsonValue 
 
 /// Shared event representation used by table DDL procedures.
 #[derive(Debug)]
-pub struct TableDdlEvent {
+pub(crate) struct TableDdlEvent {
     event_type: TableDdlEventType,
     locators: Vec<TableDdlLocator>,
     payload: JsonValue,
@@ -157,7 +154,7 @@ pub struct TableDdlEvent {
 
 impl TableDdlEvent {
     /// Builds a rich submitted event for one table row.
-    pub fn submitted(
+    pub(crate) fn submitted(
         event_type: TableDdlEventType,
         locator: TableDdlLocator,
         payload: JsonValue,
@@ -166,7 +163,7 @@ impl TableDdlEvent {
     }
 
     /// Builds a rich submitted event with one row per logical table locator.
-    pub fn submitted_for_tables(
+    pub(crate) fn submitted_for_tables(
         event_type: TableDdlEventType,
         locators: impl IntoIterator<Item = TableDdlLocator>,
         payload: JsonValue,
@@ -179,7 +176,7 @@ impl TableDdlEvent {
     }
 
     /// Builds a lightweight lifecycle event with null domain columns and payload.
-    pub fn lifecycle(event_type: TableDdlEventType) -> Self {
+    pub(crate) fn lifecycle(event_type: TableDdlEventType) -> Self {
         Self {
             event_type,
             locators: vec![TableDdlLocator::default()],
@@ -188,7 +185,7 @@ impl TableDdlEvent {
     }
 
     /// Builds a Create Table success event containing only the allocated table ID.
-    pub fn create_table_succeeded(table_id: TableId) -> Self {
+    pub(crate) fn create_table_succeeded(table_id: TableId) -> Self {
         Self {
             event_type: TableDdlEventType::CreateTable,
             locators: vec![TableDdlLocator::from_table_id(table_id)],
@@ -196,34 +193,24 @@ impl TableDdlEvent {
         }
     }
 
-    /// Builds Create Logical Tables success rows containing only allocated table IDs.
-    pub fn create_logical_tables_succeeded(table_ids: impl IntoIterator<Item = TableId>) -> Self {
+    /// Builds Create Logical Tables success rows from their allocated locators.
+    pub(crate) fn create_logical_tables_succeeded(
+        locators: impl IntoIterator<Item = TableDdlLocator>,
+    ) -> Self {
         Self {
             event_type: TableDdlEventType::CreateLogicalTables,
-            locators: table_ids
-                .into_iter()
-                .map(TableDdlLocator::from_table_id)
-                .collect(),
+            locators: locators.into_iter().collect(),
             payload: JsonValue::Null,
         }
     }
 
     fn schema() -> Vec<ColumnSchema> {
-        let mut schema = column_schemas([&CATALOG_NAME_COLUMN, &SCHEMA_NAME_COLUMN]);
-        schema.extend(
-            [
-                (EVENTS_TABLE_TABLE_NAME_COLUMN_NAME, ColumnDataType::String),
-                (EVENTS_TABLE_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
-            ]
-            .into_iter()
-            .map(|(column_name, datatype)| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: datatype.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            }),
-        );
-        schema
+        column_schemas([
+            &CATALOG_NAME_COLUMN,
+            &SCHEMA_NAME_COLUMN,
+            &TABLE_NAME_COLUMN,
+            &TABLE_ID_COLUMN,
+        ])
     }
 
     fn locator_row(&self, locator: &TableDdlLocator) -> Row {
@@ -252,12 +239,7 @@ impl Event for TableDdlEvent {
     fn extra_schema(&self) -> Vec<ColumnSchema> {
         let mut schema = Self::schema();
         if self.event_type.has_physical_table_id() {
-            schema.push(ColumnSchema {
-                column_name: EVENTS_TABLE_PHYSICAL_TABLE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint32.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            });
+            schema.push(PHYSICAL_TABLE_ID_COLUMN.column_schema());
         }
         schema
     }

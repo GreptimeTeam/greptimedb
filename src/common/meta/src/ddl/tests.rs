@@ -23,4 +23,3 @@ mod drop_flow;
 mod drop_table;
 mod drop_view;
 mod event;
-mod table_procedure_events;

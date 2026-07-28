@@ -27,7 +27,7 @@ mod jsonbench;
 mod sql;
 #[macro_use]
 mod region_migration;
-mod table_ddl_events;
+mod table_ddl_event;
 #[macro_use]
 mod repartition;
 mod repartition_event;
