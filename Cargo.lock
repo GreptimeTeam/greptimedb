@@ -2398,6 +2398,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "tokio",
  "tonic 0.14.2",

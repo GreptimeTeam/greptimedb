@@ -40,7 +40,7 @@ use auth::{
 };
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
-    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
+    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryRecorder, SlowQueryTimer,
 };
 use client::OutputData;
 use common_base::Plugins;
@@ -59,6 +59,7 @@ use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
 use lazy_static::lazy_static;
@@ -214,6 +215,10 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
     ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
 }
 
+fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
+    matches!(stmt, Statement::Explain(explain) if explain.analyze && explain.verbose)
+}
+
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
     let Statement::Explain(explain) = stmt else {
         return InvalidSqlSnafu {
@@ -272,6 +277,9 @@ impl Instance {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
             let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+            let timeout_recorder = is_explain_analyze_verbose(&stmt)
+                .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
+                .flatten();
 
             let ticket = self.process_manager.register_query(
                 catalog_name,
@@ -282,7 +290,12 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+            let query_fut = self.exec_statement_with_timeout(
+                stmt,
+                query_ctx,
+                query_interceptor,
+                timeout_recorder,
+            );
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -299,7 +312,7 @@ impl Instance {
                     Output { data, meta }
                 })
         } else {
-            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
+            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor, None)
                 .await
         }
     }
@@ -309,6 +322,7 @@ impl Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+        timeout_recorder: Option<SlowQueryRecorder>,
     ) -> Result<Output> {
         let timeout = derive_timeout(&stmt, &query_ctx);
         match timeout {
@@ -323,7 +337,7 @@ impl Instance {
                 let output = map_query_output(output)?;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
-                attach_timeout(output, remaining_timeout)
+                attach_timeout(output, remaining_timeout, timeout_recorder)
             }
             None => self
                 .exec_statement(stmt, query_ctx, query_interceptor)
@@ -560,18 +574,42 @@ fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> O
     }
 }
 
-fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
+fn record_explain_analyze_timeout(
+    recorder: Option<&SlowQueryRecorder>,
+    plan: Option<&Arc<dyn ExecutionPlan>>,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let metrics = plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok());
+    recorder.force_record_with_payload(serde_json::json!({
+        "timed_out": true,
+        "metrics": metrics,
+    }));
+}
+
+fn attach_timeout(
+    output: Output,
+    mut timeout: Duration,
+    timeout_recorder: Option<SlowQueryRecorder>,
+) -> Result<Output> {
     if timeout.is_zero() {
         return StatementTimeoutSnafu.fail();
     }
 
+    let plan = timeout_recorder
+        .as_ref()
+        .and_then(|_| output.meta.plan.clone());
     let output = match output.data {
         OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
         OutputData::Stream(mut stream) => {
             let schema = stream.schema();
             let s = Box::pin(stream! {
                 let mut start = tokio::time::Instant::now();
-                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
+                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| {
+                    record_explain_analyze_timeout(timeout_recorder.as_ref(), plan.as_ref());
+                    StreamTimeoutSnafu.build()
+                })? {
                     yield item;
 
                     let now = tokio::time::Instant::now();
@@ -579,6 +617,7 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
                     start = now;
                     // tokio::time::timeout may not return an error immediately when timeout is 0.
                     if timeout.is_zero() {
+                        record_explain_analyze_timeout(timeout_recorder.as_ref(), plan.as_ref());
                         StreamTimeoutSnafu.fail()?;
                     }
                 }
@@ -677,7 +716,7 @@ impl Instance {
             slow_query_timer,
         );
         let query_fut =
-            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
+            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor, None);
         let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| error::CancelledSnafu.build())??;
@@ -760,6 +799,7 @@ impl Instance {
         &self,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
+        timeout_recorder: Option<SlowQueryRecorder>,
     ) -> Result<Output> {
         let timeout = derive_timeout_for_plan(&plan, &query_ctx);
         match timeout {
@@ -770,7 +810,7 @@ impl Instance {
                     .map_err(|_| StatementTimeoutSnafu.build())??;
                 let output = map_query_output(output)?;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
-                attach_timeout(output, remaining_timeout)
+                attach_timeout(output, remaining_timeout, timeout_recorder)
             }
             None => self
                 .exec_plan(plan, query_ctx)
@@ -816,6 +856,11 @@ impl Instance {
                 None
             };
 
+            let timeout_recorder = stmt
+                .as_ref()
+                .is_some_and(is_explain_analyze_verbose)
+                .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
+                .flatten();
             let ticket = self.process_manager.register_query(
                 catalog_name,
                 vec![schema_name],
@@ -825,7 +870,7 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
+            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -842,7 +887,8 @@ impl Instance {
                     Output { data, meta }
                 })
         } else {
-            self.exec_plan_with_timeout(plan, query_ctx.clone()).await
+            self.exec_plan_with_timeout(plan, query_ctx.clone(), None)
+                .await
         };
 
         result.and_then(|output| query_interceptor.post_execute(output, query_ctx))
@@ -1607,10 +1653,12 @@ mod tests {
     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     use auth::{PermissionResp, UserInfoRef};
-    use catalog::process_manager::ProcessManager;
+    use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
     use common_error::ext::{BoxedError, PlainError};
     use common_error::status_code::StatusCode;
+    use common_event_recorder::{Event, EventRecorder};
+    use common_frontend::slow_query_event::SlowQueryEvent;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
@@ -1618,11 +1666,13 @@ mod tests {
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
-    use common_query::Output;
+    use common_query::{Output, OutputMeta};
     use common_recordbatch::{
         OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
     };
+    use common_telemetry::logging::SlowQueriesRecordType;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_expr::dml::InsertOp;
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
@@ -1652,6 +1702,23 @@ mod tests {
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingSlowQueryEventRecorder {
+        payloads: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl EventRecorder for RecordingSlowQueryEventRecorder {
+        fn record(&self, event: Box<dyn Event>) {
+            let event = event
+                .as_any()
+                .downcast_ref::<SlowQueryEvent>()
+                .expect("expected a slow query event");
+            self.payloads.lock().unwrap().push(event.payload.clone());
+        }
+
+        fn close(&self) {}
     }
 
     #[test]
@@ -1688,6 +1755,21 @@ mod tests {
             parse_test_sql("explain analyze verbose select 1; select 2").len(),
             2
         );
+
+        assert!(is_explain_analyze_verbose(
+            &parse_test_sql("explain analyze verbose select 1")[0]
+        ));
+        for sql in [
+            "select 1",
+            "explain select 1",
+            "explain analyze select 1",
+            "explain verbose select 1",
+        ] {
+            assert!(
+                !is_explain_analyze_verbose(&parse_test_sql(sql)[0]),
+                "{sql}"
+            );
+        }
     }
 
     #[derive(Debug, Snafu)]
@@ -1954,6 +2036,51 @@ mod tests {
     }
 
     impl Unpin for PendingRecordBatchStream {}
+
+    #[tokio::test]
+    async fn test_attach_timeout_records_explain_analyze_metrics() {
+        let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        let timer = SlowQueryTimer::new(
+            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            "public".to_string(),
+            Duration::from_secs(3600),
+            0.0,
+            SlowQueriesRecordType::SystemTable,
+            event_recorder.clone(),
+        );
+        let timeout_recorder = timer.recorder();
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(Schema::empty())));
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let stream = PendingRecordBatchStream {
+            schema: Arc::new(GtSchema::new(vec![])),
+            polled_tx: None,
+            _finish_tx: finish_tx,
+            finish_rx: Box::pin(finish_rx),
+        };
+        let output = Output::new(
+            OutputData::Stream(Box::pin(stream)),
+            OutputMeta::new_with_plan(plan),
+        );
+        let output =
+            attach_timeout(output, Duration::from_millis(10), Some(timeout_recorder)).unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            unreachable!();
+        };
+
+        let err = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(err.to_string(), "Stream timeout");
+        drop(stream);
+        drop(timer);
+
+        let payloads = event_recorder.payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["timed_out"], true);
+        assert!(
+            payloads[0]["metrics"]
+                .as_array()
+                .is_some_and(|metrics| !metrics.is_empty())
+        );
+    }
 
     struct PendingDataSource {
         schema: GtSchemaRef,
