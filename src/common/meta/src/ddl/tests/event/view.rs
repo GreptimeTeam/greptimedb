@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
@@ -24,10 +23,11 @@ use common_event_recorder::event_table::{
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId,
-    ProcedureState, RetryPhase,
+    ChildSubmissionOutcome, EventContext, EventTrigger, Output, Procedure, ProcedureEvent,
+    ProcedureId, ProcedureState, RetryPhase,
 };
 
+use super::test_util::assert_event_filter;
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::event::view::{
@@ -37,59 +37,23 @@ use crate::ddl::tests::create_view::test_create_view_task;
 use crate::ddl::tests::drop_view::new_drop_view_task;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
-fn view_schema() -> Vec<ColumnSchema> {
-    vec![
-        CATALOG_NAME_COLUMN.column_schema(),
-        SCHEMA_NAME_COLUMN.column_schema(),
-        VIEW_NAME_COLUMN.column_schema(),
-        VIEW_ID_COLUMN.column_schema(),
-    ]
-}
-
-fn drop_view_event(procedure: &DropViewProcedure, trigger: EventTrigger) -> Box<dyn Event> {
-    let state = ProcedureState::Running;
-    procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap()
-}
-
 #[test]
-fn test_create_view_event_submitted() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(node_manager);
+fn test_view_submitted_event_contracts() {
     let mut task = test_create_view_task("v_metrics");
     task.create_view.or_replace = true;
     task.create_view.create_if_not_exists = true;
-    task.view_info.ident.table_id = 42;
-    let procedure = CreateViewProcedure::new(task, ddl_context);
-    let state = ProcedureState::Running;
+    let create = CreateViewProcedure::new(task, test_context());
+    let event = event_for(&create, EventTrigger::Submitted);
 
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Submitted,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_event_contract(
+    assert_view_event_contract(
         event.as_ref(),
         CREATE_VIEW_EVENT_TYPE,
-        &view_schema(),
-        &[Row {
-            values: vec![
-                ValueData::StringValue("greptime".to_string()).into(),
-                ValueData::StringValue("public".to_string()).into(),
-                ValueData::StringValue("v_metrics".to_string()).into(),
-                Default::default(),
-            ],
-        }],
+        ViewEventLocator {
+            catalog_name: Some("greptime"),
+            schema_name: Some("public"),
+            view_name: Some("v_metrics"),
+            view_id: None,
+        },
     );
     assert_eq!(
         event.json_payload().unwrap(),
@@ -102,204 +66,58 @@ fn test_create_view_event_submitted() {
         })
     );
     let payload = event.json_payload().unwrap().to_string();
-    assert!(!payload.contains("CREATE VIEW"));
-    assert!(!payload.contains("SELECT"));
-    assert!(!payload.contains("a_table"));
-    assert!(!payload.contains("b_table"));
-}
-
-#[test]
-fn test_create_view_event_lifecycle_rows_have_fixed_schema() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(node_manager);
-    let mut task = test_create_view_task("v_metrics");
-    task.view_info.ident.table_id = 42;
-    let procedure = CreateViewProcedure::new(task, ddl_context);
-    let state = ProcedureState::Running;
-    let submitted = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Submitted,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-    let expected_schema = submitted.extra_schema();
-    let submitted_values = submitted.extra_rows().unwrap().remove(0).values;
-    assert!(
-        submitted_values[..3]
-            .iter()
-            .all(|value| value.value_data.is_some())
-    );
-    assert!(submitted_values[3].value_data.is_none());
-
-    let lightweight_triggers = [
-        EventTrigger::Recovered,
-        EventTrigger::ChildSubmitted {
-            procedure_id: ProcedureId::random(),
-            outcome: ChildSubmissionOutcome::Accepted,
-        },
-        EventTrigger::Retrying {
-            phase: RetryPhase::Execute,
-            attempt: 1,
-        },
-        EventTrigger::RollingBack,
-        EventTrigger::Failed,
-        EventTrigger::Poisoned,
-    ];
-
-    for trigger in lightweight_triggers {
-        let event = procedure
-            .event(&EventContext {
-                procedure_id: ProcedureId::random(),
-                lifecycle_state: &state,
-                trigger,
-                event_type_filter: Arc::new(EventTypeFilter::All),
-            })
-            .unwrap();
-        assert_eq!(event.extra_schema(), expected_schema);
-        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-        assert!(
-            event
-                .extra_rows()
-                .unwrap()
-                .remove(0)
-                .values
-                .iter()
-                .all(|value| value.value_data.is_none())
-        );
+    for omitted in ["CREATE VIEW", "SELECT", "a_table", "b_table"] {
+        assert!(!payload.contains(omitted));
     }
 
-    let succeeded_state = ProcedureState::Done {
-        output: Some(Arc::new(84_u32)),
-    };
-    let succeeded = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &succeeded_state,
-            trigger: EventTrigger::Succeeded,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-    assert_eq!(succeeded.extra_schema(), expected_schema);
-    assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
-    let values = succeeded.extra_rows().unwrap().remove(0).values;
-    assert!(values[..3].iter().all(|value| value.value_data.is_none()));
-    assert_eq!(values[3].value_data, Some(ValueData::U32Value(84)));
-}
+    let drop = DropViewProcedure::new(new_drop_view_task("view_name", 42, true), test_context());
+    let event = event_for(&drop, EventTrigger::Submitted);
 
-#[test]
-fn test_create_view_event_succeeded_without_output_is_lifecycle() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let mut task = test_create_view_task("v_metrics");
-    task.view_info.ident.table_id = 42;
-    let procedure = CreateViewProcedure::new(task, new_ddl_context(node_manager));
-    let state = ProcedureState::Done { output: None };
-
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Succeeded,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
-    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-    assert!(
-        event
-            .extra_rows()
-            .unwrap()
-            .remove(0)
-            .values
-            .iter()
-            .all(|value| value.value_data.is_none())
-    );
-}
-
-#[test]
-fn test_create_view_event_succeeded_with_wrong_output_type_is_lifecycle() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let mut task = test_create_view_task("v_metrics");
-    task.view_info.ident.table_id = 42;
-    let procedure = CreateViewProcedure::new(task, new_ddl_context(node_manager));
-    let state = ProcedureState::Done {
-        output: Some(Arc::new("not a table id".to_string())),
-    };
-
-    let event = procedure
-        .event(&EventContext {
-            procedure_id: ProcedureId::random(),
-            lifecycle_state: &state,
-            trigger: EventTrigger::Succeeded,
-            event_type_filter: Arc::new(EventTypeFilter::All),
-        })
-        .unwrap();
-
-    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
-    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-    assert!(
-        event
-            .extra_rows()
-            .unwrap()
-            .remove(0)
-            .values
-            .iter()
-            .all(|value| value.value_data.is_none())
-    );
-}
-
-#[test]
-fn test_drop_view_event_submission() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, true),
-        new_ddl_context(node_manager),
-    );
-    let event = drop_view_event(&procedure, EventTrigger::Submitted);
-
-    assert_event_contract(
+    assert_view_event_contract(
         event.as_ref(),
         DROP_VIEW_EVENT_TYPE,
-        &view_schema(),
-        &[Row {
-            values: vec![
-                ValueData::StringValue("greptime".to_string()).into(),
-                ValueData::StringValue("public".to_string()).into(),
-                ValueData::StringValue("view_name".to_string()).into(),
-                ValueData::U32Value(42).into(),
-            ],
-        }],
+        ViewEventLocator {
+            catalog_name: Some("greptime"),
+            schema_name: Some("public"),
+            view_name: Some("view_name"),
+            view_id: Some(42),
+        },
     );
     assert_eq!(
         event.json_payload().unwrap(),
         serde_json::json!({"version": 1, "drop_if_exists": true})
     );
-    assert!(
-        !event
-            .json_payload()
-            .unwrap()
-            .to_string()
-            .contains("Prepare")
-    );
-    assert!(
-        !event
-            .json_payload()
-            .unwrap()
-            .to_string()
-            .contains("view_name")
-    );
+    let payload = event.json_payload().unwrap().to_string();
+    for omitted in ["Prepare", "view_name"] {
+        assert!(!payload.contains(omitted));
+    }
 }
 
 #[test]
-fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, false),
-        new_ddl_context(node_manager),
+fn test_view_lifecycle_event_contracts() {
+    for (event, event_type) in [
+        (ViewDdlEvent::create_lifecycle(), CREATE_VIEW_EVENT_TYPE),
+        (ViewDdlEvent::drop_lifecycle(), DROP_VIEW_EVENT_TYPE),
+    ] {
+        assert_lightweight_event(&event, event_type);
+    }
+
+    let event = ViewDdlEvent::create_succeeded(84);
+    assert_view_event_contract(
+        &event,
+        CREATE_VIEW_EVENT_TYPE,
+        ViewEventLocator {
+            view_id: Some(84),
+            ..Default::default()
+        },
     );
-    let submitted = drop_view_event(&procedure, EventTrigger::Submitted);
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+}
+
+#[test]
+fn test_view_procedures_emit_lightweight_lifecycle_events() {
+    let create = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
+    let drop = DropViewProcedure::new(new_drop_view_task("view_name", 42, false), test_context());
     let triggers = [
         EventTrigger::Recovered,
         EventTrigger::ChildSubmitted {
@@ -311,72 +129,61 @@ fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
             attempt: 1,
         },
         EventTrigger::RollingBack,
-        EventTrigger::Succeeded,
         EventTrigger::Failed,
         EventTrigger::Poisoned,
     ];
 
-    let submitted_schema = submitted.extra_schema();
-    assert_eq!(submitted_schema, view_schema());
+    for (procedure, event_type) in [
+        (&create as &dyn Procedure, CREATE_VIEW_EVENT_TYPE),
+        (&drop as &dyn Procedure, DROP_VIEW_EVENT_TYPE),
+    ] {
+        for trigger in &triggers {
+            let event = event_for(procedure, trigger.clone());
+            assert_lightweight_event(event.as_ref(), event_type);
+        }
+    }
 
-    for trigger in triggers {
-        let event = drop_view_event(&procedure, trigger);
-        assert_eq!(event.event_type(), DROP_VIEW_EVENT_TYPE);
-        assert_eq!(event.extra_schema(), submitted_schema);
-        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-        let row = event.extra_rows().unwrap().remove(0);
-        assert!(row.values.iter().all(|value| value.value_data.is_none()));
+    let event = event_for(&drop, EventTrigger::Succeeded);
+    assert_lightweight_event(event.as_ref(), DROP_VIEW_EVENT_TYPE);
+}
+
+#[test]
+fn test_create_view_succeeded_output_mapping() {
+    let procedure = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
+    let state = ProcedureState::Done {
+        output: Some(Arc::new(84_u32)),
+    };
+    let event = event_for_state(&procedure, EventTrigger::Succeeded, &state);
+
+    assert_view_event_contract(
+        event.as_ref(),
+        CREATE_VIEW_EVENT_TYPE,
+        ViewEventLocator {
+            view_id: Some(84),
+            ..Default::default()
+        },
+    );
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+
+    let invalid_outputs: [Option<Output>; 2] = [None, Some(Arc::new("not a table id".to_string()))];
+    for output in invalid_outputs {
+        let state = ProcedureState::Done { output };
+        let event = event_for_state(&procedure, EventTrigger::Succeeded, &state);
+        assert_lightweight_event(event.as_ref(), CREATE_VIEW_EVENT_TYPE);
     }
 }
 
 #[test]
 fn test_create_view_event_filter() {
-    let procedure = CreateViewProcedure::new(
-        test_create_view_task("view_name"),
-        new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
-    );
-
-    assert_view_event_filter(&procedure, CREATE_VIEW_EVENT_TYPE);
+    let procedure = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
+    assert_event_filter(&procedure, CREATE_VIEW_EVENT_TYPE);
 }
 
 #[test]
 fn test_drop_view_event_filter() {
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, false),
-        new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
-    );
-
-    assert_view_event_filter(&procedure, DROP_VIEW_EVENT_TYPE);
-}
-
-fn assert_view_event_filter(procedure: &dyn Procedure, event_type: &str) {
-    let state = ProcedureState::Running;
-    let event_context = |event_type_filter| EventContext {
-        procedure_id: ProcedureId::random(),
-        lifecycle_state: &state,
-        trigger: EventTrigger::Submitted,
-        event_type_filter: Arc::new(event_type_filter),
-    };
-
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
-                event_type.to_string()
-            ]))))
-            .is_some()
-    );
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::new())))
-            .is_none()
-    );
-    assert!(
-        procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
-                "other_event".to_string(),
-            ]))))
-            .is_none()
-    );
+    let procedure =
+        DropViewProcedure::new(new_drop_view_task("view_name", 42, false), test_context());
+    assert_event_filter(&procedure, DROP_VIEW_EVENT_TYPE);
 }
 
 #[test]
@@ -423,19 +230,57 @@ fn test_view_event_procedure_envelope_contract() {
         "Done",
         "Succeeded",
         ViewEventLocator {
-            catalog_name: None,
-            schema_name: None,
-            view_name: None,
             view_id: Some(42),
+            ..Default::default()
         },
     );
 }
 
+#[derive(Default)]
 struct ViewEventLocator<'a> {
     catalog_name: Option<&'a str>,
     schema_name: Option<&'a str>,
     view_name: Option<&'a str>,
     view_id: Option<u32>,
+}
+
+impl ViewEventLocator<'_> {
+    fn values(&self) -> Vec<Value> {
+        vec![
+            optional_string(self.catalog_name),
+            optional_string(self.schema_name),
+            optional_string(self.view_name),
+            self.view_id
+                .map(ValueData::U32Value)
+                .map(Into::into)
+                .unwrap_or_default(),
+        ]
+    }
+}
+
+fn view_schema() -> Vec<ColumnSchema> {
+    vec![
+        CATALOG_NAME_COLUMN.column_schema(),
+        SCHEMA_NAME_COLUMN.column_schema(),
+        VIEW_NAME_COLUMN.column_schema(),
+        VIEW_ID_COLUMN.column_schema(),
+    ]
+}
+
+fn assert_view_event_contract(event: &dyn Event, event_type: &str, locator: ViewEventLocator<'_>) {
+    assert_event_contract(
+        event,
+        event_type,
+        &view_schema(),
+        &[Row {
+            values: locator.values(),
+        }],
+    );
+}
+
+fn assert_lightweight_event(event: &dyn Event, event_type: &str) {
+    assert_view_event_contract(event, event_type, ViewEventLocator::default());
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
 }
 
 fn assert_procedure_event_contract(
@@ -452,31 +297,43 @@ fn assert_procedure_event_contract(
         PROCEDURE_TRIGGER_COLUMN.column_schema(),
     ];
     schema.extend(view_schema());
-    assert_event_contract(
-        event,
-        event_type,
-        &schema,
-        &[Row {
-            values: vec![
-                ValueData::StringValue(event.procedure_id.to_string()).into(),
-                ValueData::StringValue(state.to_string()).into(),
-                ValueData::StringValue(String::new()).into(),
-                ValueData::StringValue(trigger.to_string()).into(),
-                optional_string(locator.catalog_name),
-                optional_string(locator.schema_name),
-                optional_string(locator.view_name),
-                locator
-                    .view_id
-                    .map(ValueData::U32Value)
-                    .map(Into::into)
-                    .unwrap_or(Value { value_data: None }),
-            ],
-        }],
-    );
+
+    let mut values = vec![
+        ValueData::StringValue(event.procedure_id.to_string()).into(),
+        ValueData::StringValue(state.to_string()).into(),
+        ValueData::StringValue(String::new()).into(),
+        ValueData::StringValue(trigger.to_string()).into(),
+    ];
+    values.extend(locator.values());
+
+    assert_event_contract(event, event_type, &schema, &[Row { values }]);
+}
+
+fn test_context() -> crate::ddl::DdlContext {
+    new_ddl_context(Arc::new(MockDatanodeManager::new(())))
+}
+
+fn event_for(procedure: &dyn Procedure, trigger: EventTrigger) -> Box<dyn Event> {
+    event_for_state(procedure, trigger, &ProcedureState::Running)
+}
+
+fn event_for_state(
+    procedure: &dyn Procedure,
+    trigger: EventTrigger,
+    lifecycle_state: &ProcedureState,
+) -> Box<dyn Event> {
+    procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state,
+            trigger,
+            event_type_filter: Arc::new(EventTypeFilter::All),
+        })
+        .unwrap()
 }
 
 fn optional_string(value: Option<&str>) -> Value {
     value
         .map(|value| ValueData::StringValue(value.to_string()).into())
-        .unwrap_or(Value { value_data: None })
+        .unwrap_or_default()
 }
