@@ -45,7 +45,7 @@ use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
-use meta_srv::event::region_migration_event::REGION_MIGRATION_EVENT_TYPE;
+use meta_srv::event::region_migration::REGION_MIGRATION_EVENT_TYPE;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,

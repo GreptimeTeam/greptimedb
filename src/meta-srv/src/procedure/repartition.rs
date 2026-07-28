@@ -59,7 +59,7 @@ use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
-use crate::event::repartition_event::{REPARTITION_EVENT_TYPE, RepartitionEvent};
+use crate::event::repartition::{REPARTITION_EVENT_TYPE, RepartitionEvent};
 use crate::procedure::repartition::collect::ProcedureMeta;
 use crate::procedure::repartition::deallocate_region::DeallocateRegion;
 use crate::procedure::repartition::group::{

@@ -48,7 +48,7 @@ use store_api::storage::{RegionId, TableId};
 use uuid::Uuid;
 
 use crate::error::{self, Result};
-use crate::event::repartition_event::{REPARTITION_GROUP_EVENT_TYPE, RepartitionGroupEvent};
+use crate::event::repartition::{REPARTITION_GROUP_EVENT_TYPE, RepartitionGroupEvent};
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
 use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
 use crate::procedure::repartition::utils::get_datanode_table_value;
