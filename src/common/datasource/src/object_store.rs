@@ -46,18 +46,13 @@ pub const GCS_SCHEMA: &str = "GCS";
 pub const AZBLOB_SCHEMA: &str = "AZBLOB";
 
 /// Controls whether SQL paths may access the local filesystem.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum LocalFileAccess {
     /// Local filesystem paths are rejected.
+    #[default]
     Disabled,
     /// Local filesystem paths are confined to a server-configured root.
     Sandboxed { root: LocalFileRoot },
-}
-
-impl Default for LocalFileAccess {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 /// An opened server-controlled root for sandboxed SQL file access.
