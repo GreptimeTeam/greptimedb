@@ -232,7 +232,7 @@ pub struct HttpOptions {
     /// only the `v1` interfaces plus the dashboard. It shares every other
     /// `[http]` option with the main server and only differs by its bound
     /// address (see `api_server_addr`).
-    pub api_server_enable: bool,
+    pub enable_api_server: bool,
     /// The address to bind the dedicated HTTP API server, in the same form as
     /// `addr` (e.g. `127.0.0.1:4006`).
     pub api_server_addr: String,
@@ -250,7 +250,7 @@ impl Default for HttpOptions {
             prom_validation_mode: PromValidationMode::Strict,
             experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: true,
-            api_server_enable: false,
+            enable_api_server: false,
             api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
         }
     }
@@ -839,7 +839,7 @@ impl HttpServerBuilder {
 
     /// Builds the full HTTP server (serves the `v1` interfaces **and** the
     /// internal interfaces such as health, status, metrics, config and debug).
-    /// When [`HttpOptions::api_server_enable`] is `true`, it also builds a
+    /// When [`HttpOptions::enable_api_server`] is `true`, it also builds a
     /// dedicated HTTP **API** server that serves only the `v1` interfaces plus
     /// the dashboard.
     ///
@@ -856,7 +856,7 @@ impl HttpServerBuilder {
     /// second server is bound to `api_server_addr` (e.g. `127.0.0.1:4006`). The
     /// API server inherits **every** option from `[http]` except the bound address.
     pub fn build_servers(self) -> (HttpServer, Option<HttpServer>) {
-        let api_enabled = self.options.api_server_enable;
+        let api_enabled = self.options.enable_api_server;
         let api_addr = self.options.api_server_addr.clone();
 
         let internal = HttpServer {
@@ -1629,7 +1629,7 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         // Enable the dedicated API server so the split behavior can be exercised.
         let options = HttpOptions {
-            api_server_enable: true,
+            enable_api_server: true,
             ..HttpOptions::default()
         };
         HttpServerBuilder::new(options)
@@ -1642,7 +1642,7 @@ mod test {
     pub async fn test_http_api_options_defaults() {
         let opts = HttpOptions::default();
         // The API server is disabled by default.
-        assert!(!opts.api_server_enable);
+        assert!(!opts.enable_api_server);
         assert_eq!(opts.api_server_addr, "127.0.0.1:4006");
     }
 
@@ -1715,7 +1715,7 @@ mod test {
             timeout: Duration::from_secs(42),
             body_limit: ReadableSize::mb(128),
             cors_allowed_origins: vec!["https://example.com".to_string()],
-            api_server_enable: true,
+            enable_api_server: true,
             ..HttpOptions::default()
         };
         let (internal, api) = HttpServerBuilder::new(http_opts.clone()).build_servers();
@@ -1761,7 +1761,7 @@ mod test {
         let (tx, _rx) = mpsc::channel(100);
         let instance = Arc::new(DummyInstance { _tx: tx });
         let options = HttpOptions {
-            api_server_enable: true,
+            enable_api_server: true,
             ..HttpOptions::default()
         };
         let builder = HttpServerBuilder::new(options)
@@ -1808,7 +1808,7 @@ mod test {
     #[test]
     fn test_build_servers_api_disabled_by_default() {
         // The API server is disabled by default, so `build_servers` returns no
-        // second server unless `api_server_enable` is set.
+        // second server unless `enable_api_server` is set.
         let (_internal, api) = HttpServerBuilder::new(HttpOptions::default()).build_servers();
         assert!(api.is_none());
     }

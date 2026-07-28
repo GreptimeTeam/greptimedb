@@ -288,7 +288,7 @@ where
             self.http_server_builder(opts, request_memory_limiter)
         };
 
-        // The API server is configured entirely under `[http]` (`api_server_enable`,
+        // The API server is configured entirely under `[http]` (`enable_api_server`,
         // `api_server_host`, `api_server_port`) and shares every other `[http]`
         // option with the main server.
         let (internal, api) = builder
