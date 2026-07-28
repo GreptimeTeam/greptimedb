@@ -219,7 +219,7 @@ impl Default for HttpOptions {
             prom_validation_mode: PromValidationMode::Strict,
             experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: true,
-            api_server_enable: true,
+            api_server_enable: false,
             api_server_host: "127.0.0.1".to_string(),
             api_server_port: DEFAULT_HTTP_API_ADDR_PORT,
         }
@@ -1596,7 +1596,12 @@ mod test {
     fn make_split_builder() -> HttpServerBuilder {
         let (tx, _rx) = mpsc::channel(100);
         let instance = Arc::new(DummyInstance { _tx: tx });
-        HttpServerBuilder::new(HttpOptions::default())
+        // Enable the dedicated API server so the split behavior can be exercised.
+        let options = HttpOptions {
+            api_server_enable: true,
+            ..HttpOptions::default()
+        };
+        HttpServerBuilder::new(options)
             .with_sql_handler(instance)
             .with_metrics_handler(MetricsHandler)
             .with_greptime_config_options("dummy = \"value\"".to_string())
@@ -1605,7 +1610,8 @@ mod test {
     #[tokio::test]
     pub async fn test_http_api_options_defaults() {
         let opts = HttpOptions::default();
-        assert!(opts.api_server_enable);
+        // The API server is disabled by default.
+        assert!(!opts.api_server_enable);
         assert_eq!(opts.api_server_host, "127.0.0.1");
         assert_eq!(opts.api_server_port, 4006);
     }
@@ -1636,7 +1642,7 @@ mod test {
         // `build_servers` produces the internal/full server (everything) plus a
         // dedicated API server that only serves the v1 interfaces (and dashboard).
         let (internal, api) = make_split_builder().build_servers();
-        let api = api.expect("API server is enabled by default");
+        let api = api.expect("API server is explicitly enabled in make_split_builder");
         assert_eq!(internal.name(), HTTP_SERVER);
         assert_eq!(api.name(), HTTP_API_SERVER);
 
@@ -1679,10 +1685,11 @@ mod test {
             timeout: Duration::from_secs(42),
             body_limit: ReadableSize::mb(128),
             cors_allowed_origins: vec!["https://example.com".to_string()],
+            api_server_enable: true,
             ..HttpOptions::default()
         };
         let (internal, api) = HttpServerBuilder::new(http_opts.clone()).build_servers();
-        let api = api.expect("API server is enabled by default");
+        let api = api.expect("API server is explicitly enabled");
 
         // Only the bound address differs.
         assert_eq!(internal.options.addr, http_opts.addr);
@@ -1697,13 +1704,10 @@ mod test {
     }
 
     #[test]
-    fn test_build_servers_can_disable_api_server() {
-        // When `api_server_enable` is false, no API server is built.
-        let opts = HttpOptions {
-            api_server_enable: false,
-            ..HttpOptions::default()
-        };
-        let (_internal, api) = HttpServerBuilder::new(opts).build_servers();
+    fn test_build_servers_api_disabled_by_default() {
+        // The API server is disabled by default, so `build_servers` returns no
+        // second server unless `api_server_enable` is set.
+        let (_internal, api) = HttpServerBuilder::new(HttpOptions::default()).build_servers();
         assert!(api.is_none());
     }
 

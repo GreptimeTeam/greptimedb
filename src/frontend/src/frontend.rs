@@ -200,10 +200,10 @@ mod tests {
 
     #[test]
     fn test_http_api_server_defaults_on_when_absent() {
-        // When `[http]` is not present in the config, the dedicated API server must
-        // still be enabled by default on port 4006.
+        // When `[http]` is not present in the config, the dedicated API server is
+        // disabled by default (its port/host defaults are still 4006 / 127.0.0.1).
         let parsed: FrontendOptions = toml::from_str("").unwrap();
-        assert!(parsed.http.api_server_enable);
+        assert!(!parsed.http.api_server_enable);
         assert_eq!(parsed.http.api_server_port, 4006);
         assert_eq!(parsed.http.api_server_host, "127.0.0.1");
     }
