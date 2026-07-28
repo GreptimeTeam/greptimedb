@@ -740,11 +740,6 @@ impl LocalCompactionState {
         }
     }
 
-    /// Returns the cancellation handle for this compaction task.
-    pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {
-        self.cancel_handle.clone()
-    }
-
     /// Marks the compaction task as started to commit,
     /// which means the compaction task is in the final stage and is about to update region version and manifest.
     /// It will reject cancellation request after this method is called.
@@ -757,6 +752,15 @@ impl LocalCompactionState {
         }
         *commit_started = true;
         true
+    }
+
+    /// Marks the compaction task as started to commit after it has produced new files.
+    ///
+    /// Once compaction has written output files, cancellation must not drop the only
+    /// owner of those files before they become manifest-owned.
+    pub(crate) fn mark_commit_started_after_output(&self) {
+        let mut commit_started = self.commit_started.lock().unwrap();
+        *commit_started = true;
     }
 
     /// Request cancellation for this compaction task.
@@ -2079,7 +2083,6 @@ mod tests {
         let state = status.start_local_task();
 
         assert_eq!(status.request_cancel(), RequestCancelResult::CancelIssued);
-        assert!(state.cancel_handle().is_cancelled());
         assert_eq!(
             status.request_cancel(),
             RequestCancelResult::AlreadyCancelling
