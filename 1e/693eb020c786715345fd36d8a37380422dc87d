@@ -25,6 +25,12 @@ tests-integration/Cargo.toml
   s_2a9e18b5bc423a::t_5ac8f979d7f638 119
 Cargo.lock
   s_2a9e18b5bc423a::t_83a50294c8cd00 14763
+config/metasrv.example.toml
+  s_2a9e18b5bc423a::t_2b762b9075f493 317
+config/standalone.example.toml
+  s_2a9e18b5bc423a::t_2b762b9075f493 908
+config/config.md
+  s_2a9e18b5bc423a::t_6722128f3063b9 234,447
 ---
 {
   "schema_version": "authorship/3.0.0",
