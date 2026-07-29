@@ -19,6 +19,7 @@ use client::OutputData;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use frontend::instance::Instance;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
@@ -102,13 +103,28 @@ async fn event_count_is_one(instance: &Arc<Instance>, query: &str) -> bool {
 async fn query_first_string(instance: &Arc<Instance>, query: &str, column: &str) -> Option<String> {
     let batches = query_record_batches(instance, query).await?;
     let batch = batches.take().into_iter().next()?;
-    batch
-        .column_by_name(column)?
-        .as_string::<i32>()
-        .iter()
-        .next()
-        .flatten()
-        .map(ToString::to_string)
+    let column = batch.column_by_name(column)?;
+    match column.data_type() {
+        ArrowDataType::Utf8 => column
+            .as_string::<i32>()
+            .iter()
+            .next()
+            .flatten()
+            .map(ToString::to_string),
+        ArrowDataType::LargeUtf8 => column
+            .as_string::<i64>()
+            .iter()
+            .next()
+            .flatten()
+            .map(ToString::to_string),
+        ArrowDataType::Utf8View => column
+            .as_string_view()
+            .iter()
+            .next()
+            .flatten()
+            .map(ToString::to_string),
+        _ => None,
+    }
 }
 
 async fn query_first_u32(instance: &Arc<Instance>, query: &str, column: &str) -> Option<u32> {

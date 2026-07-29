@@ -24,7 +24,7 @@ use session::context::QueryContext;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{StorageType, get_test_store_config};
 
-use crate::event_recorder_test_util::{assert_eventually_eq, assert_single_event};
+use crate::event_recorder_test_util::find_eventually_string;
 
 const TABLE_NAME: &str = "batch_gc_events";
 const MAX_ATTEMPTS: usize = 60;
@@ -82,7 +82,7 @@ async fn test_batch_gc_event() {
         execute(instance, &format!("ADMIN FLUSH_TABLE('{TABLE_NAME}')")).await;
     }
     assert_sst_count(&cluster, 4).await;
-    let deleted_file_ids = cluster
+    let mut deleted_file_ids = cluster
         .list_sst_files_from_all_datanodes()
         .await
         .into_iter()
@@ -119,7 +119,6 @@ async fn test_batch_gc_event() {
         .map(|route| route.region.id)
         .collect::<Vec<_>>();
     assert_eq!(regions.len(), 1);
-    let region_id = regions[0];
 
     let procedure = BatchGcProcedure::new(
         cluster.metasrv.mailbox().clone(),
@@ -143,25 +142,6 @@ async fn test_batch_gc_event() {
     watcher::wait(&mut watcher).await.unwrap();
     assert_sst_count(&cluster, 1).await;
 
-    let submitted = format!(
-        r#"SELECT count(*) AS event_count
-FROM greptime_private.events
-WHERE type = 'batch_gc'
-  AND procedure_id = '{procedure_id}'
-  AND procedure_state = 'Running'
-  AND procedure_trigger = 'Submitted'
-  AND region_id = {}
-  AND table_id = {table_id}
-  AND region_number = {}
-  AND gc_report IS NULL
-  AND json_path_match(payload, '$.version == 1')
-  AND json_path_match(payload, '$.full_file_listing == false')
-  AND json_path_match(payload, '$.timeout == "10s"')"#,
-        region_id.as_u64(),
-        region_id.region_number(),
-    );
-    assert_single_event(instance, &submitted).await;
-
     let succeeded = format!(
         r#"SELECT json_to_string(gc_report) AS gc_report
 FROM greptime_private.events
@@ -171,18 +151,21 @@ WHERE type = 'batch_gc'
   AND procedure_trigger = 'Succeeded'
   AND json_is_null(payload)"#,
     );
-    let expected_report = serde_json::json!({
-        "deleted_files": deleted_file_ids,
-        "need_retry": false,
-        "processed": true,
-    })
-    .to_string();
-    assert_eventually_eq(
-        instance,
-        &succeeded,
-        &expected_single_value("gc_report", &expected_report),
-    )
-    .await;
+    let actual_report: serde_json::Value =
+        serde_json::from_str(&find_eventually_string(instance, &succeeded, "gc_report").await)
+            .unwrap();
+    assert_eq!(actual_report["need_retry"], false);
+    assert_eq!(actual_report["processed"], true);
+
+    let mut actual_file_ids = actual_report["deleted_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file_id| file_id.as_str().unwrap())
+        .collect::<Vec<_>>();
+    actual_file_ids.sort_unstable();
+    deleted_file_ids.sort_unstable();
+    assert_eq!(actual_file_ids, deleted_file_ids);
 }
 
 async fn execute(instance: &Arc<frontend::instance::Instance>, sql: &str) {
@@ -204,10 +187,4 @@ async fn assert_sst_count(cluster: &GreptimeDbCluster, expected: usize) {
     }
 
     panic!("timed out waiting for {expected} SST files, found {last_actual}");
-}
-
-fn expected_single_value(column: &str, value: &str) -> String {
-    let width = column.len().max(value.len());
-    let separator = format!("+{}+", "-".repeat(width + 2));
-    format!("{separator}\n| {column:<width$} |\n{separator}\n| {value:<width$} |\n{separator}")
 }

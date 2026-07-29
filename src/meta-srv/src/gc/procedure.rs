@@ -1032,11 +1032,9 @@ impl Procedure for BatchGcProcedure {
         }
 
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => BatchGcEvent::submitted(
-                &self.data.regions,
-                self.data.full_file_listing,
-                self.data.timeout,
-            ),
+            EventTrigger::Submitted
+            | EventTrigger::Recovered
+            | EventTrigger::ChildSubmitted { .. } => return None,
             EventTrigger::Succeeded => {
                 let ProcedureState::Done {
                     output: Some(output),
@@ -1047,7 +1045,14 @@ impl Procedure for BatchGcProcedure {
                 let report = output.downcast_ref::<GcReport>()?;
                 BatchGcEvent::succeeded(&self.data.regions, report)
             }
-            _ => BatchGcEvent::lifecycle(&self.data.regions),
+            EventTrigger::Retrying { .. }
+            | EventTrigger::RollingBack
+            | EventTrigger::Failed
+            | EventTrigger::Poisoned => BatchGcEvent::lifecycle(
+                &self.data.regions,
+                self.data.full_file_listing,
+                self.data.timeout,
+            ),
         };
         Some(Box::new(event))
     }

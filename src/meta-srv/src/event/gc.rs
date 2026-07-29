@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema, Row};
+use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
@@ -34,8 +34,9 @@ pub(crate) const BATCH_GC_EVENT_TYPE: &str = "batch_gc";
 const PAYLOAD_VERSION: u8 = 1;
 
 #[derive(Debug, Serialize)]
-struct BatchGcSubmittedPayload {
+struct BatchGcPayload {
     version: u8,
+    regions: Vec<RegionId>,
     full_file_listing: bool,
     #[serde(with = "humantime_serde")]
     timeout: Duration,
@@ -65,23 +66,25 @@ struct BatchGcRegionRow {
 
 #[derive(Debug)]
 pub(crate) struct BatchGcEvent {
-    payload: Option<BatchGcSubmittedPayload>,
-    regions: Vec<BatchGcRegionRow>,
+    payload: Option<BatchGcPayload>,
+    // None emits a procedure-level lifecycle row with null Region dimensions.
+    regions: Option<Vec<BatchGcRegionRow>>,
 }
 
 impl BatchGcEvent {
-    pub(crate) fn submitted(
+    pub(crate) fn lifecycle(
         regions: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
     ) -> Self {
         Self {
-            payload: Some(BatchGcSubmittedPayload {
+            payload: Some(BatchGcPayload {
                 version: PAYLOAD_VERSION,
+                regions: regions.to_vec(),
                 full_file_listing,
                 timeout,
             }),
-            regions: lifecycle_rows(regions),
+            regions: None,
         }
     }
 
@@ -102,14 +105,7 @@ impl BatchGcEvent {
 
         Self {
             payload: None,
-            regions,
-        }
-    }
-
-    pub(crate) fn lifecycle(regions: &[RegionId]) -> Self {
-        Self {
-            payload: None,
-            regions: lifecycle_rows(regions),
+            regions: Some(regions),
         }
     }
 }
@@ -138,7 +134,11 @@ impl Event for BatchGcEvent {
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
-        self.regions
+        let Some(regions) = &self.regions else {
+            return Ok(vec![null_row(4)]);
+        };
+
+        regions
             .iter()
             .map(|region| {
                 let report = region
@@ -164,30 +164,24 @@ impl Event for BatchGcEvent {
     }
 }
 
-fn lifecycle_rows(regions: &[RegionId]) -> Vec<BatchGcRegionRow> {
-    regions
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|region_id| BatchGcRegionRow {
-            region_id,
-            report: None,
-        })
-        .collect()
+fn null_row(column_count: usize) -> Row {
+    Row {
+        values: (0..column_count)
+            .map(|_| Value { value_data: None })
+            .collect(),
+    }
 }
 
 fn region_report(region_id: RegionId, report: &GcReport) -> Option<BatchGcRegionReport> {
-    let mut deleted_files = report
+    let deleted_files = report
         .deleted_files
         .get(&region_id)
         .into_iter()
         .flatten()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    deleted_files.sort_unstable();
 
-    let mut deleted_indexes = report
+    let deleted_indexes = report
         .deleted_indexes
         .get(&region_id)
         .into_iter()
@@ -197,9 +191,6 @@ fn region_report(region_id: RegionId, report: &GcReport) -> Option<BatchGcRegion
             index_version: *index_version,
         })
         .collect::<Vec<_>>();
-    deleted_indexes.sort_unstable_by(|left, right| {
-        (&left.file_id, left.index_version).cmp(&(&right.file_id, right.index_version))
-    });
 
     let need_retry = report.need_retry_regions.contains(&region_id);
     if deleted_files.is_empty() && deleted_indexes.is_empty() && !need_retry {
@@ -231,6 +222,7 @@ mod tests {
     use common_meta::sequence::SequenceBuilder;
     use common_procedure::{
         EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId, ProcedureState,
+        RetryPhase,
     };
     use store_api::storage::FileId;
 
@@ -239,22 +231,23 @@ mod tests {
     use crate::procedure::test_util::MailboxContext;
 
     #[test]
-    fn test_batch_gc_submitted_event_contract() {
+    fn test_batch_gc_lifecycle_event_contract() {
         let first = RegionId::new(1024, 1);
         let second = RegionId::new(1024, 2);
         let event =
-            BatchGcEvent::submitted(&[second, first, second], true, Duration::from_secs(10));
+            BatchGcEvent::lifecycle(&[second, first, second], true, Duration::from_secs(10));
 
         assert_event_contract(
             &event,
             BATCH_GC_EVENT_TYPE,
             &batch_gc_schema(),
-            &[region_row(first, None), region_row(second, None)],
+            &[null_row(4)],
         );
         assert_eq!(
             event.json_payload().unwrap(),
             serde_json::json!({
                 "version": 1,
+                "regions": [second.as_u64(), first.as_u64(), second.as_u64()],
                 "full_file_listing": true,
                 "timeout": "10s",
             })
@@ -286,8 +279,8 @@ mod tests {
                     first,
                     Some(serde_json::json!({
                         "deleted_files": [
-                            "00000000-0000-0000-0000-000000000001",
                             "00000000-0000-0000-0000-000000000002",
+                            "00000000-0000-0000-0000-000000000001",
                         ],
                         "processed": true,
                         "need_retry": false,
@@ -340,21 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_gc_lifecycle_event_contract() {
-        let first = RegionId::new(1024, 1);
-        let second = RegionId::new(1024, 2);
-        let event = BatchGcEvent::lifecycle(&[second, first, second]);
-
-        assert_event_contract(
-            &event,
-            BATCH_GC_EVENT_TYPE,
-            &batch_gc_schema(),
-            &[region_row(first, None), region_row(second, None)],
-        );
-        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
-    }
-
-    #[test]
     fn test_batch_gc_event_filter() {
         let procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
@@ -365,24 +343,15 @@ mod tests {
             event_type_filter: Arc::new(event_type_filter),
         };
 
-        let submitted = procedure
-            .event(&event_context(
-                EventTrigger::Submitted,
-                &running,
-                EventTypeFilter::All,
-            ))
-            .unwrap();
-        assert_eq!(submitted.event_type(), BATCH_GC_EVENT_TYPE);
-        assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
-
-        let allowed = procedure
-            .event(&event_context(
-                EventTrigger::Submitted,
-                &running,
-                EventTypeFilter::Only(HashSet::from([BATCH_GC_EVENT_TYPE.to_string()])),
-            ))
-            .unwrap();
-        assert_eq!(allowed.event_type(), BATCH_GC_EVENT_TYPE);
+        assert!(
+            procedure
+                .event(&event_context(
+                    EventTrigger::Submitted,
+                    &running,
+                    EventTypeFilter::All,
+                ))
+                .is_none()
+        );
 
         let report = GcReport {
             processed_regions: HashSet::from([RegionId::new(1024, 1)]),
@@ -405,24 +374,41 @@ mod tests {
                 .is_none()
         );
 
-        let recovered = procedure
+        assert!(
+            procedure
+                .event(&event_context(
+                    EventTrigger::Recovered,
+                    &running,
+                    EventTypeFilter::All,
+                ))
+                .is_none()
+        );
+
+        let retrying = procedure
             .event(&event_context(
-                EventTrigger::Recovered,
+                EventTrigger::Retrying {
+                    phase: RetryPhase::Execute,
+                    attempt: 1,
+                },
                 &running,
                 EventTypeFilter::All,
             ))
             .unwrap();
-        assert_eq!(recovered.json_payload().unwrap(), serde_json::Value::Null);
-        assert!(
-            recovered.extra_rows().unwrap()[0].values[3]
-                .value_data
-                .is_none()
+        assert_eq!(
+            retrying.json_payload().unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "regions": [RegionId::new(1024, 1).as_u64()],
+                "full_file_listing": true,
+                "timeout": "10s",
+            })
         );
+        assert_eq!(retrying.extra_rows().unwrap(), vec![null_row(4)]);
 
         assert!(
             procedure
                 .event(&event_context(
-                    EventTrigger::Submitted,
+                    EventTrigger::Recovered,
                     &running,
                     EventTypeFilter::Only(HashSet::from(["another_event".to_string()])),
                 ))
@@ -431,7 +417,7 @@ mod tests {
         assert!(
             procedure
                 .event(&event_context(
-                    EventTrigger::Submitted,
+                    EventTrigger::Recovered,
                     &running,
                     EventTypeFilter::Only(HashSet::new()),
                 ))
