@@ -416,18 +416,31 @@ fn time_window_intersects_range(
     time_window_size: i64,
     time_range: &TimestampRange,
 ) -> bool {
-    let first_window = time_range.start().map_or(i64::MIN, |start| {
-        start
-            .convert_to(TimeUnit::Second)
-            .and_then(|timestamp| timestamp.value().align_to_ceil_by_bucket(time_window_size))
-            .unwrap_or(i64::MIN)
-    });
-    let last_window = time_range.end().map_or(i64::MAX, |end| {
-        end.convert_to_ceil(TimeUnit::Second)
-            .and_then(|timestamp| timestamp.value().checked_sub(1))
-            .and_then(|timestamp| timestamp.align_to_ceil_by_bucket(time_window_size))
-            .unwrap_or(i64::MAX)
-    });
+    let first_window = match time_range.start() {
+        None => i64::MIN,
+        Some(start) => {
+            let Some(first_window) = start
+                .convert_to(TimeUnit::Second)
+                .and_then(|timestamp| timestamp.value().align_to_ceil_by_bucket(time_window_size))
+            else {
+                return false;
+            };
+            first_window
+        }
+    };
+    let last_window = match time_range.end() {
+        None => i64::MAX,
+        Some(end) => {
+            let Some(last_window) = end
+                .convert_to_ceil(TimeUnit::Second)
+                .and_then(|timestamp| timestamp.value().checked_sub(1))
+                .and_then(|timestamp| timestamp.align_to_ceil_by_bucket(time_window_size))
+            else {
+                return false;
+            };
+            last_window
+        }
+    };
     (first_window..=last_window).contains(&window_end)
 }
 
@@ -1411,6 +1424,13 @@ mod tests {
         assert!(time_window_intersects_range(0, 3, &boundary_range));
         assert!(time_window_intersects_range(3, 3, &boundary_range));
         assert!(!time_window_intersects_range(6, 3, &boundary_range));
+
+        let overflowing_range = TimestampRange::new(
+            Timestamp::new_second(i64::MAX - 1),
+            Timestamp::new_second(i64::MAX),
+        )
+        .unwrap();
+        assert!(!time_window_intersects_range(0, 4, &overflowing_range));
     }
 
     #[test]
