@@ -39,6 +39,7 @@ use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::put_and_flush;
 use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildListener};
+use crate::manifest::action::RegionEdit;
 use crate::read::scan_region::Scanner;
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::location;
@@ -232,12 +233,7 @@ async fn assert_compacted_state(
     );
 }
 
-async fn assert_stale_artifacts_removed(
-    engine: &MitoEngine,
-    region_id: RegionId,
-    source_files: &[FileMeta],
-) {
-    let region = engine.get_region(region_id).unwrap();
+async fn assert_stale_artifact_caches_removed(engine: &MitoEngine, source_files: &[FileMeta]) {
     let cache_manager = engine.cache_manager();
     let write_cache = cache_manager
         .write_cache()
@@ -248,29 +244,46 @@ async fn assert_stale_artifacts_removed(
         } else {
             0
         };
-        let index_id =
-            RegionIndexId::new(RegionFileId::new(region_id, source.file_id), index_version);
+        assert!(
+            !write_cache.file_cache().contains_key(&IndexKey::new(
+                source.region_id,
+                source.file_id,
+                FileType::Puffin(index_version),
+            )),
+            "stale index artifact remains in write cache"
+        );
+    }
+}
+
+async fn assert_index_artifacts_exist(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    source_files: &[FileMeta],
+) {
+    let region = engine.get_region(region_id).unwrap();
+    for source in source_files {
+        let index_version = if source.index_file_size > 0 {
+            source.index_version + 1
+        } else {
+            0
+        };
+        let index_id = RegionIndexId::new(
+            RegionFileId::new(source.region_id, source.file_id),
+            index_version,
+        );
         let path = location::index_file_path(
             region.access_layer.table_dir(),
             index_id,
             region.access_layer.path_type(),
         );
         assert!(
-            !region
+            region
                 .access_layer
                 .object_store()
                 .exists(&path)
                 .await
                 .unwrap(),
-            "stale index artifact still exists: {path}"
-        );
-        assert!(
-            !write_cache.file_cache().contains_key(&IndexKey::new(
-                region_id,
-                source.file_id,
-                FileType::Puffin(index_version),
-            )),
-            "stale index artifact remains in write cache"
+            "stale index artifact was deleted outside FilePurger/GC: {path}"
         );
     }
 }
@@ -367,7 +380,11 @@ async fn run_index_publication_compaction_race(phase: IndexPublicationPhase, gc_
     assert_eq!(gate.abort_count.load(Ordering::Relaxed), old_files.len());
 
     assert_compacted_state(&engine, region_id, &old_files).await;
-    assert_stale_artifacts_removed(&engine, region_id, &old_files).await;
+    assert_stale_artifact_caches_removed(&engine, &old_files).await;
+    if gc_enabled {
+        // ObjectStoreFilePurger leaves remote deletion to reference-aware GC.
+        assert_index_artifacts_exist(&engine, region_id, &old_files).await;
+    }
     let before_reopen = scan_timestamps(&engine, region_id).await;
     assert_eq!(before_reopen.len(), 20);
     assert_eq!(
@@ -402,6 +419,97 @@ async fn test_compaction_wins_before_index_worker_apply() {
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn test_index_build_routes_cross_region_file_to_logical_region() {
+    let mut env = TestEnv::with_prefix("test_cross_region_index_build_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(false),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id = RegionId::new(1, 2);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            source_region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let builder = CreateRequestBuilder::new();
+    let source_request = builder.build_with_index();
+    let column_schemas = rows_schema(&source_request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(source_request))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::Create(builder.build_with_index()),
+        )
+        .await
+        .unwrap();
+
+    put_and_flush(&engine, source_region_id, &column_schemas, 0..10).await;
+    let source_files = current_file_metas(&engine, source_region_id).await;
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].region_id, source_region_id);
+
+    engine
+        .edit_region(
+            target_region_id,
+            RegionEdit {
+                files_to_add: source_files.clone(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), listener.wait_finish(1))
+        .await
+        .expect("cross-region index build did not apply to the logical region");
+
+    let target_files = current_file_metas(&engine, target_region_id).await;
+    assert_eq!(target_files.len(), 1);
+    assert_eq!(target_files[0].region_id, source_region_id);
+    assert!(target_files[0].exists_index());
+    assert_eq!(
+        engine
+            .get_region(target_region_id)
+            .unwrap()
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+            .get(&target_files[0].file_id),
+        Some(&target_files[0])
+    );
+    assert!(!current_file_metas(&engine, source_region_id).await[0].exists_index());
 }
 
 #[tokio::test]

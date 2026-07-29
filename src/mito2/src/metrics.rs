@@ -326,11 +326,11 @@ lazy_static! {
             "stale index publications rejected",
             &[STAGE_LABEL],
         ).unwrap();
-    /// Number of failures while cleaning stale index artifacts.
+    /// Number of failures while cleaning local state for stale index artifacts.
     pub static ref INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL: IntCounter =
         register_int_counter!(
             "greptime_mito_index_artifact_cleanup_failure_total",
-            "failures while cleaning stale index artifacts",
+            "failures while cleaning local state for stale index artifacts",
         ).unwrap();
     /// Timer of index application.
     pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(

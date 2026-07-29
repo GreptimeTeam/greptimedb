@@ -33,7 +33,7 @@ use crate::request::{
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
-    cleanup_stale_index_artifact,
+    cleanup_stale_index_caches,
 };
 use crate::worker::RegionWorkerLoop;
 
@@ -75,6 +75,7 @@ impl<S> RegionWorkerLoop<S> {
         });
 
         IndexBuildTask {
+            region_id: region.region_id,
             file: file.clone(),
             file_meta: file.meta_ref().clone(),
             reason: build_type,
@@ -219,7 +220,7 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let file_meta = request.file_meta;
-        let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
+        let region_file_id = RegionFileId::new(file_meta.region_id, file_meta.file_id);
         let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
 
         // Clean old puffin-related cache before making the new metadata visible.
@@ -254,7 +255,7 @@ impl<S> RegionWorkerLoop<S> {
                 "Ignores stale index build result, region: {}, file_id: {}, index_version: {}, committed manifest version: {}",
                 region_id, file_meta.file_id, file_meta.index_version, request.manifest_version
             );
-            cleanup_stale_index_artifact(
+            cleanup_stale_index_caches(
                 index_id,
                 &region.access_layer,
                 Some(&self.cache_manager),

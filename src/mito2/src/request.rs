@@ -983,8 +983,6 @@ pub(crate) struct IndexBuildFinished {
 /// Notifies an index build job has been stopped.
 #[derive(Debug)]
 pub(crate) struct IndexBuildStopped {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
     pub(crate) file_id: FileId,
 }
 

@@ -87,27 +87,18 @@ pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 #[cfg(feature = "vector_index")]
 pub(crate) const TYPE_VECTOR_INDEX: &str = "vector_index";
 
-/// Deletes one stale index artifact and evicts all caches for its exact version.
-pub(crate) async fn cleanup_stale_index_artifact(
+/// Evicts local state for a stale index artifact.
+///
+/// The remote artifact may already be referenced by another region manifest
+/// because repartitioned regions share physical SST and index paths. Remote
+/// deletion therefore stays in the normal FilePurger/GC lifecycle; object-store
+/// GC can account for cross-region references and the configured lingering time.
+pub(crate) async fn cleanup_stale_index_caches(
     index_id: RegionIndexId,
     access_layer: &AccessLayerRef,
     cache_manager: Option<&CacheManagerRef>,
     write_cache: Option<&WriteCacheRef>,
 ) {
-    // Same-file builds stay serialized until stale cleanup and
-    // IndexBuildStopped complete, so this exact version cannot become
-    // referenced concurrently.
-    if let Err(e) = access_layer.delete_index(index_id).await {
-        INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL.inc();
-        warn!(
-            e;
-            "Failed to delete stale index artifact, region: {}, file_id: {}, index_version: {}",
-            index_id.region_id(),
-            index_id.file_id(),
-            index_id.version
-        );
-    }
-
     if let Some(cache_manager) = cache_manager {
         CacheStrategy::EnableAll(cache_manager.clone())
             .evict_puffin_cache(index_id)
@@ -705,6 +696,8 @@ pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
 #[derive(Clone)]
 pub struct IndexBuildTask {
+    /// The logical region whose manifest and in-memory version this task updates.
+    pub region_id: RegionId,
     /// The SST file handle to build index for.
     pub file: FileHandle,
     /// The file meta to build index for.
@@ -728,7 +721,8 @@ pub struct IndexBuildTask {
 impl std::fmt::Debug for IndexBuildTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexBuildTask")
-            .field("region_id", &self.file_meta.region_id)
+            .field("region_id", &self.region_id)
+            .field("origin_region_id", &self.file_meta.region_id)
             .field("file_id", &self.file_meta.file_id)
             .field("reason", &self.reason)
             .finish()
@@ -746,7 +740,7 @@ impl IndexBuildTask {
         let _ = self
             .result_sender
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
-                region_id: self.file_meta.region_id,
+                region_id: self.region_id,
             }))
             .await;
     }
@@ -769,15 +763,14 @@ impl IndexBuildTask {
             Err(e) => {
                 warn!(
                     e; "Index build task failed, region: {}, file_id: {}",
-                    self.file_meta.region_id, self.file_meta.file_id,
+                    self.region_id, self.file_meta.file_id,
                 );
                 self.on_failure(e.into()).await
             }
         }
         let worker_request = WorkerRequest::Background {
-            region_id: self.file_meta.region_id,
+            region_id: self.region_id,
             notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
-                region_id: self.file_meta.region_id,
                 file_id: self.file_meta.file_id,
             }),
         };
@@ -797,7 +790,7 @@ impl IndexBuildTask {
         let Some(level_files) = version.ssts.levels().get(level as usize) else {
             warn!(
                 "File id {} not found in level {} for index build, region: {}",
-                file_id, level, self.file_meta.region_id
+                file_id, level, self.region_id
             );
             return false;
         };
@@ -812,7 +805,7 @@ impl IndexBuildTask {
             _ => {
                 warn!(
                     "File id {} not found in region version for index build, region: {}",
-                    file_id, self.file_meta.region_id
+                    file_id, self.region_id
                 );
                 false
             }
@@ -841,7 +834,7 @@ impl IndexBuildTask {
                 .await;
             return Ok(IndexBuildOutcome::Aborted(format!(
                 "SST file not found during index build, region: {}, file_id: {}",
-                self.file_meta.region_id, self.file_meta.file_id
+                self.region_id, self.file_meta.file_id
             )));
         }
 
@@ -897,7 +890,7 @@ impl IndexBuildTask {
                     .await;
                 return Ok(IndexBuildOutcome::Aborted(format!(
                     "SST file not found during index build, region: {}, file_id: {}",
-                    self.file_meta.region_id, self.file_meta.file_id
+                    self.region_id, self.file_meta.file_id
                 )));
             }
 
@@ -924,7 +917,7 @@ impl IndexBuildTask {
                         file_meta,
                     };
                     WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
+                        region_id: self.region_id,
                         notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
                     }
                 }
@@ -933,7 +926,7 @@ impl IndexBuildTask {
                         .with_label_values(&["manifest_commit"])
                         .inc();
                     let index_id = RegionIndexId::new(region_file_id, new_index_version);
-                    cleanup_stale_index_artifact(
+                    cleanup_stale_index_caches(
                         index_id,
                         &self.access_layer,
                         self.cache_manager.as_ref(),
@@ -943,13 +936,13 @@ impl IndexBuildTask {
                     self.listener.on_index_build_abort(region_file_id).await;
                     return Ok(IndexBuildOutcome::Aborted(format!(
                         "Source SST or region incarnation changed before index publication, region: {}, file_id: {}",
-                        self.file_meta.region_id, self.file_meta.file_id
+                        self.region_id, self.file_meta.file_id
                     )));
                 }
                 Err(e) => {
                     let err = Arc::new(e);
                     WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
+                        region_id: self.region_id,
                         notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
                     }
                 }
@@ -1032,7 +1025,7 @@ impl IndexBuildTask {
             info!(
                 "Successfully update manifest version to {}, region: {}, reason: {}",
                 manifest_version,
-                self.file_meta.region_id,
+                self.region_id,
                 self.reason.as_str()
             );
         }
@@ -1142,7 +1135,7 @@ impl IndexBuildScheduler {
     ) -> Result<()> {
         let status = self
             .region_status
-            .entry(task.file_meta.region_id)
+            .entry(task.region_id)
             .or_insert_with(IndexBuildStatus::new);
 
         let duplicate = if status.retiring {
@@ -1190,7 +1183,7 @@ impl IndexBuildScheduler {
         while building_count < self.files_limit {
             if let Some(pending) = self.find_next_task() {
                 let task = pending.task;
-                let region_id = task.file_meta.region_id;
+                let region_id = task.region_id;
                 let file_id = task.file_meta.file_id;
                 let job = task.into_index_build_job(pending.version_control);
                 if self.scheduler.schedule(job).is_ok() {
@@ -1947,6 +1940,7 @@ mod tests {
 
         // Create mock task.
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta,
             reason: IndexBuildType::Flush,
@@ -2007,6 +2001,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2083,6 +2078,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2189,6 +2185,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2283,6 +2280,7 @@ mod tests {
         let (tx, mut _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2355,6 +2353,7 @@ mod tests {
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
 
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta,
             reason,
