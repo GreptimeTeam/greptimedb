@@ -29,7 +29,7 @@ use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 
 use crate::event_recorder_test_util::{
-    assert_eventually_eq, assert_single_event, find_eventually_string,
+    assert_eventually_eq, assert_single_event, find_eventually_string, find_eventually_u32,
 };
 
 const EVENTS_TABLE: &str = "greptime_private.events";
@@ -63,7 +63,8 @@ async fn test_table_ddl_procedure_events() {
         .await;
     let frontend = cluster.fe_instance().clone();
 
-    // Act / Assert: Create Table retains its rich submitted row.
+    // Act / Assert: Create Table retains its rich submitted row and records the
+    // created table ID when it completes.
     run_sql(
         &frontend,
         &format!(
@@ -71,9 +72,12 @@ async fn test_table_ddl_procedure_events() {
         ),
     )
     .await;
+    let table_id = find_table_id(&frontend, TABLE).await;
+    let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
     assert_named_submitted_event(
         &frontend,
         "create_table",
+        &create_table_procedure_id,
         "\
 +--------------+------------------+
 | type         | name             |
@@ -85,13 +89,15 @@ async fn test_table_ddl_procedure_events() {
     assert_id_terminal_event(
         &frontend,
         "create_table",
+        &create_table_procedure_id,
+        table_id,
         "Succeeded",
         "\
-+--------------+------+
-| type         | id   |
-+--------------+------+
-| create_table | 1024 |
-+--------------+------+",
++--------------+
+| type         |
++--------------+
+| create_table |
++--------------+",
     )
     .await;
 
@@ -102,91 +108,130 @@ async fn test_table_ddl_procedure_events() {
         &format!("ALTER TABLE {TABLE} ADD COLUMN extra STRING"),
     )
     .await;
-    assert_named_id_submitted_event(
+    let alter_table_procedure_id = submitted_procedure_id(&frontend, "alter_table", TABLE).await;
+    assert_named_submitted_event(
         &frontend,
         "alter_table",
+        &alter_table_procedure_id,
         "\
-+-------------+------------------+------+
-| type        | name             | id   |
-+-------------+------------------+------+
-| alter_table | table_ddl_events | 1024 |
-+-------------+------------------+------+",
++-------------+------------------+
+| type        | name             |
++-------------+------------------+
+| alter_table | table_ddl_events |
++-------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "alter_table", "Succeeded").await;
+    assert_lightweight_terminal_event(
+        &frontend,
+        "alter_table",
+        &alter_table_procedure_id,
+        "Succeeded",
+    )
+    .await;
     run_sql(
         &frontend,
         &format!("INSERT INTO {TABLE} VALUES ('a', 0, 1, 'b')"),
     )
     .await;
     run_sql(&frontend, &format!("TRUNCATE TABLE {TABLE}")).await;
-    assert_named_id_submitted_event(
+    let truncate_table_procedure_id =
+        submitted_procedure_id(&frontend, "truncate_table", TABLE).await;
+    assert_named_submitted_event(
         &frontend,
         "truncate_table",
+        &truncate_table_procedure_id,
         "\
-+----------------+------------------+------+
-| type           | name             | id   |
-+----------------+------------------+------+
-| truncate_table | table_ddl_events | 1024 |
-+----------------+------------------+------+",
++----------------+------------------+
+| type           | name             |
++----------------+------------------+
+| truncate_table | table_ddl_events |
++----------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "truncate_table", "Succeeded").await;
+    assert_lightweight_terminal_event(
+        &frontend,
+        "truncate_table",
+        &truncate_table_procedure_id,
+        "Succeeded",
+    )
+    .await;
 
     // Act / Assert: Drop records the table name, while Undrop and Purge use the
-    // deterministic table ID as their submitted locator.
+    // table ID as their submitted locator.
     run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
-    assert_named_id_submitted_event(
+    let drop_table_procedure_id = submitted_procedure_id(&frontend, "drop_table", TABLE).await;
+    assert_named_submitted_event(
         &frontend,
         "drop_table",
+        &drop_table_procedure_id,
         "\
-+------------+------------------+------+
-| type       | name             | id   |
-+------------+------------------+------+
-| drop_table | table_ddl_events | 1024 |
-+------------+------------------+------+",
++------------+------------------+
+| type       | name             |
++------------+------------------+
+| drop_table | table_ddl_events |
++------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "drop_table", "Succeeded").await;
-    cluster
+    assert_lightweight_terminal_event(
+        &frontend,
+        "drop_table",
+        &drop_table_procedure_id,
+        "Succeeded",
+    )
+    .await;
+    let (undrop_table_procedure_id, _) = cluster
         .metasrv
         .ddl_manager()
-        .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id: 1024 })
+        .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id })
         .await
         .unwrap();
+    let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
     assert_id_submitted_event(
         &frontend,
         "undrop_table",
+        &undrop_table_procedure_id,
         "\
-+--------------+------+
-| type         | id   |
-+--------------+------+
-| undrop_table | 1024 |
-+--------------+------+",
++--------------+
+| type         |
++--------------+
+| undrop_table |
++--------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "undrop_table", "Succeeded").await;
+    assert_lightweight_terminal_event(
+        &frontend,
+        "undrop_table",
+        &undrop_table_procedure_id,
+        "Succeeded",
+    )
+    .await;
     run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
-    cluster
+    let (purge_table_procedure_id, _) = cluster
         .metasrv
         .ddl_manager()
-        .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask {
-            table_id: 1024,
-        })
+        .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask { table_id })
         .await
         .unwrap();
+    let purge_table_procedure_id = purge_table_procedure_id.to_string();
     assert_id_submitted_event(
         &frontend,
         "purge_dropped_table",
+        &purge_table_procedure_id,
         "\
-+---------------------+------+
-| type                | id   |
-+---------------------+------+
-| purge_dropped_table | 1024 |
-+---------------------+------+",
++---------------------+
+| type                |
++---------------------+
+| purge_dropped_table |
++---------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "purge_dropped_table", "Succeeded").await;
+    assert_lightweight_terminal_event(
+        &frontend,
+        "purge_dropped_table",
+        &purge_table_procedure_id,
+        "Succeeded",
+    )
+    .await;
 
     // Arrange / Act: metric logical-table DDL is executed through the distributed
     // frontend, which groups logical DDL tasks for the meta procedure manager.
@@ -197,6 +242,7 @@ async fn test_table_ddl_procedure_events() {
         ),
     )
     .await;
+    let physical_table_id = find_table_id(&frontend, PHYSICAL_TABLE).await;
     run_sql(
         &frontend,
         &format!(
@@ -204,11 +250,16 @@ async fn test_table_ddl_procedure_events() {
         ),
     )
     .await;
+    let logical_table_id = find_table_id(&frontend, LOGICAL_TABLE).await;
+    let create_logical_tables_procedure_id =
+        submitted_procedure_id(&frontend, "create_logical_tables", LOGICAL_TABLE).await;
 
-    // Assert: logical Create emits one submitted row per logical table.
+    // Assert: logical Create emits one submitted row per logical table and
+    // preserves the logical and physical table IDs on its terminal row.
     assert_named_submitted_event(
         &frontend,
         "create_logical_tables",
+        &create_logical_tables_procedure_id,
         "\
 +-----------------------+--------------------------+
 | type                  | name                     |
@@ -220,13 +271,16 @@ async fn test_table_ddl_procedure_events() {
     assert_logical_terminal_event(
         &frontend,
         "create_logical_tables",
+        &create_logical_tables_procedure_id,
+        logical_table_id,
+        physical_table_id,
         "Succeeded",
         "\
-+-----------------------+--------------------------+------+-------------+
-| type                  | name                     | id   | physical_id |
-+-----------------------+--------------------------+------+-------------+
-| create_logical_tables | table_ddl_events_logical | 1027 | 1026        |
-+-----------------------+--------------------------+------+-------------+",
++-----------------------+--------------------------+
+| type                  | name                     |
++-----------------------+--------------------------+
+| create_logical_tables | table_ddl_events_logical |
++-----------------------+--------------------------+",
     )
     .await;
 
@@ -237,9 +291,12 @@ async fn test_table_ddl_procedure_events() {
         &format!("ALTER TABLE {LOGICAL_TABLE} ADD COLUMN rack STRING PRIMARY KEY"),
     )
     .await;
+    let alter_logical_tables_procedure_id =
+        submitted_procedure_id(&frontend, "alter_logical_tables", LOGICAL_TABLE).await;
     assert_named_submitted_event(
         &frontend,
         "alter_logical_tables",
+        &alter_logical_tables_procedure_id,
         "\
 +----------------------+--------------------------+
 | type                 | name                     |
@@ -248,7 +305,13 @@ async fn test_table_ddl_procedure_events() {
 +----------------------+--------------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(&frontend, "alter_logical_tables", "Succeeded").await;
+    assert_lightweight_terminal_event(
+        &frontend,
+        "alter_logical_tables",
+        &alter_logical_tables_procedure_id,
+        "Succeeded",
+    )
+    .await;
 }
 
 async fn run_sql(instance: &Arc<Instance>, sql: &str) {
@@ -260,72 +323,83 @@ async fn run_sql(instance: &Arc<Instance>, sql: &str) {
     assert!(matches!(output.data, OutputData::AffectedRows(_)), "{sql}");
 }
 
-async fn assert_named_submitted_event(instance: &Arc<Instance>, event_type: &str, expected: &str) {
-    let query = format!(
-        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
-        TYPE_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
-        TYPE_COLUMN.name(),
-        PROCEDURE_TRIGGER_COLUMN.name(),
-        PAYLOAD_COLUMN.name(),
-    );
-    assert_eventually_eq(instance, &query, expected).await;
+async fn find_table_id(instance: &Arc<Instance>, table_name: &str) -> u32 {
+    find_eventually_u32(
+        instance,
+        &format!(
+            "SELECT table_id FROM information_schema.tables WHERE table_catalog = 'greptime' AND table_schema = 'public' AND table_name = '{table_name}'"
+        ),
+        "table_id",
+    )
+    .await
 }
 
-async fn assert_named_id_submitted_event(
+async fn submitted_procedure_id(
     instance: &Arc<Instance>,
     event_type: &str,
-    expected: &str,
-) {
+    table_name: &str,
+) -> String {
     let query = format!(
-        "SELECT {}, {} AS name, {} AS id FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
-        TYPE_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
-        TYPE_COLUMN.name(),
-        PROCEDURE_TRIGGER_COLUMN.name(),
-        PAYLOAD_COLUMN.name(),
-    );
-    assert_eventually_eq(instance, &query, expected).await;
-}
-
-async fn assert_id_submitted_event(instance: &Arc<Instance>, event_type: &str, expected: &str) {
-    let query = format!(
-        "SELECT {}, {} AS id FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
-        TYPE_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
-        TYPE_COLUMN.name(),
-        PROCEDURE_TRIGGER_COLUMN.name(),
-        PAYLOAD_COLUMN.name(),
-    );
-    assert_eventually_eq(instance, &query, expected).await;
-}
-
-async fn submitted_procedure_id(instance: &Arc<Instance>, event_type: &str) -> String {
-    let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{table_name}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
         PROCEDURE_ID_COLUMN.name(),
         TYPE_COLUMN.name(),
+        TABLE_NAME_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
         PAYLOAD_COLUMN.name(),
     );
     find_eventually_string(instance, &query, PROCEDURE_ID_COLUMN.name()).await
 }
 
-async fn assert_id_terminal_event(
+async fn assert_named_submitted_event(
     instance: &Arc<Instance>,
     event_type: &str,
-    terminal_trigger: &str,
+    procedure_id: &str,
     expected: &str,
 ) {
-    let procedure_id = submitted_procedure_id(instance, event_type).await;
     let query = format!(
-        "SELECT {}, {} AS id FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
         TYPE_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
+        TABLE_NAME_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
+        PAYLOAD_COLUMN.name(),
+    );
+    assert_eventually_eq(instance, &query, expected).await;
+}
+
+async fn assert_id_submitted_event(
+    instance: &Arc<Instance>,
+    event_type: &str,
+    procedure_id: &str,
+    expected: &str,
+) {
+    let query = format!(
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
+        TYPE_COLUMN.name(),
+        TYPE_COLUMN.name(),
+        PROCEDURE_ID_COLUMN.name(),
+        PROCEDURE_TRIGGER_COLUMN.name(),
+        PAYLOAD_COLUMN.name(),
+    );
+    assert_eventually_eq(instance, &query, expected).await;
+}
+
+async fn assert_id_terminal_event(
+    instance: &Arc<Instance>,
+    event_type: &str,
+    procedure_id: &str,
+    table_id: u32,
+    terminal_trigger: &str,
+    expected: &str,
+) {
+    let query = format!(
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        TYPE_COLUMN.name(),
+        TYPE_COLUMN.name(),
+        PROCEDURE_ID_COLUMN.name(),
+        PROCEDURE_TRIGGER_COLUMN.name(),
+        TABLE_ID_COLUMN.name(),
         PAYLOAD_COLUMN.name(),
         CATALOG_NAME_COLUMN.name(),
         SCHEMA_NAME_COLUMN.name(),
@@ -337,19 +411,21 @@ async fn assert_id_terminal_event(
 async fn assert_logical_terminal_event(
     instance: &Arc<Instance>,
     event_type: &str,
+    procedure_id: &str,
+    table_id: u32,
+    physical_table_id: u32,
     terminal_trigger: &str,
     expected: &str,
 ) {
-    let procedure_id = submitted_procedure_id(instance, event_type).await;
     let query = format!(
-        "SELECT {}, {} AS name, {} AS id, {} AS physical_id FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND json_is_null({})",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND {} = {physical_table_id} AND json_is_null({})",
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
-        PHYSICAL_TABLE_ID_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
+        TABLE_ID_COLUMN.name(),
+        PHYSICAL_TABLE_ID_COLUMN.name(),
         PAYLOAD_COLUMN.name(),
     );
     assert_eventually_eq(instance, &query, expected).await;
@@ -358,9 +434,9 @@ async fn assert_logical_terminal_event(
 async fn assert_lightweight_terminal_event(
     instance: &Arc<Instance>,
     event_type: &str,
+    procedure_id: &str,
     terminal_trigger: &str,
 ) {
-    let procedure_id = submitted_procedure_id(instance, event_type).await;
     let query = format!(
         "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
         TYPE_COLUMN.name(),

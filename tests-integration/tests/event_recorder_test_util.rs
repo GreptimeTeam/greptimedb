@@ -18,6 +18,7 @@ use std::time::Duration;
 use client::OutputData;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::UInt32Type;
 use frontend::instance::Instance;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
@@ -45,6 +46,22 @@ pub(crate) async fn find_eventually_string(
 ) -> String {
     for _ in 0..MAX_ATTEMPTS {
         if let Some(value) = query_first_string(instance, query, column).await {
+            return value;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    panic!("timed out waiting for event query: {query}");
+}
+
+/// Returns the first non-null u32 from `column` once the query produces one.
+pub(crate) async fn find_eventually_u32(
+    instance: &Arc<Instance>,
+    query: &str,
+    column: &str,
+) -> u32 {
+    for _ in 0..MAX_ATTEMPTS {
+        if let Some(value) = query_first_u32(instance, query, column).await {
             return value;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -92,6 +109,17 @@ async fn query_first_string(instance: &Arc<Instance>, query: &str, column: &str)
         .next()
         .flatten()
         .map(ToString::to_string)
+}
+
+async fn query_first_u32(instance: &Arc<Instance>, query: &str, column: &str) -> Option<u32> {
+    let batches = query_record_batches(instance, query).await?;
+    let batch = batches.take().into_iter().next()?;
+    batch
+        .column_by_name(column)?
+        .as_primitive::<UInt32Type>()
+        .iter()
+        .next()
+        .flatten()
 }
 
 async fn query_pretty_print(instance: &Arc<Instance>, query: &str) -> Option<String> {
