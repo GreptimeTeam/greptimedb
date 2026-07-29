@@ -701,6 +701,11 @@ pub trait ProcedureManager: Send + Sync + 'static {
 
     /// Returns the details of the procedure.
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>>;
+
+    /// Returns whether persisted unfinished procedures contain any requested type.
+    ///
+    /// This inspects durable state without submitting procedures for execution.
+    async fn has_unfinished_procedure(&self, type_names: &[&str]) -> Result<bool>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].

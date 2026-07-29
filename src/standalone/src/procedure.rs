@@ -63,6 +63,7 @@ pub fn build_procedure_manager(
 /// work in [`RepartitionProcedureFactory::register_loaders`].
 pub struct StandaloneRepartitionProcedureFactory;
 
+#[async_trait::async_trait]
 impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
     fn create(
         &self,
@@ -82,5 +83,9 @@ impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
         _procedure_manager: &ProcedureManagerRef,
     ) -> std::result::Result<(), BoxedError> {
         Ok(())
+    }
+
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
+        Err(BoxedError::new(NoSupportRepartitionProcedureSnafu.build()))
     }
 }

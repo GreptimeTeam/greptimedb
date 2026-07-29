@@ -105,6 +105,8 @@ impl MetasrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        self.metasrv.ensure_repartition_gc_enabled().await?;
+
         if let Some(builder) = self.http_server.as_mut().left()
             && let Some(mut builder) = builder.take()
         {
@@ -129,7 +131,7 @@ impl MetasrvInstance {
             return Ok(());
         };
 
-        self.metasrv.try_start().await?;
+        self.metasrv.try_start_after_gc_check().await?;
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
@@ -472,6 +474,7 @@ mod tests {
 
     use super::*;
     use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
+    use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
 
     struct RecordingSelectorFactory {
         called: Arc<AtomicBool>,
@@ -505,6 +508,32 @@ mod tests {
         .unwrap();
 
         assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn gc_requirement_is_checked_before_http_server_start() {
+        let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
+        RepartitionGcRequirementManager::new(kv_backend.clone())
+            .require_gc()
+            .await
+            .unwrap();
+
+        let opts = MetasrvOptions {
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        let metasrv = MetasrvBuilder::new()
+            .options(opts)
+            .kv_backend(kv_backend)
+            .build()
+            .await
+            .unwrap();
+        let mut instance = MetasrvInstance::new(metasrv).await.unwrap();
+
+        let err = instance.start().await.unwrap_err();
+        assert!(matches!(err, error::Error::RepartitionGcRequired { .. }));
+        assert!(instance.http_server().is_none());
+        assert!(matches!(instance.mut_http_server(), Either::Left(Some(_))));
     }
 
     struct TestExtraHttpRouterProvider;

@@ -973,6 +973,15 @@ impl ProcedureManager for LocalManager {
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>> {
         Ok(self.manager_ctx.list_procedure())
     }
+
+    async fn has_unfinished_procedure(&self, type_names: &[&str]) -> Result<bool> {
+        let messages = self.procedure_store.load_messages().await?;
+        Ok(messages
+            .messages
+            .values()
+            .chain(messages.rollback_messages.values())
+            .any(|message| type_names.contains(&message.type_name.as_str())))
+    }
 }
 
 struct RemoveOutdatedMetaFunction {
