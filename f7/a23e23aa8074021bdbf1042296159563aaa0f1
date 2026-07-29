@@ -1,0 +1,19 @@
+config/config.md
+  s_86c3f8856cbad8::t_03ab9b98758f4a 234,447
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f7a23e23aa8074021bdbf1042296159563aaa0f1",
+  "prompts": {},
+  "sessions": {
+    "s_86c3f8856cbad8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa7d7-07d1-7e53-ba5d-44ecd6e4e11f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
