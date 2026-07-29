@@ -1,0 +1,26 @@
+src/meta-srv/src/event/repartition.rs
+  s_86c3f8856cbad8::t_a21f30f39c2530 603
+  s_86c3f8856cbad8::t_9daa23aca73df5 161-191,193-219,230,243,247,274,306-307,344-350
+  s_86c3f8856cbad8::t_1f59c448385369 83,88,192
+  s_86c3f8856cbad8::t_92a53bc11ce0dc 279-305,495,499,611
+  s_86c3f8856cbad8::t_c6f22d4765ec77 486,494,498,500-501,570,581,584-586,594,602,607-608,616-617,619
+  s_86c3f8856cbad8::t_a6514e6755342d 308
+src/meta-srv/src/procedure/repartition/group.rs
+  s_86c3f8856cbad8::t_cc4f32da6c4934 42,337,375,634,712
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "0f5f01b1bc6a5986295c177c7b65cc418a485911",
+  "prompts": {},
+  "sessions": {
+    "s_86c3f8856cbad8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa7d7-07d1-7e53-ba5d-44ecd6e4e11f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
