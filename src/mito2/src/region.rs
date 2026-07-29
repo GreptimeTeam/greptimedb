@@ -1229,7 +1229,7 @@ impl ManifestContext {
         source: &FileMeta,
         updated: FileMeta,
     ) -> Result<IndexPublication> {
-        let mut manager = self.manifest_manager.write().await;
+        let manager = self.manifest_manager.write().await;
         let manifest = manager.manifest();
         let region_id = manifest.metadata.region_id;
         let current_state = self.state.load();
@@ -1266,17 +1266,7 @@ impl ManifestContext {
             compaction_time_window: None,
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-        let pending = self.update_locked(&mut manager, action_list, false).await?;
-        let manifest_version = pending.version();
-        drop(manager);
-
-        if self.state.load() == RegionRoleState::Follower {
-            warn!(
-                "Region {} becomes follower while publishing index metadata, manifest version: {}",
-                region_id, manifest_version
-            );
-        }
-        pending.fire().await;
+        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
 
         Ok(IndexPublication::Committed {
             manifest_version,
@@ -1317,6 +1307,38 @@ impl ManifestContext {
         ))
     }
 
+    /// Updates the manifest using a caller-held write lock, releases the lock,
+    /// and then fires the manifest hook.
+    ///
+    /// Callers must perform state and applicability checks before calling this
+    /// method so the checks and update remain in the same lock critical section.
+    async fn update_and_fire(
+        &self,
+        mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<ManifestVersion> {
+        let region_id = manager.manifest().metadata.region_id;
+        let pending = self
+            .update_locked(&mut manager, action_list, is_staging)
+            .await?;
+        let version = pending.version();
+
+        // Hook implementations may read the manifest or send region requests
+        // that acquire this lock.
+        drop(manager);
+
+        if self.state.load() == RegionRoleState::Follower {
+            warn!(
+                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
+                region_id
+            );
+        }
+
+        pending.fire().await;
+        Ok(version)
+    }
+
     async fn update_manifest_with_state_check(
         &self,
         action_list: RegionMetaActionList,
@@ -1324,7 +1346,7 @@ impl ManifestContext {
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
-        let mut manager = self.manifest_manager.write().await;
+        let manager = self.manifest_manager.write().await;
         // Gets current manifest.
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
@@ -1382,28 +1404,7 @@ impl ManifestContext {
             }
         }
 
-        // `update_locked` returns a `PendingManifestHook` we fire after releasing the lock.
-        let region_id = manifest.metadata.region_id;
-        let pending = self
-            .update_locked(&mut manager, action_list, is_staging)
-            .await?;
-        let version = pending.version();
-
-        // Drop the write lock before invoking the hook. Hook implementations may
-        // read the manifest or send region requests that acquire this lock;
-        // holding it would deadlock. Slow hooks also must not block manifest updates.
-        drop(manager);
-
-        if self.state.load() == RegionRoleState::Follower {
-            warn!(
-                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
-                region_id
-            );
-        }
-
-        pending.fire().await;
-
-        Ok(version)
+        self.update_and_fire(manager, action_list, is_staging).await
     }
 
     /// Sets the [`RegionRole`].
