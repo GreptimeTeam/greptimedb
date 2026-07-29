@@ -177,37 +177,11 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-+----+
-| j  |
-+----+
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-+----+
+Error: 3001(EngineExecuteQuery), Error during planning: Querying the whole JSON2 column 'j' is currently not supported; use json_get to select its fields
 
 select * from json2_table order by ts;
 
-+-------------------------+----+
-| ts                      | j  |
-+-------------------------+----+
-| 1970-01-01T00:00:00.001 | {} |
-| 1970-01-01T00:00:00.002 | {} |
-| 1970-01-01T00:00:00.003 | {} |
-| 1970-01-01T00:00:00.004 | {} |
-| 1970-01-01T00:00:00.005 | {} |
-| 1970-01-01T00:00:00.006 | {} |
-| 1970-01-01T00:00:00.007 | {} |
-| 1970-01-01T00:00:00.008 | {} |
-| 1970-01-01T00:00:00.009 | {} |
-| 1970-01-01T00:00:00.010 | {} |
-+-------------------------+----+
+Error: 3001(EngineExecuteQuery), Error during planning: Querying the whole JSON2 column 'j' is currently not supported; use json_get to select its fields
 
 select j.a.b + 1 from json2_table order by ts;
 

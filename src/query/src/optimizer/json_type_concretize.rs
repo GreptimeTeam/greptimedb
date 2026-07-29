@@ -21,6 +21,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 
 use crate::dummy_catalog::DummyTableProvider;
@@ -41,6 +42,8 @@ impl OptimizerRule for JsonTypeConcretizeRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
+        ensure_no_whole_json2_output(&plan)?;
+
         let json_types = deduce_json_types(&plan)?;
         if json_types.is_empty() {
             return Ok(Transformed::no(plan));
@@ -70,6 +73,18 @@ impl OptimizerRule for JsonTypeConcretizeRule {
             _ => Ok(Transformed::no(plan)),
         })
     }
+}
+
+fn ensure_no_whole_json2_output(plan: &LogicalPlan) -> Result<()> {
+    for field in plan.schema().fields() {
+        if is_structured_json_field(field) {
+            return plan_err!(
+                "Querying the whole JSON2 column '{}' is currently not supported; use json_get to select its fields",
+                field.name()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
@@ -148,16 +163,20 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
     use common_function::scalars::udf::create_udf;
     use datafusion::datasource::provider_as_source;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{LogicalPlanBuilder, col};
     use datafusion_optimizer::OptimizerContext;
-    use store_api::storage::RegionId;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
-    use crate::optimizer::test_util::mock_table_provider;
+    use crate::optimizer::test_util::{MetaRegionEngine, mock_table_provider};
 
     fn json_get_expr(base: Expr, path: Expr, with_type: Option<DataType>) -> Result<Expr> {
         let json_get = Arc::new(create_udf(Arc::new(JsonGetWithType::default())));
@@ -180,6 +199,45 @@ mod tests {
         let plan = LogicalPlanBuilder::scan("t", provider_as_source(provider.clone()), None)?
             .project(exprs)?
             .build()?;
+        Ok((provider, plan))
+    }
+
+    fn build_json2_scan() -> Result<(Arc<DummyTableProvider>, LogicalPlanBuilder)> {
+        let region_id = RegionId::new(1024, 2);
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        let mut json_column = ColumnSchema::new(
+            "j",
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata::default())))
+            .unwrap();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column,
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+        let metadata = Arc::new(builder.build().unwrap());
+        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+        let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
+        let plan = LogicalPlanBuilder::scan("t", provider_as_source(provider.clone()), None)?;
+        Ok((provider, plan))
+    }
+
+    fn build_json2_plan(exprs: Vec<Expr>) -> Result<(Arc<DummyTableProvider>, LogicalPlan)> {
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan.project(exprs)?.build()?;
         Ok((provider, plan))
     }
 
@@ -250,6 +308,58 @@ mod tests {
                 .transformed
         );
         assert!(provider.scan_request().json_type_hint.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_whole_json2_projection() -> Result<()> {
+        for (exprs, output_name) in [
+            (vec![col("j")], "j"),
+            (vec![col("j").alias("json"), col("ts")], "json"),
+        ] {
+            let (_, plan) = build_json2_plan(exprs)?;
+            let err = JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())
+                .unwrap_err();
+            assert!(err.to_string().contains(&format!(
+                "Querying the whole JSON2 column '{output_name}' is currently not supported"
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_whole_json2_output_without_projection() -> Result<()> {
+        let (_, plan) = build_json2_scan()?;
+        let plan = plan.sort(vec![col("ts").sort(true, false)])?.build()?;
+
+        let err = JsonTypeConcretizeRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Querying the whole JSON2 column 'j' is currently not supported")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_projection_by_path() -> Result<()> {
+        let expr = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_plan(vec![expr])?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Object(JsonObjectType::from([(
+                "a".to_string(),
+                JsonNativeType::i64(),
+            )]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
         Ok(())
     }
 
