@@ -94,6 +94,9 @@ pub(crate) async fn cleanup_stale_index_artifact(
     cache_manager: Option<&CacheManagerRef>,
     write_cache: Option<&WriteCacheRef>,
 ) {
+    // Same-file builds stay serialized until stale cleanup and
+    // IndexBuildStopped complete, so this exact version cannot become
+    // referenced concurrently.
     if let Err(e) = access_layer.delete_index(index_id).await {
         INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL.inc();
         warn!(
@@ -1101,11 +1104,15 @@ impl IndexBuildStatus {
         }
     }
 
-    async fn retire(&mut self, err: Arc<Error>) {
-        self.retiring = !self.building_files.is_empty();
+    async fn fail_pending(&mut self, err: Arc<Error>) {
         for pending in std::mem::take(&mut self.pending_tasks) {
             pending.task.on_failure(err.clone()).await;
         }
+    }
+
+    async fn retire(&mut self, err: Arc<Error>) {
+        self.retiring = !self.building_files.is_empty();
+        self.fail_pending(err).await;
     }
 }
 
@@ -1250,10 +1257,10 @@ impl IndexBuildScheduler {
             return;
         }
         error!(
-            err; "Index build scheduler encountered failure for region {}, retiring active builds and failing pending tasks.",
+            err; "Index build scheduler encountered failure for region {}, failing pending tasks.",
             region_id
         );
-        status.retire(err).await;
+        status.fail_pending(err).await;
         if status.building_files.is_empty() {
             self.region_status.remove(&region_id);
         }
@@ -2486,7 +2493,7 @@ mod tests {
         // Region should be removed when all tasks complete
         assert!(!scheduler.region_status.contains_key(&region_id));
 
-        // Test 8: Region dropped with pending tasks
+        // Test 8: A build failure keeps active leases without retiring the region
         let task6 =
             create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
         let task7 =
@@ -2512,9 +2519,19 @@ mod tests {
         assert_eq!(status.building_files.len(), 2);
         assert_eq!(status.pending_tasks.len(), 1);
 
-        scheduler.on_region_dropped(region_id).await;
+        scheduler
+            .on_failure(
+                region_id,
+                Arc::new(
+                    crate::error::UnexpectedSnafu {
+                        reason: "index build failed".to_string(),
+                    }
+                    .build(),
+                ),
+            )
+            .await;
         let status = scheduler.region_status.get(&region_id).unwrap();
-        assert!(status.retiring);
+        assert!(!status.retiring);
         assert_eq!(status.building_files.len(), 2);
         assert!(status.pending_tasks.is_empty());
 

@@ -91,19 +91,6 @@ lazy_static! {
             "greptime_mito_inflight_flush_count",
             "inflight flush count",
         ).unwrap();
-    /// Number of stale index publications rejected at each publication stage.
-    pub static ref INDEX_PUBLICATION_STALE_TOTAL: IntCounterVec =
-        register_int_counter_vec!(
-            "greptime_mito_index_publication_stale_total",
-            "stale index publications rejected",
-            &[STAGE_LABEL],
-        ).unwrap();
-    /// Number of failures while cleaning stale index artifacts.
-    pub static ref INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL: IntCounter =
-        register_int_counter!(
-            "greptime_mito_index_artifact_cleanup_failure_total",
-            "failures while cleaning stale index artifacts",
-        ).unwrap();
     // ------ End of flush related metrics
 
 
@@ -332,6 +319,19 @@ lazy_static! {
 // Index metrics.
 lazy_static! {
     // Index metrics.
+    /// Number of stale index publications rejected at each publication stage.
+    pub static ref INDEX_PUBLICATION_STALE_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_mito_index_publication_stale_total",
+            "stale index publications rejected",
+            &[STAGE_LABEL],
+        ).unwrap();
+    /// Number of failures while cleaning stale index artifacts.
+    pub static ref INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL: IntCounter =
+        register_int_counter!(
+            "greptime_mito_index_artifact_cleanup_failure_total",
+            "failures while cleaning stale index artifacts",
+        ).unwrap();
     /// Timer of index application.
     pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_apply_elapsed",
