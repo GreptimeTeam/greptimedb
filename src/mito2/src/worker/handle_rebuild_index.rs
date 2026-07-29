@@ -284,17 +284,7 @@ impl<S> RegionWorkerLoop<S> {
         region_id: RegionId,
         request: IndexBuildStopped,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            warn!(
-                "Region not found for index build stopped, region_id: {}",
-                region_id
-            );
-            return;
-        };
-        self.index_build_scheduler.on_task_stopped(
-            region_id,
-            request.file_id,
-            &region.version_control,
-        );
+        self.index_build_scheduler
+            .on_task_stopped(region_id, request.file_id);
     }
 }

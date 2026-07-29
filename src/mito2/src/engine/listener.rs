@@ -474,6 +474,8 @@ impl EventListener for IndexBuildListener {
 /// gate.release_begin();           // let begin proceed
 /// ```
 pub struct GateIndexBuildListener {
+    recv_count: AtomicUsize,
+    recv_notify: Notify,
     begin_count: AtomicUsize,
     begin_notify: Notify,
     /// Blocks `on_index_build_begin` until released by the test.
@@ -489,6 +491,8 @@ pub struct GateIndexBuildListener {
 impl Default for GateIndexBuildListener {
     fn default() -> Self {
         Self {
+            recv_count: AtomicUsize::new(0),
+            recv_notify: Notify::new(),
             begin_count: AtomicUsize::new(0),
             begin_notify: Notify::new(),
             begin_blocker: Semaphore::new(0),
@@ -502,6 +506,13 @@ impl Default for GateIndexBuildListener {
 }
 
 impl GateIndexBuildListener {
+    /// Wait until the worker has received at least `times` requests.
+    pub async fn wait_recv(&self, times: usize) {
+        while self.recv_count.load(Ordering::Relaxed) < times {
+            self.recv_notify.notified().await;
+        }
+    }
+
     /// Wait until index build begin is reached for `times` times.
     pub async fn wait_begin(&self, times: usize) {
         while self.begin_count.load(Ordering::Relaxed) < times {
@@ -554,10 +565,20 @@ impl GateIndexBuildListener {
     pub fn abort_count(&self) -> usize {
         self.abort_count.load(Ordering::Relaxed)
     }
+
+    /// Returns the number of requests received by the worker.
+    pub fn recv_count(&self) -> usize {
+        self.recv_count.load(Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
 impl EventListener for GateIndexBuildListener {
+    fn on_recv_requests(&self, request_num: usize) {
+        self.recv_count.fetch_add(request_num, Ordering::Relaxed);
+        self.recv_notify.notify_one();
+    }
+
     async fn on_index_build_begin(&self, region_file_id: RegionFileId) {
         info!("Region {} index build begin (gated)", region_file_id);
         self.begin_count.fetch_add(1, Ordering::Relaxed);

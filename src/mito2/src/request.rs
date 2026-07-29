@@ -976,8 +976,6 @@ pub(crate) struct FlushFailed {
 
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
     pub(crate) manifest_version: ManifestVersion,
     pub(crate) file_meta: FileMeta,
 }

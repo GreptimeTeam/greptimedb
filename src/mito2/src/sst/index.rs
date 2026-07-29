@@ -917,7 +917,6 @@ impl IndexBuildTask {
                         .on_index_build_manifest_committed(region_file_id)
                         .await;
                     let index_build_finished = IndexBuildFinished {
-                        region_id: self.file_meta.region_id,
                         manifest_version,
                         file_meta,
                     };
@@ -940,18 +939,11 @@ impl IndexBuildTask {
                     .await;
                     self.listener.on_index_build_abort(region_file_id).await;
                     return Ok(IndexBuildOutcome::Aborted(format!(
-                        "Source SST generation changed before index publication, region: {}, file_id: {}",
+                        "Source SST or region incarnation changed before index publication, region: {}, file_id: {}",
                         self.file_meta.region_id, self.file_meta.file_id
                     )));
                 }
                 Err(e) => {
-                    cleanup_stale_index_artifact(
-                        RegionIndexId::new(region_file_id, new_index_version),
-                        &self.access_layer,
-                        self.cache_manager.as_ref(),
-                        self.write_cache.as_ref(),
-                    )
-                    .await;
                     let err = Arc::new(e);
                     WorkerRequest::Background {
                         region_id: self.file_meta.region_id,
@@ -1065,25 +1057,54 @@ impl Ord for IndexBuildTask {
     }
 }
 
+#[derive(Clone)]
+struct PendingIndexBuild {
+    task: IndexBuildTask,
+    version_control: VersionControlRef,
+}
+
+impl PartialEq for PendingIndexBuild {
+    fn eq(&self, other: &Self) -> bool {
+        self.task == other.task
+    }
+}
+
+impl Eq for PendingIndexBuild {}
+
+impl PartialOrd for PendingIndexBuild {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingIndexBuild {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.task.cmp(&other.task)
+    }
+}
+
 /// Tracks the index build status of a region scheduled by the [IndexBuildScheduler].
-pub struct IndexBuildStatus {
-    pub region_id: RegionId,
-    pub building_files: HashSet<FileId>,
-    pub pending_tasks: BinaryHeap<IndexBuildTask>,
+struct IndexBuildStatus {
+    building_files: HashSet<FileId>,
+    pending_tasks: BinaryHeap<PendingIndexBuild>,
+    /// Whether the active builds belong to a region incarnation that has
+    /// stopped accepting index publications.
+    retiring: bool,
 }
 
 impl IndexBuildStatus {
-    pub fn new(region_id: RegionId) -> Self {
+    fn new() -> Self {
         IndexBuildStatus {
-            region_id,
             building_files: HashSet::new(),
             pending_tasks: BinaryHeap::new(),
+            retiring: false,
         }
     }
 
-    async fn on_failure(self, err: Arc<Error>) {
-        for task in self.pending_tasks {
-            task.on_failure(err.clone()).await;
+    async fn retire(&mut self, err: Arc<Error>) {
+        self.retiring = !self.building_files.is_empty();
+        for pending in std::mem::take(&mut self.pending_tasks) {
+            pending.task.on_failure(err.clone()).await;
         }
     }
 }
@@ -1093,7 +1114,7 @@ pub struct IndexBuildScheduler {
     scheduler: SchedulerRef,
     /// Tracks regions need to build index.
     region_status: HashMap<RegionId, IndexBuildStatus>,
-    /// Limit of files allowed to build index concurrently for a region.
+    /// Limit of files allowed to build index concurrently on this worker.
     files_limit: usize,
 }
 
@@ -1115,9 +1136,17 @@ impl IndexBuildScheduler {
         let status = self
             .region_status
             .entry(task.file_meta.region_id)
-            .or_insert_with(|| IndexBuildStatus::new(task.file_meta.region_id));
+            .or_insert_with(IndexBuildStatus::new);
 
-        if status.building_files.contains(&task.file_meta.file_id) {
+        let duplicate = if status.retiring {
+            status
+                .pending_tasks
+                .iter()
+                .any(|pending| pending.task.file_meta.file_id == task.file_meta.file_id)
+        } else {
+            status.building_files.contains(&task.file_meta.file_id)
+        };
+        if duplicate {
             let region_file_id =
                 RegionFileId::new(task.file_meta.region_id, task.file_meta.file_id);
             debug!(
@@ -1133,31 +1162,37 @@ impl IndexBuildScheduler {
             return Ok(());
         }
 
-        status.pending_tasks.push(task);
+        status.pending_tasks.push(PendingIndexBuild {
+            task,
+            version_control: version_control.clone(),
+        });
 
-        self.schedule_next_build_batch(version_control);
+        if !status.retiring {
+            self.schedule_next_build_batch();
+        }
         Ok(())
     }
 
     /// Schedule tasks until reaching the files limit or no more tasks.
-    fn schedule_next_build_batch(&mut self, version_control: &VersionControlRef) {
+    fn schedule_next_build_batch(&mut self) {
         let mut building_count = 0;
         for status in self.region_status.values() {
             building_count += status.building_files.len();
         }
 
         while building_count < self.files_limit {
-            if let Some(task) = self.find_next_task() {
+            if let Some(pending) = self.find_next_task() {
+                let task = pending.task;
                 let region_id = task.file_meta.region_id;
                 let file_id = task.file_meta.file_id;
-                let job = task.into_index_build_job(version_control.clone());
+                let job = task.into_index_build_job(pending.version_control);
                 if self.scheduler.schedule(job).is_ok() {
                     if let Some(status) = self.region_status.get_mut(&region_id) {
                         status.building_files.insert(file_id);
                         building_count += 1;
                         status
                             .pending_tasks
-                            .retain(|t| t.file_meta.file_id != file_id);
+                            .retain(|pending| pending.task.file_meta.file_id != file_id);
                     } else {
                         error!(
                             "Region status not found when scheduling index build task, region: {}",
@@ -1169,6 +1204,7 @@ impl IndexBuildScheduler {
                         "Failed to schedule index build job, region: {}, file_id: {}",
                         region_id, file_id
                     );
+                    break;
                 }
             } else {
                 // No more tasks to schedule.
@@ -1178,45 +1214,54 @@ impl IndexBuildScheduler {
     }
 
     /// Find the next task which has the highest priority to run.
-    fn find_next_task(&self) -> Option<IndexBuildTask> {
+    fn find_next_task(&self) -> Option<PendingIndexBuild> {
         self.region_status
             .values()
+            .filter(|status| !status.retiring)
             .filter_map(|status| status.pending_tasks.peek())
             .max()
             .cloned()
     }
 
-    pub(crate) fn on_task_stopped(
-        &mut self,
-        region_id: RegionId,
-        file_id: FileId,
-        version_control: &VersionControlRef,
-    ) {
+    pub(crate) fn on_task_stopped(&mut self, region_id: RegionId, file_id: FileId) {
         if let Some(status) = self.region_status.get_mut(&region_id) {
-            status.building_files.remove(&file_id);
+            if !status.building_files.remove(&file_id) {
+                return;
+            }
             if status.building_files.is_empty() && status.pending_tasks.is_empty() {
                 // No more tasks for this region, remove it.
                 self.region_status.remove(&region_id);
+            } else if status.building_files.is_empty() {
+                // All builds from the previous region incarnation have stopped.
+                status.retiring = false;
             }
         }
 
-        self.schedule_next_build_batch(version_control);
+        self.schedule_next_build_batch();
     }
 
     pub(crate) async fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        error!(
-            err; "Index build scheduler encountered failure for region {}, removing all pending tasks.",
-            region_id
-        );
-        let Some(status) = self.region_status.remove(&region_id) else {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            error!(err; "Index build failed after scheduler state was removed, region: {}", region_id);
             return;
         };
-        status.on_failure(err).await;
+        if status.retiring {
+            error!(err; "Index build from a retiring region incarnation failed, region: {}", region_id);
+            return;
+        }
+        error!(
+            err; "Index build scheduler encountered failure for region {}, retiring active builds and failing pending tasks.",
+            region_id
+        );
+        status.retire(err).await;
+        if status.building_files.is_empty() {
+            self.region_status.remove(&region_id);
+        }
     }
 
     /// Notifies the scheduler that the region is dropped.
     pub(crate) async fn on_region_dropped(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(
+        self.retire_region(
             region_id,
             Arc::new(RegionDroppedSnafu { region_id }.build()),
         )
@@ -1225,24 +1270,27 @@ impl IndexBuildScheduler {
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) async fn on_region_closed(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()))
+        self.retire_region(region_id, Arc::new(RegionClosedSnafu { region_id }.build()))
             .await;
     }
 
     /// Notifies the scheduler that the region is truncated.
     pub(crate) async fn on_region_truncated(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(
+        self.retire_region(
             region_id,
             Arc::new(RegionTruncatedSnafu { region_id }.build()),
         )
         .await;
     }
 
-    async fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        let Some(status) = self.region_status.remove(&region_id) else {
+    async fn retire_region(&mut self, region_id: RegionId, err: Arc<Error>) {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
-        status.on_failure(err).await;
+        status.retire(err).await;
+        if status.building_files.is_empty() {
+            self.region_status.remove(&region_id);
+        }
     }
 }
 
@@ -2409,7 +2457,7 @@ mod tests {
         assert_eq!(status.pending_tasks.len(), 3); // Three pending
 
         // Test 5: Task completion triggers scheduling next highest priority task (Manual)
-        scheduler.on_task_stopped(region_id, file_id1, &version_control);
+        scheduler.on_task_stopped(region_id, file_id1);
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert!(!status.building_files.contains(&file_id1));
         assert_eq!(status.building_files.len(), 2); // Should schedule next task
@@ -2418,22 +2466,22 @@ mod tests {
         assert!(status.building_files.contains(&file_id5));
 
         // Test 6: Complete another task, should schedule SchemaChange (second highest priority)
-        scheduler.on_task_stopped(region_id, file_id2, &version_control);
+        scheduler.on_task_stopped(region_id, file_id2);
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 2);
         assert_eq!(status.pending_tasks.len(), 1); // One less pending
         assert!(status.building_files.contains(&file_id4)); // SchemaChange should be building
 
         // Test 7: Complete remaining tasks and cleanup
-        scheduler.on_task_stopped(region_id, file_id5, &version_control);
-        scheduler.on_task_stopped(region_id, file_id4, &version_control);
+        scheduler.on_task_stopped(region_id, file_id5);
+        scheduler.on_task_stopped(region_id, file_id4);
 
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 1); // Last task (Compact) should be building
         assert_eq!(status.pending_tasks.len(), 0);
         assert!(status.building_files.contains(&file_id3));
 
-        scheduler.on_task_stopped(region_id, file_id3, &version_control);
+        scheduler.on_task_stopped(region_id, file_id3);
 
         // Region should be removed when all tasks complete
         assert!(!scheduler.region_status.contains_key(&region_id));
@@ -2465,12 +2513,20 @@ mod tests {
         assert_eq!(status.pending_tasks.len(), 1);
 
         scheduler.on_region_dropped(region_id).await;
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert!(status.retiring);
+        assert_eq!(status.building_files.len(), 2);
+        assert!(status.pending_tasks.is_empty());
+
+        scheduler.on_task_stopped(region_id, file_id1);
+        assert!(scheduler.region_status.contains_key(&region_id));
+        scheduler.on_task_stopped(region_id, file_id2);
         assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
     /// Helper to set up a scheduler with files_limit=1 and 3 scheduled tasks,
     /// returning the scheduler, the two pending-task result receivers, and the
-    /// version_control (needed for no-op assertion after cleanup).
+    /// version control.
     async fn setup_scheduler_with_pending_tasks(
         env: &SchedulerEnv,
     ) -> (
@@ -2623,23 +2679,22 @@ mod tests {
 
         // --- on_region_dropped ---
         {
-            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+            let (mut scheduler, mut rx2, mut rx3, _version_control, region_id, building_file_id) =
                 setup_scheduler_with_pending_tasks(&env).await;
 
             scheduler.on_region_dropped(region_id).await;
 
-            // region_status is removed.
-            assert!(
-                !scheduler.region_status.contains_key(&region_id),
-                "region_status should be removed after on_region_dropped"
-            );
+            let status = scheduler.region_status.get(&region_id).unwrap();
+            assert!(status.retiring);
+            assert_eq!(status.building_files.len(), 1);
+            assert!(status.pending_tasks.is_empty());
 
             // Pending-task receivers get lifecycle errors (with timeout).
             recv_lifecycle_error(&mut rx2, "dropped", "on_region_dropped").await;
             recv_lifecycle_error(&mut rx3, "dropped", "on_region_dropped").await;
 
-            // on_task_stopped after cleanup is a safe no-op.
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            // The active build keeps its lease until it stops.
+            scheduler.on_task_stopped(region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
 
@@ -2650,34 +2705,65 @@ mod tests {
 
             scheduler.on_region_closed(region_id).await;
 
-            assert!(
-                !scheduler.region_status.contains_key(&region_id),
-                "region_status should be removed after on_region_closed"
-            );
+            let status = scheduler.region_status.get(&region_id).unwrap();
+            assert!(status.retiring);
+            assert_eq!(status.building_files.len(), 1);
+            assert!(status.pending_tasks.is_empty());
 
             recv_lifecycle_error(&mut rx2, "closed", "on_region_closed").await;
             recv_lifecycle_error(&mut rx3, "closed", "on_region_closed").await;
 
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            // A build scheduled by the reopened region waits behind the old
+            // incarnation's active lease.
+            let (reopened_task, _reopened_rx) = create_mock_task_for_schedule_with_result(
+                &env,
+                building_file_id,
+                region_id,
+                IndexBuildType::Manual,
+            )
+            .await;
+            scheduler
+                .schedule_build(&version_control, reopened_task)
+                .await
+                .unwrap();
+            let status = scheduler.region_status.get(&region_id).unwrap();
+            assert!(status.retiring);
+            assert_eq!(status.building_files.len(), 1);
+            assert_eq!(status.pending_tasks.len(), 1);
+
+            // A manifest error from the old incarnation must not discard the
+            // reopened task before the old build reports stopped.
+            scheduler
+                .on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()))
+                .await;
+            assert_eq!(scheduler.region_status[&region_id].pending_tasks.len(), 1);
+
+            scheduler.on_task_stopped(region_id, building_file_id);
+            let status = scheduler.region_status.get(&region_id).unwrap();
+            assert!(!status.retiring);
+            assert_eq!(status.building_files.len(), 1);
+            assert!(status.pending_tasks.is_empty());
+
+            scheduler.on_task_stopped(region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
 
         // --- on_region_truncated ---
         {
-            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+            let (mut scheduler, mut rx2, mut rx3, _version_control, region_id, building_file_id) =
                 setup_scheduler_with_pending_tasks(&env).await;
 
             scheduler.on_region_truncated(region_id).await;
 
-            assert!(
-                !scheduler.region_status.contains_key(&region_id),
-                "region_status should be removed after on_region_truncated"
-            );
+            let status = scheduler.region_status.get(&region_id).unwrap();
+            assert!(status.retiring);
+            assert_eq!(status.building_files.len(), 1);
+            assert!(status.pending_tasks.is_empty());
 
             recv_lifecycle_error(&mut rx2, "truncated", "on_region_truncated").await;
             recv_lifecycle_error(&mut rx3, "truncated", "on_region_truncated").await;
 
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            scheduler.on_task_stopped(region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
     }

@@ -1027,7 +1027,7 @@ pub(crate) enum IndexPublication {
         manifest_version: ManifestVersion,
         file_meta: FileMeta,
     },
-    /// The source SST no longer matches the generation captured by the task.
+    /// The source SST or region incarnation is no longer publishable.
     Stale,
 }
 
@@ -1231,19 +1231,15 @@ impl ManifestContext {
     ) -> Result<IndexPublication> {
         let manager = self.manifest_manager.write().await;
         let manifest = manager.manifest();
-        let region_id = manifest.metadata.region_id;
         let current_state = self.state.load();
-        ensure!(
-            matches!(
-                current_state,
-                RegionRoleState::Leader(RegionLeaderState::Writable)
-                    | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-            ),
-            UpdateManifestSnafu {
-                region_id,
-                state: current_state,
-            }
-        );
+        if !matches!(
+            current_state,
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        ) || manager.is_stopped()
+        {
+            return Ok(IndexPublication::Stale);
+        }
 
         if manifest.files.get(&source.file_id) != Some(source) {
             return Ok(IndexPublication::Stale);

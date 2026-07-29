@@ -28,8 +28,8 @@ use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCompactRequest, RegionRequest,
-    SetIndexOption,
+    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
+    RegionCompactRequest, RegionRequest, SetIndexOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, Semaphore};
@@ -624,8 +624,7 @@ async fn test_index_build_type_schema_change() {
 /// for all pre-existing SST files, not just one.  Covers the scenario
 /// where multiple SSTs were flushed before the index was defined:
 /// 1. Create region without index, flush 3 files.
-/// 2. Reset scheduler state via reopen_region (flush-triggered no-index
-///    builds pollute building_files).
+/// 2. Reopen while flush-triggered no-index builds may still be stopping.
 /// 3. Verify 3 SST files and 0 index files.
 /// 4. ALTER SetIndexes — triggers rebuild of all 3 inconsistent SSTs.
 /// 5. Wait for 3 finishes, then verify 3 SST files + 3 index files.
@@ -670,8 +669,8 @@ async fn test_index_build_type_schema_change_multiple_files() {
 
     // Async flush still schedules index builds for flushed SSTs. Since this
     // region has no index metadata yet, those builds are no-ops; if they already
-    // stopped, reopening is harmless, and if they are still running, reopening
-    // clears building_files so the subsequent ALTER rebuild schedules cleanly.
+    // stopped, reopening is harmless. Otherwise the subsequent ALTER rebuilds
+    // wait behind their active leases.
     reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
 
     let scanner = engine
@@ -968,8 +967,8 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     // so on_index_build_finish is NOT called.
     gate.release_begin();
 
-    // Reset scheduler state via reopen_region. This ensures the flush-triggered
-    // build's entry is removed from building_files and the scheduler is clean.
+    // Reopen the region. If the flush-triggered no-op is still stopping, the
+    // manual build below waits behind its active lease.
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
 
     // Verify no index file exists after flush (create_on_flush=false).
@@ -1034,6 +1033,140 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
+async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
+    let mut env =
+        TestEnv::with_prefix("test_reopen_waits_for_active_index_build_of_previous_incarnation_")
+            .await;
+    let gate = Arc::new(GateIndexBuildListener::default());
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(false),
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_begin(1))
+        .await
+        .expect("flush index build did not start");
+    gate.release_begin();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+
+    let engine_for_old_build = engine.clone();
+    let old_build = tokio::spawn(async move {
+        engine_for_old_build
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_begin(2))
+        .await
+        .expect("old index build did not reach the begin gate");
+
+    // Closing the region must not wait for the blocked index build.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        ),
+    )
+    .await
+    .expect("close waited for the active index build")
+    .unwrap();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+
+    let received_before_rebuild = gate.recv_count();
+    let aborts_before_rebuild = gate.abort_count();
+    let engine_for_new_build = engine.clone();
+    let new_build = tokio::spawn(async move {
+        engine_for_new_build
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        gate.wait_recv(received_before_rebuild + 1),
+    )
+    .await
+    .expect("worker did not receive the reopened index build request");
+
+    // The reopened task is queued: it is neither started nor rejected as a
+    // duplicate while the old incarnation still owns the SST build lease.
+    assert_eq!(gate.begin_count(), 2);
+    assert_eq!(gate.abort_count(), aborts_before_rebuild);
+
+    gate.release_begin();
+    tokio::time::timeout(Duration::from_secs(10), old_build)
+        .await
+        .expect("old index build request did not finish")
+        .expect("old index build task panicked")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_begin(3))
+        .await
+        .expect("reopened index build did not start after the old build stopped");
+
+    gate.release_begin();
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_finish(1))
+        .await
+        .expect("reopened index build did not finish");
+    tokio::time::timeout(Duration::from_secs(10), new_build)
+        .await
+        .expect("reopened index build request did not finish")
+        .expect("reopened index build task panicked")
+        .unwrap();
+
+    assert_eq!(gate.begin_count(), 3);
+    assert_eq!(gate.finish_count(), 1);
+    assert_eq!(gate.abort_count(), aborts_before_rebuild + 1);
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+
+    let before_reopen = scan_timestamps(&engine, region_id).await;
+    assert_eq!(before_reopen.len(), 20);
+    assert_eq!(
+        before_reopen.iter().copied().collect::<HashSet<_>>().len(),
+        20,
+        "scan contains duplicate rows before reopen"
+    );
+
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(scan_timestamps(&engine, region_id).await, before_reopen);
 }
 
 /// Tests the race between an in-flight index build and a compaction that
