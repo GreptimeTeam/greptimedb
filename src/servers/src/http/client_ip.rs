@@ -61,8 +61,7 @@ pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Respons
 }
 
 fn is_public_http_api_path(path: &str) -> bool {
-    path == super::HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH
-        || path.starts_with(super::HTTP_API_PREFIX)
+    super::is_namespace(path, super::HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH)
 }
 
 #[cfg(test)]

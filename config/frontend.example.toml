@@ -73,6 +73,14 @@ experimental_enable_prometheus_native_histogram = false
 ## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
 experimental_enable_explain_analyze_stream = true
 
+## Whether to start the dedicated public HTTP **API** server. This server serves
+## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
+## option with the main server. It is disabled by default; set to `true` to enable.
+enable_api_server = false
+## The address to bind the dedicated HTTP API server, in the same form as `addr`.
+## Defaults to `127.0.0.1:4006`.
+api_server_addr = "127.0.0.1:4006"
+
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
