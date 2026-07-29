@@ -343,7 +343,7 @@ impl Procedure for AlterLogicalTablesProcedure {
             .tasks
             .iter()
             .filter_map(|task| task.alter_table.kind.as_ref())
-            .map(alter_table_kind_name);
+            .filter_map(alter_table_kind_name);
         Some(Box::new(TableDdlEvent::alter_logical_tables_submitted(
             locators,
             self.data.tasks.len(),

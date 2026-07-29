@@ -417,7 +417,7 @@ impl Procedure for AlterTableProcedure {
                     .alter_table
                     .kind
                     .as_ref()
-                    .map(alter_table_kind_name);
+                    .and_then(alter_table_kind_name);
                 TableDdlEvent::alter_table_submitted(locator, kind)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable),

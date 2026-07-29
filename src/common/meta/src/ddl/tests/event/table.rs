@@ -14,8 +14,9 @@
 
 use std::sync::Arc;
 
+use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, SemanticType, Value};
+use api::v1::{ColumnDataType, Repartition, SemanticType, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
@@ -37,6 +38,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::event::table::{
     TABLE_DDL_PAYLOAD_VERSION, TableDdlEvent, TableDdlEventType, TableDdlLocator,
+    alter_table_kind_name,
 };
 use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task as test_create_table_task_with_id;
@@ -63,6 +65,14 @@ struct ProcedureCase {
     event_type: &'static str,
     payload: JsonValue,
     rows: Vec<Vec<Value>>,
+}
+
+#[test]
+fn repartition_kind_is_not_supported_by_alter_table_events() {
+    assert_eq!(
+        None,
+        alter_table_kind_name(&AlterTableKind::Repartition(Repartition::default()))
+    );
 }
 
 #[test]

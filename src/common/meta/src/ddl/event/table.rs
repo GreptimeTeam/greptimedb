@@ -177,22 +177,23 @@ struct TruncateTablePayload {
     time_range_count: usize,
 }
 
-/// Returns the stable kind stored in an Alter Table payload.
-pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> &'static str {
+/// Returns the stable kind stored in an Alter Table payload, if supported.
+pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> Option<&'static str> {
     match kind {
-        AlterTableKind::AddColumns(_) => "add_columns",
-        AlterTableKind::DropColumns(_) => "drop_columns",
-        AlterTableKind::RenameTable(_) => "rename_table",
-        AlterTableKind::ModifyColumnTypes(_) => "modify_column_types",
-        AlterTableKind::SetTableOptions(_) => "set_table_options",
-        AlterTableKind::UnsetTableOptions(_) => "unset_table_options",
-        AlterTableKind::SetIndex(_) => "set_index",
-        AlterTableKind::UnsetIndex(_) => "unset_index",
-        AlterTableKind::DropDefaults(_) => "drop_defaults",
-        AlterTableKind::SetIndexes(_) => "set_indexes",
-        AlterTableKind::UnsetIndexes(_) => "unset_indexes",
-        AlterTableKind::SetDefaults(_) => "set_defaults",
-        AlterTableKind::Repartition(_) => "repartition",
+        AlterTableKind::AddColumns(_) => Some("add_columns"),
+        AlterTableKind::DropColumns(_) => Some("drop_columns"),
+        AlterTableKind::RenameTable(_) => Some("rename_table"),
+        AlterTableKind::ModifyColumnTypes(_) => Some("modify_column_types"),
+        AlterTableKind::SetTableOptions(_) => Some("set_table_options"),
+        AlterTableKind::UnsetTableOptions(_) => Some("unset_table_options"),
+        AlterTableKind::SetIndex(_) => Some("set_index"),
+        AlterTableKind::UnsetIndex(_) => Some("unset_index"),
+        AlterTableKind::DropDefaults(_) => Some("drop_defaults"),
+        AlterTableKind::SetIndexes(_) => Some("set_indexes"),
+        AlterTableKind::UnsetIndexes(_) => Some("unset_indexes"),
+        AlterTableKind::SetDefaults(_) => Some("set_defaults"),
+        // Repartition is handled by RepartitionProcedure.
+        AlterTableKind::Repartition(_) => None,
     }
 }
 
