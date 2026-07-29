@@ -132,6 +132,13 @@ impl Picker for WindowedCompactionPicker {
     }
 }
 
+/// Keeps windows that overlap the requested range and their transitive dependencies.
+///
+/// [`assign_files_to_time_windows`] adds an SST to every time window that the SST covers. If a
+/// selected window contains such a cross-window SST, compaction will remove that input SST after
+/// rewriting it. Keeping only the directly selected window would therefore omit the SST's rows in
+/// the other windows. We must include every window covered by the SST, then repeat the process for
+/// other cross-window SSTs in those windows, until the complete dependency closure is selected.
 fn filter_time_windows(
     mut windows: BTreeMap<i64, (i64, Vec<FileHandle>)>,
     time_range: Option<TimestampRange>,
