@@ -240,9 +240,10 @@ pub async fn query_pipeline_ddl(
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
-    let pipeline = handler
-        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+    let (pipeline, _) = handler
+        .get_pipeline_str(&pipeline_name, version, query_ctx.clone())
         .await?;
+    let pipeline = handler.build_pipeline(&pipeline)?;
 
     let schemas_def = pipeline.schemas().context(InvalidParameterSnafu {
         reason: "auto transform doesn't have fixed table schema",
@@ -614,6 +615,7 @@ pub async fn pipeline_dryrun(
 
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
+    handler.check_pipeline_query_permission(&query_ctx)?;
 
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {

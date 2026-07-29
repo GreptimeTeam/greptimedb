@@ -21,6 +21,7 @@ use api::v1::{
     RowInsertRequests, Rows, SemanticType,
 };
 use async_trait::async_trait;
+use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
 use common_error::ext::BoxedError;
 use common_query::OutputData;
@@ -33,7 +34,7 @@ use datafusion::sql::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan, lit};
 use datatypes::arrow::array::{Array, AsArray};
 use servers::error::{
-    CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
+    AuthSnafu, CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
     TableNotFoundSnafu,
 };
 use servers::query_handler::DashboardDefinition;
@@ -52,6 +53,19 @@ pub const DASHBOARD_TABLE_DEFINITION_COLUMN_NAME: &str = "definition";
 pub const DASHBOARD_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 
 impl Instance {
+    fn check_dashboard_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+    ) -> servers::error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), req)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
     /// Build a schema for dashboard table.
     /// Returns the (time index, primary keys, column) definitions.
     fn build_dashboard_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
@@ -392,14 +406,17 @@ impl servers::query_handler::DashboardHandler for Instance {
         definition: &str,
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
+        self.check_dashboard_permission(&ctx, PermissionReq::DashboardManage)?;
         self.insert_dashboard(name, definition, ctx).await
     }
 
     async fn list(&self, ctx: QueryContextRef) -> servers::error::Result<Vec<DashboardDefinition>> {
+        self.check_dashboard_permission(&ctx, PermissionReq::DashboardQuery)?;
         self.list_dashboards(ctx).await
     }
 
     async fn delete(&self, name: &str, ctx: QueryContextRef) -> servers::error::Result<()> {
+        self.check_dashboard_permission(&ctx, PermissionReq::DashboardManage)?;
         self.delete_dashboard(name, ctx).await
     }
 }

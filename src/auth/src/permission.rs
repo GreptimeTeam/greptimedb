@@ -105,6 +105,11 @@ pub enum PermissionReq<'a> {
     PromStoreRead,
     Otlp,
     LogWrite,
+    JaegerQuery,
+    PipelineQuery,
+    PipelineManage,
+    DashboardQuery,
+    DashboardManage,
     BulkInsert {
         catalog: &'a str,
         schema: &'a str,
@@ -119,9 +124,12 @@ impl<'a> PermissionReq<'a> {
             PermissionReq::GrpcRequest(Request::Query(query_request)) => {
                 !matches!(query_request.query, Some(Query::InsertIntoPlan(_)))
             }
-            PermissionReq::PromQuery | PermissionReq::LogQuery | PermissionReq::PromStoreRead => {
-                true
-            }
+            PermissionReq::PromQuery
+            | PermissionReq::LogQuery
+            | PermissionReq::PromStoreRead
+            | PermissionReq::JaegerQuery
+            | PermissionReq::PipelineQuery
+            | PermissionReq::DashboardQuery => true,
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
 
             PermissionReq::GrpcRequest(_)
@@ -130,6 +138,8 @@ impl<'a> PermissionReq<'a> {
             | PermissionReq::PromStoreWrite
             | PermissionReq::Otlp
             | PermissionReq::LogWrite
+            | PermissionReq::PipelineManage
+            | PermissionReq::DashboardManage
             | PermissionReq::BulkInsert { .. } => false,
         }
     }
@@ -487,6 +497,24 @@ mod tests {
         };
 
         assert!(req.is_write());
+    }
+
+    #[test]
+    fn test_management_request_access_modes() {
+        for req in [
+            PermissionReq::JaegerQuery,
+            PermissionReq::PipelineQuery,
+            PermissionReq::DashboardQuery,
+        ] {
+            assert!(req.is_readonly());
+        }
+
+        for req in [
+            PermissionReq::PipelineManage,
+            PermissionReq::DashboardManage,
+        ] {
+            assert!(req.is_write());
+        }
     }
 
     #[test]

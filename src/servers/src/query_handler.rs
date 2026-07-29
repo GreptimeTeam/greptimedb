@@ -177,6 +177,8 @@ pub trait PipelineHandler {
         inputs: Vec<(QueryContextRef, RowInsertRequests)>,
     ) -> Result<Vec<Result<Output>>>;
 
+    fn check_pipeline_query_permission(&self, query_ctx: &QueryContextRef) -> Result<()>;
+
     async fn get_pipeline(
         &self,
         name: &str,
