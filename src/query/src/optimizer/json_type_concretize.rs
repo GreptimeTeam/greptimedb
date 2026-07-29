@@ -18,7 +18,8 @@ use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{Result, plan_datafusion_err, plan_err};
+use datafusion_common::{ExprSchema, Result, plan_datafusion_err, plan_err};
+use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::extension::json::is_structured_json_field;
@@ -42,7 +43,7 @@ impl OptimizerRule for JsonTypeConcretizeRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        ensure_no_whole_json2_output(&plan)?;
+        ensure_no_whole_json2_read(&plan)?;
 
         let json_types = deduce_json_types(&plan)?;
         if json_types.is_empty() {
@@ -75,7 +76,9 @@ impl OptimizerRule for JsonTypeConcretizeRule {
     }
 }
 
-fn ensure_no_whole_json2_output(plan: &LogicalPlan) -> Result<()> {
+/// Rejects unsupported whole-column JSON2 reads in a logical plan.
+fn ensure_no_whole_json2_read(plan: &LogicalPlan) -> Result<()> {
+    // Reject whole JSON2 columns in the final query output, including `SELECT *`.
     for field in plan.schema().fields() {
         if is_structured_json_field(field) {
             return plan_err!(
@@ -84,7 +87,83 @@ fn ensure_no_whole_json2_output(plan: &LogicalPlan) -> Result<()> {
             );
         }
     }
+
+    // Reject whole JSON2 columns consumed by intermediate expressions, for example:
+    // `SELECT count(*) FROM (SELECT j FROM t GROUP BY j)`.
+    plan.apply(|plan| {
+        let input_schema = merge_schema(&plan.inputs());
+        for expr in plan.expressions() {
+            // A bare column in an intermediate projection is only passed through, not consumed.
+            if matches!(plan, LogicalPlan::Projection(_)) && is_passthrough_column(&expr) {
+                continue;
+            }
+
+            expr.apply(|expr| {
+                // For JSON2, `json_get` is allowed only with a non-empty path; skip its arguments
+                // after validation.
+                if let Expr::ScalarFunction(function) = expr
+                    && function.name().eq_ignore_ascii_case(JsonGetWithType::NAME)
+                {
+                    let Some(Expr::Column(col)) = function.args.first() else {
+                        return Ok(TreeNodeRecursion::Jump);
+                    };
+                    let Some(path) = function
+                        .args
+                        .get(1)
+                        .and_then(Expr::as_literal)
+                        .and_then(|value| value.try_as_str())
+                        .flatten()
+                    else {
+                        return Ok(TreeNodeRecursion::Jump);
+                    };
+                    let reads_whole_column = path
+                        .trim_start_matches('$')
+                        .split('.')
+                        .all(str::is_empty);
+                    if !reads_whole_column {
+                        return Ok(TreeNodeRecursion::Jump);
+                    }
+
+                    let field = input_schema
+                        .field_from_column(col)
+                        .or_else(|_| plan.schema().field_from_column(col))?;
+                    if is_structured_json_field(field) {
+                        return plan_err!(
+                            "Querying the whole JSON2 column '{}' is currently not supported; use json_get to select its fields",
+                            col.name
+                        );
+                    }
+                    return Ok(TreeNodeRecursion::Jump);
+                }
+
+                // Any remaining JSON2 column reference is a whole-column read.
+                let Expr::Column(col) = expr else {
+                    return Ok(TreeNodeRecursion::Continue);
+                };
+                let field = input_schema
+                    .field_from_column(col)
+                    .or_else(|_| plan.schema().field_from_column(col))?;
+                if is_structured_json_field(field) {
+                    return plan_err!(
+                        "Querying the whole JSON2 column '{}' is currently not supported; use json_get to select its fields",
+                        col.name
+                    );
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })?;
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+
     Ok(())
+}
+
+fn is_passthrough_column(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) => true,
+        Expr::Alias(alias) => is_passthrough_column(&alias.expr),
+        _ => false,
+    }
 }
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
@@ -166,9 +245,10 @@ mod tests {
     use api::v1::SemanticType;
     use common_function::scalars::udf::create_udf;
     use datafusion::datasource::provider_as_source;
+    use datafusion::functions_aggregate::expr_fn::count;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{LogicalPlanBuilder, col};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::ColumnSchema;
@@ -344,6 +424,60 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_whole_json2_use_in_intermediate_plan() -> Result<()> {
+        let (_, plan) = build_json2_scan()?;
+        let plan = plan
+            .aggregate(vec![col("j")], Vec::<Expr>::new())?
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .build()?;
+
+        let err = JsonTypeConcretizeRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Querying the whole JSON2 column 'j' is currently not supported")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_path_use_in_intermediate_plan() -> Result<()> {
+        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan
+            .aggregate(vec![json_get], Vec::<Expr>::new())?
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_passthrough_for_later_projection() -> Result<()> {
+        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan
+            .project(vec![json_get.alias("__common_expr"), col("j")])?
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        Ok(())
+    }
+
+    #[test]
     fn test_allow_json2_projection_by_path() -> Result<()> {
         let expr = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
         let (provider, plan) = build_json2_plan(vec![expr])?;
@@ -360,6 +494,23 @@ mod tests {
             )]))),
             provider.scan_request().json_type_hint.get("j")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_json2_projection_with_empty_path() -> Result<()> {
+        for path in ["", "$", ".", "$."] {
+            let expr = json_get_expr(col("j"), path_expr(path), Some(DataType::Utf8View))?;
+            let (_, plan) = build_json2_plan(vec![expr])?;
+
+            let err = JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("Querying the whole JSON2 column 'j' is currently not supported")
+            );
+        }
         Ok(())
     }
 

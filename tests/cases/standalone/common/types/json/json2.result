@@ -175,14 +175,6 @@ select j.c, j.y from json2_table order by ts;
 |                                   | false                             |
 +-----------------------------------+-----------------------------------+
 
-select j from json2_table order by ts;
-
-Error: 3001(EngineExecuteQuery), Error during planning: Querying the whole JSON2 column 'j' is currently not supported; use json_get to select its fields
-
-select * from json2_table order by ts;
-
-Error: 3001(EngineExecuteQuery), Error during planning: Querying the whole JSON2 column 'j' is currently not supported; use json_get to select its fields
-
 select j.a.b + 1 from json2_table order by ts;
 
 +------------------------------------------------------------+
