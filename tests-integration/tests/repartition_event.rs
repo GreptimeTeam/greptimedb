@@ -66,7 +66,7 @@ async fn test_repartition_event() {
         "repartition",
         &format!(
             "table_name = '{TABLE_NAME}' \
-             AND json_path_match(payload, '$.source.type == \"partitioned\"')"
+             AND json_path_match(payload, '$.source_type == \"partitioned\"')"
         ),
     )
     .await;
@@ -106,14 +106,14 @@ async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) 
         "repartition",
         &format!(
             "table_name = '{TABLE_NAME}' \
-             AND json_path_match(payload, '$.source.type == \"unpartitioned\"')"
+             AND json_path_match(payload, '$.source_type == \"unpartitioned\"')"
         ),
     )
     .await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
-    json_path_match(payload, '$.version == 1') AS payload_version,
-    json_path_match(payload, '$.source.type == "unpartitioned"') AS unpartitioned_source,
+    json_path_match(payload, '$.version == 2') AS payload_version,
+    json_path_match(payload, '$.source_type == "unpartitioned"') AS unpartitioned_source,
     json_path_match(payload, '$.target_partition_columns[0] == "host"') AS target_column
 FROM greptime_private.events
 WHERE type = 'repartition'

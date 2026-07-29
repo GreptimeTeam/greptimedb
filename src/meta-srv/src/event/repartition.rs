@@ -39,23 +39,19 @@ use crate::procedure::repartition::repartition_start::RepartitionStart;
 pub(crate) const REPARTITION_EVENT_TYPE: &str = "repartition";
 pub(crate) const REPARTITION_GROUP_EVENT_TYPE: &str = "repartition_group";
 
-const PAYLOAD_VERSION: u8 = 1;
+const PAYLOAD_VERSION: u8 = 2;
 
 #[derive(Debug, Serialize)]
 struct RepartitionSubmittedPayload {
     version: u8,
-    source: RepartitionSourcePayload,
+    source_type: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    source_partition_exprs: Vec<String>,
     target_partition_exprs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_partition_columns: Option<Vec<String>>,
     #[serde(with = "humantime_serde")]
     timeout: Duration,
-}
-
-#[derive(Debug, Serialize)]
-struct RepartitionSourcePayload {
-    #[serde(rename = "type")]
-    source_type: &'static str,
-    partition_exprs: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -80,14 +76,12 @@ impl RepartitionEvent {
             table_id: Some(persistent_ctx.table_id),
             payload: Some(RepartitionSubmittedPayload {
                 version: PAYLOAD_VERSION,
-                source: RepartitionSourcePayload {
-                    source_type: intent.source_type(),
-                    partition_exprs: intent
-                        .source_partition_exprs()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                },
+                source_type: intent.source_type(),
+                source_partition_exprs: intent
+                    .source_partition_exprs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 target_partition_exprs: intent
                     .target_partition_exprs()
                     .iter()
@@ -418,23 +412,43 @@ mod tests {
 
         let unpartitioned_payload = unpartitioned.json_payload().unwrap();
         let partitioned_payload = partitioned.json_payload().unwrap();
-        assert_eq!(unpartitioned_payload["source"]["type"], "unpartitioned");
-        assert_eq!(
-            unpartitioned_payload["source"]["partition_exprs"],
-            serde_json::json!([])
+        assert_eq!(unpartitioned_payload["version"], PAYLOAD_VERSION);
+        assert_eq!(unpartitioned_payload["source_type"], "unpartitioned");
+        assert!(
+            unpartitioned_payload
+                .get("source_partition_exprs")
+                .is_none()
         );
         assert_eq!(
             unpartitioned_payload["target_partition_columns"],
             serde_json::json!(["host"])
         );
-        assert_eq!(partitioned_payload["source"]["type"], "partitioned");
+        assert_eq!(partitioned_payload["source_type"], "partitioned");
         assert_eq!(
-            partitioned_payload["source"]["partition_exprs"],
+            partitioned_payload["source_partition_exprs"],
             serde_json::json!([expr(0, 100).to_string()])
         );
         assert_eq!(
             partitioned_payload["target_partition_columns"],
             serde_json::json!(["host"])
+        );
+
+        let merge = RepartitionEvent::submitted(
+            &parent_persistent_ctx(),
+            &RepartitionStart::new(
+                RepartitionFrom::Partitioned {
+                    exprs: vec![expr(0, 50), expr(50, 100)],
+                    target_partition_columns: None,
+                },
+                vec![expr(0, 100)],
+            ),
+        );
+        assert!(
+            merge
+                .json_payload()
+                .unwrap()
+                .get("target_partition_columns")
+                .is_none()
         );
     }
 
