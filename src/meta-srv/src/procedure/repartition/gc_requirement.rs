@@ -101,6 +101,8 @@ impl RepartitionGcRequirementManager {
         gc_enabled: bool,
         procedure_manager: &ProcedureManagerRef,
     ) -> Result<()> {
+        // Reconciliation is also a legacy migration and must run before GC can
+        // remove the repartition mappings used to backfill the durable marker.
         let required = self.reconcile_legacy_state(procedure_manager).await?;
         ensure!(!required || gc_enabled, error::RepartitionGcRequiredSnafu);
         Ok(())
