@@ -445,6 +445,7 @@ impl MetasrvBuilder {
             Arc::new(GcDisabledRepartitionProcedureFactory::new(
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                repartition_gc_requirement_manager.clone(),
             ))
         };
         let ddl_manager = DdlManager::new(

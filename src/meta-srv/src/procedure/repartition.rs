@@ -48,8 +48,8 @@ use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, BoxedProcedureLoader, Context as ProcedureContext, Error as ProcedureError,
-    LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
+    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
+    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
@@ -813,22 +813,26 @@ impl DefaultRepartitionProcedureFactory {
 
 /// Rejects new repartition requests when metasrv GC is disabled.
 ///
-/// Procedure type names remain registered, but their loaders fail recovery
-/// closed without discarding durable procedure state.
-pub struct GcDisabledRepartitionProcedureFactory;
-
-impl GcDisabledRepartitionProcedureFactory {
-    pub fn new(_mailbox: MailboxRef, _server_addr: String) -> Self {
-        Self
-    }
+/// Procedure loaders are still delegated to the enabled factory so procedures
+/// persisted before a metasrv restart remain recoverable after GC is re-enabled.
+pub struct GcDisabledRepartitionProcedureFactory {
+    enabled_factory: DefaultRepartitionProcedureFactory,
 }
 
-fn gc_required_recovery_loader() -> BoxedProcedureLoader {
-    Box::new(|_| {
-        Err(ProcedureError::recovery_blocked(
-            error::RepartitionGcRequiredForRecoverySnafu.build(),
-        ))
-    })
+impl GcDisabledRepartitionProcedureFactory {
+    pub fn new(
+        mailbox: MailboxRef,
+        server_addr: String,
+        gc_requirement_manager: RepartitionGcRequirementManagerRef,
+    ) -> Self {
+        Self {
+            enabled_factory: DefaultRepartitionProcedureFactory::new(
+                mailbox,
+                server_addr,
+                gc_requirement_manager,
+            ),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -852,21 +856,11 @@ impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
 
     fn register_loaders(
         &self,
-        _ddl_ctx: &DdlContext,
+        ddl_ctx: &DdlContext,
         procedure_manager: &ProcedureManagerRef,
     ) -> std::result::Result<(), BoxedError> {
-        procedure_manager
-            .register_loader(
-                RepartitionProcedure::TYPE_NAME,
-                gc_required_recovery_loader(),
-            )
-            .map_err(BoxedError::new)?;
-        procedure_manager
-            .register_loader(
-                RepartitionGroupProcedure::TYPE_NAME,
-                gc_required_recovery_loader(),
-            )
-            .map_err(BoxedError::new)
+        self.enabled_factory
+            .register_loaders(ddl_ctx, procedure_manager)
     }
 
     async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
@@ -1023,6 +1017,7 @@ mod tests {
     use crate::procedure::repartition::collect::Collect;
     use crate::procedure::repartition::deallocate_region::DeallocateRegion;
     use crate::procedure::repartition::dispatch::Dispatch;
+    use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
     use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
@@ -1132,13 +1127,14 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_disabled_factory_rejects_repartition_and_registers_blocked_loaders() {
+    fn test_gc_disabled_factory_rejects_repartition_and_registers_loaders() {
         let env = TestingEnv::new();
         let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
         let factory = GcDisabledRepartitionProcedureFactory::new(
             env.mailbox_ctx.mailbox().clone(),
             env.server_addr.clone(),
+            Arc::new(RepartitionGcRequirementManager::new(env.kv_backend.clone())),
         );
 
         let err = factory

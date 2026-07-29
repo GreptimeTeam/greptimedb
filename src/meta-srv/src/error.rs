@@ -813,12 +813,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Repartition procedure recovery requires metasrv GC to be enabled"))]
-    RepartitionGcRequiredForRecovery {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Source partition expression '{}' does not match any existing region",
         expr
@@ -1289,9 +1283,9 @@ impl ErrorExt for Error {
             Error::ListActiveFrontends { source, .. }
             | Error::ListActiveDatanodes { source, .. }
             | Error::ListActiveFlownodes { source, .. } => source.status_code(),
-            Error::NoAvailableFrontend { .. }
-            | Error::RepartitionGcRequired { .. }
-            | Error::RepartitionGcRequiredForRecovery { .. } => StatusCode::IllegalState,
+            Error::NoAvailableFrontend { .. } | Error::RepartitionGcRequired { .. } => {
+                StatusCode::IllegalState
+            }
 
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }

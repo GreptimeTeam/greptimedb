@@ -261,17 +261,6 @@ mod tests {
         assert!(matches!(err, error::Error::RepartitionGcRequired { .. }));
         assert!(requirement_manager.is_gc_required().await.unwrap());
 
-        disabled_manager
-            .register_loader(
-                RepartitionProcedure::TYPE_NAME,
-                crate::procedure::repartition::gc_required_recovery_loader(),
-            )
-            .unwrap();
-        let err = disabled_manager.start().await.unwrap_err();
-        assert!(matches!(
-            err,
-            common_procedure::error::Error::LoadProcedure { .. }
-        ));
         assert!(
             disabled_manager
                 .has_unfinished_procedure(&[RepartitionProcedure::TYPE_NAME])

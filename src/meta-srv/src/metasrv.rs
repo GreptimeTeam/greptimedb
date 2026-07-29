@@ -603,10 +603,14 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
-    pub async fn try_start(&self) -> Result<()> {
+    pub(crate) async fn ensure_repartition_gc_enabled(&self) -> Result<()> {
         self.repartition_gc_requirement_manager
             .ensure_gc_enabled(self.options.gc.enable, &self.procedure_manager)
-            .await?;
+            .await
+    }
+
+    pub async fn try_start(&self) -> Result<()> {
+        self.ensure_repartition_gc_enabled().await?;
 
         if self
             .started

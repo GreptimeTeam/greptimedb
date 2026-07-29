@@ -487,37 +487,30 @@ impl ManagerContext {
         &self,
         procedure_id: ProcedureId,
         message: &ProcedureMessage,
-    ) -> Result<Option<LoadedProcedure>> {
+    ) -> Option<LoadedProcedure> {
         let loaders = self.loaders.lock().unwrap();
-        let Some(loader) = loaders.get(&message.type_name) else {
+        let loader = loaders.get(&message.type_name).or_else(|| {
             error!(
                 "Loader not found, procedure_id: {}, type_name: {}",
                 procedure_id, message.type_name
             );
-            return Ok(None);
-        };
+            None
+        })?;
 
-        let procedure = match loader(&message.data) {
-            Ok(procedure) => procedure,
-            Err(err) if err.is_recovery_blocked() => {
-                return Err(Box::new(err)).context(error::LoadProcedureSnafu {
-                    procedure_id,
-                    type_name: &message.type_name,
-                });
-            }
-            Err(err) => {
+        let procedure = loader(&message.data)
+            .map_err(|e| {
                 error!(
                     "Failed to load procedure data, key: {}, source: {:?}",
-                    procedure_id, err
+                    procedure_id, e
                 );
-                return Ok(None);
-            }
-        };
+                e
+            })
+            .ok()?;
 
-        Ok(Some(LoadedProcedure {
+        Some(LoadedProcedure {
             procedure,
             step: message.step,
-        }))
+        })
     }
 
     /// Returns all procedures in the tree (including given `root` procedure).
@@ -793,18 +786,20 @@ impl LocalManager {
         Ok(watcher)
     }
 
-    fn load_recovered_messages(
+    fn submit_recovered_messages(
         &self,
         messages: HashMap<ProcedureId, ProcedureMessage>,
         init_state: InitProcedureState,
-    ) -> Result<Vec<(ProcedureId, ProcedureState, LoadedProcedure)>> {
-        let mut recovered = Vec::new();
+    ) {
         for (procedure_id, message) in &messages {
             if message.parent_id.is_none() {
-                let Some(loaded_procedure) = self
+                // This is the root procedure. We only submit the root procedure as it will
+                // submit sub-procedures to the manager.
+                let Some(mut loaded_procedure) = self
                     .manager_ctx
-                    .load_one_procedure_from_message(*procedure_id, message)?
+                    .load_one_procedure_from_message(*procedure_id, message)
                 else {
+                    // Try to load other procedures.
                     continue;
                 };
 
@@ -827,34 +822,19 @@ impl LocalManager {
                     InitProcedureState::Running => ProcedureState::Running,
                 };
 
-                recovered.push((*procedure_id, procedure_state, loaded_procedure));
-            }
-        }
+                if let Err(e) = loaded_procedure.procedure.recover() {
+                    error!(e; "Failed to recover procedure {}", procedure_id);
+                }
 
-        Ok(recovered)
-    }
-
-    fn run_recovery_hooks(&self, recovered: &mut [(ProcedureId, ProcedureState, LoadedProcedure)]) {
-        for (procedure_id, _, loaded_procedure) in recovered {
-            if let Err(e) = loaded_procedure.procedure.recover() {
-                error!(e; "Failed to recover procedure {}", procedure_id);
-            }
-        }
-    }
-
-    fn submit_recovered_procedures(
-        &self,
-        recovered: Vec<(ProcedureId, ProcedureState, LoadedProcedure)>,
-    ) {
-        for (procedure_id, procedure_state, loaded_procedure) in recovered {
-            if let Err(e) = self.submit_root(
-                procedure_id,
-                procedure_state,
-                loaded_procedure.step,
-                loaded_procedure.procedure,
-                RootSubmissionOrigin::Recovery,
-            ) {
-                error!(e; "Failed to recover procedure {}", procedure_id);
+                if let Err(e) = self.submit_root(
+                    *procedure_id,
+                    procedure_state,
+                    loaded_procedure.step,
+                    loaded_procedure.procedure,
+                    RootSubmissionOrigin::Recovery,
+                ) {
+                    error!(e; "Failed to recover procedure {}", procedure_id);
+                }
             }
         }
     }
@@ -869,15 +849,9 @@ impl LocalManager {
             rollback_messages,
             finished_ids,
         } = self.procedure_store.load_messages().await?;
-        // Load every root before running recovery hooks or submitting any of them.
-        // Only an explicit recovery-blocking loader error fails the whole recovery.
-        let mut recovered_rollbacks =
-            self.load_recovered_messages(rollback_messages, InitProcedureState::RollingBack)?;
-        let mut recovered = self.load_recovered_messages(messages, InitProcedureState::Running)?;
-        self.run_recovery_hooks(&mut recovered_rollbacks);
-        self.run_recovery_hooks(&mut recovered);
-        self.submit_recovered_procedures(recovered_rollbacks);
-        self.submit_recovered_procedures(recovered);
+        // Submits recovered messages first.
+        self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
+        self.submit_recovered_messages(messages, InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
             info!(
@@ -937,29 +911,20 @@ impl ProcedureManager for LocalManager {
             return Ok(());
         }
 
+        let task_inner = self.build_remove_outdated_meta_task();
+
+        task_inner
+            .start(common_runtime::global_runtime())
+            .context(StartRemoveOutdatedMetaTaskSnafu)?;
+
+        *task = Some(task_inner);
+
         self.manager_ctx.reset_runtime_state();
         self.manager_ctx.start();
 
         info!("LocalManager is start.");
 
-        if let Err(err) = self.recover().await {
-            self.manager_ctx.stop();
-            self.manager_ctx.reset_runtime_state();
-            return Err(err);
-        }
-
-        let task_inner = self.build_remove_outdated_meta_task();
-        if let Err(err) = task_inner
-            .start(common_runtime::global_runtime())
-            .context(StartRemoveOutdatedMetaTaskSnafu)
-        {
-            self.manager_ctx.stop();
-            self.manager_ctx.reset_runtime_state();
-            return Err(err);
-        }
-        *task = Some(task_inner);
-
-        Ok(())
+        self.recover().await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1667,137 +1632,6 @@ mod tests {
         // Since the mocked root procedure actually doesn't submit subprocedures, so there is no
         // related state.
         assert!(manager.procedure_state(child_id).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_recovery_blocked_error_fails_recovery_without_losing_state() {
-        let dir = create_temp_dir("loader_error_recovery");
-        let object_store = test_util::new_object_store(&dir);
-        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonStore::new());
-        let manager = LocalManager::new(
-            ManagerConfig {
-                parent_path: "data/".to_string(),
-                ..Default::default()
-            },
-            state_store,
-            poison_manager,
-            None,
-            None,
-        );
-
-        let loader_enabled = Arc::new(AtomicBool::new(false));
-        let moved_loader_enabled = loader_enabled.clone();
-        manager
-            .register_loader(
-                "ProcedureToLoad",
-                Box::new(move |json| {
-                    if !moved_loader_enabled.load(AtomicOrdering::Relaxed) {
-                        return Err(Error::recovery_blocked(MockError::new(
-                            StatusCode::IllegalState,
-                        )));
-                    }
-                    Ok(Box::new(ProcedureToLoad::new(json)))
-                }),
-            )
-            .unwrap();
-
-        let procedure_id = ProcedureId::random();
-        let procedure = ProcedureToLoad::new("recover after loader is enabled");
-        ProcedureStore::from_object_store(object_store)
-            .store_procedure(
-                procedure_id,
-                0,
-                procedure.type_name().to_string(),
-                procedure.dump().unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-
-        let err = manager.start().await.unwrap_err();
-        assert!(matches!(err, Error::LoadProcedure { .. }), "{err:?}");
-        assert!(
-            manager
-                .has_unfinished_procedure(&["ProcedureToLoad"])
-                .await
-                .unwrap()
-        );
-        assert!(
-            manager
-                .procedure_state(procedure_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        loader_enabled.store(true, AtomicOrdering::Relaxed);
-        manager.start().await.unwrap();
-        assert!(
-            manager
-                .procedure_state(procedure_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        manager.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_regular_loader_error_does_not_fail_recovery() {
-        let dir = create_temp_dir("regular_loader_error_recovery");
-        let object_store = test_util::new_object_store(&dir);
-        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonStore::new());
-        let manager = LocalManager::new(
-            ManagerConfig {
-                parent_path: "data/".to_string(),
-                ..Default::default()
-            },
-            state_store,
-            poison_manager,
-            None,
-            None,
-        );
-        manager
-            .register_loader(
-                "ProcedureToLoad",
-                Box::new(|_| {
-                    Err(Error::external(MockError::new(
-                        StatusCode::InvalidArguments,
-                    )))
-                }),
-            )
-            .unwrap();
-
-        let procedure_id = ProcedureId::random();
-        let procedure = ProcedureToLoad::new("skip regular loader error");
-        ProcedureStore::from_object_store(object_store)
-            .store_procedure(
-                procedure_id,
-                0,
-                procedure.type_name().to_string(),
-                procedure.dump().unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-
-        manager.start().await.unwrap();
-        assert!(
-            manager
-                .has_unfinished_procedure(&["ProcedureToLoad"])
-                .await
-                .unwrap()
-        );
-        assert!(
-            manager
-                .procedure_state(procedure_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        manager.stop().await.unwrap();
     }
 
     #[tokio::test]

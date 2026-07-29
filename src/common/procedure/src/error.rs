@@ -58,22 +58,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to load procedure data, procedure_id: {}, type_name: {}",
-        procedure_id,
-        type_name
-    ))]
-    LoadProcedure {
-        procedure_id: ProcedureId,
-        type_name: String,
-        source: Box<Error>,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Procedure recovery is blocked"))]
-    RecoveryBlocked { source: BoxedError },
-
     #[snafu(display("Procedure Manager is stopped"))]
     ManagerNotStart {
         #[snafu(implicit)]
@@ -302,8 +286,6 @@ impl ErrorExt for Error {
             | &Error::ProcedureNotFound { .. }
             | Error::PoisonKeyNotDefined { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
-            Error::LoadProcedure { source, .. } => source.status_code(),
-            Error::RecoveryBlocked { source } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
         }
@@ -325,8 +307,6 @@ impl ErrorExt for Error {
             | Error::GetPoison { source, .. }
             | Error::CheckStatus { source, .. } => source.retry_hint(),
             Error::ProcedureExec { source, .. } => source.retry_hint(),
-            Error::LoadProcedure { source, .. } => source.retry_hint(),
-            Error::RecoveryBlocked { source } => source.retry_hint(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.retry_hint(),
             Error::DeleteState { error, .. } => retry_hint_from_opendal_error(error),
@@ -339,18 +319,6 @@ impl ErrorExt for Error {
 }
 
 impl Error {
-    /// Creates an error that explicitly prevents procedure recovery from continuing.
-    pub fn recovery_blocked<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
-        Error::RecoveryBlocked {
-            source: BoxedError::new(err),
-        }
-    }
-
-    /// Returns whether this error must block procedure recovery.
-    pub fn is_recovery_blocked(&self) -> bool {
-        matches!(self, Error::RecoveryBlocked { .. })
-    }
-
     /// Creates a new [Error::External] error from source `err`.
     pub fn external<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::External {
