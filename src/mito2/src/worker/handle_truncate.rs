@@ -40,6 +40,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        let (sender, req) = match self.flush_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            req,
+            DdlRequest::Truncate,
+        ) {
+            Ok(()) => {
+                self.listener.on_flush_cancel_requested(region_id);
+                return;
+            }
+            Err(request) => request,
+        };
+
         let (sender, req) = match self.compaction_scheduler.try_cancel_and_add_ddl(
             region_id,
             sender,

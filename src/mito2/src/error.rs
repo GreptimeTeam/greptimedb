@@ -1160,6 +1160,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("Flush is cancelled."))]
+    FlushCancelled {},
+
     #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1514,7 +1517,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "vector_index")]
             VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
-            ManualCompactionOverride {} | CompactionCancelled {} => StatusCode::Cancelled,
+            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
+                StatusCode::Cancelled
+            }
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 

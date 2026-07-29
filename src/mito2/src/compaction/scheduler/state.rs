@@ -247,8 +247,8 @@ impl LocalCompactionState {
         }
     }
 
-    /// Returns the cancellation handle for this compaction task.
-    pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {
+    #[cfg(test)]
+    fn cancel_handle(&self) -> Arc<CancellationHandle> {
         self.cancel_handle.clone()
     }
 

@@ -16,7 +16,6 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
@@ -36,7 +35,7 @@ use crate::request::{
     BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
     RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
 };
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::worker::WorkerListener;
 use crate::{error, metrics};
 
@@ -67,6 +66,8 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) memory_policy: OnExhaustedPolicy,
     /// Estimated memory bytes needed for this compaction.
     pub(crate) estimated_memory_bytes: u64,
+    /// Finalized output SSTs not committed to the manifest yet.
+    pub(crate) uncommitted: UncommittedSsts,
 }
 
 impl Debug for CompactionTaskImpl {
@@ -304,18 +305,14 @@ impl CompactionTask for CompactionTaskImpl {
 
         self.handle_expiration().await;
 
-        let cancel_handle = self.state.cancel_handle();
-        // Run compaction with cooperative cancellation.
-        let notify = match CancellableFuture::new(
-            async { self.handle_compaction().await },
-            cancel_handle,
-        )
-        .await
-        {
-            Ok(Ok(merge_output)) => {
+        // The local compactor owns cancellation of its spawned merge tasks. Waiting for it to
+        // return ensures all finalized outputs are tracked before cleanup starts.
+        let notify = match self.handle_compaction().await {
+            Ok(merge_output) => {
                 self.invoke_sst_hook(&merge_output).await;
                 // Stop accepting cancellation once we are about to publish the compaction edit.
                 if !self.state.mark_commit_started() {
+                    self.uncommitted.cleanup().await;
                     let senders = std::mem::take(&mut self.waiters);
                     BackgroundNotify::CompactionCancelled(CompactionCancelled {
                         region_id: self.compaction_region.region_id,
@@ -328,6 +325,7 @@ impl CompactionTask for CompactionTaskImpl {
                         .await;
                     match self.update_manifest(merge_output).await {
                         Ok((edit, _manifest_version)) => {
+                            self.uncommitted.commit();
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,
@@ -339,6 +337,7 @@ impl CompactionTask for CompactionTaskImpl {
                         }
                         Err(e) => {
                             error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
+                            self.uncommitted.cleanup().await;
                             let err = Arc::new(e);
                             self.on_failure(err.clone());
                             BackgroundNotify::CompactionFailed(CompactionFailed {
@@ -350,20 +349,9 @@ impl CompactionTask for CompactionTaskImpl {
                     }
                 }
             }
-            Err(_) => {
-                info!(
-                    "Compaction cancelled, region id: {}",
-                    self.compaction_region.region_id
-                );
-                let senders = std::mem::take(&mut self.waiters);
-                BackgroundNotify::CompactionCancelled(CompactionCancelled {
-                    region_id: self.compaction_region.region_id,
-                    execution: self.execution.clone(),
-                    senders,
-                })
-            }
-            Ok(Err(e)) => {
+            Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
+                self.uncommitted.cleanup().await;
                 let err = Arc::new(e);
                 // notify compaction waiters
                 self.on_failure(err.clone());

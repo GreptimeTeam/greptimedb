@@ -974,6 +974,13 @@ pub(crate) struct FlushFailed {
     pub(crate) err: Arc<Error>,
 }
 
+impl FlushFailed {
+    /// Returns whether the flush was cancelled cooperatively.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.err.as_ref(), Error::FlushCancelled { .. })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
     pub(crate) manifest_version: ManifestVersion,
@@ -1359,6 +1366,24 @@ mod tests {
         let err = rx.blocking_recv().unwrap().unwrap_err();
         assert!(matches!(err, Error::CompactionCancelled { .. }));
         assert_eq!(err.status_code(), StatusCode::Cancelled);
+    }
+
+    #[test]
+    fn test_flush_failed_detects_cancellation() {
+        let cancelled = FlushFailed {
+            err: Arc::new(crate::error::FlushCancelledSnafu.build()),
+        };
+        assert!(cancelled.is_cancelled());
+
+        let failed = FlushFailed {
+            err: Arc::new(
+                crate::error::RegionBusySnafu {
+                    region_id: RegionId::new(1, 1),
+                }
+                .build(),
+            ),
+        };
+        assert!(!failed.is_cancelled());
     }
 
     #[test]

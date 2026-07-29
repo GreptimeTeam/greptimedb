@@ -22,18 +22,76 @@ use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionDropRequest, RegionRequest};
+use store_api::region_request::{RegionDropRequest, RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockRegionHook;
-use crate::engine::listener::DropListener;
+use crate::engine::listener::{DropListener, FlushTruncateListener};
 use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows_for_key, flush_region,
+    put_rows, rows_schema,
 };
 use crate::worker::DROPPING_MARKER_FILE;
+
+#[tokio::test]
+async fn test_drop_cancels_running_flush() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("drop-during-flush").await;
+    let listener = Arc::new(FlushTruncateListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            Some(Arc::new(MockWriteBufferManager::default())),
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(100, 1);
+    let request = CreateRequestBuilder::new().build();
+    let rows = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows,
+            rows: build_rows_for_key("a", 0, 2, 0),
+        },
+    )
+    .await;
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    listener.wait_truncate().await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(flush_task.await.unwrap().is_err());
+    assert!(engine.get_region(region_id).is_none());
+}
 
 #[tokio::test]
 async fn test_engine_drop_region() {

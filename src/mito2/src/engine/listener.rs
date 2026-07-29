@@ -41,6 +41,12 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
     }
 
+    /// Notifies the listener after a flush becomes non-cancellable and before commit.
+    async fn on_flush_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after flush cancellation is requested and its DDL is queued.
+    fn on_flush_cancel_requested(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that the later drop task starts running.
     /// Returns the gc interval if we want to override the default one.
     fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {

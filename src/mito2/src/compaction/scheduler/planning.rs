@@ -54,7 +54,7 @@ use crate::request::{
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, UncommittedSsts};
 use crate::sst::version::SstVersion;
 use crate::worker::WorkerListener;
 
@@ -529,6 +529,11 @@ impl CompactionScheduler {
         let cancel_handle = Arc::new(CancellationHandle::default());
         let state = LocalCompactionState::new(cancel_handle.clone());
         let execution = CompactionExecution::new(plan_id, files);
+        let uncommitted = UncommittedSsts::new(
+            region_id,
+            compaction_region.access_layer.clone(),
+            Some(compaction_region.cache_manager.clone()),
+        );
         let local_compaction_task = Box::new(CompactionTaskImpl {
             state: state.clone(),
             execution: execution.clone(),
@@ -538,10 +543,14 @@ impl CompactionScheduler {
             listener: self.listener.clone(),
             picker_output,
             compaction_region,
-            compactor: Arc::new(DefaultCompactor::with_cancel_handle(cancel_handle.clone())),
+            compactor: Arc::new(DefaultCompactor::with_cancel_handle(
+                cancel_handle.clone(),
+                uncommitted.clone(),
+            )),
             memory_manager: self.memory_manager.clone(),
             memory_policy: self.memory_policy,
             estimated_memory_bytes: estimated_bytes,
+            uncommitted,
         });
 
         match self.submit_compaction_task(local_compaction_task, region_id) {
