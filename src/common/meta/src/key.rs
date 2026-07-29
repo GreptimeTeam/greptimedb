@@ -174,6 +174,7 @@ use crate::wal_provider::RegionWalOptions;
 pub const TOPIC_NAME_PATTERN: &str = r"[a-zA-Z0-9_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
 pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
+pub const REPARTITION_GC_REQUIRED_KEY: &str = "__requirements/gc/repartition";
 pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
 pub const RECOVERY_MODE_KEY: &str = "__switches/recovery";
 

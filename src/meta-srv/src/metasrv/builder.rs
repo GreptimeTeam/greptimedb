@@ -71,6 +71,7 @@ use crate::metasrv::{
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
 use crate::procedure::repartition::{
     DefaultRepartitionProcedureFactory, GcDisabledRepartitionProcedureFactory,
 };
@@ -255,6 +256,8 @@ impl MetasrvBuilder {
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+        let repartition_gc_requirement_manager =
+            Arc::new(RepartitionGcRequirementManager::new(kv_backend.clone()));
         let procedure_manager = build_procedure_manager(
             &options,
             &kv_backend,
@@ -436,6 +439,7 @@ impl MetasrvBuilder {
             Arc::new(DefaultRepartitionProcedureFactory::new(
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                repartition_gc_requirement_manager.clone(),
             ))
         } else {
             Arc::new(GcDisabledRepartitionProcedureFactory::new(
@@ -628,6 +632,7 @@ impl MetasrvBuilder {
             wal_provider,
             table_metadata_manager,
             runtime_switch_manager,
+            repartition_gc_requirement_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
                 meta_peer_client,

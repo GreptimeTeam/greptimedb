@@ -75,6 +75,7 @@ use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::flush_trigger::RegionFlushTickerRef;
@@ -582,6 +583,7 @@ pub struct Metasrv {
     wal_provider: WalProviderRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
+    repartition_gc_requirement_manager: RepartitionGcRequirementManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -602,6 +604,10 @@ pub struct Metasrv {
 
 impl Metasrv {
     pub async fn try_start(&self) -> Result<()> {
+        self.repartition_gc_requirement_manager
+            .ensure_gc_enabled(self.options.gc.enable, &self.procedure_manager)
+            .await?;
+
         if self
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

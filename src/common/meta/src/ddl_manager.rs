@@ -48,10 +48,11 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
-    RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu, Result,
-    SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
+    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
+    PersistRepartitionGcRequirementSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
+    RegisterRepartitionProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu,
+    TableNotFoundSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+    WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -170,6 +171,7 @@ pub enum RepartitionSource {
     },
 }
 
+#[async_trait::async_trait]
 pub trait RepartitionProcedureFactory: Send + Sync {
     fn create(
         &self,
@@ -186,6 +188,9 @@ pub trait RepartitionProcedureFactory: Send + Sync {
         ddl_ctx: &DdlContext,
         procedure_manager: &ProcedureManagerRef,
     ) -> std::result::Result<(), BoxedError>;
+
+    /// Persists the cluster-level GC requirement before submitting a repartition.
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError>;
 }
 
 /// The options for DDL tasks.
@@ -356,6 +361,10 @@ impl DdlManager {
                 Some(timeout),
             )
             .context(CreateRepartitionProcedureSnafu)?;
+        self.repartition_procedure_factory
+            .ensure_gc_requirement()
+            .await
+            .context(PersistRepartitionGcRequirementSnafu)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         if wait {
             self.execute_procedure_and_wait(procedure_with_id).await
@@ -1326,6 +1335,10 @@ mod tests {
             _ddl_ctx: &DdlContext,
             _procedure_manager: &ProcedureManagerRef,
         ) -> std::result::Result<(), BoxedError> {
+            Ok(())
+        }
+
+        async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
             Ok(())
         }
     }

@@ -16,6 +16,7 @@ pub mod allocate_region;
 pub mod collect;
 pub mod deallocate_region;
 pub mod dispatch;
+pub mod gc_requirement;
 pub mod group;
 pub mod plan;
 pub mod repartition_end;
@@ -47,8 +48,8 @@ use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
+    BoxedProcedure, BoxedProcedureLoader, Context as ProcedureContext, Error as ProcedureError,
+    LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
@@ -60,6 +61,7 @@ use table::table_name::TableName;
 use crate::error::{self, Result};
 use crate::procedure::repartition::collect::ProcedureMeta;
 use crate::procedure::repartition::deallocate_region::DeallocateRegion;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::repartition::group::{
     Context as RepartitionGroupContext, RepartitionGroupProcedure, region_routes,
 };
@@ -792,33 +794,44 @@ impl Procedure for RepartitionProcedure {
 pub struct DefaultRepartitionProcedureFactory {
     mailbox: MailboxRef,
     server_addr: String,
+    gc_requirement_manager: RepartitionGcRequirementManagerRef,
 }
 
 impl DefaultRepartitionProcedureFactory {
-    pub fn new(mailbox: MailboxRef, server_addr: String) -> Self {
+    pub fn new(
+        mailbox: MailboxRef,
+        server_addr: String,
+        gc_requirement_manager: RepartitionGcRequirementManagerRef,
+    ) -> Self {
         Self {
             mailbox,
             server_addr,
+            gc_requirement_manager,
         }
     }
 }
 
 /// Rejects new repartition requests when metasrv GC is disabled.
 ///
-/// Procedure loaders are still delegated to the enabled factory so procedures
-/// persisted before a metasrv restart can be recovered.
-pub struct GcDisabledRepartitionProcedureFactory {
-    enabled_factory: DefaultRepartitionProcedureFactory,
-}
+/// Procedure type names remain registered, but their loaders fail recovery
+/// closed without discarding durable procedure state.
+pub struct GcDisabledRepartitionProcedureFactory;
 
 impl GcDisabledRepartitionProcedureFactory {
-    pub fn new(mailbox: MailboxRef, server_addr: String) -> Self {
-        Self {
-            enabled_factory: DefaultRepartitionProcedureFactory::new(mailbox, server_addr),
-        }
+    pub fn new(_mailbox: MailboxRef, _server_addr: String) -> Self {
+        Self
     }
 }
 
+fn gc_required_recovery_loader() -> BoxedProcedureLoader {
+    Box::new(|_| {
+        Err(ProcedureError::recovery_blocked(
+            error::RepartitionGcRequiredForRecoverySnafu.build(),
+        ))
+    })
+}
+
+#[async_trait::async_trait]
 impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
     fn create(
         &self,
@@ -839,14 +852,34 @@ impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
 
     fn register_loaders(
         &self,
-        ddl_ctx: &DdlContext,
+        _ddl_ctx: &DdlContext,
         procedure_manager: &ProcedureManagerRef,
     ) -> std::result::Result<(), BoxedError> {
-        self.enabled_factory
-            .register_loaders(ddl_ctx, procedure_manager)
+        procedure_manager
+            .register_loader(
+                RepartitionProcedure::TYPE_NAME,
+                gc_required_recovery_loader(),
+            )
+            .map_err(BoxedError::new)?;
+        procedure_manager
+            .register_loader(
+                RepartitionGroupProcedure::TYPE_NAME,
+                gc_required_recovery_loader(),
+            )
+            .map_err(BoxedError::new)
+    }
+
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
+        Err(BoxedError::new(
+            error::InvalidArgumentsSnafu {
+                err_msg: "Repartition requires metasrv GC to be enabled".to_string(),
+            }
+            .build(),
+        ))
     }
 }
 
+#[async_trait::async_trait]
 impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
     fn create(
         &self,
@@ -950,6 +983,13 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 
         Ok(())
     }
+
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
+        self.gc_requirement_manager
+            .require_gc()
+            .await
+            .map_err(BoxedError::new)
+    }
 }
 
 #[cfg(test)]
@@ -968,7 +1008,9 @@ mod tests {
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::state_store::KvStateStore;
     use common_meta::test_util::MockDatanodeManager;
+    use common_procedure::local::{LocalManager, ManagerConfig};
     use common_procedure::{Error as ProcedureError, Procedure, ProcedureId, ProcedureState};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -1090,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_disabled_factory_rejects_repartition() {
+    fn test_gc_disabled_factory_rejects_repartition_and_registers_blocked_loaders() {
         let env = TestingEnv::new();
         let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
         let ddl_ctx = env.ddl_context(node_manager);
@@ -1118,6 +1160,21 @@ mod tests {
             "Invalid arguments: Repartition requires metasrv GC to be enabled",
             err.to_string()
         );
+
+        let state_store = Arc::new(KvStateStore::new(env.kv_backend));
+        let procedure_manager = Arc::new(LocalManager::new(
+            ManagerConfig::default(),
+            state_store.clone(),
+            state_store,
+            None,
+            None,
+        ));
+        let procedure_manager_ref: ProcedureManagerRef = procedure_manager.clone();
+        factory
+            .register_loaders(&ddl_ctx, &procedure_manager_ref)
+            .unwrap();
+        assert!(procedure_manager.contains_loader(RepartitionProcedure::TYPE_NAME));
+        assert!(procedure_manager.contains_loader(RepartitionGroupProcedure::TYPE_NAME));
     }
 
     #[test]

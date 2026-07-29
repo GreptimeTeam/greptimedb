@@ -791,6 +791,34 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to manage the repartition GC requirement"))]
+    RepartitionGcRequirement {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to inspect persisted repartition procedures"))]
+    InspectRepartitionProcedures {
+        source: common_procedure::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Metasrv GC must be enabled because the cluster has durable repartition state"
+    ))]
+    RepartitionGcRequired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Repartition procedure recovery requires metasrv GC to be enabled"))]
+    RepartitionGcRequiredForRecovery {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Source partition expression '{}' does not match any existing region",
         expr
@@ -1261,7 +1289,9 @@ impl ErrorExt for Error {
             Error::ListActiveFrontends { source, .. }
             | Error::ListActiveDatanodes { source, .. }
             | Error::ListActiveFlownodes { source, .. } => source.status_code(),
-            Error::NoAvailableFrontend { .. } => StatusCode::IllegalState,
+            Error::NoAvailableFrontend { .. }
+            | Error::RepartitionGcRequired { .. }
+            | Error::RepartitionGcRequiredForRecovery { .. } => StatusCode::IllegalState,
 
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }
@@ -1270,6 +1300,8 @@ impl ErrorExt for Error {
             Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
             Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
+            Error::RepartitionGcRequirement { source, .. } => source.status_code(),
+            Error::InspectRepartitionProcedures { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
             Error::AllocateRegions { source, .. } => source.status_code(),
             Error::DeallocateRegions { source, .. } => source.status_code(),
@@ -1360,7 +1392,8 @@ impl ErrorExt for Error {
             | Error::DeallocateRegions { source, .. }
             | Error::BuildCreateRequest { source, .. }
             | Error::AllocateRegionRoutes { source, .. }
-            | Error::AllocateWalOptions { source, .. } => source.retry_hint(),
+            | Error::AllocateWalOptions { source, .. }
+            | Error::RepartitionGcRequirement { source, .. } => source.retry_hint(),
 
             Error::Other { source, .. }
             | Error::ListCatalogs { source, .. }
@@ -1374,6 +1407,7 @@ impl ErrorExt for Error {
             | Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. }
             | Error::RegisterProcedureLoader { source, .. }
+            | Error::InspectRepartitionProcedures { source, .. }
             | Error::RepartitionSubprocedureStateReceiver { source, .. } => source.retry_hint(),
 
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
