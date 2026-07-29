@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 
 use common_telemetry::info;
@@ -155,23 +155,29 @@ fn filter_time_windows(
         })
         .collect::<HashSet<_>>();
 
-    loop {
-        let selected_files = windows
-            .iter()
-            .filter(|(lower_bound, _)| selected_windows.contains(lower_bound))
-            .flat_map(|(_, (_, files))| files.iter().map(FileHandle::file_id))
-            .collect::<HashSet<_>>();
-        let previous_len = selected_windows.len();
-        for (lower_bound, (_, files)) in &windows {
-            if files
-                .iter()
-                .any(|file| selected_files.contains(&file.file_id()))
-            {
-                selected_windows.insert(*lower_bound);
-            }
+    let mut file_windows = HashMap::new();
+    for (lower_bound, (_, files)) in &windows {
+        for file in files {
+            file_windows
+                .entry(file.file_id())
+                .or_insert_with(Vec::new)
+                .push(*lower_bound);
         }
-        if selected_windows.len() == previous_len {
-            break;
+    }
+
+    let mut pending_windows = selected_windows.iter().copied().collect::<VecDeque<_>>();
+    let mut visited_files = HashSet::new();
+    while let Some(lower_bound) = pending_windows.pop_front() {
+        let (_, files) = &windows[&lower_bound];
+        for file in files {
+            if !visited_files.insert(file.file_id()) {
+                continue;
+            }
+            for dependent_window in &file_windows[&file.file_id()] {
+                if selected_windows.insert(*dependent_window) {
+                    pending_windows.push_back(*dependent_window);
+                }
+            }
         }
     }
 
@@ -445,6 +451,31 @@ mod tests {
             )),
             outputs.last().map(|output| output.output_time_range)
         );
+    }
+
+    #[test]
+    fn test_pick_time_range_expands_long_dependency_chain() {
+        const CHAIN_LEN: i64 = 128;
+
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(HOUR / 2),
+        )
+        .unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(Some(time_range));
+        let files = (0..CHAIN_LEN)
+            .map(|window| (FileId::random(), window * HOUR, (window + 2) * HOUR - 1, 0))
+            .collect::<Vec<_>>();
+        let version = build_version(&files, None);
+
+        let (outputs, _, _) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond((CHAIN_LEN + 2) * HOUR),
+        );
+
+        assert_eq!(CHAIN_LEN as usize + 1, outputs.len());
     }
 
     #[test]
