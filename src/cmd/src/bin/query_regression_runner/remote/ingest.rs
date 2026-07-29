@@ -22,7 +22,9 @@ use serde_json::{Value, json};
 
 use crate::query_regression_runner::model::{PromStore, RemoteWrite};
 use crate::query_regression_runner::plan::normalized_remote_write;
-use crate::query_regression_runner::sql::{http_post_sql, sql_ident, sql_string};
+use crate::query_regression_runner::sql::{
+    extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64,
+};
 use crate::query_regression_runner::{PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
 
 pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Result<()> {
@@ -55,7 +57,6 @@ pub(super) async fn run_prepare_remote(args: PrepareRemoteArgs) -> Result<()> {
         args.base_http_port,
         &args.fixture_generator,
         &remote,
-        args.http_timeout,
         &client,
     )
     .await?;
@@ -64,7 +65,6 @@ pub(super) async fn run_prepare_remote(args: PrepareRemoteArgs) -> Result<()> {
         args.candidate_http_port,
         &args.fixture_generator,
         &remote,
-        args.http_timeout,
         &client,
     )
     .await?;
@@ -88,7 +88,6 @@ async fn prepare_remote_target(
     port: u16,
     generator: &Path,
     remote: &RemoteWrite,
-    http_timeout: f64,
     client: &Client,
 ) -> Result<Value> {
     let create_database = http_post_sql(
@@ -108,8 +107,7 @@ async fn prepare_remote_target(
         )
         .into());
     }
-    let (remote_write, flushes) =
-        ingest_remote_write(generator, port, remote, http_timeout, client).await?;
+    let (remote_write, flushes) = ingest_remote_write(generator, port, remote, client).await?;
     let expected_rows = remote
         .series_count
         .checked_mul(remote.samples_per_series)
@@ -145,12 +143,11 @@ async fn ingest_remote_write(
     generator: &Path,
     port: u16,
     remote: &RemoteWrite,
-    http_timeout: f64,
     client: &Client,
 ) -> Result<(Value, Vec<Value>)> {
     let Some(chunks) = sample_chunks(remote)? else {
         let remote_write = run_remote_write(generator, port, remote, None)?;
-        let flush = flush_remote_table(client, port, remote, http_timeout, "final", None).await?;
+        let flush = flush_remote_table(client, port, remote, "final", None).await?;
         return Ok((remote_write, vec![flush]));
     };
     let mut results = Vec::with_capacity(chunks.len());
@@ -174,17 +171,8 @@ async fn ingest_remote_write(
             .iter()
             .find(|(index, _)| *index == chunk.index)
         {
-            flushes.push(
-                flush_remote_table(
-                    client,
-                    port,
-                    remote,
-                    http_timeout,
-                    reason,
-                    Some(chunk.index),
-                )
-                .await?,
-            );
+            flushes
+                .push(flush_remote_table(client, port, remote, reason, Some(chunk.index)).await?);
         }
     }
     Ok((
@@ -373,7 +361,6 @@ async fn flush_remote_table(
     client: &Client,
     port: u16,
     remote: &RemoteWrite,
-    _http_timeout: f64,
     reason: &str,
     chunk_index: Option<u64>,
 ) -> Result<Value> {
@@ -439,29 +426,6 @@ async fn poll_expected_count(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-fn extract_count_value(result: &Value) -> Option<u64> {
-    let row = result
-        .get("response")?
-        .get("data")?
-        .as_array()?
-        .first()?
-        .as_object()?;
-    row.iter()
-        .find(|(key, _)| {
-            let key = key.to_ascii_lowercase();
-            key == "count(*)" || key.starts_with("count(")
-        })
-        .and_then(|(_, value)| value_u64(Some(value)))
-}
-
-fn value_u64(value: Option<&Value>) -> Option<u64> {
-    value?.as_u64().or_else(|| value?.as_str()?.parse().ok())
-}
-
-fn value_f64(value: Option<&Value>) -> Option<f64> {
-    value?.as_f64().or_else(|| value?.as_str()?.parse().ok())
 }
 
 fn json_number(value: f64) -> String {
@@ -536,22 +500,6 @@ mod tests {
         assert_eq!(
             scheduled_flushes(&chunks, remote.flush_every_sample_chunks),
             vec![(2, "periodic"), (3, "final")]
-        );
-    }
-
-    #[test]
-    fn extracts_remote_write_count_from_data_map() {
-        assert_eq!(
-            extract_count_value(&json!({"response": {"data": [{"COUNT(*)": "12"}]}})),
-            Some(12)
-        );
-        assert_eq!(
-            extract_count_value(&json!({"response": {"data": [{"count(value)": 7}]}})),
-            Some(7)
-        );
-        assert_eq!(
-            extract_count_value(&json!({"response": {"data": [[]]}})),
-            None
         );
     }
 }

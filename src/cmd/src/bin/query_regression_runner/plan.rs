@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -69,13 +69,13 @@ pub(super) fn validate_direct_tables(tables: Vec<Table>, layout: Layout) -> Resu
     if tables.is_empty() || layout.regions != 1 {
         return Err("runner supports one or more tables and exactly one region per table".into());
     }
-    let mut pairs = HashMap::new();
-    let mut names = HashMap::new();
+    let mut pairs = HashSet::new();
+    let mut names = HashSet::new();
     for table in &tables {
-        if pairs.insert((&table.database, &table.name), ()).is_some() {
+        if !pairs.insert((&table.database, &table.name)) {
             return Err("duplicate (database, name) table entries are not supported".into());
         }
-        if names.insert(&table.name, ()).is_some() {
+        if !names.insert(&table.name) {
             return Err("duplicate table names are not supported".into());
         }
     }

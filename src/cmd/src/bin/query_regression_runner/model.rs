@@ -92,7 +92,7 @@ pub(super) struct Column {
     pub(super) data_type: String,
 }
 
-pub(super) const fn default_show_create_engine() -> bool {
+const fn default_show_create_engine() -> bool {
     true
 }
 
@@ -211,7 +211,7 @@ pub(super) struct Query {
     pub(super) thresholds: Map<String, Value>,
 }
 
-pub(super) const fn one() -> usize {
+const fn one() -> usize {
     1
 }
 

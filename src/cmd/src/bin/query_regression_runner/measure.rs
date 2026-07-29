@@ -49,16 +49,8 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
-    let base = run_target(
-        "base",
-        args.base_http_port,
-        &tables,
-        &configured_queries,
-        &client,
-    )
-    .await;
+    let base = run_target(args.base_http_port, &tables, &configured_queries, &client).await;
     let candidate = run_target(
-        "candidate",
         args.candidate_http_port,
         &tables,
         &configured_queries,
@@ -115,7 +107,6 @@ fn target_report(name: &str, http_port: u16, result: QueryResult) -> Value {
 }
 
 async fn run_target(
-    _name: &str,
     port: u16,
     tables: &[Table],
     configured_queries: &[Query],

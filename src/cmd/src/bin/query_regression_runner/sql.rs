@@ -219,4 +219,20 @@ mod tests {
             &json!({"error_code": "success", "output": []})
         ));
     }
+
+    #[test]
+    fn extracts_remote_write_count_from_data_map() {
+        assert_eq!(
+            extract_count_value(&json!({"response": {"data": [{"COUNT(*)": "12"}]}})),
+            Some(12)
+        );
+        assert_eq!(
+            extract_count_value(&json!({"response": {"data": [{"count(value)": 7}]}})),
+            Some(7)
+        );
+        assert_eq!(
+            extract_count_value(&json!({"response": {"data": [[]]}})),
+            None
+        );
+    }
 }
