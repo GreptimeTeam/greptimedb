@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
-use api::v1::region::compact_request::Options;
 use common_base::Plugins;
 use common_base::cancellation::CancellationHandle;
 use common_memory_manager::OnExhaustedPolicy;
@@ -192,6 +191,13 @@ pub(crate) struct CompactionScheduler {
     next_plan_id: u64,
 }
 
+fn requires_pending_compaction_slot(
+    options: &compact_request::Options,
+    time_range: Option<TimestampRange>,
+) -> bool {
+    matches!(options, compact_request::Options::StrictWindow(_)) || time_range.is_some()
+}
+
 impl CompactionScheduler {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -242,6 +248,33 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
     ) -> Result<bool> {
+        self.schedule_compaction_with_time_range(
+            region_id,
+            compact_options,
+            version_control,
+            access_layer,
+            waiter,
+            manifest_ctx,
+            schema_metadata_manager,
+            max_parallelism,
+            None,
+        )
+    }
+
+    /// Schedules a compaction constrained by an optional time range.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn schedule_compaction_with_time_range(
+        &mut self,
+        region_id: RegionId,
+        compact_options: compact_request::Options,
+        version_control: &VersionControlRef,
+        access_layer: &AccessLayerRef,
+        waiter: OptionOutputTx,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+        max_parallelism: usize,
+        time_range: Option<TimestampRange>,
+    ) -> Result<bool> {
         // skip compaction if region is in staging state
         let current_state = manifest_ctx.current_state();
         if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
@@ -267,22 +300,20 @@ impl CompactionScheduler {
                 return Ok(false);
             }
 
-            match compact_options {
-                Options::Regular(_) => {
-                    status.merge_regular_trigger(waiter);
-                }
-                options @ Options::StrictWindow(_) => {
-                    // Incoming compaction request is manually triggered.
-                    status.set_pending_request(PendingCompaction {
-                        options,
-                        waiter,
-                        max_parallelism,
-                    });
-                    info!(
-                        "Region {} is compacting, manually compaction will be re-scheduled.",
-                        region_id
-                    );
-                }
+            if requires_pending_compaction_slot(&compact_options, time_range) {
+                // Incoming compaction request is manually triggered.
+                status.set_pending_request(PendingCompaction {
+                    options: compact_options,
+                    waiter,
+                    max_parallelism,
+                    time_range,
+                });
+                info!(
+                    "Region {} is compacting, manually compaction will be re-scheduled.",
+                    region_id
+                );
+            } else {
+                status.merge_regular_trigger(waiter);
             }
             return Ok(false);
         }
@@ -300,10 +331,10 @@ impl CompactionScheduler {
             max_parallelism,
         );
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_picking(plan_id);
+        status.start_picking_with_time_range(plan_id, time_range);
         status.merge_waiter(waiter);
         self.region_status.insert(region_id, status);
-        self.dispatch_compaction_planning(plan_id, request, compact_options);
+        self.dispatch_compaction_planning(plan_id, request, compact_options, time_range);
         self.listener.on_compaction_scheduled(region_id);
         Ok(true)
     }
@@ -331,6 +362,7 @@ impl CompactionScheduler {
             options,
             waiter,
             max_parallelism,
+            time_range,
         } = pending_request;
 
         let request = status.new_compaction_request(
@@ -347,8 +379,8 @@ impl CompactionScheduler {
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_picking(plan_id);
-        self.dispatch_compaction_planning(plan_id, request, options);
+        status.start_picking_with_time_range(plan_id, time_range);
+        self.dispatch_compaction_planning(plan_id, request, options, time_range);
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
             region_id
@@ -413,6 +445,7 @@ impl CompactionScheduler {
                 manifest_ctx,
                 schema_metadata_manager,
                 Some(active),
+                None,
             );
             return Vec::new();
         }
@@ -488,11 +521,13 @@ impl CompactionScheduler {
             return true;
         }
 
+        let time_range = status.time_range;
         self.schedule_next_compaction_with_active(
             region_id,
             manifest_ctx,
             schema_metadata_manager,
             None,
+            time_range,
         )
     }
 
@@ -502,6 +537,7 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         active: Option<ActiveCompaction>,
+        time_range: Option<TimestampRange>,
     ) -> bool {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
@@ -520,11 +556,12 @@ impl CompactionScheduler {
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_regular_picking(plan_id, active);
+        status.start_regular_picking(plan_id, active, time_range);
         self.dispatch_compaction_planning(
             plan_id,
             request,
             compact_request::Options::Regular(Default::default()),
+            time_range,
         );
         debug!(
             "Successfully scheduled next compaction planning for region id: {}",
@@ -664,14 +701,20 @@ impl CompactionScheduler {
         plan_id: u64,
         request: CompactionRequest,
         options: compact_request::Options,
+        time_range: Option<TimestampRange>,
     ) {
         let plugins = self.plugins.clone();
         let max_background_compactions = self.engine_config.max_background_compactions;
         common_runtime::spawn_compact(async move {
             let region_id = request.region_id();
             let request_sender = request.request_sender.clone();
-            let planning =
-                Self::prepare_compaction(request, options, plugins, max_background_compactions);
+            let planning = Self::prepare_compaction(
+                request,
+                options,
+                plugins,
+                max_background_compactions,
+                time_range,
+            );
             Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
         });
     }
@@ -729,6 +772,7 @@ impl CompactionScheduler {
         options: compact_request::Options,
         plugins: Plugins,
         max_background_compactions: usize,
+        time_range: Option<TimestampRange>,
     ) -> CompactionPlanningResult {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
@@ -750,6 +794,7 @@ impl CompactionScheduler {
             &dynamic_compaction_opts,
             request.current_version.options.append_mode,
             Some(max_background_compactions),
+            time_range,
         );
         let region_id = request.region_id();
         let CompactionRequest {
@@ -954,6 +999,7 @@ impl CompactionScheduler {
                 manifest_ctx,
                 schema_metadata_manager,
                 Some(active),
+                None,
             );
             return Vec::new();
         }
@@ -1478,13 +1524,12 @@ struct CompactionStatus {
     // TODO: Remove idle statuses and make ActiveCompaction non-optional once chained
     // scheduling can recreate the status from region context.
     active: Option<ActiveCompaction>,
+    /// Optional range retained by automatic continuations of the current compaction.
+    time_range: Option<TimestampRange>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     ///
-    /// In production code, this can only hold a manual `Options::StrictWindow` compaction.
-    /// When a `Options::Regular` compaction request arrives while the region is already
-    /// compacting, it goes to `ActiveCompaction::regular_followup_waiters` or `waiters`
-    /// instead — it does not become a `pending_request`. See `schedule_compaction` for
-    /// the branching logic.
+    /// This holds strict-window requests and ranged regular requests. An unrestricted regular
+    /// request is instead merged into `ActiveCompaction::regular_followup_waiters` or `waiters`.
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     ///
@@ -1506,12 +1551,19 @@ impl CompactionStatus {
             version_control,
             access_layer,
             active: None,
+            time_range: None,
             pending_request: None,
             pending_ddl_requests: Vec::new(),
         }
     }
 
+    #[cfg(test)]
     fn start_picking(&mut self, plan_id: u64) {
+        self.start_picking_with_time_range(plan_id, None);
+    }
+
+    fn start_picking_with_time_range(&mut self, plan_id: u64, time_range: Option<TimestampRange>) {
+        self.time_range = time_range;
         if let Some(active) = &mut self.active {
             active.start_picking(plan_id);
         } else {
@@ -1519,7 +1571,13 @@ impl CompactionStatus {
         }
     }
 
-    fn start_regular_picking(&mut self, plan_id: u64, active: Option<ActiveCompaction>) {
+    fn start_regular_picking(
+        &mut self,
+        plan_id: u64,
+        active: Option<ActiveCompaction>,
+        time_range: Option<TimestampRange>,
+    ) {
+        self.time_range = time_range;
         self.active = Some(if let Some(mut active) = active {
             active.start_regular_picking(plan_id);
             active
@@ -2031,13 +2089,14 @@ fn refresh_picker_output(output: PickerOutput, current: &SstVersion) -> Option<P
 /// Pending compaction request that is supposed to run after current task is finished,
 /// typically used for manual compactions.
 struct PendingCompaction {
-    /// Compaction options. In production code this can only be [`compact_request::Options::StrictWindow`];
-    /// see the [`CompactionStatus::pending_request`] field for why.
+    /// Compaction options.
     pub(crate) options: compact_request::Options,
     /// Waiters of pending requests.
     pub(crate) waiter: OptionOutputTx,
     /// Max parallelism for pending compaction.
     pub(crate) max_parallelism: usize,
+    /// Optional time range that constrains candidate compaction windows.
+    pub(crate) time_range: Option<TimestampRange>,
 }
 
 #[cfg(test)]
@@ -2046,6 +2105,7 @@ mod tests {
     use std::time::Duration;
 
     use api::v1::region::StrictWindow;
+    use api::v1::region::compact_request::Options;
     use common_datasource::compression::CompressionType;
     use common_meta::key::schema_name::SchemaNameValue;
     use common_time::DatabaseTimeToLive;
@@ -2063,6 +2123,28 @@ mod tests {
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+
+    #[test]
+    fn test_requires_pending_compaction_slot() {
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(1_000),
+            Timestamp::new_millisecond(2_000),
+        )
+        .unwrap();
+
+        assert!(!requires_pending_compaction_slot(
+            &compact_request::Options::Regular(Default::default()),
+            None,
+        ));
+        assert!(requires_pending_compaction_slot(
+            &compact_request::Options::Regular(Default::default()),
+            Some(time_range),
+        ));
+        assert!(requires_pending_compaction_slot(
+            &compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            None,
+        ));
+    }
 
     struct FailingScheduler;
 
@@ -3141,7 +3223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manual_compaction_when_compaction_in_progress() {
+    async fn test_time_range_compaction_when_compaction_in_progress() {
         common_telemetry::init_default_ut_logging();
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
@@ -3225,25 +3307,37 @@ mod tests {
                 .is_none()
         );
 
-        // Schedule another manual compaction.
+        // Schedule another manual compaction with a time range.
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(end + 1),
+        )
+        .unwrap();
         let (tx, _rx) = oneshot::channel();
         scheduler
-            .schedule_compaction(
+            .schedule_compaction_with_time_range(
                 region_id,
-                compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 OptionOutputTx::new(Some(OutputTx::new(tx))),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
                 1,
+                Some(time_range),
             )
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         // Current job num should be 1 since compaction is in progress.
         assert_eq!(1, job_scheduler.num_jobs());
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
-        assert!(status.pending_request.is_some());
+        assert_eq!(
+            Some(time_range),
+            status
+                .pending_request
+                .as_ref()
+                .and_then(|pending| pending.time_range)
+        );
 
         // On compaction finished and schedule next compaction.
         scheduler
@@ -3263,6 +3357,101 @@ mod tests {
 
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
         assert!(status.pending_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ranged_compaction_continuation_preserves_time_range() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+
+        let mut builder = VersionControlBuilder::new();
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(offset, 1_000);
+        }
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(2 * 3_600_000 + offset, 2 * 3_600_000 + 1_000);
+        }
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        let mut schema_value = SchemaNameValue::default();
+        schema_value
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+        schema_value
+            .extra_options
+            .insert("compaction.twcs.time_window".to_string(), "1h".to_string());
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "t",
+                "c",
+                "s",
+                Some(schema_value),
+                kv_backend,
+            )
+            .await;
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(3_600_000),
+        )
+        .unwrap();
+
+        scheduler
+            .schedule_compaction_with_time_range(
+                region_id,
+                compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3_600,
+                }),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+                Some(time_range),
+            )
+            .unwrap();
+        let first = recv_compaction_pick_finished(&mut rx).await;
+        assert!(
+            selected_files(&first)
+                .iter()
+                .all(|file| file.time_range().1 < Timestamp::new_millisecond(3_600_000))
+        );
+        scheduler
+            .handle_compaction_pick_finished(first, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert_eq!(1, job_scheduler.num_jobs());
+
+        scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert!(scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager,
+        ));
+
+        let continuation = recv_compaction_pick_finished(&mut rx).await;
+        match continuation.result {
+            CompactionPlanningResult::NoPlan => {}
+            CompactionPlanningResult::Prepared(prepared) => assert!(
+                prepared
+                    .picker_output
+                    .outputs
+                    .iter()
+                    .flat_map(|output| &output.inputs)
+                    .all(|file| file.time_range().1 < Timestamp::new_millisecond(3_600_000))
+            ),
+            CompactionPlanningResult::Error(err) => {
+                panic!("unexpected compaction planning error: {err}")
+            }
+        }
     }
 
     #[tokio::test]
@@ -3378,6 +3567,7 @@ mod tests {
             options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
             waiter: OptionOutputTx::from(first_manual_tx),
             max_parallelism: 1,
+            time_range: None,
         });
         scheduler.region_status.insert(region_id, status);
 
@@ -3629,6 +3819,7 @@ mod tests {
             options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
             waiter: OptionOutputTx::from(manual_tx),
             max_parallelism: 1,
+            time_range: None,
         });
 
         let (output_tx, _output_rx) = oneshot::channel();
@@ -3860,6 +4051,7 @@ mod tests {
             options: compact_request::Options::Regular(Default::default()),
             waiter: OptionOutputTx::from(manual_tx),
             max_parallelism: 1,
+            time_range: None,
         });
         scheduler.region_status.insert(region_id, status);
 
@@ -3987,6 +4179,7 @@ mod tests {
             options: compact_request::Options::Regular(Default::default()),
             waiter: OptionOutputTx::from(manual_tx),
             max_parallelism: 1,
+            time_range: None,
         });
         scheduler.region_status.insert(region_id, status);
 

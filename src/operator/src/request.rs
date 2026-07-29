@@ -14,14 +14,19 @@
 
 use std::sync::Arc;
 
+use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
-use api::v1::region::{BuildIndexRequest, CompactRequest, FlushRequest, RegionRequestHeader};
+use api::v1::region::{
+    BuildIndexRequest, CompactRequest, CompactionTimeRange, FlushRequest, RegionRequestHeader,
+};
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info};
+use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit as TimestampUnit;
 use futures_util::future;
 use partition::cache::PhysicalPartitionInfo;
 use partition::manager::PartitionRuleManagerRef;
@@ -145,6 +150,10 @@ impl Requester {
             .await?
             .partitions;
 
+        let time_range = request
+            .time_range
+            .map(to_pb_compaction_time_range)
+            .transpose()?;
         let requests = partitions
             .iter()
             .map(|partition| {
@@ -152,6 +161,7 @@ impl Requester {
                     region_id: partition.id.into(),
                     parallelism: request.parallelism,
                     options: Some(request.compact_options),
+                    time_range,
                 })
             })
             .collect();
@@ -190,11 +200,49 @@ impl Requester {
             region_id: region_id.into(),
             parallelism: 1,
             options: None, // todo(hl): maybe also support parameters in region compaction.
+            time_range: None,
         });
 
         info!("Handle region manual compaction request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
     }
+}
+
+fn to_pb_compaction_time_range(range: TimestampRange) -> Result<CompactionTimeRange> {
+    let (Some(start), Some(end)) = (*range.start(), *range.end()) else {
+        return crate::error::InvalidTimestampRangeSnafu {
+            start: format!("{:?}", range.start()),
+            end: format!("{:?}", range.end()),
+        }
+        .fail();
+    };
+    let original_start = start;
+    let original_end = end;
+    let start = start.convert_to(TimestampUnit::Second).with_context(|| {
+        crate::error::InvalidTimestampRangeSnafu {
+            start: format!("{original_start:?}"),
+            end: format!("{original_end:?}"),
+        }
+    })?;
+    let end = end
+        .convert_to_ceil(TimestampUnit::Second)
+        .with_context(|| crate::error::InvalidTimestampRangeSnafu {
+            start: format!("{original_start:?}"),
+            end: format!("{original_end:?}"),
+        })?;
+    ensure!(
+        start < end,
+        crate::error::InvalidTimestampRangeSnafu {
+            start: format!("{original_start:?}"),
+            end: format!("{original_end:?}"),
+        }
+    );
+
+    Ok(CompactionTimeRange {
+        start: start.value(),
+        end: end.value(),
+        time_unit: to_pb_time_unit(TimestampUnit::Second) as i32,
+    })
 }
 
 impl Requester {
@@ -278,5 +326,42 @@ impl Requester {
             .with_context(|_| FindTablePartitionRuleSnafu {
                 table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::TimeUnit;
+    use common_time::Timestamp;
+    use common_time::range::TimestampRange;
+
+    use super::*;
+
+    #[test]
+    fn test_to_pb_compaction_time_range_normalizes_mixed_units() {
+        let range = TimestampRange::new(
+            Timestamp::new_millisecond(1_500),
+            Timestamp::new_microsecond(2_500_000),
+        )
+        .unwrap();
+
+        let pb_range = to_pb_compaction_time_range(range).unwrap();
+        assert_eq!(1, pb_range.start);
+        assert_eq!(3, pb_range.end);
+        assert_eq!(TimeUnit::Second as i32, pb_range.time_unit);
+    }
+
+    #[test]
+    fn test_to_pb_compaction_time_range() {
+        let range = TimestampRange::new(
+            Timestamp::new_microsecond(1_000),
+            Timestamp::new_microsecond(2_000),
+        )
+        .unwrap();
+
+        let pb_range = to_pb_compaction_time_range(range).unwrap();
+        assert_eq!(0, pb_range.start);
+        assert_eq!(1, pb_range.end);
+        assert_eq!(TimeUnit::Second as i32, pb_range.time_unit);
     }
 }

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::time::Duration;
 
-use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
+use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges, from_pb_time_unit};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
@@ -36,6 +36,7 @@ pub use common_base::AffectedRows;
 use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
+use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
@@ -391,11 +392,41 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     } else {
         Some(compact.parallelism)
     };
+    let time_range = compact
+        .time_range
+        .map(|range| {
+            let time_unit = v1::TimeUnit::try_from(range.time_unit).map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!("invalid compaction time unit: {}", range.time_unit),
+                }
+                .build()
+            })?;
+            let time_unit = from_pb_time_unit(time_unit);
+            let start = Timestamp::new(range.start, time_unit);
+            let end = Timestamp::new(range.end, time_unit);
+            ensure!(
+                start < end,
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!(
+                        "compaction start time must be earlier than end time: {} >= {}",
+                        range.start, range.end
+                    ),
+                }
+            );
+            TimestampRange::new(start, end).with_context(|| InvalidRegionRequestSnafu {
+                region_id,
+                err: "invalid compaction time range".to_string(),
+            })
+        })
+        .transpose()?;
     Ok(vec![(
         region_id,
         RegionRequest::Compact(RegionCompactRequest {
             options,
             parallelism,
+            time_range,
         }),
     )])
 }
@@ -1569,6 +1600,7 @@ pub struct RegionFlushRequest {
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
     pub parallelism: Option<u32>,
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1577,6 +1609,7 @@ impl Default for RegionCompactRequest {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
             parallelism: None,
+            time_range: None,
         }
     }
 }
@@ -1726,11 +1759,40 @@ mod tests {
 
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
+    use common_time::range::TimestampRange;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_make_region_compact_with_time_range() {
+        let requests = make_region_compact(CompactRequest {
+            region_id: 42,
+            time_range: Some(api::v1::region::CompactionTimeRange {
+                start: 1_000,
+                end: 2_000,
+                time_unit: api::v1::TimeUnit::Microsecond as i32,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let RegionRequest::Compact(request) = &requests[0].1 else {
+            unreachable!();
+        };
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::new_microsecond(1_000),
+                    Timestamp::new_microsecond(2_000),
+                )
+                .unwrap()
+            ),
+            request.time_range
+        );
+    }
 
     #[test]
     fn test_from_proto_location() {

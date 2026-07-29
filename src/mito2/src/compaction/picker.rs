@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::region::compact_request;
+use common_time::range::TimestampRange;
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::compactor::CompactionRegion;
@@ -126,6 +127,7 @@ pub fn new_picker(
     compaction_options: &CompactionOptions,
     append_mode: bool,
     max_background_tasks: Option<usize>,
+    time_range: Option<TimestampRange>,
 ) -> Arc<dyn Picker> {
     if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
@@ -133,7 +135,7 @@ pub fn new_picker(
         } else {
             Some(window.window_seconds)
         };
-        Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
+        Arc::new(WindowedCompactionPicker::new(window).with_time_range(time_range)) as Arc<_>
     } else {
         match compaction_options {
             CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker {
@@ -142,6 +144,7 @@ pub fn new_picker(
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
                 append_mode,
                 max_background_tasks,
+                time_range,
             }) as Arc<_>,
         }
     }

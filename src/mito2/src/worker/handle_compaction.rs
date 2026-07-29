@@ -67,16 +67,20 @@ impl<S> RegionWorkerLoop<S> {
         };
         COMPACTION_REQUEST_COUNT.inc();
         let parallelism = req.parallelism.unwrap_or(1) as usize;
-        if let Err(e) = self.compaction_scheduler.schedule_compaction(
-            region.region_id,
-            req.options,
-            &region.version_control,
-            &region.access_layer,
-            sender,
-            &region.manifest_ctx,
-            self.schema_metadata_manager.clone(),
-            parallelism,
-        ) {
+        if let Err(e) = self
+            .compaction_scheduler
+            .schedule_compaction_with_time_range(
+                region.region_id,
+                req.options,
+                &region.version_control,
+                &region.access_layer,
+                sender,
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+                parallelism,
+                req.time_range,
+            )
+        {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
