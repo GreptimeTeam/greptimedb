@@ -101,8 +101,8 @@ WHERE type = 'wal_prune'
   AND procedure_state = 'Done'
   AND procedure_trigger = 'Succeeded'
   AND topic_name = '{topic_name}'
-  AND previous_pruned_entry_id = 0
-  AND pruned_entry_id = {pruned_entry_id}
+  AND prunable_entry_id = {pruned_entry_id}
+  AND latest_offset = 3
   AND json_path_match(payload, '$.version == 1')
   AND json_path_match(payload, '$.logical_delete == false')"#
     );

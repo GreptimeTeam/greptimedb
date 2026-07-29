@@ -67,15 +67,14 @@ pub struct WalPruneData {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WalPruneOutcome {
-    previous_pruned_entry_id: Option<EntryId>,
-    pruned_entry_id: EntryId,
-}
+struct WalPruneOutcome;
 
 /// The procedure to prune WAL.
 pub struct WalPruneProcedure {
     pub data: WalPruneData,
     pub context: Context,
+    /// The latest offset observed during the current execution attempt.
+    observed_latest_offset: Option<u64>,
     pub _guard: Option<WalPruneProcedureGuard>,
 }
 
@@ -96,6 +95,7 @@ impl WalPruneProcedure {
                 logical_delete,
             },
             context,
+            observed_latest_offset: None,
             _guard: guard,
         }
     }
@@ -110,6 +110,7 @@ impl WalPruneProcedure {
         Ok(Self {
             data,
             context: context.clone(),
+            observed_latest_offset: None,
             _guard: guard,
         })
     }
@@ -120,9 +121,11 @@ impl WalPruneProcedure {
     /// - Kafka client errors that have exhausted rskafka's internal retry.
     /// - Failed to update the pruned entry id in the table metadata manager.
     pub async fn on_prune(&mut self) -> Result<Status> {
+        self.observed_latest_offset = None;
         let partition_client = get_partition_client(&self.context.client, &self.data.topic).await?;
         let (earliest_offset, latest_offset) =
             get_offsets_for_topic(&partition_client, &self.data.topic).await?;
+        self.observed_latest_offset = Some(latest_offset);
         if self.data.prunable_entry_id <= earliest_offset {
             warn!(
                 "The prunable entry id is less or equal to the earliest offset, topic: {}, prunable entry id: {}, earliest offset: {}, latest offset: {}",
@@ -147,7 +150,7 @@ impl WalPruneProcedure {
         }
 
         // Update the pruned entry id for the topic.
-        let previous_pruned_entry_id = update_pruned_entry_id(
+        update_pruned_entry_id(
             &self.context.table_metadata_manager,
             &self.data.topic,
             self.data.prunable_entry_id,
@@ -165,10 +168,7 @@ impl WalPruneProcedure {
             "Successfully pruned WAL for topic: {}, prunable entry id: {}, latest offset: {}",
             self.data.topic, self.data.prunable_entry_id, latest_offset
         );
-        Ok(Status::done_with_output(WalPruneOutcome {
-            previous_pruned_entry_id,
-            pruned_entry_id: self.data.prunable_entry_id,
-        }))
+        Ok(Status::done_with_output(WalPruneOutcome))
     }
 }
 
@@ -211,24 +211,29 @@ impl Procedure for WalPruneProcedure {
     }
 
     fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
-        if !ctx.event_type_filter.allows(WAL_PRUNE_EVENT_TYPE)
-            || !matches!(&ctx.trigger, EventTrigger::Succeeded)
-        {
+        if !ctx.event_type_filter.allows(WAL_PRUNE_EVENT_TYPE) {
             return None;
         }
 
-        let ProcedureState::Done {
-            output: Some(output),
-        } = ctx.lifecycle_state
-        else {
+        if matches!(&ctx.trigger, EventTrigger::Succeeded) {
+            let ProcedureState::Done {
+                output: Some(output),
+            } = ctx.lifecycle_state
+            else {
+                return None;
+            };
+            output.downcast_ref::<WalPruneOutcome>()?;
+        } else if !matches!(
+            &ctx.trigger,
+            EventTrigger::Retrying { .. } | EventTrigger::Failed | EventTrigger::Poisoned
+        ) {
             return None;
-        };
-        let outcome = output.downcast_ref::<WalPruneOutcome>()?;
+        }
 
         Some(Box::new(WalPruneEvent::new(
             &self.data.topic,
-            outcome.previous_pruned_entry_id,
-            outcome.pruned_entry_id,
+            self.data.prunable_entry_id,
+            self.observed_latest_offset,
             self.data.logical_delete,
         )))
     }
@@ -385,10 +390,7 @@ mod tests {
         let status = procedure.on_prune().await.unwrap();
         assert_eq!(
             status.downcast_output_ref::<WalPruneOutcome>(),
-            Some(&WalPruneOutcome {
-                previous_pruned_entry_id: Some(0),
-                pruned_entry_id: prunable_entry_id,
-            })
+            Some(&WalPruneOutcome)
         );
         // Check if the entry ids after(include) `prunable_entry_id` still exist.
         check_entry_id_existence(
@@ -445,10 +447,7 @@ mod tests {
         let status = procedure.on_prune().await.unwrap();
         assert_eq!(
             status.downcast_output_ref::<WalPruneOutcome>(),
-            Some(&WalPruneOutcome {
-                previous_pruned_entry_id: Some(0),
-                pruned_entry_id: prunable_entry_id,
-            })
+            Some(&WalPruneOutcome)
         );
         // Logical delete should keep the entry ids before `prunable_entry_id`.
         check_entry_id_existence(
@@ -485,6 +484,7 @@ mod tests {
         let status = procedure.on_prune().await.unwrap();
 
         assert_matches!(status, Status::Done { output: None });
+        assert_eq!(procedure.observed_latest_offset, Some(0));
         delete_topic(context.client, &topic_name).await;
     }
 
@@ -494,7 +494,8 @@ mod tests {
         let context = TestEnv::new()
             .build_wal_prune_context(get_kafka_endpoints())
             .await;
-        let procedure = WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
+        let mut procedure =
+            WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
         let running = ProcedureState::Running;
         let event_context = |trigger, lifecycle_state, event_type_filter| EventContext {
             procedure_id: ProcedureId::random(),
@@ -503,20 +504,38 @@ mod tests {
             event_type_filter: Arc::new(event_type_filter),
         };
 
-        for trigger in [
-            EventTrigger::Submitted,
-            EventTrigger::Recovered,
-            EventTrigger::Retrying {
-                phase: common_procedure::RetryPhase::Execute,
-                attempt: 1,
-            },
-            EventTrigger::Failed,
-            EventTrigger::Poisoned,
-        ] {
+        for trigger in [EventTrigger::Submitted, EventTrigger::Recovered] {
             assert!(
                 procedure
                     .event(&event_context(trigger, &running, EventTypeFilter::All))
                     .is_none()
+            );
+        }
+
+        let retrying_event = procedure
+            .event(&event_context(
+                EventTrigger::Retrying {
+                    phase: common_procedure::RetryPhase::Execute,
+                    attempt: 1,
+                },
+                &running,
+                EventTypeFilter::All,
+            ))
+            .unwrap();
+        assert!(
+            retrying_event.extra_rows().unwrap()[0].values[2]
+                .value_data
+                .is_none()
+        );
+
+        procedure.observed_latest_offset = Some(100);
+        for trigger in [EventTrigger::Failed, EventTrigger::Poisoned] {
+            let event = procedure
+                .event(&event_context(trigger, &running, EventTypeFilter::All))
+                .unwrap();
+            assert_eq!(
+                event.extra_rows().unwrap()[0].values[2].value_data,
+                Some(api::v1::value::ValueData::U64Value(100))
             );
         }
 
@@ -544,10 +563,7 @@ mod tests {
         );
 
         let done = ProcedureState::Done {
-            output: Some(Arc::new(WalPruneOutcome {
-                previous_pruned_entry_id: Some(10),
-                pruned_entry_id: 42,
-            }) as Output),
+            output: Some(Arc::new(WalPruneOutcome) as Output),
         };
         let event = procedure
             .event(&event_context(

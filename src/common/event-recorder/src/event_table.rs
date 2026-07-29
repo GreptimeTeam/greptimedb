@@ -127,18 +127,15 @@ pub const VIEW_ID_COLUMN: EventTableColumn =
 /// The canonical Kafka topic name dimension.
 pub const TOPIC_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("topic_name", ColumnDataType::String, SemanticType::Field);
-/// The canonical previous WAL prune boundary.
-pub const PREVIOUS_PRUNED_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
-    "previous_pruned_entry_id",
+/// The canonical WAL prune boundary.
+pub const PRUNABLE_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "prunable_entry_id",
     ColumnDataType::Uint64,
     SemanticType::Field,
 );
-/// The canonical completed WAL prune boundary.
-pub const PRUNED_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
-    "pruned_entry_id",
-    ColumnDataType::Uint64,
-    SemanticType::Field,
-);
+/// The canonical Kafka latest offset, which is an exclusive upper bound.
+pub const LATEST_OFFSET_COLUMN: EventTableColumn =
+    EventTableColumn::new("latest_offset", ColumnDataType::Uint64, SemanticType::Field);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -456,13 +453,13 @@ mod tests {
         assert_field_columns(
             [
                 &TOPIC_NAME_COLUMN,
-                &PREVIOUS_PRUNED_ENTRY_ID_COLUMN,
-                &PRUNED_ENTRY_ID_COLUMN,
+                &PRUNABLE_ENTRY_ID_COLUMN,
+                &LATEST_OFFSET_COLUMN,
             ],
             [
                 ("topic_name", ColumnDataType::String),
-                ("previous_pruned_entry_id", ColumnDataType::Uint64),
-                ("pruned_entry_id", ColumnDataType::Uint64),
+                ("prunable_entry_id", ColumnDataType::Uint64),
+                ("latest_offset", ColumnDataType::Uint64),
             ],
         );
     }

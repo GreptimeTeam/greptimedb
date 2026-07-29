@@ -19,7 +19,7 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    PREVIOUS_PRUNED_ENTRY_ID_COLUMN, PRUNED_ENTRY_ID_COLUMN, TOPIC_NAME_COLUMN, column_schemas,
+    LATEST_OFFSET_COLUMN, PRUNABLE_ENTRY_ID_COLUMN, TOPIC_NAME_COLUMN, column_schemas,
     nullable_value,
 };
 use serde::Serialize;
@@ -37,27 +37,27 @@ struct WalPrunePayload {
     logical_delete: bool,
 }
 
-/// A sparse lifecycle event for a completed WAL prune operation.
+/// A lifecycle event for a WAL prune operation.
 #[derive(Debug)]
 pub(crate) struct WalPruneEvent {
     topic_name: String,
-    previous_pruned_entry_id: Option<EntryId>,
-    pruned_entry_id: EntryId,
+    prunable_entry_id: EntryId,
+    latest_offset: Option<u64>,
     payload: WalPrunePayload,
 }
 
 impl WalPruneEvent {
-    /// Creates an event for a completed WAL prune operation.
+    /// Creates an event for a WAL prune operation.
     pub(crate) fn new(
         topic_name: &str,
-        previous_pruned_entry_id: Option<EntryId>,
-        pruned_entry_id: EntryId,
+        prunable_entry_id: EntryId,
+        latest_offset: Option<u64>,
         logical_delete: bool,
     ) -> Self {
         Self {
             topic_name: topic_name.to_string(),
-            previous_pruned_entry_id,
-            pruned_entry_id,
+            prunable_entry_id,
+            latest_offset,
             payload: WalPrunePayload {
                 version: PAYLOAD_VERSION,
                 logical_delete,
@@ -78,8 +78,8 @@ impl Event for WalPruneEvent {
     fn extra_schema(&self) -> Vec<ColumnSchema> {
         column_schemas([
             &TOPIC_NAME_COLUMN,
-            &PREVIOUS_PRUNED_ENTRY_ID_COLUMN,
-            &PRUNED_ENTRY_ID_COLUMN,
+            &PRUNABLE_ENTRY_ID_COLUMN,
+            &LATEST_OFFSET_COLUMN,
         ])
     }
 
@@ -87,8 +87,8 @@ impl Event for WalPruneEvent {
         Ok(vec![Row {
             values: vec![
                 ValueData::StringValue(self.topic_name.clone()).into(),
-                nullable_value(self.previous_pruned_entry_id.map(ValueData::U64Value)),
-                ValueData::U64Value(self.pruned_entry_id).into(),
+                ValueData::U64Value(self.prunable_entry_id).into(),
+                nullable_value(self.latest_offset.map(ValueData::U64Value)),
             ],
         }])
     }
@@ -103,7 +103,7 @@ mod tests {
     use api::v1::Row;
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
-        PREVIOUS_PRUNED_ENTRY_ID_COLUMN, PRUNED_ENTRY_ID_COLUMN, TOPIC_NAME_COLUMN, column_schemas,
+        LATEST_OFFSET_COLUMN, PRUNABLE_ENTRY_ID_COLUMN, TOPIC_NAME_COLUMN, column_schemas,
     };
     use common_event_recorder::testing::assert_event_contract;
 
@@ -111,15 +111,15 @@ mod tests {
 
     #[test]
     fn test_wal_prune_event_contract() {
-        let event = WalPruneEvent::new("greptimedb_wal_topic_0", Some(100), 200, false);
+        let event = WalPruneEvent::new("greptimedb_wal_topic_0", 100, Some(200), false);
 
         assert_event_contract(
             &event,
             WAL_PRUNE_EVENT_TYPE,
             &column_schemas([
                 &TOPIC_NAME_COLUMN,
-                &PREVIOUS_PRUNED_ENTRY_ID_COLUMN,
-                &PRUNED_ENTRY_ID_COLUMN,
+                &PRUNABLE_ENTRY_ID_COLUMN,
+                &LATEST_OFFSET_COLUMN,
             ]),
             &[Row {
                 values: vec![
@@ -137,9 +137,9 @@ mod tests {
             })
         );
 
-        let event = WalPruneEvent::new("greptimedb_wal_topic_1", None, 42, true);
+        let event = WalPruneEvent::new("greptimedb_wal_topic_1", 42, None, true);
         assert!(
-            event.extra_rows().unwrap()[0].values[1]
+            event.extra_rows().unwrap()[0].values[2]
                 .value_data
                 .is_none()
         );

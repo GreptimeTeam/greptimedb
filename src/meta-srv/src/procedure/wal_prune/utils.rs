@@ -143,13 +143,12 @@ pub(crate) async fn update_pruned_entry_id(
     table_metadata_manager: &TableMetadataManagerRef,
     topic: &str,
     pruned_entry_id: EntryId,
-) -> Result<Option<EntryId>> {
+) -> Result<()> {
     let prev = table_metadata_manager
         .topic_name_manager()
         .get(topic)
         .await
         .context(TableMetadataManagerSnafu)?;
-    let previous_pruned_entry_id = prev.as_ref().map(|value| value.pruned_entry_id);
 
     table_metadata_manager
         .topic_name_manager()
@@ -157,7 +156,7 @@ pub(crate) async fn update_pruned_entry_id(
         .await
         .context(UpdateTopicNameValueSnafu { topic })?;
 
-    Ok(previous_pruned_entry_id)
+    Ok(())
 }
 
 /// Deletes the records for the given topic.
