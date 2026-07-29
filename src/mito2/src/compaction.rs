@@ -331,7 +331,7 @@ impl CompactionScheduler {
             max_parallelism,
         );
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_picking(plan_id);
+        status.start_picking_with_time_range(plan_id, time_range);
         status.merge_waiter(waiter);
         self.region_status.insert(region_id, status);
         self.dispatch_compaction_planning(plan_id, request, compact_options, time_range);
@@ -379,7 +379,7 @@ impl CompactionScheduler {
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_picking(plan_id);
+        status.start_picking_with_time_range(plan_id, time_range);
         self.dispatch_compaction_planning(plan_id, request, options, time_range);
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
@@ -445,6 +445,7 @@ impl CompactionScheduler {
                 manifest_ctx,
                 schema_metadata_manager,
                 Some(active),
+                None,
             );
             return Vec::new();
         }
@@ -520,11 +521,13 @@ impl CompactionScheduler {
             return true;
         }
 
+        let time_range = status.time_range;
         self.schedule_next_compaction_with_active(
             region_id,
             manifest_ctx,
             schema_metadata_manager,
             None,
+            time_range,
         )
     }
 
@@ -534,6 +537,7 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         active: Option<ActiveCompaction>,
+        time_range: Option<TimestampRange>,
     ) -> bool {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
@@ -552,12 +556,12 @@ impl CompactionScheduler {
         // borrow stays alive; nothing could have removed the status since it
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
-        status.start_regular_picking(plan_id, active);
+        status.start_regular_picking(plan_id, active, time_range);
         self.dispatch_compaction_planning(
             plan_id,
             request,
             compact_request::Options::Regular(Default::default()),
-            None,
+            time_range,
         );
         debug!(
             "Successfully scheduled next compaction planning for region id: {}",
@@ -995,6 +999,7 @@ impl CompactionScheduler {
                 manifest_ctx,
                 schema_metadata_manager,
                 Some(active),
+                None,
             );
             return Vec::new();
         }
@@ -1519,13 +1524,12 @@ struct CompactionStatus {
     // TODO: Remove idle statuses and make ActiveCompaction non-optional once chained
     // scheduling can recreate the status from region context.
     active: Option<ActiveCompaction>,
+    /// Optional range retained by automatic continuations of the current compaction.
+    time_range: Option<TimestampRange>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     ///
-    /// In production code, this can only hold a manual `Options::StrictWindow` compaction.
-    /// When a `Options::Regular` compaction request arrives while the region is already
-    /// compacting, it goes to `ActiveCompaction::regular_followup_waiters` or `waiters`
-    /// instead — it does not become a `pending_request`. See `schedule_compaction` for
-    /// the branching logic.
+    /// This holds strict-window requests and ranged regular requests. An unrestricted regular
+    /// request is instead merged into `ActiveCompaction::regular_followup_waiters` or `waiters`.
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     ///
@@ -1547,12 +1551,19 @@ impl CompactionStatus {
             version_control,
             access_layer,
             active: None,
+            time_range: None,
             pending_request: None,
             pending_ddl_requests: Vec::new(),
         }
     }
 
+    #[cfg(test)]
     fn start_picking(&mut self, plan_id: u64) {
+        self.start_picking_with_time_range(plan_id, None);
+    }
+
+    fn start_picking_with_time_range(&mut self, plan_id: u64, time_range: Option<TimestampRange>) {
+        self.time_range = time_range;
         if let Some(active) = &mut self.active {
             active.start_picking(plan_id);
         } else {
@@ -1560,7 +1571,13 @@ impl CompactionStatus {
         }
     }
 
-    fn start_regular_picking(&mut self, plan_id: u64, active: Option<ActiveCompaction>) {
+    fn start_regular_picking(
+        &mut self,
+        plan_id: u64,
+        active: Option<ActiveCompaction>,
+        time_range: Option<TimestampRange>,
+    ) {
+        self.time_range = time_range;
         self.active = Some(if let Some(mut active) = active {
             active.start_regular_picking(plan_id);
             active
@@ -3340,6 +3357,101 @@ mod tests {
 
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
         assert!(status.pending_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ranged_compaction_continuation_preserves_time_range() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+
+        let mut builder = VersionControlBuilder::new();
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(offset, 1_000);
+        }
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(2 * 3_600_000 + offset, 2 * 3_600_000 + 1_000);
+        }
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        let mut schema_value = SchemaNameValue::default();
+        schema_value
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+        schema_value
+            .extra_options
+            .insert("compaction.twcs.time_window".to_string(), "1h".to_string());
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "t",
+                "c",
+                "s",
+                Some(schema_value),
+                kv_backend,
+            )
+            .await;
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(3_600_000),
+        )
+        .unwrap();
+
+        scheduler
+            .schedule_compaction_with_time_range(
+                region_id,
+                compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3_600,
+                }),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+                Some(time_range),
+            )
+            .unwrap();
+        let first = recv_compaction_pick_finished(&mut rx).await;
+        assert!(
+            selected_files(&first)
+                .iter()
+                .all(|file| file.time_range().1 < Timestamp::new_millisecond(3_600_000))
+        );
+        scheduler
+            .handle_compaction_pick_finished(first, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert_eq!(1, job_scheduler.num_jobs());
+
+        scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert!(scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager,
+        ));
+
+        let continuation = recv_compaction_pick_finished(&mut rx).await;
+        match continuation.result {
+            CompactionPlanningResult::NoPlan => {}
+            CompactionPlanningResult::Prepared(prepared) => assert!(
+                prepared
+                    .picker_output
+                    .outputs
+                    .iter()
+                    .flat_map(|output| &output.inputs)
+                    .all(|file| file.time_range().1 < Timestamp::new_millisecond(3_600_000))
+            ),
+            CompactionPlanningResult::Error(err) => {
+                panic!("unexpected compaction planning error: {err}")
+            }
+        }
     }
 
     #[tokio::test]
