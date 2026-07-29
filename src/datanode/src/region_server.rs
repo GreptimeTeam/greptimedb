@@ -1805,7 +1805,8 @@ impl RegionServerInner {
         request: QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let explain_verbose = query_ctx.explain_verbose();
+        let live_analyze_metrics =
+            query_ctx.explain_verbose() && query_ctx.live_analyze_metrics_enabled();
         let inner = self.clone();
         let mut stream = common_runtime::spawn_query(async move {
             inner.handle_read_inner(request, query_ctx).await
@@ -1822,7 +1823,7 @@ impl RegionServerInner {
         let producer_metrics = metrics.clone();
 
         let producer_handle = common_runtime::spawn_query(async move {
-            if explain_verbose {
+            if live_analyze_metrics {
                 loop {
                     match time::timeout(FLIGHT_METRICS_HEARTBEAT_INTERVAL, stream.next()).await {
                         Ok(Some(batch)) => {

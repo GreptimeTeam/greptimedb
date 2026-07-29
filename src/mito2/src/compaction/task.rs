@@ -24,10 +24,10 @@ use snafu::ResultExt;
 use store_api::ManifestVersion;
 use tokio::sync::mpsc;
 
-use crate::compaction::LocalCompactionState;
 use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
+use crate::compaction::{CompactionExecution, LocalCompactionState};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
@@ -46,6 +46,8 @@ pub const MAX_PARALLEL_COMPACTION: usize = 1;
 pub(crate) struct CompactionTaskImpl {
     /// Shared local-compaction state for cooperative cancellation.
     pub(crate) state: LocalCompactionState,
+    /// Identity and reservation lease of this accepted execution.
+    pub(crate) execution: CompactionExecution,
     pub compaction_region: CompactionRegion,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
@@ -80,20 +82,7 @@ impl Debug for CompactionTaskImpl {
     }
 }
 
-impl Drop for CompactionTaskImpl {
-    fn drop(&mut self) {
-        self.mark_files_compacting(false)
-    }
-}
-
 impl CompactionTaskImpl {
-    fn mark_files_compacting(&self, compacting: bool) {
-        self.picker_output
-            .outputs
-            .iter()
-            .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
-    }
-
     /// Acquires memory budget based on the configured policy.
     ///
     /// Returns an error if memory cannot be acquired according to the policy.
@@ -301,6 +290,7 @@ impl CompactionTask for CompactionTaskImpl {
                 self.on_failure(err.clone());
                 let notify = BackgroundNotify::CompactionFailed(CompactionFailed {
                     region_id: self.compaction_region.region_id,
+                    execution: self.execution.clone(),
                     err,
                 });
                 self.send_to_worker(WorkerRequest::Background {
@@ -312,8 +302,6 @@ impl CompactionTask for CompactionTaskImpl {
             }
         };
 
-        // Marks files compacting before compaction and unmark after compaction (even if compaction is cancelled or failed), so that they won't be picked by other compaction tasks.
-        self.mark_files_compacting(true);
         self.handle_expiration().await;
 
         let cancel_handle = self.state.cancel_handle();
@@ -331,14 +319,19 @@ impl CompactionTask for CompactionTaskImpl {
                     let senders = std::mem::take(&mut self.waiters);
                     BackgroundNotify::CompactionCancelled(CompactionCancelled {
                         region_id: self.compaction_region.region_id,
+                        execution: self.execution.clone(),
                         senders,
                     })
                 } else {
+                    self.listener
+                        .on_compaction_commit_begin(self.compaction_region.region_id)
+                        .await;
                     match self.update_manifest(merge_output).await {
                         Ok((edit, _manifest_version)) => {
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,
+                                execution: self.execution.clone(),
                                 senders,
                                 start_time: self.start_time,
                                 edit,
@@ -350,6 +343,7 @@ impl CompactionTask for CompactionTaskImpl {
                             self.on_failure(err.clone());
                             BackgroundNotify::CompactionFailed(CompactionFailed {
                                 region_id: self.compaction_region.region_id,
+                                execution: self.execution.clone(),
                                 err,
                             })
                         }
@@ -364,6 +358,7 @@ impl CompactionTask for CompactionTaskImpl {
                 let senders = std::mem::take(&mut self.waiters);
                 BackgroundNotify::CompactionCancelled(CompactionCancelled {
                     region_id: self.compaction_region.region_id,
+                    execution: self.execution.clone(),
                     senders,
                 })
             }
@@ -374,6 +369,7 @@ impl CompactionTask for CompactionTaskImpl {
                 self.on_failure(err.clone());
                 BackgroundNotify::CompactionFailed(CompactionFailed {
                     region_id: self.compaction_region.region_id,
+                    execution: self.execution.clone(),
                     err,
                 })
             }

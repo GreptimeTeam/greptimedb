@@ -34,6 +34,8 @@
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
 | `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
+| `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
+| `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
@@ -229,7 +231,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_view`, `drop_view`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -258,6 +260,8 @@
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
 | `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
+| `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
+| `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:4001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
@@ -336,6 +340,8 @@
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
+| `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
+| `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -420,6 +426,8 @@
 | `datanode.client.timeout` | String | `10s` | Operation timeout. |
 | `datanode.client.connect_timeout` | String | `10s` | Connect server timeout. |
 | `datanode.client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
+| `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
+| `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
@@ -436,7 +444,7 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_view`, `drop_view`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |

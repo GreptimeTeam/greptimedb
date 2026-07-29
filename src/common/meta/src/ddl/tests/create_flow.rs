@@ -40,7 +40,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
-fn test_query_context() -> QueryContext {
+pub(crate) fn test_query_context() -> QueryContext {
     QueryContext {
         current_catalog: DEFAULT_CATALOG_NAME.to_string(),
         current_schema: DEFAULT_SCHEMA_NAME.to_string(),

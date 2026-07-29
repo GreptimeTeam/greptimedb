@@ -15,3 +15,5 @@
 //! Events emitted by DDL procedures.
 
 pub(crate) mod database;
+pub(crate) mod flow;
+pub(crate) mod view;

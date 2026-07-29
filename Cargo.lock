@@ -2654,6 +2654,7 @@ dependencies = [
 name = "common-options"
 version = "1.2.0"
 dependencies = [
+ "common-base",
  "common-grpc",
  "humantime-serde",
  "serde",

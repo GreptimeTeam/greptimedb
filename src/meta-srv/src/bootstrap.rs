@@ -32,7 +32,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
 use servers::configurator::GrpcRouterConfiguratorRef;
-use servers::http::{HttpServer, HttpServerBuilder};
+use servers::http::{ExtraHttpRouterProviders, HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -106,8 +106,13 @@ impl MetasrvInstance {
 
     pub async fn start(&mut self) -> Result<()> {
         if let Some(builder) = self.http_server.as_mut().left()
-            && let Some(builder) = builder.take()
+            && let Some(mut builder) = builder.take()
         {
+            if let Some(providers) = self.plugins.get::<ExtraHttpRouterProviders>() {
+                for provider in providers.iter() {
+                    builder = builder.with_extra_router(provider.router());
+                }
+            }
             let mut server = builder.build();
 
             let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
@@ -458,7 +463,12 @@ pub(crate) fn build_default_meta_peer_client(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use servers::http::{ExtraHttpRouterProvider, ExtraHttpRouterProviderRef};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
@@ -495,5 +505,53 @@ mod tests {
         .unwrap();
 
         assert!(called.load(Ordering::Relaxed));
+    }
+
+    struct TestExtraHttpRouterProvider;
+
+    impl ExtraHttpRouterProvider for TestExtraHttpRouterProvider {
+        fn router(&self) -> axum::Router {
+            axum::Router::new().route(
+                "/test-extra-http-router",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metasrv_add_extra_http_router() -> Result<()> {
+        let mut opts = MetasrvOptions::default();
+        opts.grpc.bind_addr = "127.0.0.1:0".to_string();
+        opts.http.addr = "127.0.0.1:0".to_string();
+        opts.enable_telemetry = false;
+
+        let plugins = Plugins::new();
+        let mut providers = ExtraHttpRouterProviders::new();
+        providers.add(Arc::new(TestExtraHttpRouterProvider) as ExtraHttpRouterProviderRef);
+        plugins.insert(providers);
+
+        let metasrv = MetasrvBuilder::new()
+            .options(opts)
+            .plugins(plugins)
+            .build()
+            .await?;
+        let mut instance = MetasrvInstance::new(metasrv).await?;
+        instance.start().await?;
+
+        let response = instance
+            .http_server()
+            .unwrap()
+            .make_app()
+            .oneshot(
+                Request::get("/test-extra-http-router")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(StatusCode::NO_CONTENT, response.status());
+        instance.shutdown().await?;
+        Ok(())
     }
 }

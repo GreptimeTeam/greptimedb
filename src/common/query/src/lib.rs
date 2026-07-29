@@ -18,6 +18,7 @@ pub mod logical_plan;
 pub mod native_histogram;
 pub mod prelude;
 pub mod prometheus;
+pub mod promql_annotations;
 pub mod request;
 pub mod stream;
 #[cfg(any(test, feature = "testing"))]

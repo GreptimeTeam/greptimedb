@@ -71,6 +71,18 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the compaction is scheduled.
     fn on_compaction_scheduled(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener immediately before compaction planning invokes the picker.
+    async fn on_compaction_pick_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after local compaction becomes non-cancellable and before commit.
+    async fn on_compaction_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction results are sent and before pending DDL dispatch.
+    async fn on_compaction_result_notified(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction cancellation is requested and its DDL is queued.
+    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 

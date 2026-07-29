@@ -112,6 +112,18 @@ pub const CATALOG_NAME_COLUMN: EventTableColumn =
 /// The canonical schema name dimension.
 pub const SCHEMA_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("schema_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical Flow name dimension.
+pub const FLOW_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("flow_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical Flow identifier dimension.
+pub const FLOW_ID_COLUMN: EventTableColumn =
+    EventTableColumn::new("flow_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical View name dimension.
+pub const VIEW_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("view_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical View identifier dimension.
+pub const VIEW_ID_COLUMN: EventTableColumn =
+    EventTableColumn::new("view_id", ColumnDataType::Uint32, SemanticType::Field);
 
 /// Builds API schemas from canonical event-table columns while preserving their order.
 pub fn column_schemas<'a>(
@@ -211,6 +223,40 @@ mod tests {
             ["catalog_name", "schema_name"].map(|column_name| ColumnSchema {
                 column_name: column_name.to_string(),
                 datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn flow_dimension_schema_preserves_names_types_semantics_and_order() {
+        assert_eq!(
+            column_schemas([&FLOW_NAME_COLUMN, &FLOW_ID_COLUMN]),
+            [
+                ("flow_name", ColumnDataType::String),
+                ("flow_id", ColumnDataType::Uint32),
+            ]
+            .map(|(column_name, datatype)| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: datatype.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn view_dimension_schema_preserves_names_types_semantics_and_order() {
+        assert_eq!(
+            column_schemas([&VIEW_NAME_COLUMN, &VIEW_ID_COLUMN]),
+            [
+                ("view_name", ColumnDataType::String),
+                ("view_id", ColumnDataType::Uint32),
+            ]
+            .map(|(column_name, datatype)| ColumnSchema {
+                column_name: column_name.to_string(),
+                datatype: datatype.into(),
                 semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             })
