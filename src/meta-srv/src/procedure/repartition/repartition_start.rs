@@ -104,6 +104,48 @@ impl RepartitionStart {
     pub fn new(from: RepartitionFrom, to_exprs: Vec<PartitionExpr>) -> Self {
         Self { from, to_exprs }
     }
+
+    pub(crate) fn submitted_intent(&self) -> RepartitionSubmittedIntent<'_> {
+        RepartitionSubmittedIntent {
+            from: &self.from,
+            target_partition_exprs: &self.to_exprs,
+        }
+    }
+}
+
+pub(crate) struct RepartitionSubmittedIntent<'a> {
+    from: &'a RepartitionFrom,
+    target_partition_exprs: &'a [PartitionExpr],
+}
+
+impl RepartitionSubmittedIntent<'_> {
+    pub(crate) fn source_type(&self) -> &'static str {
+        match self.from {
+            RepartitionFrom::Partitioned { .. } => "partitioned",
+            RepartitionFrom::Unpartitioned { .. } => "unpartitioned",
+        }
+    }
+
+    pub(crate) fn source_partition_exprs(&self) -> &[PartitionExpr] {
+        match self.from {
+            RepartitionFrom::Partitioned { exprs, .. } => exprs,
+            RepartitionFrom::Unpartitioned { .. } => &[],
+        }
+    }
+
+    pub(crate) fn target_partition_exprs(&self) -> &[PartitionExpr] {
+        self.target_partition_exprs
+    }
+
+    pub(crate) fn target_partition_columns(&self) -> Option<&[String]> {
+        match self.from {
+            RepartitionFrom::Partitioned {
+                target_partition_columns,
+                ..
+            } => target_partition_columns.as_deref(),
+            RepartitionFrom::Unpartitioned { partition_columns } => Some(partition_columns),
+        }
+    }
 }
 
 #[async_trait::async_trait]

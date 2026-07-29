@@ -759,7 +759,7 @@ impl LocalManager {
             DuplicateProcedureSnafu { procedure_id },
         );
 
-        runner.record_event(origin.event_trigger());
+        let initial_event = runner.build_event(origin.event_trigger());
 
         let tracing_context = TracingContext::from_current_span();
 
@@ -782,6 +782,12 @@ impl LocalManager {
                 ManagerNotStartSnafu
             }
         );
+
+        if let Some(event) = initial_event
+            && let Some(recorder) = event_recorder.recorder.as_ref()
+        {
+            recorder.record(Box::new(event));
+        }
 
         Ok(watcher)
     }
@@ -1040,13 +1046,16 @@ mod tests {
     use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::sync::oneshot;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     use super::*;
     use crate::error::{self, Error};
     use crate::store::state_store::ObjectStateStore;
     use crate::test_util::InMemoryPoisonStore;
-    use crate::{Context, EventContext, EventTrigger, Procedure, ProcedureEvent, Status};
+    use crate::{
+        ChildSubmissionOutcome, Context, EventContext, EventTrigger, Procedure, ProcedureEvent,
+        Status,
+    };
 
     fn new_test_manager_context() -> ManagerContext {
         let poison_manager = Arc::new(InMemoryPoisonStore::default());
@@ -1082,6 +1091,18 @@ mod tests {
                 })
                 .collect()
         }
+
+        fn procedure_events(&self) -> Vec<(ProcedureId, EventTrigger)> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| {
+                    let event = event.as_any().downcast_ref::<ProcedureEvent>().unwrap();
+                    (event.procedure_id, event.trigger.clone())
+                })
+                .collect()
+        }
     }
 
     impl EventRecorder for CapturingEventRecorder {
@@ -1100,6 +1121,16 @@ mod tests {
         fn default() -> Self {
             Self::with_event_type_filter(Arc::new(EventTypeFilter::All))
         }
+    }
+
+    async fn wait_for_trigger(event_recorder: &CapturingEventRecorder, trigger: EventTrigger) {
+        timeout(Duration::from_secs(1), async {
+            while !event_recorder.triggers().contains(&trigger) {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[derive(Debug)]
@@ -1288,6 +1319,89 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ParentWithChildProcedure {
+        child_id: ProcedureId,
+        child_submitted: bool,
+    }
+
+    #[async_trait]
+    impl Procedure for ParentWithChildProcedure {
+        fn type_name(&self) -> &str {
+            "ParentWithChildProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            if self.child_submitted {
+                return Ok(Status::done());
+            }
+
+            self.child_submitted = true;
+            Ok(Status::suspended(
+                vec![ProcedureWithId {
+                    id: self.child_id,
+                    procedure: Box::new(ProcedureToLoad::new("child")),
+                }],
+                false,
+            ))
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            Some(Box::new(TestProcedureEvent))
+        }
+    }
+
+    struct ParentWithBlockedChildProcedure {
+        child_id: ProcedureId,
+        ready: Option<oneshot::Sender<()>>,
+        proceed: Option<oneshot::Receiver<()>>,
+        child_submitted: bool,
+    }
+
+    #[async_trait]
+    impl Procedure for ParentWithBlockedChildProcedure {
+        fn type_name(&self) -> &str {
+            "ParentWithBlockedChildProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            if self.child_submitted {
+                return Ok(Status::done());
+            }
+
+            self.child_submitted = true;
+            self.ready.take().unwrap().send(()).unwrap();
+            self.proceed.take().unwrap().await.unwrap();
+            Ok(Status::suspended(
+                vec![ProcedureWithId {
+                    id: self.child_id,
+                    procedure: Box::new(ProcedureToLoad::new("child")),
+                }],
+                false,
+            ))
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            Some(Box::new(TestProcedureEvent))
+        }
+    }
+
     struct FilterCapturingProcedure {
         captured_filter: Arc<Mutex<Option<EventTypeFilterRef>>>,
     }
@@ -1348,7 +1462,16 @@ mod tests {
             .await
             .unwrap();
 
-        let captured_filter = captured_filter.lock().unwrap().clone().unwrap();
+        let captured_filter = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(captured_filter) = captured_filter.lock().unwrap().clone() {
+                    return captured_filter;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(Arc::ptr_eq(&event_type_filter, &captured_filter));
         assert!(captured_filter.allows("test_procedure"));
         assert!(!captured_filter.allows("other_procedure"));
@@ -1380,7 +1503,184 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(event_recorder.triggers().contains(&EventTrigger::Submitted));
+        wait_for_trigger(&event_recorder, EventTrigger::Submitted).await;
+    }
+
+    #[test]
+    fn test_submit_root_does_not_record_event_when_runner_is_not_spawned() {
+        let dir = create_temp_dir("submit_root_without_runner");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+
+        let procedure_id = ProcedureId::random();
+        let runner_tasks = manager.manager_ctx.runner_tasks.lock().unwrap();
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                manager.submit_root(
+                    procedure_id,
+                    ProcedureState::Running,
+                    0,
+                    Box::new(ProcedureToLoad::new("submit root without runner")),
+                    RootSubmissionOrigin::Fresh,
+                )
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !manager.manager_ctx.contains_procedure(procedure_id) {
+                assert!(
+                    Instant::now() < deadline,
+                    "procedure metadata was not inserted"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            manager.manager_ctx.stop();
+            drop(runner_tasks);
+
+            let err = handle.join().unwrap().unwrap_err();
+            assert_matches!(err, Error::ManagerNotStart { .. });
+        });
+
+        assert!(!manager.manager_ctx.contains_procedure(procedure_id));
+        assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
+    }
+
+    #[tokio::test]
+    async fn test_child_submission_emits_submitted_event_for_child() {
+        let dir = create_temp_dir("child_submission_event");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+
+        let parent_id = ProcedureId::random();
+        let child_id = ProcedureId::random();
+        let mut watcher = manager
+            .submit(ProcedureWithId {
+                id: parent_id,
+                procedure: Box::new(ParentWithChildProcedure {
+                    child_id,
+                    child_submitted: false,
+                }),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while !watcher.borrow().is_done() {
+                watcher.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+
+        let procedure_events = event_recorder.procedure_events();
+        assert!(procedure_events.contains(&(
+            parent_id,
+            EventTrigger::ChildSubmitted {
+                procedure_id: child_id,
+                outcome: ChildSubmissionOutcome::Accepted,
+            },
+        )));
+        assert!(procedure_events.contains(&(child_id, EventTrigger::Submitted)));
+    }
+
+    #[tokio::test]
+    async fn test_child_submission_does_not_emit_event_when_spawn_fails() {
+        let dir = create_temp_dir("child_submission_spawn_failed_event");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+
+        let parent_id = ProcedureId::random();
+        let child_id = ProcedureId::random();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (proceed_tx, proceed_rx) = oneshot::channel();
+        manager
+            .submit(ProcedureWithId {
+                id: parent_id,
+                procedure: Box::new(ParentWithBlockedChildProcedure {
+                    child_id,
+                    ready: Some(ready_tx),
+                    proceed: Some(proceed_rx),
+                    child_submitted: false,
+                }),
+            })
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(1), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let runner_tasks = manager.manager_ctx.runner_tasks.lock().unwrap();
+        proceed_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !manager.manager_ctx.contains_procedure(child_id) {
+            assert!(
+                Instant::now() < deadline,
+                "child procedure was not inserted"
+            );
+            std::thread::yield_now();
+        }
+
+        manager.manager_ctx.stop();
+        drop(runner_tasks);
+
+        timeout(Duration::from_secs(1), async {
+            while !event_recorder.procedure_events().contains(&(
+                parent_id,
+                EventTrigger::ChildSubmitted {
+                    procedure_id: child_id,
+                    outcome: ChildSubmissionOutcome::SpawnFailed,
+                },
+            )) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(!manager.manager_ctx.contains_procedure(child_id));
+        assert!(
+            !event_recorder
+                .procedure_events()
+                .contains(&(child_id, EventTrigger::Submitted))
+        );
+
+        manager.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1430,7 +1730,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        assert!(event_recorder.triggers().contains(&EventTrigger::Recovered));
+        wait_for_trigger(&event_recorder, EventTrigger::Recovered).await;
         assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
     }
 

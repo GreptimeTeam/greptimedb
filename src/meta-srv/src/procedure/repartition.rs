@@ -48,8 +48,9 @@ use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey,
+    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventContext,
+    EventTrigger, LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status,
+    StringKey,
 };
 use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
@@ -59,6 +60,7 @@ use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::event::repartition::{REPARTITION_EVENT_TYPE, RepartitionEvent};
 use crate::procedure::repartition::collect::ProcedureMeta;
 use crate::procedure::repartition::deallocate_region::DeallocateRegion;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
@@ -789,6 +791,20 @@ impl Procedure for RepartitionProcedure {
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(REPARTITION_EVENT_TYPE) {
+            return None;
+        }
+
+        let event = if matches!(ctx.trigger, EventTrigger::Submitted) {
+            let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
+            RepartitionEvent::submitted(&self.context.persistent_ctx, start)
+        } else {
+            RepartitionEvent::lifecycle()
+        };
+        Some(Box::new(event))
+    }
 }
 
 pub struct DefaultRepartitionProcedureFactory {
@@ -995,6 +1011,7 @@ mod tests {
     use common_error::ext::{BoxedError, ErrorExt};
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use common_event_recorder::EventTypeFilter;
     use common_meta::ddl::test_util::datanode_handler::{
         DatanodeWatcher, NaiveDatanodeHandler, UnexpectedErrorDatanodeHandler,
     };
@@ -1230,6 +1247,73 @@ mod tests {
 
         let procedure = test_procedure(Box::new(RepartitionEnd), test_context(&env, table_id));
         assert!(!procedure.should_rollback());
+    }
+
+    #[test]
+    fn test_event_hook_records_submitted_and_lightweight_lifecycle_events() {
+        let env = TestingEnv::new();
+        let procedure = test_procedure(
+            Box::new(RepartitionStart::new(
+                RepartitionFrom::Unpartitioned {
+                    partition_columns: vec!["x".to_string()],
+                },
+                vec![range_expr("x", 0, 100)],
+            )),
+            test_context(&env, 1024),
+        );
+        let state = ProcedureState::Running;
+        let all = Arc::new(EventTypeFilter::All);
+
+        let submitted = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: all.clone(),
+            })
+            .unwrap();
+        assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
+        assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
+
+        let allowed = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
+                    REPARTITION_EVENT_TYPE.to_string(),
+                ]))),
+            })
+            .unwrap();
+        assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
+
+        let succeeded = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Succeeded,
+                event_type_filter: all,
+            })
+            .unwrap();
+        assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
+
+        let filtered = procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
+                "another_event".to_string()
+            ]))),
+        });
+        assert!(filtered.is_none());
+
+        let empty = procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+        });
+        assert!(empty.is_none());
     }
 
     #[test]

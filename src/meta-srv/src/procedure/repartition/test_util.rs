@@ -180,8 +180,10 @@ pub fn new_persistent_context(
 ) -> PersistentContext {
     PersistentContext {
         group_id: Uuid::new_v4(),
+        parent_procedure_id: Some(ProcedureId::random()),
         catalog_name: "test_catalog".to_string(),
         schema_name: "test_schema".to_string(),
+        table_name: Some("test_table".to_string()),
         table_id,
         sources,
         targets,
