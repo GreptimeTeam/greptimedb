@@ -27,7 +27,11 @@ use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
-fn new_drop_view_task(view: &str, view_id: TableId, drop_if_exists: bool) -> DropViewTask {
+pub(crate) fn new_drop_view_task(
+    view: &str,
+    view_id: TableId,
+    drop_if_exists: bool,
+) -> DropViewTask {
     DropViewTask {
         catalog: "greptime".to_string(),
         schema: "public".to_string(),
