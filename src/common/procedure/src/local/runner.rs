@@ -28,6 +28,7 @@ use snafu::ResultExt;
 use tokio::time;
 
 use crate::error::{self, ProcedurePanicSnafu, Result, RollbackTimesExceededSnafu};
+use crate::event::ProcedureEvent;
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::rwlock::OwnedKeyRwLockGuard;
@@ -486,19 +487,19 @@ impl Runner {
         procedure_id: ProcedureId,
         procedure_state: ProcedureState,
         procedure: BoxedProcedure,
-    ) -> ChildSubmissionOutcome {
+    ) -> (ChildSubmissionOutcome, Option<ProcedureEvent>) {
         if !self.running() {
             warn!(
                 "ProcedureManager is not running, skip submitting subprocedure {}-{}",
                 procedure.type_name(),
                 procedure_id
             );
-            return ChildSubmissionOutcome::ManagerStopped;
+            return (ChildSubmissionOutcome::ManagerStopped, None);
         }
 
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
-            return ChildSubmissionOutcome::AlreadyAccepted;
+            return (ChildSubmissionOutcome::AlreadyAccepted, None);
         }
 
         let step = 0;
@@ -536,8 +537,7 @@ impl Runner {
             procedure_id,
         );
 
-        runner.record_event(EventTrigger::Submitted);
-
+        let submitted_event = runner.build_event(EventTrigger::Submitted);
         let parent_id = self.meta.id;
 
         let tracing_context = TracingContext::from_current_span();
@@ -556,12 +556,12 @@ impl Runner {
             })
         }) {
             self.manager_ctx.remove_procedure(procedure_id);
-            return ChildSubmissionOutcome::SpawnFailed;
+            return (ChildSubmissionOutcome::SpawnFailed, None);
         }
 
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
-        ChildSubmissionOutcome::Accepted
+        (ChildSubmissionOutcome::Accepted, submitted_event)
     }
 
     /// Extend the retry time to wait for the next retry.
@@ -623,11 +623,16 @@ impl Runner {
             );
 
             let child_id = subprocedure.id;
-            let outcome = self.submit_subprocedure(
+            let (outcome, submitted_event) = self.submit_subprocedure(
                 subprocedure.id,
                 ProcedureState::Running,
                 subprocedure.procedure,
             );
+            if let Some(event) = submitted_event
+                && let Some(recorder) = self.event_recorder.as_ref()
+            {
+                recorder.record(Box::new(event));
+            }
             self.record_event(EventTrigger::ChildSubmitted {
                 procedure_id: child_id,
                 outcome,
@@ -767,12 +772,9 @@ impl Runner {
         }
     }
 
-    /// Builds and dispatches an event from the live procedure. Delivery is best effort and is
-    /// intentionally not part of procedure execution or persistence.
-    pub(crate) fn record_event(&self, trigger: EventTrigger) {
-        let Some(recorder) = self.event_recorder.as_ref() else {
-            return;
-        };
+    /// Builds an event from the live procedure.
+    pub(crate) fn build_event(&self, trigger: EventTrigger) -> Option<ProcedureEvent> {
+        let recorder = self.event_recorder.as_ref()?;
         let state = self.meta.state();
         let context = EventContext {
             procedure_id: self.meta.id,
@@ -780,13 +782,18 @@ impl Runner {
             trigger: trigger.clone(),
             event_type_filter: recorder.event_type_filter(),
         };
-        if let Some(event) = self.procedure.event(&context) {
-            recorder.record(Box::new(crate::event::ProcedureEvent::new(
-                self.meta.id,
-                event,
-                state,
-                trigger,
-            )));
+        self.procedure
+            .event(&context)
+            .map(|event| ProcedureEvent::new(self.meta.id, event, state, trigger))
+    }
+
+    /// Builds and dispatches an event from the live procedure. Delivery is best effort and is
+    /// intentionally not part of procedure execution or persistence.
+    pub(crate) fn record_event(&self, trigger: EventTrigger) {
+        if let Some(event) = self.build_event(trigger)
+            && let Some(recorder) = self.event_recorder.as_ref()
+        {
+            recorder.record(Box::new(event));
         }
     }
 }
