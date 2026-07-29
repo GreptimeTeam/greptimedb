@@ -160,6 +160,19 @@ impl Instance {
         &self.plugins
     }
 
+    fn check_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+    ) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), req)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
     pub fn statement_executor(&self) -> &StatementExecutorRef {
         &self.statement_executor
     }
@@ -1521,9 +1534,9 @@ pub fn check_permission(
         }
         // cursor operations are always allowed once it's created
         Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
-        // KILL is scoped to the current catalog by the executor.
+        // User can only kill process in their own catalog.
         Statement::Kill(_) => {}
-        // Process-control authorization is checked before statement validation.
+        // SHOW PROCESSLIST
         Statement::ShowProcesslist(_) => {}
     }
     Ok(())

@@ -34,19 +34,6 @@ use table::Table;
 use crate::instance::Instance;
 
 impl Instance {
-    fn check_pipeline_permission(
-        &self,
-        ctx: &QueryContextRef,
-        req: PermissionReq<'_>,
-    ) -> ServerResult<()> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), req)
-            .context(AuthSnafu)?;
-        Ok(())
-    }
-
     async fn prepare_log_insert(
         &self,
         log: RowInsertRequests,
@@ -98,7 +85,7 @@ impl PipelineHandler for Instance {
     }
 
     fn check_pipeline_query_permission(&self, query_ctx: &QueryContextRef) -> ServerResult<()> {
-        self.check_pipeline_permission(query_ctx, PermissionReq::PipelineQuery)
+        self.check_permission(query_ctx, PermissionReq::PipelineQuery)
     }
 
     async fn get_pipeline(
@@ -120,7 +107,7 @@ impl PipelineHandler for Instance {
         pipeline: &str,
         query_ctx: QueryContextRef,
     ) -> ServerResult<PipelineInfo> {
-        self.check_pipeline_permission(&query_ctx, PermissionReq::PipelineManage)?;
+        self.check_permission(&query_ctx, PermissionReq::PipelineManage)?;
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await
@@ -133,7 +120,7 @@ impl PipelineHandler for Instance {
         version: PipelineVersion,
         ctx: QueryContextRef,
     ) -> ServerResult<Option<()>> {
-        self.check_pipeline_permission(&ctx, PermissionReq::PipelineManage)?;
+        self.check_permission(&ctx, PermissionReq::PipelineManage)?;
         self.pipeline_operator
             .delete_pipeline(name, version, ctx)
             .await
@@ -162,7 +149,7 @@ impl PipelineHandler for Instance {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> ServerResult<(String, TimestampNanosecond)> {
-        self.check_pipeline_permission(&query_ctx, PermissionReq::PipelineQuery)?;
+        self.check_permission(&query_ctx, PermissionReq::PipelineQuery)?;
         self.pipeline_operator
             .get_pipeline_str(name, version, query_ctx)
             .await
