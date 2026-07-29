@@ -124,6 +124,21 @@ pub const VIEW_NAME_COLUMN: EventTableColumn =
 /// The canonical View identifier dimension.
 pub const VIEW_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("view_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical Kafka topic name dimension.
+pub const TOPIC_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("topic_name", ColumnDataType::String, SemanticType::Field);
+/// The canonical previous WAL prune boundary.
+pub const PREVIOUS_PRUNED_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "previous_pruned_entry_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical completed WAL prune boundary.
+pub const PRUNED_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "pruned_entry_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -432,6 +447,22 @@ mod tests {
                 ("target_region_id", ColumnDataType::Uint64),
                 ("target_region_number", ColumnDataType::Uint32),
                 ("target_partition_expr", ColumnDataType::String),
+            ],
+        );
+    }
+
+    #[test]
+    fn wal_prune_schema_preserves_names_types_semantics_and_order() {
+        assert_field_columns(
+            [
+                &TOPIC_NAME_COLUMN,
+                &PREVIOUS_PRUNED_ENTRY_ID_COLUMN,
+                &PRUNED_ENTRY_ID_COLUMN,
+            ],
+            [
+                ("topic_name", ColumnDataType::String),
+                ("previous_pruned_entry_id", ColumnDataType::Uint64),
+                ("pruned_entry_id", ColumnDataType::Uint64),
             ],
         );
     }

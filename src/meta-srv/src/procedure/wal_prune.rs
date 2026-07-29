@@ -25,8 +25,8 @@ use common_meta::lock_key::RemoteWalLock;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, ProcedureState, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{info, warn};
 use manager::{WalPruneProcedureGuard, WalPruneProcedureTracker};
@@ -37,6 +37,7 @@ use store_api::logstore::EntryId;
 
 use crate::Result;
 use crate::error::{self};
+use crate::event::wal_prune::{WAL_PRUNE_EVENT_TYPE, WalPruneEvent};
 use crate::procedure::wal_prune::utils::{
     delete_records, get_offsets_for_topic, get_partition_client, update_pruned_entry_id,
 };
@@ -63,6 +64,12 @@ pub struct WalPruneData {
     /// Whether pruning only updates metadata and skips Kafka DeleteRecords.
     #[serde(default)]
     pub logical_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalPruneOutcome {
+    previous_pruned_entry_id: Option<EntryId>,
+    pruned_entry_id: EntryId,
 }
 
 /// The procedure to prune WAL.
@@ -140,7 +147,7 @@ impl WalPruneProcedure {
         }
 
         // Update the pruned entry id for the topic.
-        update_pruned_entry_id(
+        let previous_pruned_entry_id = update_pruned_entry_id(
             &self.context.table_metadata_manager,
             &self.data.topic,
             self.data.prunable_entry_id,
@@ -158,7 +165,10 @@ impl WalPruneProcedure {
             "Successfully pruned WAL for topic: {}, prunable entry id: {}, latest offset: {}",
             self.data.topic, self.data.prunable_entry_id, latest_offset
         );
-        Ok(Status::done())
+        Ok(Status::done_with_output(WalPruneOutcome {
+            previous_pruned_entry_id,
+            pruned_entry_id: self.data.prunable_entry_id,
+        }))
     }
 }
 
@@ -199,12 +209,38 @@ impl Procedure for WalPruneProcedure {
         let lock_key: StringKey = RemoteWalLock::Write(self.data.topic.clone()).into();
         LockKey::new(vec![lock_key])
     }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(WAL_PRUNE_EVENT_TYPE)
+            || !matches!(&ctx.trigger, EventTrigger::Succeeded)
+        {
+            return None;
+        }
+
+        let ProcedureState::Done {
+            output: Some(output),
+        } = ctx.lifecycle_state
+        else {
+            return None;
+        };
+        let outcome = output.downcast_ref::<WalPruneOutcome>()?;
+
+        Some(Box::new(WalPruneEvent::new(
+            &self.data.topic,
+            outcome.previous_pruned_entry_id,
+            outcome.pruned_entry_id,
+            self.data.logical_delete,
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::collections::HashSet;
 
+    use common_event_recorder::EventTypeFilter;
+    use common_procedure::{Output, ProcedureId};
     use common_wal::maybe_skip_kafka_integration_test;
     use common_wal::test_util::get_kafka_endpoints;
     use rskafka::client::partition::{FetchResult, UnknownTopicHandling};
@@ -347,7 +383,13 @@ mod tests {
             false,
         );
         let status = procedure.on_prune().await.unwrap();
-        assert_matches!(status, Status::Done { output: None });
+        assert_eq!(
+            status.downcast_output_ref::<WalPruneOutcome>(),
+            Some(&WalPruneOutcome {
+                previous_pruned_entry_id: Some(0),
+                pruned_entry_id: prunable_entry_id,
+            })
+        );
         // Check if the entry ids after(include) `prunable_entry_id` still exist.
         check_entry_id_existence(
             procedure.context.client.clone(),
@@ -401,7 +443,13 @@ mod tests {
             true,
         );
         let status = procedure.on_prune().await.unwrap();
-        assert_matches!(status, Status::Done { output: None });
+        assert_eq!(
+            status.downcast_output_ref::<WalPruneOutcome>(),
+            Some(&WalPruneOutcome {
+                previous_pruned_entry_id: Some(0),
+                pruned_entry_id: prunable_entry_id,
+            })
+        );
         // Logical delete should keep the entry ids before `prunable_entry_id`.
         check_entry_id_existence(
             procedure.context.client.clone(),
@@ -421,5 +469,110 @@ mod tests {
         assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
         // Clean up the topic.
         delete_topic(procedure.context.client, &topic_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_noop_has_no_output() {
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let topic_name = format!("test_procedure_noop_has_no_output-{}", uuid::Uuid::new_v4());
+        let env = TestEnv::new();
+        let context = env.build_wal_prune_context(broker_endpoints).await;
+        TestEnv::prepare_topic(&context.client, &topic_name).await;
+        let mut procedure =
+            WalPruneProcedure::new(context.clone(), None, topic_name.clone(), 0, false);
+
+        let status = procedure.on_prune().await.unwrap();
+
+        assert_matches!(status, Status::Done { output: None });
+        delete_topic(context.client, &topic_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_wal_prune_event_trigger_selection() {
+        maybe_skip_kafka_integration_test!();
+        let context = TestEnv::new()
+            .build_wal_prune_context(get_kafka_endpoints())
+            .await;
+        let procedure = WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
+        let running = ProcedureState::Running;
+        let event_context = |trigger, lifecycle_state, event_type_filter| EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state,
+            trigger,
+            event_type_filter: Arc::new(event_type_filter),
+        };
+
+        for trigger in [
+            EventTrigger::Submitted,
+            EventTrigger::Recovered,
+            EventTrigger::Retrying {
+                phase: common_procedure::RetryPhase::Execute,
+                attempt: 1,
+            },
+            EventTrigger::Failed,
+            EventTrigger::Poisoned,
+        ] {
+            assert!(
+                procedure
+                    .event(&event_context(trigger, &running, EventTypeFilter::All))
+                    .is_none()
+            );
+        }
+
+        let done_without_output = ProcedureState::Done { output: None };
+        assert!(
+            procedure
+                .event(&event_context(
+                    EventTrigger::Succeeded,
+                    &done_without_output,
+                    EventTypeFilter::All,
+                ))
+                .is_none()
+        );
+        let done_with_wrong_output = ProcedureState::Done {
+            output: Some(Arc::new(42_u64) as Output),
+        };
+        assert!(
+            procedure
+                .event(&event_context(
+                    EventTrigger::Succeeded,
+                    &done_with_wrong_output,
+                    EventTypeFilter::All,
+                ))
+                .is_none()
+        );
+
+        let done = ProcedureState::Done {
+            output: Some(Arc::new(WalPruneOutcome {
+                previous_pruned_entry_id: Some(10),
+                pruned_entry_id: 42,
+            }) as Output),
+        };
+        let event = procedure
+            .event(&event_context(
+                EventTrigger::Succeeded,
+                &done,
+                EventTypeFilter::All,
+            ))
+            .unwrap();
+        assert_eq!(event.event_type(), WAL_PRUNE_EVENT_TYPE);
+        assert_eq!(
+            event.json_payload().unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "logical_delete": false,
+            })
+        );
+
+        assert!(
+            procedure
+                .event(&event_context(
+                    EventTrigger::Succeeded,
+                    &done,
+                    EventTypeFilter::Only(HashSet::new()),
+                ))
+                .is_none()
+        );
     }
 }

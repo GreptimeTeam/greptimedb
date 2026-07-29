@@ -35,6 +35,7 @@ mod repartition_event;
 mod repartition_expr_version;
 mod mysql;
 mod view_ddl_event;
+mod wal_prune_event;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 

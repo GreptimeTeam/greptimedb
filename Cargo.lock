@@ -14772,6 +14772,7 @@ dependencies = [
  "prost 0.14.1",
  "query",
  "rand 0.9.4",
+ "rskafka",
  "rstest",
  "rstest_reuse",
  "sea-query",

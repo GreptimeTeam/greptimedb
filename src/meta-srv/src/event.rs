@@ -22,6 +22,7 @@ use snafu::ResultExt;
 
 pub mod region_migration;
 pub mod repartition;
+pub(crate) mod wal_prune;
 
 /// EventHandlerImpl is the default event handler implementation in metasrv.
 /// It sends the received events to the frontend instances.
