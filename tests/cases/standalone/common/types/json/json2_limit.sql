@@ -1,3 +1,25 @@
+create table json2_disable_non_object_insert (
+    ts timestamp time index,
+    j json2
+)
+with (
+    'append_mode' = 'true'
+);
+
+insert into json2_disable_non_object_insert values (1, '[1, 2, 3]');
+
+insert into json2_disable_non_object_insert values (2, '"hello"');
+
+insert into json2_disable_non_object_insert values (3, '42');
+
+insert into json2_disable_non_object_insert values (4, 'true');
+
+insert into json2_disable_non_object_insert values (5, 'null');
+
+insert into json2_disable_non_object_insert values (6, '{}');
+
+drop table json2_disable_non_object_insert;
+
 create table json2_disable_whole_column_read (
     ts timestamp time index,
     j json2
@@ -55,3 +77,34 @@ from (
 );
 
 drop table json2_disable_whole_column_read;
+
+create table json2_without_append_mode (
+    ts timestamp time index,
+    j json2
+);
+
+create table json2_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'false'
+);
+
+create table json2_alter_non_append (
+    ts timestamp time index
+);
+
+alter table json2_alter_non_append add column j json2;
+
+drop table json2_alter_non_append;
+
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+drop table json2_set_append_mode_false;
