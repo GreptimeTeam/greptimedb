@@ -45,6 +45,7 @@ pub struct SlowQueryEvent {
     pub promql_step: Option<u64>,
     pub promql_start: Option<i64>,
     pub promql_end: Option<i64>,
+    pub payload: serde_json::Value,
 }
 
 impl Event for SlowQueryEvent {
@@ -54,6 +55,10 @@ impl Event for SlowQueryEvent {
 
     fn event_type(&self) -> &str {
         SLOW_QUERY_EVENT_TYPE
+    }
+
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        Ok(self.payload.clone())
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
@@ -155,6 +160,7 @@ mod tests {
             promql_step: None,
             promql_start: None,
             promql_end: None,
+            payload: serde_json::Value::Null,
         };
 
         let schema = event.extra_schema();
@@ -177,6 +183,7 @@ mod tests {
             ]
         );
         assert_eq!(schema[8].semantic_type, SemanticType::Field as i32);
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
 
         let rows = event.extra_rows().unwrap();
         assert_eq!(rows.len(), 1);
@@ -184,5 +191,27 @@ mod tests {
             rows[0].values[8].value_data,
             Some(ValueData::StringValue("public".to_string()))
         );
+    }
+
+    #[test]
+    fn slow_query_event_includes_timeout_payload() {
+        let payload = serde_json::json!({
+            "timed_out": true,
+            "metrics": [{"stage": 0}],
+        });
+        let event = SlowQueryEvent {
+            cost: 100,
+            threshold: 10,
+            query: "EXPLAIN ANALYZE VERBOSE SELECT 1".to_string(),
+            schema_name: "public".to_string(),
+            is_promql: false,
+            promql_range: None,
+            promql_step: None,
+            promql_start: None,
+            promql_end: None,
+            payload: payload.clone(),
+        };
+
+        assert_eq!(event.json_payload().unwrap(), payload);
     }
 }
