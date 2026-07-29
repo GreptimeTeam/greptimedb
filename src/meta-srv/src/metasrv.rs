@@ -611,7 +611,10 @@ impl Metasrv {
 
     pub async fn try_start(&self) -> Result<()> {
         self.ensure_repartition_gc_enabled().await?;
+        self.try_start_after_gc_check().await
+    }
 
+    pub(crate) async fn try_start_after_gc_check(&self) -> Result<()> {
         if self
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

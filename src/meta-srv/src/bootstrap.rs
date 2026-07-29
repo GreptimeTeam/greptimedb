@@ -131,7 +131,7 @@ impl MetasrvInstance {
             return Ok(());
         };
 
-        self.metasrv.try_start().await?;
+        self.metasrv.try_start_after_gc_check().await?;
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
