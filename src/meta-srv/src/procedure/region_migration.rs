@@ -59,6 +59,7 @@ pub use manager::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::ManifestVersion;
 use store_api::storage::{RegionId, TableId};
 use tokio::time::Instant;
 
@@ -321,6 +322,10 @@ pub struct VolatileContext {
     leader_region_last_entry_ids: HashMap<RegionId, u64>,
     /// The last_entry_ids of leader metadata regions (Only used for metric engine).
     leader_region_metadata_last_entry_ids: HashMap<RegionId, u64>,
+    /// The final manifest versions of leader regions.
+    leader_region_manifest_versions: HashMap<RegionId, ManifestVersion>,
+    /// The final manifest versions of leader metadata regions (Only used for metric engine).
+    leader_region_metadata_manifest_versions: HashMap<RegionId, ManifestVersion>,
     /// Metrics of region migration.
     metrics: Metrics,
 }
@@ -348,6 +353,22 @@ impl VolatileContext {
     pub fn set_metadata_last_entry_id(&mut self, region_id: RegionId, last_entry_id: u64) {
         self.leader_region_metadata_last_entry_ids
             .insert(region_id, last_entry_id);
+    }
+
+    /// Sets the final manifest version of a leader region.
+    pub fn set_manifest_version(&mut self, region_id: RegionId, manifest_version: ManifestVersion) {
+        self.leader_region_manifest_versions
+            .insert(region_id, manifest_version);
+    }
+
+    /// Sets the final manifest version of a leader metadata region.
+    pub fn set_metadata_manifest_version(
+        &mut self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) {
+        self.leader_region_metadata_manifest_versions
+            .insert(region_id, manifest_version);
     }
 }
 

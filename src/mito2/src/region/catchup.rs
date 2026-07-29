@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use common_telemetry::{info, warn};
 use snafu::ensure;
+use store_api::ManifestVersion;
 use store_api::logstore::LogStore;
 
 use crate::error::{self, Result};
@@ -29,6 +30,7 @@ pub struct RegionCatchupTask<S> {
     entry_receiver: Option<WalEntryReceiver>,
     region: Arc<MitoRegion>,
     replay_checkpoint_entry_id: Option<u64>,
+    expected_manifest_version: Option<ManifestVersion>,
     expected_last_entry_id: Option<u64>,
     allow_stale_entries: bool,
     location_id: Option<u64>,
@@ -41,11 +43,21 @@ impl<S: LogStore> RegionCatchupTask<S> {
             entry_receiver: None,
             region,
             replay_checkpoint_entry_id: None,
+            expected_manifest_version: None,
             expected_last_entry_id: None,
             allow_stale_entries,
             location_id: None,
             wal,
         }
+    }
+
+    /// Sets the expected manifest version.
+    pub(crate) fn with_expected_manifest_version(
+        mut self,
+        expected_manifest_version: Option<ManifestVersion>,
+    ) -> Self {
+        self.expected_manifest_version = expected_manifest_version;
+        self
     }
 
     /// Sets the location id.
@@ -79,6 +91,21 @@ impl<S: LogStore> RegionCatchupTask<S> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        if let Some(expected_manifest_version) = self.expected_manifest_version {
+            let installed_manifest_version = self.region.manifest_ctx.manifest_version().await;
+            ensure!(
+                installed_manifest_version >= expected_manifest_version,
+                error::UnexpectedSnafu {
+                    reason: format!(
+                        "Failed to catchup region {}, expected manifest version {}, installed {}",
+                        self.region.region_id,
+                        expected_manifest_version,
+                        installed_manifest_version,
+                    ),
+                }
+            );
+        }
+
         if self.region.provider.is_remote_wal() {
             self.remote_wal_catchup().await
         } else {
@@ -142,6 +169,20 @@ impl<S: LogStore> RegionCatchupTask<S> {
         let version = self.region.version_control.current();
         let mut flushed_entry_id = version.last_entry_id;
         let region_id = self.region.region_id;
+        // Without a manifest target, preserve the legacy rolling-upgrade behavior.
+        if self.expected_manifest_version.is_some()
+            && let Some(expected_last_entry_id) = self.expected_last_entry_id
+        {
+            ensure!(
+                flushed_entry_id >= expected_last_entry_id,
+                error::UnexpectedSnafu {
+                    reason: format!(
+                        "Failed to catchup region {}, expected manifest entry id {}, installed {}",
+                        region_id, expected_last_entry_id, flushed_entry_id,
+                    ),
+                }
+            );
+        }
         let latest_entry_id = self
             .wal
             .store()

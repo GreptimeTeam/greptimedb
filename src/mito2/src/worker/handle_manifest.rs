@@ -23,6 +23,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
 use snafu::ResultExt;
+use store_api::ManifestVersion;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -39,7 +40,7 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
     RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
@@ -205,6 +206,60 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
     }
 
+    /// Installs a manifest version and rebuilds the in-memory region version.
+    ///
+    /// The installed version may be greater than `manifest_version`.
+    pub(crate) async fn install_region_manifest(
+        &mut self,
+        region: &Arc<MitoRegion>,
+        manifest_version: ManifestVersion,
+    ) -> Result<ManifestVersion> {
+        let manifest = region
+            .manifest_ctx
+            .install_manifest_to(manifest_version)
+            .await?;
+        let version = region.version();
+        let mut region_options = version.options.clone();
+        let old_format = region_options.sst_format.unwrap_or_default();
+        sanitize_region_options(&manifest, &mut region_options);
+        if !version.memtables.is_empty() {
+            let current = region.version_control.current();
+            warn!(
+                "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                region.region_id, manifest.manifest_version, current.last_entry_id
+            );
+        }
+
+        let memtable_builder = if old_format != region_options.sst_format.unwrap_or_default() {
+            Some(
+                self.memtable_builder_provider
+                    .builder_for_options(&region_options),
+            )
+        } else {
+            None
+        };
+        let new_mutable = Arc::new(
+            region
+                .version()
+                .memtables
+                .mutable
+                .new_with_part_duration(version.compaction_time_window, memtable_builder),
+        );
+        let metadata = manifest.metadata.clone();
+        let version_builder = version_builder_from_manifest(
+            &manifest,
+            metadata,
+            region.file_purger.clone(),
+            new_mutable,
+            region_options,
+        );
+        region
+            .version_control
+            .overwrite_current(Arc::new(version_builder.build()));
+
+        Ok(manifest.manifest_version)
+    }
+
     /// Handles region sync request.
     ///
     /// Updates the manifest to at least the given version.
@@ -221,62 +276,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let original_manifest_version = region.manifest_ctx.manifest_version().await;
-        let manifest = match region
-            .manifest_ctx
-            .install_manifest_to(request.manifest_version)
+        let installed_manifest_version = match self
+            .install_region_manifest(&region, request.manifest_version)
             .await
         {
-            Ok(manifest) => manifest,
+            Ok(manifest_version) => manifest_version,
             Err(e) => {
                 let _ = sender.send(Err(e));
                 return;
             }
         };
-        let version = region.version();
-        let mut region_options = version.options.clone();
-        let old_format = region_options.sst_format.unwrap_or_default();
-        // Updates the region options with the manifest.
-        sanitize_region_options(&manifest, &mut region_options);
-        if !version.memtables.is_empty() {
-            let current = region.version_control.current();
-            warn!(
-                "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
-                region.region_id, manifest.manifest_version, current.last_entry_id
-            );
-        }
-
-        // We should sanitize the region options before creating a new memtable.
-        let memtable_builder = if old_format != region_options.sst_format.unwrap_or_default() {
-            // Format changed, also needs to replace the memtable builder.
-            Some(
-                self.memtable_builder_provider
-                    .builder_for_options(&region_options),
-            )
-        } else {
-            None
-        };
-        let new_mutable = Arc::new(
-            region
-                .version()
-                .memtables
-                .mutable
-                .new_with_part_duration(version.compaction_time_window, memtable_builder),
-        );
-        // Here it assumes the leader has backfilled the partition_expr of the metadata.
-        let metadata = manifest.metadata.clone();
-
-        let version_builder = version_builder_from_manifest(
-            &manifest,
-            metadata,
-            region.file_purger.clone(),
-            new_mutable,
-            region_options,
-        );
-        let version = version_builder.build();
-        region.version_control.overwrite_current(Arc::new(version));
-
-        let updated = manifest.manifest_version > original_manifest_version;
-        let _ = sender.send(Ok((manifest.manifest_version, updated)));
+        let updated = installed_manifest_version > original_manifest_version;
+        let _ = sender.send(Ok((installed_manifest_version, updated)));
     }
 }
 

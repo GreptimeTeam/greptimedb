@@ -153,11 +153,23 @@ impl UpgradeCandidateRegion {
                 .leader_region_metadata_last_entry_ids
                 .get(&region_id)
                 .copied();
+            let manifest_version = ctx
+                .volatile_ctx
+                .leader_region_manifest_versions
+                .get(&region_id)
+                .copied();
+            let metadata_manifest_version = ctx
+                .volatile_ctx
+                .leader_region_metadata_manifest_versions
+                .get(&region_id)
+                .copied();
             let checkpoint = replay_checkpoints.get(&region_id).copied();
             upgrade_regions.push(UpgradeRegion {
                 region_id,
                 last_entry_id,
                 metadata_last_entry_id,
+                manifest_version,
+                metadata_manifest_version,
                 replay_timeout,
                 location_id: Some(ctx.persistent_ctx.from_peer.id),
                 replay_entry_id: checkpoint.map(|c| c.entry_id),
@@ -424,6 +436,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let region_id = ctx.persistent_ctx.region_ids[0];
         let topic = "test_topic";
+        ctx.volatile_ctx.set_manifest_version(region_id, 30);
         prepare_table_metadata(&ctx, kafka_wal_options(topic)).await;
         ctx.table_metadata_manager
             .topic_region_manager()
@@ -459,6 +472,8 @@ mod tests {
         };
 
         assert_eq!(upgrade_regions.len(), 1);
+        assert_eq!(upgrade_regions[0].manifest_version, Some(30));
+        assert_eq!(upgrade_regions[0].metadata_manifest_version, None);
         assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
         assert_eq!(upgrade_regions[0].metadata_replay_entry_id, None);
     }
@@ -471,6 +486,9 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let region_id = ctx.persistent_ctx.region_ids[0];
         let topic = "test_topic";
+        ctx.volatile_ctx.set_manifest_version(region_id, 30);
+        ctx.volatile_ctx
+            .set_metadata_manifest_version(region_id, 31);
         prepare_table_metadata_with_engine(&ctx, kafka_wal_options(topic), METRIC_ENGINE_NAME)
             .await;
         ctx.table_metadata_manager
@@ -510,6 +528,8 @@ mod tests {
         };
 
         assert_eq!(upgrade_regions.len(), 1);
+        assert_eq!(upgrade_regions[0].manifest_version, Some(30));
+        assert_eq!(upgrade_regions[0].metadata_manifest_version, Some(31));
         assert_eq!(upgrade_regions[0].replay_entry_id, Some(20));
         assert_eq!(upgrade_regions[0].metadata_replay_entry_id, Some(20));
     }

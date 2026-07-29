@@ -56,8 +56,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // If the memtable is not empty or the manifest has been updated, we need to reopen the region.
-        let region = match self.reopen_region_if_needed(region).await {
+        let region = match self
+            .prepare_region_for_catchup(region, request.manifest_version)
+            .await
+        {
             Ok(region) => region,
             Err(e) => {
                 sender.send(Err(e));
@@ -72,6 +74,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
+                .with_expected_manifest_version(request.manifest_version)
                 .with_expected_last_entry_id(request.entry_id)
                 .with_location_id(request.location_id)
                 .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id));
@@ -98,6 +101,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
         });
+    }
+
+    async fn prepare_region_for_catchup(
+        &mut self,
+        region: Arc<MitoRegion>,
+        manifest_version: Option<store_api::ManifestVersion>,
+    ) -> Result<Arc<MitoRegion>> {
+        if let Some(manifest_version) = manifest_version {
+            self.install_region_manifest(&region, manifest_version)
+                .await?;
+            Ok(region)
+        } else {
+            // A missing target version indicates a rolling-upgrade migration.
+            self.reopen_region_if_needed(region).await
+        }
     }
 
     /// Reopens a region.

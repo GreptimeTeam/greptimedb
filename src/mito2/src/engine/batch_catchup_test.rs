@@ -182,6 +182,8 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
                 region_id,
                 RegionCatchupRequest {
                     set_writable: true,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     entry_id: None,
                     metadata_entry_id: None,
                     location_id: None,
@@ -229,6 +231,8 @@ async fn test_batch_catchup_err_with_format(factory: Option<LogStoreFactory>, fl
                 region_id,
                 RegionCatchupRequest {
                     set_writable: true,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     entry_id: None,
                     metadata_entry_id: None,
                     location_id: None,

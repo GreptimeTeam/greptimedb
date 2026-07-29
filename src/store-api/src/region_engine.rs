@@ -33,6 +33,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
+use crate::ManifestVersion;
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
@@ -86,10 +87,13 @@ pub enum SetRegionRoleStateSuccess {
     File,
     Mito {
         last_entry_id: entry::Id,
+        manifest_version: ManifestVersion,
     },
     Metric {
         last_entry_id: entry::Id,
+        manifest_version: ManifestVersion,
         metadata_last_entry_id: entry::Id,
+        metadata_manifest_version: ManifestVersion,
     },
 }
 
@@ -99,16 +103,26 @@ impl SetRegionRoleStateSuccess {
         Self::File
     }
 
-    /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
-    pub fn mito(last_entry_id: entry::Id) -> Self {
-        SetRegionRoleStateSuccess::Mito { last_entry_id }
+    /// Returns a [SetRegionRoleStateSuccess::Mito].
+    pub fn mito(last_entry_id: entry::Id, manifest_version: ManifestVersion) -> Self {
+        SetRegionRoleStateSuccess::Mito {
+            last_entry_id,
+            manifest_version,
+        }
     }
 
-    /// Returns a [SetRegionRoleStateSuccess::Metric] with the `last_entry_id` and `metadata_last_entry_id`.
-    pub fn metric(last_entry_id: entry::Id, metadata_last_entry_id: entry::Id) -> Self {
+    /// Returns a [SetRegionRoleStateSuccess::Metric].
+    pub fn metric(
+        last_entry_id: entry::Id,
+        manifest_version: ManifestVersion,
+        metadata_last_entry_id: entry::Id,
+        metadata_manifest_version: ManifestVersion,
+    ) -> Self {
         SetRegionRoleStateSuccess::Metric {
             last_entry_id,
+            manifest_version,
             metadata_last_entry_id,
+            metadata_manifest_version,
         }
     }
 }
@@ -118,8 +132,21 @@ impl SetRegionRoleStateSuccess {
     pub fn last_entry_id(&self) -> Option<entry::Id> {
         match self {
             SetRegionRoleStateSuccess::File => None,
-            SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
+            SetRegionRoleStateSuccess::Mito { last_entry_id, .. } => Some(*last_entry_id),
             SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
+        }
+    }
+
+    /// Returns the manifest version of the region.
+    pub fn manifest_version(&self) -> Option<ManifestVersion> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito {
+                manifest_version, ..
+            }
+            | SetRegionRoleStateSuccess::Metric {
+                manifest_version, ..
+            } => Some(*manifest_version),
         }
     }
 
@@ -132,6 +159,17 @@ impl SetRegionRoleStateSuccess {
                 metadata_last_entry_id,
                 ..
             } => Some(*metadata_last_entry_id),
+        }
+    }
+
+    /// Returns the manifest version of the metadata region.
+    pub fn metadata_manifest_version(&self) -> Option<ManifestVersion> {
+        match self {
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Mito { .. } => None,
+            SetRegionRoleStateSuccess::Metric {
+                metadata_manifest_version,
+                ..
+            } => Some(*metadata_manifest_version),
         }
     }
 }

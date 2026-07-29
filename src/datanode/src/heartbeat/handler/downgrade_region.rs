@@ -43,6 +43,8 @@ impl DowngradeRegionsHandler {
                 region_id,
                 last_entry_id: None,
                 metadata_last_entry_id: None,
+                manifest_version: None,
+                metadata_manifest_version: None,
                 exists: false,
                 error: None,
             };
@@ -79,6 +81,8 @@ impl DowngradeRegionsHandler {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: false,
                     error: None,
                 };
@@ -89,6 +93,8 @@ impl DowngradeRegionsHandler {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: true,
                     error: Some(InstructionError::from_error(&err)),
                 };
@@ -99,6 +105,8 @@ impl DowngradeRegionsHandler {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: true,
                     error: Some(InstructionError::from_error(&err)),
                 };
@@ -135,6 +143,8 @@ impl DowngradeRegionsHandler {
                 region_id,
                 last_entry_id: None,
                 metadata_last_entry_id: None,
+                manifest_version: None,
+                metadata_manifest_version: None,
                 exists: true,
                 error: Some(InstructionError::legacy_internal_retryable(format!(
                     "Flush region timeout, region: {region_id}, timeout: {:?}",
@@ -146,6 +156,8 @@ impl DowngradeRegionsHandler {
                 region_id,
                 last_entry_id: None,
                 metadata_last_entry_id: None,
+                manifest_version: None,
+                metadata_manifest_version: None,
                 exists: true,
                 error: Some(InstructionError::from_error(&err)),
             },
@@ -185,6 +197,8 @@ impl HandlerContext {
                 region_id,
                 last_entry_id: success.last_entry_id(),
                 metadata_last_entry_id: success.metadata_last_entry_id(),
+                manifest_version: success.manifest_version(),
+                metadata_manifest_version: success.metadata_manifest_version(),
                 exists: true,
                 error: None,
             },
@@ -194,6 +208,8 @@ impl HandlerContext {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: false,
                     error: None,
                 }
@@ -204,6 +220,8 @@ impl HandlerContext {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: true,
                     error: Some(InstructionError::from_error(&err)),
                 }
@@ -214,6 +232,8 @@ impl HandlerContext {
                     region_id,
                     last_entry_id: None,
                     metadata_last_entry_id: None,
+                    manifest_version: None,
+                    metadata_manifest_version: None,
                     exists: true,
                     error: Some(InstructionError::from_error(&err)),
                 }
@@ -295,7 +315,7 @@ mod tests {
                 }));
                 region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
                     Ok(SetRegionRoleStateResponse::success(
-                        SetRegionRoleStateSuccess::mito(1024),
+                        SetRegionRoleStateSuccess::mito(1024, 2048),
                     ))
                 }))
             });
@@ -319,6 +339,7 @@ mod tests {
             assert!(reply.exists);
             assert!(reply.error.is_none());
             assert_eq!(reply.last_entry_id.unwrap(), 1024);
+            assert_eq!(reply.manifest_version, Some(2048));
         }
     }
 
@@ -332,7 +353,7 @@ mod tests {
                 region_engine.handle_request_delay = Some(Duration::from_secs(100));
                 region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
                     Ok(SetRegionRoleStateResponse::success(
-                        SetRegionRoleStateSuccess::mito(1024),
+                        SetRegionRoleStateSuccess::mito(1024, 2048),
                     ))
                 }))
             });
@@ -367,7 +388,7 @@ mod tests {
                 region_engine.handle_request_delay = Some(Duration::from_millis(300));
                 region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
                     Ok(SetRegionRoleStateResponse::success(
-                        SetRegionRoleStateSuccess::mito(1024),
+                        SetRegionRoleStateSuccess::mito(1024, 2048),
                     ))
                 }))
             });
@@ -413,6 +434,7 @@ mod tests {
         assert!(reply.exists);
         assert!(reply.error.is_none());
         assert_eq!(reply.last_entry_id.unwrap(), 1024);
+        assert_eq!(reply.manifest_version, Some(2048));
     }
 
     #[tokio::test]
@@ -431,7 +453,7 @@ mod tests {
                 }));
                 region_engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(|_| {
                     Ok(SetRegionRoleStateResponse::success(
-                        SetRegionRoleStateSuccess::mito(1024),
+                        SetRegionRoleStateSuccess::mito(1024, 2048),
                     ))
                 }))
             });
@@ -597,10 +619,12 @@ mod tests {
         assert!(reply[0].exists);
         assert!(reply[0].error.is_none());
         assert_eq!(reply[0].last_entry_id, Some(0));
+        assert!(reply[0].manifest_version.is_some());
         assert_eq!(reply[1].region_id, region_id1);
         assert!(reply[1].exists);
         assert!(reply[1].error.is_none());
         assert_eq!(reply[1].last_entry_id, Some(0));
+        assert!(reply[1].manifest_version.is_some());
 
         assert_eq!(engine.role(region_id).unwrap(), RegionRole::Follower);
         assert_eq!(engine.role(region_id1).unwrap(), RegionRole::Follower);

@@ -202,6 +202,19 @@ pub fn new_downgrade_region_reply(
     exist: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_downgrade_region_reply_with_fences(id, last_entry_id, None, None, None, exist, error)
+}
+
+/// Generates a downgrade reply with WAL and manifest fences.
+pub fn new_downgrade_region_reply_with_fences(
+    id: u64,
+    last_entry_id: Option<u64>,
+    metadata_last_entry_id: Option<u64>,
+    manifest_version: Option<u64>,
+    metadata_manifest_version: Option<u64>,
+    exist: bool,
+    error: Option<String>,
+) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -213,7 +226,9 @@ pub fn new_downgrade_region_reply(
                 DowngradeRegionsReply::new(vec![DowngradeRegionReply {
                     region_id: RegionId::new(0, 0),
                     last_entry_id,
-                    metadata_last_entry_id: None,
+                    metadata_last_entry_id,
+                    manifest_version,
+                    metadata_manifest_version,
                     exists: exist,
                     error: legacy_instruction_error(error),
                 }]),

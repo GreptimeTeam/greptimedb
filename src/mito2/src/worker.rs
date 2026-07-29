@@ -1281,10 +1281,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
-                    Ok(()) => {
+                    Ok(manifest_version) => {
                         let last_entry_id = region.version_control.current().last_entry_id;
                         let _ = sender.send(SetRegionRoleStateResponse::success(
-                            SetRegionRoleStateSuccess::mito(last_entry_id),
+                            SetRegionRoleStateSuccess::mito(last_entry_id, manifest_version),
                         ));
                     }
                     Err(e) => {

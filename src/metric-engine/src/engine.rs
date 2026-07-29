@@ -446,7 +446,9 @@ impl RegionEngine for MetricEngine {
         Ok(SetRegionRoleStateResponse::success(
             SetRegionRoleStateSuccess::metric(
                 data_result.last_entry_id().unwrap_or_default(),
+                data_result.manifest_version().unwrap_or_default(),
                 metadata_result.last_entry_id().unwrap_or_default(),
+                metadata_result.manifest_version().unwrap_or_default(),
             ),
         ))
     }
@@ -945,6 +947,115 @@ mod test {
                 assert!(state.logical_regions().contains_key(logical_region));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_catchup_requires_both_physical_region_fences() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metric_engine = env.metric();
+        let mito_engine = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        metric_engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let response = metric_engine
+            .set_region_role_state_gracefully(physical_region_id, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        let SetRegionRoleStateResponse::Success(success) = response else {
+            panic!("expected successful downgrade");
+        };
+        let data_entry_id = success.last_entry_id().unwrap();
+        let metadata_entry_id = success.metadata_last_entry_id().unwrap();
+        let data_manifest_version = success.manifest_version().unwrap();
+        let metadata_manifest_version = success.metadata_manifest_version().unwrap();
+
+        let responses = metric_engine
+            .handle_batch_catchup_requests(
+                2,
+                vec![(
+                    physical_region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        manifest_version: Some(data_manifest_version + 1),
+                        metadata_manifest_version: Some(metadata_manifest_version),
+                        entry_id: Some(data_entry_id),
+                        metadata_entry_id: Some(metadata_entry_id),
+                        ..Default::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(responses[0].1.is_err());
+        assert_eq!(
+            mito_engine.role(utils::to_data_region_id(physical_region_id)),
+            Some(RegionRole::Follower)
+        );
+        assert_eq!(
+            mito_engine.role(utils::to_metadata_region_id(physical_region_id)),
+            Some(RegionRole::Follower)
+        );
+
+        let responses = metric_engine
+            .handle_batch_catchup_requests(
+                2,
+                vec![(
+                    physical_region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        manifest_version: Some(data_manifest_version),
+                        metadata_manifest_version: Some(metadata_manifest_version + 1),
+                        entry_id: Some(data_entry_id),
+                        metadata_entry_id: Some(metadata_entry_id),
+                        ..Default::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(responses[0].1.is_err());
+        assert_eq!(
+            mito_engine.role(utils::to_data_region_id(physical_region_id)),
+            Some(RegionRole::Follower)
+        );
+        assert_eq!(
+            mito_engine.role(utils::to_metadata_region_id(physical_region_id)),
+            Some(RegionRole::Follower)
+        );
+
+        let responses = metric_engine
+            .handle_batch_catchup_requests(
+                2,
+                vec![(
+                    physical_region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        manifest_version: Some(data_manifest_version),
+                        metadata_manifest_version: Some(metadata_manifest_version),
+                        entry_id: Some(data_entry_id),
+                        metadata_entry_id: Some(metadata_entry_id),
+                        ..Default::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(responses[0].1.is_ok());
+        assert_eq!(
+            mito_engine.role(utils::to_data_region_id(physical_region_id)),
+            Some(RegionRole::Leader)
+        );
+        assert_eq!(
+            mito_engine.role(utils::to_metadata_region_id(physical_region_id)),
+            Some(RegionRole::Leader)
+        );
     }
 
     #[tokio::test]

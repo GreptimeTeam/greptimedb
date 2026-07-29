@@ -474,7 +474,7 @@ impl MitoRegion {
     pub(crate) async fn set_role_state_gracefully(
         &self,
         state: SettableRegionRoleState,
-    ) -> Result<()> {
+    ) -> Result<ManifestVersion> {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
@@ -617,6 +617,7 @@ impl MitoRegion {
             }
         }
 
+        let manifest_version = manager.manifest().manifest_version;
         drop(manager);
 
         // Merge both payloads so consumers see the complete set of actions in
@@ -632,7 +633,7 @@ impl MitoRegion {
             pending.fire().await;
         }
 
-        Ok(())
+        Ok(manifest_version)
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.

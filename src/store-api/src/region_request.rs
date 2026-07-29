@@ -52,7 +52,6 @@ use crate::metadata::{
     RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
     MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
@@ -60,6 +59,7 @@ use crate::mito_engine_options::{
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
+use crate::{ManifestVersion, metrics};
 
 /// The type of path to generate.
 #[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive)]
@@ -1605,6 +1605,10 @@ pub enum RegionTruncateRequest {
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
     pub set_writable: bool,
+    /// The minimum manifest version that must be installed before promotion.
+    pub manifest_version: Option<ManifestVersion>,
+    /// The minimum manifest version for the metric metadata region.
+    pub metadata_manifest_version: Option<ManifestVersion>,
     /// The `entry_id` that was expected to reply to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,

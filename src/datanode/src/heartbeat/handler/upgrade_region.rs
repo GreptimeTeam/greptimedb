@@ -130,6 +130,8 @@ impl UpgradeRegionsHandler {
                 let UpgradeRegion {
                     last_entry_id,
                     metadata_last_entry_id,
+                    manifest_version,
+                    metadata_manifest_version,
                     location_id,
                     replay_entry_id,
                     metadata_replay_entry_id,
@@ -159,6 +161,8 @@ impl UpgradeRegionsHandler {
                     upgrade_region.region_id,
                     RegionCatchupRequest {
                         set_writable: true,
+                        manifest_version,
+                        metadata_manifest_version,
                         entry_id: last_entry_id,
                         metadata_entry_id: metadata_last_entry_id,
                         location_id,
@@ -228,6 +232,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
+    use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
     use crate::error;
@@ -329,7 +334,16 @@ mod tests {
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 // Region is not ready.
                 region_engine.mock_role = Some(Some(RegionRole::Follower));
-                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, request| {
+                    let RegionRequest::Catchup(request) = request else {
+                        panic!("expected catchup request");
+                    };
+                    assert_eq!(request.manifest_version, Some(10));
+                    assert_eq!(request.metadata_manifest_version, Some(11));
+                    assert_eq!(request.entry_id, Some(12));
+                    assert_eq!(request.metadata_entry_id, Some(13));
+                    Ok(0)
+                }));
                 // Note: Don't change.
                 region_engine.handle_request_delay = Some(Duration::from_secs(100));
             });
@@ -342,6 +356,10 @@ mod tests {
                 &handler_context,
                 vec![UpgradeRegion {
                     region_id,
+                    manifest_version: Some(10),
+                    metadata_manifest_version: Some(11),
+                    last_entry_id: Some(12),
+                    metadata_last_entry_id: Some(13),
                     replay_timeout,
                     ..Default::default()
                 }],

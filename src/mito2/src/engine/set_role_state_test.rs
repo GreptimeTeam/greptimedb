@@ -30,7 +30,10 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows
 /// Helper function to assert a successful response with expected entry id
 fn assert_success_response(response: &SetRegionRoleStateResponse, expected_entry_id: u64) {
     match response {
-        SetRegionRoleStateResponse::Success(SetRegionRoleStateSuccess::Mito { last_entry_id }) => {
+        SetRegionRoleStateResponse::Success(SetRegionRoleStateSuccess::Mito {
+            last_entry_id,
+            ..
+        }) => {
             assert_eq!(*last_entry_id, expected_entry_id);
         }
         _ => panic!("Expected success response, got: {:?}", response),

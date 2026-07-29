@@ -143,6 +143,8 @@ impl DowngradeLeaderRegion {
             region_id,
             last_entry_id,
             metadata_last_entry_id,
+            manifest_version,
+            metadata_manifest_version,
             exists,
             error,
         } = reply;
@@ -169,11 +171,13 @@ impl DowngradeLeaderRegion {
             );
         } else {
             info!(
-                "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
+                "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, manifest_version: {:?}, metadata_manifest_version: {:?}, elapsed: {:?}",
                 region_id,
                 leader,
                 last_entry_id,
                 metadata_last_entry_id,
+                manifest_version,
+                metadata_manifest_version,
                 now.elapsed()
             );
         }
@@ -190,6 +194,16 @@ impl DowngradeLeaderRegion {
         if let Some(metadata_last_entry_id) = metadata_last_entry_id {
             ctx.volatile_ctx
                 .set_metadata_last_entry_id(*region_id, *metadata_last_entry_id);
+        }
+
+        if let Some(manifest_version) = manifest_version {
+            ctx.volatile_ctx
+                .set_manifest_version(*region_id, *manifest_version);
+        }
+
+        if let Some(metadata_manifest_version) = metadata_manifest_version {
+            ctx.volatile_ctx
+                .set_metadata_manifest_version(*region_id, *metadata_manifest_version);
         }
 
         Ok(())
@@ -393,7 +407,8 @@ mod tests {
     use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
-        new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
+        new_close_region_reply, new_downgrade_region_reply, new_downgrade_region_reply_with_fences,
+        send_mock_reply,
     };
 
     fn new_persistent_context() -> PersistentContext {
@@ -612,7 +627,15 @@ mod tests {
             mailbox
                 .on_recv(
                     reply_id,
-                    Ok(new_downgrade_region_reply(reply_id, Some(1), true, None)),
+                    Ok(new_downgrade_region_reply_with_fences(
+                        reply_id,
+                        Some(1),
+                        Some(2),
+                        Some(3),
+                        Some(4),
+                        true,
+                        None,
+                    )),
                 )
                 .await
                 .unwrap();
@@ -625,6 +648,24 @@ mod tests {
                 .get(&RegionId::new(0, 0))
                 .cloned(),
             Some(1)
+        );
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_metadata_last_entry_ids
+                .get(&RegionId::new(0, 0)),
+            Some(&2)
+        );
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_manifest_versions
+                .get(&RegionId::new(0, 0)),
+            Some(&3)
+        );
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_metadata_manifest_versions
+                .get(&RegionId::new(0, 0)),
+            Some(&4)
         );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
     }

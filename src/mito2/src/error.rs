@@ -1557,7 +1557,9 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | NoManifests { .. }
+            | InstallManifestTo { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

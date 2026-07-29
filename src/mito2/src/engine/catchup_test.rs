@@ -25,7 +25,8 @@ use rstest_reuse::{self, apply};
 use store_api::logstore::provider::RaftEngineProvider;
 use store_api::region_engine::{RegionEngine, RegionRole, SetRegionRoleStateResponse};
 use store_api::region_request::{
-    PathType, RegionCatchupRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    PathType, RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -43,6 +44,17 @@ use crate::wal::EntryId;
 fn get_last_entry_id(resp: SetRegionRoleStateResponse) -> Option<EntryId> {
     if let SetRegionRoleStateResponse::Success(success) = resp {
         success.last_entry_id()
+    } else {
+        unreachable!();
+    }
+}
+
+fn get_fences(resp: SetRegionRoleStateResponse) -> (EntryId, u64) {
+    if let SetRegionRoleStateResponse::Success(success) = resp {
+        (
+            success.last_entry_id().unwrap(),
+            success.manifest_version().unwrap(),
+        )
     } else {
         unreachable!();
     }
@@ -439,6 +451,16 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
     // Triggers to create a new manifest file.
     flush_region(&leader_engine, region_id, None).await;
 
+    let (expected_last_entry_id, expected_manifest_version) = get_fences(
+        leader_engine
+            .set_region_role_state_gracefully(
+                region_id,
+                store_api::region_engine::SettableRegionRoleState::Follower,
+            )
+            .await
+            .unwrap(),
+    );
+
     let region = follower_engine.get_region(region_id).unwrap();
     // Ensures the mutable is empty.
     assert!(region.version().memtables.mutable.is_empty());
@@ -446,11 +468,46 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
     let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(manifest.manifest_version, 0);
 
+    let err = follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                manifest_version: Some(expected_manifest_version + 1),
+                entry_id: Some(expected_last_entry_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(!follower_engine.get_region(region_id).unwrap().is_writable());
+    assert!(err.retry_hint().is_retryable());
+
+    let err = follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                manifest_version: Some(expected_manifest_version),
+                entry_id: Some(expected_last_entry_id + 1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(!follower_engine.get_region(region_id).unwrap().is_writable());
+    assert_matches!(
+        err.as_any().downcast_ref::<Error>(),
+        Some(Error::Unexpected { .. })
+    );
+
     let resp = follower_engine
         .handle_request(
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
+                manifest_version: Some(expected_manifest_version),
+                entry_id: Some(expected_last_entry_id),
                 ..Default::default()
             }),
         )
@@ -460,7 +517,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
     // The inner region was replaced. We must get it again.
     let region = follower_engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.manifest_version, 2);
+    assert_eq!(manifest.manifest_version, expected_manifest_version);
     assert!(!region.is_writable());
 
     let request = ScanRequest::default();
@@ -487,6 +544,8 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
+                manifest_version: Some(expected_manifest_version),
+                entry_id: Some(expected_last_entry_id),
                 ..Default::default()
             }),
         )
@@ -633,12 +692,34 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
     assert_eq!(start.unwrap(), 2);
     assert_eq!(end.unwrap(), 3);
 
+    let manifest_version = region.manifest_ctx.manifest_version().await;
+    let err = leader_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                manifest_version: Some(manifest_version),
+                entry_id: Some(3),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(
+        err.as_any().downcast_ref::<Error>(),
+        Some(Error::Unexpected { .. })
+    );
+    let region = leader_engine.get_region(region_id).unwrap();
+    assert!(!region.is_writable());
+    assert_eq!(region.version_control.current().last_entry_id, 1);
+
     // Try to catchup the region.
     let resp = leader_engine
         .handle_request(
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
+                entry_id: Some(3),
                 ..Default::default()
             }),
         )
@@ -686,6 +767,85 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[apply(single_raft_engine_log_store_factory)]
+async fn test_catchup_installs_compaction_manifest(factory: Option<LogStoreFactory>) {
+    use store_api::region_engine::SettableRegionRoleState;
+
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::with_prefix("catchup_compaction_manifest")
+        .await
+        .with_log_store_factory(factory);
+    let leader_engine = env.create_engine(MitoConfig::default()).await;
+    let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    leader_engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    for range in [0..3, 3..6, 6..9] {
+        put_rows(
+            &leader_engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(range.start, range.end),
+            },
+        )
+        .await;
+        flush_region(&leader_engine, region_id, None).await;
+    }
+
+    open_region(&follower_engine, region_id, table_dir, true).await;
+    let follower_region = follower_engine.get_region(region_id).unwrap();
+    let manifest_version_before_compaction = follower_region.manifest_ctx.manifest_version().await;
+    let last_entry_id_before_compaction = follower_region.version_control.current().last_entry_id;
+
+    leader_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let (expected_last_entry_id, expected_manifest_version) = get_fences(
+        leader_engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(expected_last_entry_id, last_entry_id_before_compaction);
+    assert!(expected_manifest_version > manifest_version_before_compaction);
+
+    follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                manifest_version: Some(expected_manifest_version),
+                entry_id: Some(expected_last_entry_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let follower_region = follower_engine.get_region(region_id).unwrap();
+    assert!(follower_region.is_writable());
+    assert!(follower_region.manifest_ctx.manifest_version().await >= expected_manifest_version);
+    assert!(follower_region.version_control.current().last_entry_id >= expected_last_entry_id);
 }
 
 #[tokio::test]

@@ -19,6 +19,7 @@ use std::time::Duration;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use store_api::ManifestVersion;
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::region_request::{RegionFlushReason, RegionRequirements};
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
@@ -156,6 +157,12 @@ pub struct DowngradeRegionReply {
     pub last_entry_id: Option<u64>,
     /// Returns the `metadata_last_entry_id` if available (Only available for metric engine).
     pub metadata_last_entry_id: Option<u64>,
+    /// Returns the final manifest version if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<ManifestVersion>,
+    /// Returns the final metadata manifest version if available (Only available for metric engine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_manifest_version: Option<ManifestVersion>,
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
@@ -166,8 +173,8 @@ impl Display for DowngradeRegionReply {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(last_entry_id={:?}, exists={}, error={:?})",
-            self.last_entry_id, self.exists, self.error
+            "(last_entry_id={:?}, manifest_version={:?}, exists={}, error={:?})",
+            self.last_entry_id, self.manifest_version, self.exists, self.error
         )
     }
 }
@@ -360,6 +367,12 @@ pub struct UpgradeRegion {
     pub last_entry_id: Option<u64>,
     /// The `last_entry_id` of old leader metadata region (Only used for metric engine).
     pub metadata_last_entry_id: Option<u64>,
+    /// The final manifest version of the old leader region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<ManifestVersion>,
+    /// The final manifest version of the old leader metadata region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_manifest_version: Option<ManifestVersion>,
     /// The timeout of waiting for a wal replay.
     ///
     /// `None` stands for no wait,
@@ -1332,6 +1345,8 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             last_entry_id: None,
             metadata_last_entry_id: None,
+            manifest_version: Some(10),
+            metadata_manifest_version: Some(11),
             replay_timeout: Duration::from_millis(1000),
             location_id: None,
             replay_entry_id: None,
@@ -1340,8 +1355,12 @@ mod tests {
 
         let serialized = serde_json::to_string(&upgrade_region).unwrap();
         assert_eq!(
-            r#"{"UpgradeRegions":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null}]}"#,
+            r#"{"UpgradeRegions":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"manifest_version":10,"metadata_manifest_version":11,"replay_timeout":"1s","location_id":null}]}"#,
             serialized
+        );
+        assert_eq!(
+            upgrade_region,
+            serde_json::from_str::<Instruction>(&serialized).unwrap()
         );
     }
 
@@ -1352,6 +1371,8 @@ mod tests {
                 region_id: RegionId::new(1024, 1),
                 last_entry_id: None,
                 metadata_last_entry_id: None,
+                manifest_version: Some(10),
+                metadata_manifest_version: Some(11),
                 exists: true,
                 error: None,
             }),
@@ -1359,8 +1380,12 @@ mod tests {
 
         let serialized = serde_json::to_string(&downgrade_region_reply).unwrap();
         assert_eq!(
-            r#"{"type":"downgrade_regions","replies":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"exists":true,"error":null}]}"#,
+            r#"{"type":"downgrade_regions","replies":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"manifest_version":10,"metadata_manifest_version":11,"exists":true,"error":null}]}"#,
             serialized
+        );
+        assert_eq!(
+            downgrade_region_reply,
+            serde_json::from_str::<InstructionReply>(&serialized).unwrap()
         );
 
         let upgrade_region_reply =
@@ -1429,6 +1454,8 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             last_entry_id: None,
             metadata_last_entry_id: None,
+            manifest_version: None,
+            metadata_manifest_version: None,
             replay_timeout: Duration::from_millis(1000),
             location_id: None,
             replay_entry_id: None,
@@ -1469,6 +1496,8 @@ mod tests {
                 region_id: RegionId::new(1024, 1),
                 last_entry_id: None,
                 metadata_last_entry_id: None,
+                manifest_version: None,
+                metadata_manifest_version: None,
                 exists: true,
                 error: None,
             }),
