@@ -124,9 +124,12 @@ fn ensure_no_whole_json2_read(plan: &LogicalPlan) -> Result<()> {
                         return Ok(TreeNodeRecursion::Jump);
                     }
 
-                    let field = input_schema
+                    let Ok(field) = input_schema
                         .field_from_column(col)
-                        .or_else(|_| plan.schema().field_from_column(col))?;
+                        .or_else(|_| plan.schema().field_from_column(col))
+                    else {
+                        return Ok(TreeNodeRecursion::Jump);
+                    };
                     if is_structured_json_field(field) {
                         return plan_err!(
                             "Querying the whole JSON2 column '{}' is currently not supported; use json_get to select its fields",
@@ -140,9 +143,12 @@ fn ensure_no_whole_json2_read(plan: &LogicalPlan) -> Result<()> {
                 let Expr::Column(col) = expr else {
                     return Ok(TreeNodeRecursion::Continue);
                 };
-                let field = input_schema
+                let Ok(field) = input_schema
                     .field_from_column(col)
-                    .or_else(|_| plan.schema().field_from_column(col))?;
+                    .or_else(|_| plan.schema().field_from_column(col))
+                else {
+                    return Ok(TreeNodeRecursion::Continue);
+                };
                 if is_structured_json_field(field) {
                     return plan_err!(
                         "Querying the whole JSON2 column '{}' is currently not supported; use json_get to select its fields",
