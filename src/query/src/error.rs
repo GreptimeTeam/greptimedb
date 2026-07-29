@@ -194,7 +194,7 @@ pub enum Error {
         error: regex::Error,
     },
 
-    #[snafu(display("Failed to build data source backend: {}", source))]
+    #[snafu(display("Failed to build data source backend"))]
     BuildBackend {
         source: common_datasource::error::Error,
         #[snafu(implicit)]
@@ -493,5 +493,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_backend_display_does_not_duplicate_source() {
+        let source = common_datasource::error::LocalFileAccessDisabledSnafu {
+            path: "file:///tmp/data.parquet",
+        }
+        .build();
+        let error = Error::BuildBackend {
+            source,
+            location: Location::default(),
+        };
+
+        assert_eq!(error.to_string(), "Failed to build data source backend");
     }
 }

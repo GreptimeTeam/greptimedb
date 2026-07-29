@@ -27,7 +27,7 @@ use lazy_static::lazy_static;
 use object_store::ObjectStore;
 use object_store::secure_fs::SecureFsRoot;
 use regex::Regex;
-use snafu::{IntoError, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use url::{ParseError, Url};
 
 use self::azblob::build_azblob_backend;
@@ -66,12 +66,10 @@ impl LocalFileAccess {
     /// Creates a sandbox rooted at a server-controlled local directory.
     pub fn sandboxed(root: impl AsRef<Path>) -> Result<Self> {
         let root_path = root.as_ref();
-        let configured_path = std::path::absolute(root_path).map_err(|error| {
-            error::InvalidLocalFileRootSnafu {
+        let configured_path =
+            std::path::absolute(root_path).with_context(|_| error::InvalidLocalFileRootSnafu {
                 root: root_path.display().to_string(),
-            }
-            .into_error(error)
-        })?;
+            })?;
         let root =
             SecureFsRoot::open(root_path).with_context(|_| error::InvalidLocalFileRootSnafu {
                 root: root_path.display().to_string(),
@@ -192,13 +190,11 @@ pub fn configured_local_path(location: &str) -> Result<Option<PathBuf>> {
         FILE_SCHEMA => {
             let url = Url::parse(location).context(error::InvalidUrlSnafu { url: location })?;
             url.to_file_path().map(Some).map_err(|_| {
-                error::InvalidLocalFileRootSnafu {
+                error::InvalidLocalFileRootConfigSnafu {
                     root: location.to_string(),
+                    reason: "file URL must contain a local absolute path".to_string(),
                 }
-                .into_error(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "file URL must contain a local absolute path",
-                ))
+                .build()
             })
         }
         _ => Ok(None),

@@ -122,7 +122,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build backend: {}", source))]
+    #[snafu(display("Failed to build backend"))]
     BuildBackend {
         #[snafu(implicit)]
         location: Location,
@@ -247,5 +247,24 @@ impl ErrorExt for Error {
             | DeleteRegionManifest { error, .. } => retry_hint_from_opendal_error(error),
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_backend_display_does_not_duplicate_source() {
+        let source = common_datasource::error::LocalFileAccessDisabledSnafu {
+            path: "file:///tmp/data.parquet",
+        }
+        .build();
+        let error = Error::BuildBackend {
+            source,
+            location: Location::default(),
+        };
+
+        assert_eq!(error.to_string(), "Failed to build backend");
     }
 }

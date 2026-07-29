@@ -70,7 +70,7 @@ use plugins::frontend::context::{
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
-use snafu::{IntoError, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
 use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -86,14 +86,12 @@ fn standalone_local_file_access(
 ) -> common_datasource::error::Result<LocalFileAccess> {
     let data_home = configured_local_path(&storage.data_home)?;
     let copy_root = match &storage.copy_root {
-        Some(root) => configured_local_path(root)?.ok_or_else(|| {
-            common_datasource::error::InvalidLocalFileRootSnafu { root: root.clone() }.into_error(
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "copy_root must be a local path or file URL",
-                ),
-            )
-        })?,
+        Some(root) => configured_local_path(root)?.context(
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: root.clone(),
+                reason: "copy_root must be a local path or file URL".to_string(),
+            },
+        )?,
         None => {
             let Some(data_home) = &data_home else {
                 info!(
@@ -107,32 +105,28 @@ fn standalone_local_file_access(
 
     let access = LocalFileAccess::sandboxed(&copy_root)?;
     if let Some(data_home) = data_home {
-        let canonical_data_home = data_home.canonicalize().map_err(|error| {
+        let canonical_data_home = data_home.canonicalize().with_context(|_| {
             common_datasource::error::InvalidLocalFileRootSnafu {
                 root: data_home.display().to_string(),
             }
-            .into_error(error)
         })?;
-        let canonical_copy_root = access.sandbox_root().ok_or_else(|| {
-            common_datasource::error::InvalidLocalFileRootSnafu {
+        let canonical_copy_root = access.sandbox_root().context(
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
                 root: copy_root.display().to_string(),
-            }
-            .into_error(std::io::Error::other(
-                "sandboxed local file access has no root",
-            ))
-        })?;
+                reason: "sandboxed local file access has no root".to_string(),
+            },
+        )?;
         let default_copy_root = canonical_data_home.join("copy");
         let exposes_internal_files = canonical_data_home.starts_with(canonical_copy_root)
             || (canonical_copy_root.starts_with(&canonical_data_home)
                 && !canonical_copy_root.starts_with(default_copy_root));
         if exposes_internal_files {
-            return Err(common_datasource::error::InvalidLocalFileRootSnafu {
+            return common_datasource::error::InvalidLocalFileRootConfigSnafu {
                 root: copy_root.display().to_string(),
+                reason: "copy_root must not expose files in data_home outside data_home/copy"
+                    .to_string(),
             }
-            .into_error(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "copy_root must not expose files in data_home outside data_home/copy",
-            )));
+            .fail();
         }
     }
 
@@ -1073,19 +1067,35 @@ mod tests {
             explicit_root.path().canonicalize().unwrap()
         );
 
+        let remote_copy_root = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some("s3://bucket/copy".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&remote_copy_root),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+
         let exposes_internal = StorageConfig {
             data_home: data_home.path().display().to_string(),
             copy_root: Some(data_home.path().join("data").display().to_string()),
             ..Default::default()
         };
-        assert!(standalone_local_file_access(&exposes_internal).is_err());
+        assert!(matches!(
+            standalone_local_file_access(&exposes_internal),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
 
         let exposes_data_home = StorageConfig {
             data_home: data_home.path().display().to_string(),
             copy_root: Some(data_home.path().parent().unwrap().display().to_string()),
             ..Default::default()
         };
-        assert!(standalone_local_file_access(&exposes_data_home).is_err());
+        assert!(matches!(
+            standalone_local_file_access(&exposes_data_home),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
     }
 
     #[tokio::test]

@@ -106,6 +106,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid local filesystem copy root '{}': {}", root, reason))]
+    InvalidLocalFileRootConfig {
+        root: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build backend"))]
     BuildBackend {
         #[snafu(source)]
@@ -276,6 +284,7 @@ impl ErrorExt for Error {
             | LocalFileAccessDenied { .. }
             | LocalFilePathNotFound { .. }
             | InvalidLocalFileRoot { .. }
+            | InvalidLocalFileRootConfig { .. }
             | EmptyHostPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }
