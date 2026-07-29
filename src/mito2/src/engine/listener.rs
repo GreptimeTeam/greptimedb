@@ -97,6 +97,12 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the index build task is aborted.
     async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener after the final source check and before manifest publication.
+    async fn on_index_build_before_manifest_commit(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener after manifest publication and before notifying the worker.
+    async fn on_index_build_manifest_committed(&self, _region_file_id: RegionFileId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;

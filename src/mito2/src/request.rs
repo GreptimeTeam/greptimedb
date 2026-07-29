@@ -978,7 +978,8 @@ pub(crate) struct FlushFailed {
 pub(crate) struct IndexBuildFinished {
     #[allow(dead_code)]
     pub(crate) region_id: RegionId,
-    pub(crate) edit: RegionEdit,
+    pub(crate) manifest_version: ManifestVersion,
+    pub(crate) file_meta: FileMeta,
 }
 
 /// Notifies an index build job has been stopped.

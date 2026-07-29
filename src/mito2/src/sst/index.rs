@@ -49,6 +49,7 @@ use vector_index::creator::VectorIndexer;
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
+use crate::cache::{CacheManagerRef, CacheStrategy};
 #[cfg(feature = "vector_index")]
 use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
@@ -56,12 +57,13 @@ use crate::error::{
     BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
+use crate::metrics::{
+    INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
+};
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState};
+use crate::region::{IndexPublication, ManifestContextRef};
 use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
     WorkerRequestWithTime,
@@ -84,6 +86,54 @@ pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 #[cfg(feature = "vector_index")]
 pub(crate) const TYPE_VECTOR_INDEX: &str = "vector_index";
+
+/// Deletes one stale index artifact and evicts all caches for its exact version.
+pub(crate) async fn cleanup_stale_index_artifact(
+    index_id: RegionIndexId,
+    access_layer: &AccessLayerRef,
+    cache_manager: Option<&CacheManagerRef>,
+    write_cache: Option<&WriteCacheRef>,
+) {
+    if let Err(e) = access_layer.delete_index(index_id).await {
+        INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL.inc();
+        warn!(
+            e;
+            "Failed to delete stale index artifact, region: {}, file_id: {}, index_version: {}",
+            index_id.region_id(),
+            index_id.file_id(),
+            index_id.version
+        );
+    }
+
+    if let Some(cache_manager) = cache_manager {
+        CacheStrategy::EnableAll(cache_manager.clone())
+            .evict_puffin_cache(index_id)
+            .await;
+    }
+    if let Some(write_cache) = write_cache {
+        write_cache
+            .remove(IndexKey::new(
+                index_id.region_id(),
+                index_id.file_id(),
+                FileType::Puffin(index_id.version),
+            ))
+            .await;
+    }
+    if let Err(e) = access_layer
+        .puffin_manager_factory()
+        .purge_stager(index_id)
+        .await
+    {
+        INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL.inc();
+        warn!(
+            e;
+            "Failed to purge stale index artifact from stager, region: {}, file_id: {}, index_version: {}",
+            index_id.region_id(),
+            index_id.file_id(),
+            index_id.version
+        );
+    }
+}
 
 /// Triggers background download of an index file to the local cache.
 pub(crate) fn trigger_index_background_download(
@@ -661,6 +711,7 @@ pub struct IndexBuildTask {
     pub(crate) listener: WorkerListener,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub write_cache: Option<WriteCacheRef>,
+    pub cache_manager: Option<CacheManagerRef>,
     pub file_purger: FilePurgerRef,
     /// When write cache is enabled, the indexer builder should be built from the write cache.
     /// Otherwise, it should be built from the access layer.
@@ -851,18 +902,56 @@ impl IndexBuildTask {
             self.maybe_upload_index_file(index_output.clone(), index_file_id, new_index_version)
                 .await?;
 
+            let region_file_id =
+                RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id);
+            self.listener
+                .on_index_build_before_manifest_commit(region_file_id)
+                .await;
+
             let worker_request = match self.update_manifest(index_output, new_index_version).await {
-                Ok(edit) => {
+                Ok(IndexPublication::Committed {
+                    manifest_version,
+                    file_meta,
+                }) => {
+                    self.listener
+                        .on_index_build_manifest_committed(region_file_id)
+                        .await;
                     let index_build_finished = IndexBuildFinished {
                         region_id: self.file_meta.region_id,
-                        edit,
+                        manifest_version,
+                        file_meta,
                     };
                     WorkerRequest::Background {
                         region_id: self.file_meta.region_id,
                         notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
                     }
                 }
+                Ok(IndexPublication::Stale) => {
+                    INDEX_PUBLICATION_STALE_TOTAL
+                        .with_label_values(&["manifest_commit"])
+                        .inc();
+                    let index_id = RegionIndexId::new(region_file_id, new_index_version);
+                    cleanup_stale_index_artifact(
+                        index_id,
+                        &self.access_layer,
+                        self.cache_manager.as_ref(),
+                        self.write_cache.as_ref(),
+                    )
+                    .await;
+                    self.listener.on_index_build_abort(region_file_id).await;
+                    return Ok(IndexBuildOutcome::Aborted(format!(
+                        "Source SST generation changed before index publication, region: {}, file_id: {}",
+                        self.file_meta.region_id, self.file_meta.file_id
+                    )));
+                }
                 Err(e) => {
+                    cleanup_stale_index_artifact(
+                        RegionIndexId::new(region_file_id, new_index_version),
+                        &self.access_layer,
+                        self.cache_manager.as_ref(),
+                        self.write_cache.as_ref(),
+                    )
+                    .await;
                     let err = Arc::new(e);
                     WorkerRequest::Background {
                         region_id: self.file_meta.region_id,
@@ -928,37 +1017,31 @@ impl IndexBuildTask {
     }
 
     async fn update_manifest(
-        &mut self,
+        &self,
         output: IndexOutput,
         new_index_version: u64,
-    ) -> Result<RegionEdit> {
-        self.file_meta.available_indexes = output.build_available_indexes();
-        self.file_meta.indexes = output.build_indexes();
-        self.file_meta.index_file_size = output.file_size;
-        self.file_meta.index_version = new_index_version;
-        let edit = RegionEdit {
-            files_to_add: vec![self.file_meta.clone()],
-            files_to_remove: vec![],
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            flushed_sequence: None,
-            flushed_entry_id: None,
-            committed_sequence: None,
-            compaction_time_window: None,
-        };
-        let version = self
+    ) -> Result<IndexPublication> {
+        let mut updated = self.file_meta.clone();
+        updated.available_indexes = output.build_available_indexes();
+        updated.indexes = output.build_indexes();
+        updated.index_file_size = output.file_size;
+        updated.index_version = new_index_version;
+        let publication = self
             .manifest_ctx
-            .update_manifest(
-                RegionLeaderState::Writable,
-                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
-                false,
-            )
+            .update_manifest_for_index(&self.file_meta, updated)
             .await?;
-        info!(
-            "Successfully update manifest version to {version}, region: {}, reason: {}",
-            self.file_meta.region_id,
-            self.reason.as_str()
-        );
-        Ok(edit)
+        if let IndexPublication::Committed {
+            manifest_version, ..
+        } = &publication
+        {
+            info!(
+                "Successfully update manifest version to {}, region: {}, reason: {}",
+                manifest_version,
+                self.file_meta.region_id,
+                self.reason.as_str()
+            );
+        }
+        Ok(publication)
     }
 }
 
@@ -1233,7 +1316,9 @@ mod tests {
     use crate::access_layer::{FilePathProvider, Metrics, SstWriteRequest, WriteType};
     use crate::cache::write_cache::WriteCache;
     use crate::config::{FulltextIndexConfig, IndexBuildMode, MitoConfig, Mode};
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
     use crate::memtable::time_partition::TimePartitions;
+    use crate::region::RegionLeaderState;
     use crate::region::version::{VersionBuilder, VersionControl};
     use crate::sst::file::RegionFileId;
     use crate::sst::file_purger::NoopFilePurger;
@@ -1251,6 +1336,25 @@ mod tests {
         with_skipping_bloom: bool,
         #[cfg(feature = "vector_index")]
         with_vector: bool,
+    }
+
+    async fn seed_manifest_file(manifest_ctx: &ManifestContextRef, file_meta: &FileMeta) {
+        manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![file_meta.clone()],
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    flushed_sequence: None,
+                    flushed_entry_id: None,
+                    committed_sequence: None,
+                    compaction_time_window: None,
+                })),
+                false,
+            )
+            .await
+            .unwrap();
     }
 
     fn mock_region_metadata(
@@ -1795,6 +1899,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,
@@ -1835,6 +1940,7 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
@@ -1853,6 +1959,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,
@@ -1880,8 +1987,7 @@ mod tests {
                 notify: BackgroundNotify::IndexBuildFinished(finished),
             } => {
                 assert_eq!(req_region_id, region_id);
-                assert_eq!(finished.edit.files_to_add.len(), 1);
-                let updated_meta = &finished.edit.files_to_add[0];
+                let updated_meta = &finished.file_meta;
 
                 // The mock indexer builder creates all index types.
                 assert!(!updated_meta.available_indexes.is_empty());
@@ -1910,6 +2016,7 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
@@ -1928,6 +2035,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,
@@ -2014,6 +2122,7 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
@@ -2032,6 +2141,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,
@@ -2107,6 +2217,7 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
@@ -2124,6 +2235,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: Some(write_cache.clone()),
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,
@@ -2195,6 +2307,7 @@ mod tests {
             listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
+            cache_manager: None,
             file_purger,
             indexer_builder,
             request_sender: tx,

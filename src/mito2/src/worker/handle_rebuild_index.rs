@@ -24,6 +24,8 @@ use tokio::sync::mpsc;
 
 use crate::cache::CacheStrategy;
 use crate::error::Result;
+use crate::manifest::action::RegionEdit;
+use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::MitoRegionRef;
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
@@ -31,6 +33,7 @@ use crate::request::{
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
+    cleanup_stale_index_artifact,
 };
 use crate::worker::RegionWorkerLoop;
 
@@ -79,6 +82,7 @@ impl<S> RegionWorkerLoop<S> {
             listener: self.listener.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
+            cache_manager: Some(self.cache_manager.clone()),
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
@@ -214,25 +218,54 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        // Clean old puffin-related cache for all rebuilt files.
+        let file_meta = request.file_meta;
+        let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
+        let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
+
+        // Clean old puffin-related cache before making the new metadata visible.
         let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
-        for file_meta in &request.edit.files_to_add {
-            let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
-            let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
-            cache_strategy.evict_puffin_cache(index_id).await;
+        cache_strategy.evict_puffin_cache(index_id).await;
+
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        let manifest = manager.manifest();
+        let is_current = manifest.files.get(&file_meta.file_id) == Some(&file_meta);
+        if is_current {
+            region.version_control.apply_edit(
+                Some(RegionEdit {
+                    files_to_add: vec![file_meta.clone()],
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    flushed_sequence: None,
+                    flushed_entry_id: None,
+                    committed_sequence: None,
+                    compaction_time_window: None,
+                }),
+                &[],
+                region.file_purger.clone(),
+            );
+        }
+        drop(manager);
+
+        if !is_current {
+            INDEX_PUBLICATION_STALE_TOTAL
+                .with_label_values(&["worker_apply"])
+                .inc();
+            warn!(
+                "Ignores stale index build result, region: {}, file_id: {}, index_version: {}, committed manifest version: {}",
+                region_id, file_meta.file_id, file_meta.index_version, request.manifest_version
+            );
+            cleanup_stale_index_artifact(
+                index_id,
+                &region.access_layer,
+                Some(&self.cache_manager),
+                self.cache_manager.write_cache(),
+            )
+            .await;
+            self.listener.on_index_build_abort(region_file_id).await;
+            return;
         }
 
-        region.version_control.apply_edit(
-            Some(request.edit.clone()),
-            &[],
-            region.file_purger.clone(),
-        );
-
-        for file_meta in &request.edit.files_to_add {
-            self.listener
-                .on_index_build_finish(RegionFileId::new(region_id, file_meta.file_id))
-                .await;
-        }
+        self.listener.on_index_build_finish(region_file_id).await;
     }
 
     pub(crate) async fn handle_index_build_failed(
