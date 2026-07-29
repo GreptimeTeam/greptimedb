@@ -26,8 +26,8 @@ use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, ProcedureState, Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::tracing_context::TracingContext;
@@ -40,6 +40,7 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
+use crate::events::gc::{BATCH_GC_EVENT_TYPE, BatchGcEvent};
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
@@ -1023,5 +1024,31 @@ impl Procedure for BatchGcProcedure {
             .collect();
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(BATCH_GC_EVENT_TYPE) {
+            return None;
+        }
+
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => BatchGcEvent::submitted(
+                &self.data.regions,
+                self.data.full_file_listing,
+                self.data.timeout,
+            ),
+            EventTrigger::Succeeded => {
+                let ProcedureState::Done {
+                    output: Some(output),
+                } = ctx.lifecycle_state
+                else {
+                    return None;
+                };
+                let report = output.downcast_ref::<GcReport>()?;
+                BatchGcEvent::succeeded(&self.data.regions, report)
+            }
+            _ => BatchGcEvent::lifecycle(&self.data.regions),
+        };
+        Some(Box::new(event))
     }
 }

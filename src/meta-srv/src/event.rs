@@ -20,6 +20,7 @@ use common_event_recorder::error::{InsertEventsSnafu, Result};
 use common_event_recorder::{Event, EventHandler, build_row_inserts_request, group_events_by_type};
 use snafu::ResultExt;
 
+pub mod gc;
 pub mod region_migration;
 pub mod repartition;
 pub(crate) mod wal_prune;
