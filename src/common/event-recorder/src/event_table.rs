@@ -112,18 +112,6 @@ pub const CATALOG_NAME_COLUMN: EventTableColumn =
 /// The canonical schema name dimension.
 pub const SCHEMA_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("schema_name", ColumnDataType::String, SemanticType::Field);
-/// The canonical table name dimension.
-pub const TABLE_NAME_COLUMN: EventTableColumn =
-    EventTableColumn::new("table_name", ColumnDataType::String, SemanticType::Field);
-/// The canonical table identifier dimension.
-pub const TABLE_ID_COLUMN: EventTableColumn =
-    EventTableColumn::new("table_id", ColumnDataType::Uint32, SemanticType::Field);
-/// The canonical physical table identifier dimension.
-pub const PHYSICAL_TABLE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
-    "physical_table_id",
-    ColumnDataType::Uint32,
-    SemanticType::Field,
-);
 /// The canonical Flow name dimension.
 pub const FLOW_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("flow_name", ColumnDataType::String, SemanticType::Field);
@@ -143,6 +131,12 @@ pub const TABLE_NAME_COLUMN: EventTableColumn =
 /// The canonical table identifier field for table DDL events.
 pub const TABLE_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("table_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical physical table identifier dimension.
+pub const PHYSICAL_TABLE_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "physical_table_id",
+    ColumnDataType::Uint32,
+    SemanticType::Field,
+);
 /// The canonical region identifier field for region events.
 pub const REGION_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("region_id", ColumnDataType::Uint64, SemanticType::Field);
