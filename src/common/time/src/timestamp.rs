@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeDelta,
     TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
@@ -399,12 +399,15 @@ impl Timestamp {
     }
 
     pub fn to_chrono_datetime_with_timezone(&self, tz: Option<&Timezone>) -> Option<NaiveDateTime> {
-        let datetime = self.to_chrono_datetime();
-        datetime.map(|v| match tz {
-            Some(Timezone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
-            Some(Timezone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
-            None => Utc.from_utc_datetime(&v).naive_local(),
-        })
+        let utc = self.to_chrono_datetime()?;
+        match tz {
+            None => Some(utc),
+            Some(Timezone::Offset(offset)) => utc.checked_add_offset(*offset),
+            Some(Timezone::Named(tz)) => {
+                let offset = tz.offset_from_utc_datetime(&utc).fix();
+                utc.checked_add_offset(offset)
+            }
+        }
     }
 
     /// Convert timestamp to chrono date.
@@ -1318,6 +1321,37 @@ mod tests {
                 Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_to_chrono_datetime_with_timezone_bounds() {
+        let positive_offset = Timezone::from_tz_string("+08:00").unwrap();
+        assert_eq!(
+            None,
+            Timestamp::MAX_SECOND.to_chrono_datetime_with_timezone(Some(&positive_offset))
+        );
+
+        let negative_offset = Timezone::from_tz_string("-08:00").unwrap();
+        assert_eq!(
+            None,
+            Timestamp::MIN_SECOND.to_chrono_datetime_with_timezone(Some(&negative_offset))
+        );
+    }
+
+    #[test]
+    fn test_to_chrono_datetime_with_named_timezone_summer_offset() {
+        let timestamp = Timestamp::from_str_utc("2024-07-01 12:00:00Z").unwrap();
+        let berlin = Timezone::from_tz_string("Europe/Berlin").unwrap();
+
+        assert_eq!(
+            Some(
+                NaiveDate::from_ymd_opt(2024, 7, 1)
+                    .unwrap()
+                    .and_hms_opt(14, 0, 0)
+                    .unwrap()
+            ),
+            timestamp.to_chrono_datetime_with_timezone(Some(&berlin))
         );
     }
 
