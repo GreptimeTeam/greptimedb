@@ -850,14 +850,41 @@ impl MitoRegion {
     }
 
     /// Returns all live SST file metas and the current manifest version from
-    /// the region manifest.
+    /// the region manifest, merging both the normal and staging manifests.
     ///
-    /// Used by the Iceberg rebuild admin path to enumerate the authoritative
-    /// live file set without going through the worker loop.
+    /// While the region is in staging mode (e.g. during region copy/migration),
+    /// the authoritative live file set lives in the staging manifest, so this
+    /// method merges both — matching the semantics of [`manifest_sst_entries`].
+    ///
+    /// The returned manifest version is the staging version when a staging
+    /// manifest is present, otherwise the normal manifest version.
     pub async fn all_manifest_files(&self) -> (Vec<FileMeta>, ManifestVersion) {
         let manifest = self.manifest_ctx.manifest().await;
-        let files = manifest.files.values().cloned().collect();
-        (files, manifest.manifest_version)
+        let staging = self
+            .manifest_ctx
+            .staging_manifest()
+            .await
+            .map(|m| (m.files.clone(), m.manifest_version));
+
+        let version = staging
+            .as_ref()
+            .map(|(_, v)| *v)
+            .unwrap_or(manifest.manifest_version);
+
+        let files = match staging {
+            Some((staging_files, _)) => {
+                let merged = manifest
+                    .files
+                    .clone()
+                    .into_iter()
+                    .chain(staging_files)
+                    .collect::<std::collections::HashMap<_, _>>();
+                merged.into_values().collect()
+            }
+            None => manifest.files.values().cloned().collect(),
+        };
+
+        (files, version)
     }
 
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
