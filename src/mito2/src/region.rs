@@ -849,6 +849,17 @@ impl MitoRegion {
             .collect::<Vec<_>>()
     }
 
+    /// Returns all live SST file metas and the current manifest version from
+    /// the region manifest.
+    ///
+    /// Used by the Iceberg rebuild admin path to enumerate the authoritative
+    /// live file set without going through the worker loop.
+    pub async fn all_manifest_files(&self) -> (Vec<FileMeta>, ManifestVersion) {
+        let manifest = self.manifest_ctx.manifest().await;
+        let files = manifest.files.values().cloned().collect();
+        (files, manifest.manifest_version)
+    }
+
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
     /// Merges staged manifest actions into the live manifest and exits staging mode.
     ///
