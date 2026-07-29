@@ -1,0 +1,24 @@
+tests-integration/tests/repartition_event.rs
+  s_86c3f8856cbad8::t_b89f0cfb374c95 69,109,115-116
+src/meta-srv/src/event/repartition.rs
+  s_86c3f8856cbad8::t_9b529f23dc288c 445-452
+  s_86c3f8856cbad8::t_b89f0cfb374c95 42,47,49,51,79-84,415-416,426,428,435-444
+  s_86c3f8856cbad8::t_109b407eef8fee 417-420
+  s_86c3f8856cbad8::t_d433acde9737ab 48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "644eff25472573cf23f93f9acf803dc578b851a4",
+  "prompts": {},
+  "sessions": {
+    "s_86c3f8856cbad8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa7d7-07d1-7e53-ba5d-44ecd6e4e11f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
