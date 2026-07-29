@@ -24,6 +24,7 @@ use datafusion_common::arrow::array::{
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result, ScalarValue, exec_datafusion_err, exec_err};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::vectors::json::array::JsonArray;
 use derive_more::Display;
 
@@ -277,6 +278,7 @@ fn json_struct_get(array: &ArrayRef, path: &str, with_type: &DataType) -> Result
         .split('.')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
+
     let mut curr = array.clone();
 
     for (idx, segment) in segments.iter().enumerate() {
@@ -404,9 +406,15 @@ impl Function for JsonGetWithType {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
                 let jsons = arg0.as_binary_view();
 
-                let mut builder = result_builder(len, &with_type)?;
-                jsonb_get(jsons, path, builder.as_mut())?;
-                builder.build()
+                if args.arg_fields.first().is_some_and(is_json2_extension_type) {
+                    JsonArray::from(&arg0)
+                        .project_to(&with_type)
+                        .map_err(|e| exec_datafusion_err!("{e:?}"))?
+                } else {
+                    let mut builder = result_builder(len, &with_type)?;
+                    jsonb_get(jsons, path, builder.as_mut())?;
+                    builder.build()
+                }
             }
             DataType::Struct(_) => json_struct_get(&arg0, path, &with_type)?,
             _ => {

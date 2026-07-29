@@ -120,8 +120,11 @@ impl JsonArray<'_> {
         let array_fields = struct_array.fields();
         let array_columns = struct_array.columns();
         let DataType::Struct(expect_fields) = expect else {
+            if expect.is_binary() {
+                return self.widen_scalar_to(expect);
+            }
             return AlignJsonArraySnafu {
-                reason: "expect struct datatype",
+                reason: "expect struct or binary datatype",
             }
             .fail();
         };
