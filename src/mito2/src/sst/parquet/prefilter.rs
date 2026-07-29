@@ -1051,12 +1051,13 @@ fn eval_entry_mask(
             let pk_filter = prefilter_ctx.pk_filter.as_mut().context(UnexpectedSnafu {
                 reason: "Missing primary key filter for prefilter cache entry",
             })?;
-            eval_pk_group_mask(batch, pk_filter.as_mut())
+            primary_key_filter_mask(batch, pk_filter.as_mut())
         }
     }
 }
 
-fn eval_pk_group_mask(
+/// Evaluates an encoded-primary-key filter against a primary-key batch.
+pub(crate) fn primary_key_filter_mask(
     batch: &RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
 ) -> Result<BooleanBuffer> {
@@ -1727,7 +1728,7 @@ mod tests {
             &[10, 11, 12, 13],
         );
 
-        let mask = eval_pk_group_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
+        let mask = primary_key_filter_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
 
         assert_eq!(mask.count_set_bits(), 2);
     }
@@ -1751,7 +1752,7 @@ mod tests {
             &[10, 11, 12, 13],
         );
 
-        let mask = eval_pk_group_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
+        let mask = primary_key_filter_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
 
         assert_eq!(mask.count_set_bits(), 2);
     }

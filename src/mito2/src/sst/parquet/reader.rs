@@ -1903,6 +1903,26 @@ impl RowGroupReaderBuilder {
         self.make_projected_stream(stream)
     }
 
+    /// Builds the normal projection without running the generic predicate prefilter.
+    ///
+    /// The series reader uses this after computing its own primary-key-only row
+    /// selection.
+    #[allow(dead_code)]
+    pub(crate) async fn build_without_prefilter(
+        &self,
+        build_ctx: RowGroupBuildContext<'_>,
+    ) -> Result<ProjectedRecordBatchStream> {
+        let stream = self
+            .build_with_projection(
+                build_ctx.row_group_idx,
+                build_ctx.row_selection,
+                self.projection.mask.clone(),
+                build_ctx.fetch_metrics,
+            )
+            .await?;
+        self.make_projected_stream(stream)
+    }
+
     /// Builds a stream that reads only the encoded primary-key column.
     ///
     /// It preserves the normal reader's binary-or-dictionary decision. This path deliberately
