@@ -87,20 +87,28 @@ fn read_scalar_f64_arg(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AnnotationReturn {
     FloatNull,
+    BooleanTrue,
     BooleanFalse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AnnotationLevel {
+    Info,
+    Warning,
 }
 
 impl AnnotationReturn {
     fn data_type(self) -> DataType {
         match self {
             Self::FloatNull => DataType::Float64,
-            Self::BooleanFalse => DataType::Boolean,
+            Self::BooleanTrue | Self::BooleanFalse => DataType::Boolean,
         }
     }
 
     fn scalar_value(self) -> ScalarValue {
         match self {
             Self::FloatNull => ScalarValue::Float64(None),
+            Self::BooleanTrue => ScalarValue::Boolean(Some(true)),
             Self::BooleanFalse => ScalarValue::Boolean(Some(false)),
         }
     }
@@ -111,6 +119,7 @@ struct NativeHistogramAnnotationUdf {
     name: &'static str,
     signature: Signature,
     return_kind: AnnotationReturn,
+    level: AnnotationLevel,
     message: String,
     collector: Option<PromqlAnnotationCollector>,
 }
@@ -119,6 +128,7 @@ impl NativeHistogramAnnotationUdf {
     fn new(
         name: &'static str,
         return_kind: AnnotationReturn,
+        level: AnnotationLevel,
         message: String,
         collector: Option<PromqlAnnotationCollector>,
     ) -> Self {
@@ -126,6 +136,7 @@ impl NativeHistogramAnnotationUdf {
             name,
             signature: Signature::variadic_any(Volatility::Volatile),
             return_kind,
+            level,
             message,
             collector,
         }
@@ -136,6 +147,7 @@ impl PartialEq for NativeHistogramAnnotationUdf {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.return_kind == other.return_kind
+            && self.level == other.level
             && self.message == other.message
     }
 }
@@ -146,6 +158,7 @@ impl Hash for NativeHistogramAnnotationUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.return_kind.hash(state);
+        self.level.hash(state);
         self.message.hash(state);
     }
 }
@@ -175,7 +188,10 @@ impl ScalarUDFImpl for NativeHistogramAnnotationUdf {
             .cloned()
             .or_else(|| self.collector.clone())
         {
-            collector.record_info(self.message.clone());
+            match self.level {
+                AnnotationLevel::Info => collector.record_info(self.message.clone()),
+                AnnotationLevel::Warning => collector.record_warning(self.message.clone()),
+            }
         }
         Ok(ColumnarValue::Scalar(self.return_kind.scalar_value()))
     }
@@ -192,6 +208,10 @@ impl NativeHistogramDrop {
         "prom_native_histogram_drop_bool"
     }
 
+    const fn bool_true_name() -> &'static str {
+        "prom_native_histogram_keep_bool"
+    }
+
     pub fn float_null_udf(
         message: String,
         collector: Option<PromqlAnnotationCollector>,
@@ -199,6 +219,7 @@ impl NativeHistogramDrop {
         ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
             Self::float_null_name(),
             AnnotationReturn::FloatNull,
+            AnnotationLevel::Info,
             message,
             collector,
         ))
@@ -211,14 +232,39 @@ impl NativeHistogramDrop {
         ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
             Self::bool_false_name(),
             AnnotationReturn::BooleanFalse,
+            AnnotationLevel::Info,
+            message,
+            collector,
+        ))
+    }
+
+    pub fn bool_true_udf(
+        message: String,
+        collector: Option<PromqlAnnotationCollector>,
+    ) -> ScalarUDF {
+        ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
+            Self::bool_true_name(),
+            AnnotationReturn::BooleanTrue,
+            AnnotationLevel::Info,
+            message,
+            collector,
+        ))
+    }
+
+    pub fn warning_bool_false_udf(
+        message: String,
+        collector: Option<PromqlAnnotationCollector>,
+    ) -> ScalarUDF {
+        ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
+            Self::bool_false_name(),
+            AnnotationReturn::BooleanFalse,
+            AnnotationLevel::Warning,
             message,
             collector,
         ))
     }
 }
 
-// Synthetic drop UDFs only cover info-level invalid PromQL combinations.
-// Warning annotations stay in the histogram UDFs that actually drop samples.
 fn record_info(collector: &Option<PromqlAnnotationCollector>, message: impl Into<String>) {
     if let Some(collector) = collector {
         collector.record_info(message);

@@ -48,6 +48,7 @@ use datafusion::sql::TableReference;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality};
 use datafusion_expr::expr::WindowFunctionParams;
+use datafusion_expr::expr_fn::when;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
@@ -649,6 +650,9 @@ impl PromPlanner {
                 // calculate columns to group by
                 // Need to append time index column into group by columns
                 let mut group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
+                let mixed_sample_columns =
+                    Self::alternative_sample_columns(input.schema(), &self.ctx.field_columns)
+                        .map(|(float, histogram)| (float.to_string(), histogram.to_string()));
                 // convert op and value columns to aggregate exprs
                 let (mut aggr_exprs, prev_field_exprs) =
                     self.create_aggregate_exprs(*op, param, &input)?;
@@ -692,6 +696,47 @@ impl PromPlanner {
                     builder
                         .aggregate(group_exprs.clone(), aggr_exprs)
                         .context(DataFusionPlanningSnafu)?
+                };
+
+                let builder = if let Some((float, histogram)) = mixed_sample_columns {
+                    let builder = match op.id() {
+                        token::T_SUM | token::T_AVG => builder
+                            .filter(self.mixed_aggregate_filter_expr(*op, &float, &histogram)?)
+                            .context(DataFusionPlanningSnafu)?,
+                        token::T_MIN
+                        | token::T_MAX
+                        | token::T_STDDEV
+                        | token::T_STDVAR
+                        | token::T_QUANTILE => builder
+                            .filter(self.mixed_ignored_histogram_filter_expr(*op, &histogram)?)
+                            .context(DataFusionPlanningSnafu)?,
+                        _ => builder,
+                    };
+
+                    match op.id() {
+                        token::T_SUM
+                        | token::T_AVG
+                        | token::T_MIN
+                        | token::T_MAX
+                        | token::T_STDDEV
+                        | token::T_STDVAR
+                        | token::T_QUANTILE => {
+                            let project_fields = self
+                                .create_field_column_exprs()?
+                                .into_iter()
+                                .chain(self.create_tag_column_exprs()?)
+                                .chain(self.ctx.use_tsid.then_some(DfExpr::Column(
+                                    Column::from_name(DATA_SCHEMA_TSID_COLUMN_NAME),
+                                )))
+                                .chain(Some(self.create_time_index_column_expr()?));
+                            builder
+                                .project(project_fields)
+                                .context(DataFusionPlanningSnafu)?
+                        }
+                        _ => builder,
+                    }
+                } else {
+                    builder
                 };
 
                 let sort_expr = group_exprs.into_iter().map(|expr| expr.sort(true, false));
@@ -3705,9 +3750,11 @@ impl PromPlanner {
         param: &Option<Box<PromExpr>>,
         input_plan: &LogicalPlan,
     ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
-        let mut non_col_args = Vec::new();
+        let mixed_sample_columns =
+            Self::alternative_sample_columns(input_plan.schema(), &self.ctx.field_columns)
+                .map(|(float, histogram)| (float.to_string(), histogram.to_string()));
         let is_group_agg = op.id() == token::T_GROUP;
-        if is_group_agg {
+        if is_group_agg && mixed_sample_columns.is_none() {
             ensure!(
                 self.ctx.field_columns.len() == 1,
                 MultiFieldsNotSupportedSnafu {
@@ -3716,50 +3763,27 @@ impl PromPlanner {
             );
         }
 
+        if let Some((float, histogram)) = mixed_sample_columns {
+            return self.create_mixed_aggregate_exprs(op, param, &float, &histogram);
+        }
+
         if self.all_field_columns_are_native_histograms(input_plan.schema()) {
             return self.create_native_histogram_aggregate_exprs(op, input_plan);
         }
 
-        let aggr = match op.id() {
-            token::T_SUM => sum_udaf(),
-            token::T_QUANTILE => {
-                let q =
-                    Self::get_param_as_literal_expr(param, Some(op), Some(ArrowDataType::Float64))?;
-                non_col_args.push(q);
-                quantile_udaf()
-            }
-            token::T_AVG => avg_udaf(),
-            token::T_COUNT_VALUES | token::T_COUNT => count_udaf(),
-            token::T_MIN => min_udaf(),
-            token::T_MAX => max_udaf(),
-            // PromQL's `group()` aggregator produces 1 for each group.
-            // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
-            token::T_GROUP => max_udaf(),
-            token::T_STDDEV => stddev_pop_udaf(),
-            token::T_STDVAR => var_pop_udaf(),
-            token::T_TOPK | token::T_BOTTOMK => UnsupportedExprSnafu {
-                name: format!("{op:?}"),
-            }
-            .fail()?,
-            _ => UnexpectedTokenSnafu { token: op }.fail()?,
-        };
-
         // perform aggregate operation to each value column
-        let exprs: Vec<DfExpr> = self
+        let exprs = self
             .ctx
             .field_columns
             .iter()
             .map(|col| {
-                if is_group_agg {
-                    aggr.call(vec![lit(1_f64)])
-                } else {
-                    non_col_args.push(DfExpr::Column(Column::from_name(col)));
-                    let expr = aggr.call(non_col_args.clone());
-                    non_col_args.pop();
-                    expr
-                }
+                Self::create_numeric_aggregate_expr(
+                    op,
+                    param,
+                    DfExpr::Column(Column::from_name(col)),
+                )
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         // if the aggregator is `count_values`, it must be grouped by current fields.
         let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
@@ -3795,6 +3819,230 @@ impl PromPlanner {
         Ok((exprs, prev_field_exprs))
     }
 
+    fn create_numeric_aggregate_expr(
+        op: TokenType,
+        param: &Option<Box<PromExpr>>,
+        input: DfExpr,
+    ) -> Result<DfExpr> {
+        let expr = match op.id() {
+            token::T_SUM => sum_udaf().call(vec![input]),
+            token::T_QUANTILE => {
+                let q =
+                    Self::get_param_as_literal_expr(param, Some(op), Some(ArrowDataType::Float64))?;
+                quantile_udaf().call(vec![q, input])
+            }
+            token::T_AVG => avg_udaf().call(vec![input]),
+            token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]),
+            token::T_MIN => min_udaf().call(vec![input]),
+            token::T_MAX => max_udaf().call(vec![input]),
+            // PromQL's `group()` aggregator produces 1 for each group.
+            // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
+            token::T_GROUP => max_udaf().call(vec![lit(1_f64)]),
+            token::T_STDDEV => stddev_pop_udaf().call(vec![input]),
+            token::T_STDVAR => var_pop_udaf().call(vec![input]),
+            token::T_TOPK | token::T_BOTTOMK => {
+                return UnsupportedExprSnafu {
+                    name: format!("{op:?}"),
+                }
+                .fail();
+            }
+            _ => return UnexpectedTokenSnafu { token: op }.fail(),
+        };
+        Ok(expr)
+    }
+
+    fn create_mixed_aggregate_exprs(
+        &mut self,
+        op: TokenType,
+        param: &Option<Box<PromExpr>>,
+        float_column: &str,
+        histogram_column: &str,
+    ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
+        let float_input = DfExpr::Column(Column::from_name(float_column));
+        let histogram_input = DfExpr::Column(Column::from_name(histogram_column));
+        let float_count = count_udaf().call(vec![float_input.clone()]);
+        let histogram_count = count_udaf().call(vec![histogram_input.clone()]);
+
+        let (exprs, prev_field_exprs, field_columns) = match op.id() {
+            token::T_SUM | token::T_AVG => (
+                vec![
+                    Self::create_numeric_aggregate_expr(op, param, float_input)?
+                        .alias(float_column),
+                    self.create_native_histogram_aggregate_expr(op, histogram_column)?,
+                    float_count.alias(Self::mixed_sample_count_name(float_column)),
+                    histogram_count.alias(Self::mixed_sample_count_name(histogram_column)),
+                ],
+                vec![],
+                vec![float_column.to_string(), histogram_column.to_string()],
+            ),
+            token::T_COUNT => (
+                vec![
+                    DfExpr::BinaryExpr(BinaryExpr {
+                        left: Box::new(float_count),
+                        op: Operator::Plus,
+                        right: Box::new(histogram_count),
+                    })
+                    .alias(float_column),
+                ],
+                vec![],
+                vec![float_column.to_string()],
+            ),
+            token::T_GROUP => (
+                vec![max_udaf().call(vec![lit(1_f64)]).alias(float_column)],
+                vec![],
+                vec![float_column.to_string()],
+            ),
+            token::T_COUNT_VALUES => {
+                let value = DfExpr::ScalarFunction(ScalarFunction {
+                    func: coalesce(),
+                    args: vec![
+                        DfExpr::Cast(Cast {
+                            expr: Box::new(float_input.clone()),
+                            data_type: ArrowDataType::Utf8,
+                        }),
+                        DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::new(NativeHistogramToString::scalar_udf()),
+                            args: vec![histogram_input.clone()],
+                        }),
+                    ],
+                });
+                (
+                    vec![
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(float_count),
+                            op: Operator::Plus,
+                            right: Box::new(histogram_count),
+                        })
+                        .alias(float_column),
+                    ],
+                    vec![value],
+                    vec![float_column.to_string()],
+                )
+            }
+            token::T_MIN | token::T_MAX | token::T_STDDEV | token::T_STDVAR | token::T_QUANTILE => {
+                (
+                    vec![
+                        Self::create_numeric_aggregate_expr(op, param, float_input)?
+                            .alias(float_column),
+                        histogram_count.alias(Self::mixed_sample_count_name(histogram_column)),
+                    ],
+                    vec![],
+                    vec![float_column.to_string()],
+                )
+            }
+            token::T_TOPK | token::T_BOTTOMK => {
+                return UnsupportedExprSnafu {
+                    name: format!("{op:?}"),
+                }
+                .fail();
+            }
+            _ => return UnexpectedTokenSnafu { token: op }.fail(),
+        };
+
+        self.ctx.field_columns = field_columns;
+        Ok((exprs, prev_field_exprs))
+    }
+
+    fn mixed_sample_count_column(column: &str) -> DfExpr {
+        DfExpr::Column(Column::from_name(Self::mixed_sample_count_name(column)))
+    }
+
+    fn mixed_sample_count_name(column: &str) -> String {
+        format!("__promql_sample_count({column})")
+    }
+
+    fn mixed_aggregate_filter_expr(
+        &self,
+        op: TokenType,
+        float_column: &str,
+        histogram_column: &str,
+    ) -> Result<DfExpr> {
+        let float_count = Self::mixed_sample_count_column(float_column);
+        let histogram_count = Self::mixed_sample_count_column(histogram_column);
+        let mixed = float_count
+            .clone()
+            .gt(lit(0_i64))
+            .and(histogram_count.clone().gt(lit(0_i64)));
+        let drop_mixed = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(NativeHistogramDrop::warning_bool_false_udf(
+                format!(
+                    "{op}: dropped aggregation result containing both float and native histogram samples"
+                ),
+                self.promql_annotations.clone(),
+            )),
+            args: vec![float_count, histogram_count],
+        });
+
+        when(mixed, drop_mixed)
+            .otherwise(lit(true))
+            .context(DataFusionPlanningSnafu)
+    }
+
+    fn mixed_ignored_histogram_filter_expr(
+        &self,
+        op: TokenType,
+        histogram_column: &str,
+    ) -> Result<DfExpr> {
+        let histogram_count = Self::mixed_sample_count_column(histogram_column);
+        let has_histograms = histogram_count.clone().gt(lit(0_i64));
+        let record_info = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(NativeHistogramDrop::bool_true_udf(
+                format!(
+                    "{op}: dropped native histogram samples because this aggregation is not supported for native histograms"
+                ),
+                self.promql_annotations.clone(),
+            )),
+            args: vec![histogram_count],
+        });
+
+        when(has_histograms, record_info)
+            .otherwise(lit(true))
+            .context(DataFusionPlanningSnafu)
+    }
+
+    fn create_native_histogram_aggregate_expr(
+        &self,
+        op: TokenType,
+        column: &str,
+    ) -> Result<DfExpr> {
+        let input = DfExpr::Column(Column::from_name(column));
+        let expr = match op.id() {
+            token::T_SUM => Arc::new(NativeHistogramAggSum::aggregate_udf_with_collector(
+                self.promql_annotations.clone(),
+            ))
+            .call(vec![input])
+            .alias(column),
+            token::T_AVG => Arc::new(NativeHistogramAggAvg::aggregate_udf_with_collector(
+                self.promql_annotations.clone(),
+            ))
+            .call(vec![input])
+            .alias(column),
+            token::T_COUNT_VALUES | token::T_COUNT => {
+                count_udaf().call(vec![input]).alias(column)
+            }
+            token::T_GROUP => max_udaf().call(vec![lit(1_f64)]).alias(column),
+            token::T_MIN
+            | token::T_MAX
+            | token::T_STDDEV
+            | token::T_STDVAR
+            | token::T_QUANTILE
+            | token::T_TOPK
+            | token::T_BOTTOMK => sum_udaf()
+                .call(vec![DfExpr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(NativeHistogramDrop::float_null_udf(
+                        format!(
+                            "{op}: dropped native histogram samples because this aggregation is not supported for native histograms"
+                        ),
+                        self.promql_annotations.clone(),
+                    )),
+                    args: vec![input],
+                })])
+                .alias(column),
+            _ => return UnexpectedTokenSnafu { token: op }.fail(),
+        };
+        Ok(expr)
+    }
+
     fn create_native_histogram_aggregate_exprs(
         &mut self,
         op: TokenType,
@@ -3825,43 +4073,7 @@ impl PromPlanner {
             .ctx
             .field_columns
             .iter()
-            .map(|col| {
-                let input = DfExpr::Column(Column::from_name(col));
-                let expr = match op.id() {
-                    token::T_SUM => Arc::new(NativeHistogramAggSum::aggregate_udf_with_collector(
-                        self.promql_annotations.clone(),
-                    ))
-                        .call(vec![input])
-                        .alias(col),
-                    token::T_AVG => Arc::new(NativeHistogramAggAvg::aggregate_udf_with_collector(
-                        self.promql_annotations.clone(),
-                    ))
-                        .call(vec![input])
-                        .alias(col),
-                    token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]).alias(col),
-                    token::T_GROUP => max_udaf().call(vec![lit(1_f64)]).alias(col),
-                    token::T_MIN
-                    | token::T_MAX
-                    | token::T_STDDEV
-                    | token::T_STDVAR
-                    | token::T_QUANTILE
-                    | token::T_TOPK
-                    | token::T_BOTTOMK => sum_udaf()
-                        .call(vec![DfExpr::ScalarFunction(ScalarFunction {
-                            func: Arc::new(NativeHistogramDrop::float_null_udf(
-                                format!(
-                                    "{}: dropped native histogram samples because this aggregation is not supported for native histograms",
-                                    op
-                                ),
-                                self.promql_annotations.clone(),
-                            )),
-                            args: vec![input],
-                        })])
-                        .alias(col),
-                    _ => return UnexpectedTokenSnafu { token: op }.fail(),
-                };
-                Ok(expr)
-            })
+            .map(|col| self.create_native_histogram_aggregate_expr(op, col))
             .collect::<Result<Vec<_>>>()?;
 
         let normalized_exprs =
@@ -4561,15 +4773,25 @@ impl PromPlanner {
         schema: &DFSchemaRef,
         field_columns: &[String],
     ) -> bool {
-        field_columns.len() == 2
-            && field_columns.iter().any(|field| {
-                field.starts_with(OR_FLOAT_FIELD_PREFIX)
-                    && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
-            })
-            && field_columns.iter().any(|field| {
-                field.starts_with(OR_HISTOGRAM_FIELD_PREFIX)
-                    && Self::field_column_is_native_histogram(schema, field)
-            })
+        Self::alternative_sample_columns(schema, field_columns).is_some()
+    }
+
+    fn alternative_sample_columns<'a>(
+        schema: &DFSchemaRef,
+        field_columns: &'a [String],
+    ) -> Option<(&'a str, &'a str)> {
+        if field_columns.len() != 2 {
+            return None;
+        }
+        let float = field_columns.iter().find(|field| {
+            field.starts_with(OR_FLOAT_FIELD_PREFIX)
+                && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+        })?;
+        let histogram = field_columns.iter().find(|field| {
+            field.starts_with(OR_HISTOGRAM_FIELD_PREFIX)
+                && Self::field_column_is_native_histogram(schema, field)
+        })?;
+        Some((float, histogram))
     }
 
     fn field_column_is_native_histogram_range(schema: &DFSchemaRef, field_column: &str) -> bool {
@@ -5760,7 +5982,7 @@ mod test {
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::native_histogram::{
-        CounterResetHint, NativeHistogram, build_histogram_array,
+        CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
     };
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_query::test_util::DummyDecoder;
@@ -6173,6 +6395,65 @@ mod test {
                 &or_modifier("lhs or on(k) rhs"),
             )
             .unwrap();
+        (planner, plan)
+    }
+
+    async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner, LogicalPlan) {
+        let float_field = format!("{OR_FLOAT_FIELD_PREFIX}0");
+        let histogram_field = format!("{OR_HISTOGRAM_FIELD_PREFIX}0");
+        let row_count = histograms.len() + 1;
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("k", ArrowDataType::Utf8, false),
+            Field::new(&float_field, ArrowDataType::Float64, true),
+            Field::new(
+                &histogram_field,
+                native_histogram_value_type().as_arrow_type(),
+                true,
+            ),
+        ]));
+        let mut histogram_values = Vec::with_capacity(row_count);
+        histogram_values.push(None);
+        histogram_values.extend(histograms.into_iter().map(Some));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1; row_count])),
+                Arc::new(StringArray::from_iter_values(
+                    (0..row_count).map(|row| format!("kind_{row}")),
+                )),
+                Arc::new(Float64Array::from_iter(
+                    (0..row_count).map(|row| (row == 0).then_some(1.25)),
+                )),
+                build_histogram_array(&histogram_values),
+            ],
+        )
+        .unwrap();
+        let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+        let plan = LogicalPlanBuilder::scan("mixed", provider_as_source(table), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext {
+                table_name: Some("mixed".to_string()),
+                time_index_column: Some("ts".to_string()),
+                field_columns: vec![float_field, histogram_field],
+                tag_columns: vec!["k".to_string()],
+                ..Default::default()
+            },
+            promql_annotations: None,
+        };
         (planner, plan)
     }
 
@@ -10136,6 +10417,176 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             assert_eq!(histogram.count, -1.0);
             assert_eq!(histogram.sum, -1.0);
             assert_eq!(histogram.reset_hint, CounterResetHint::Gauge);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mixed_or_sum_aggregates_each_sample_type() {
+        let PromExpr::Aggregate(AggregateExpr { op, param, .. }) =
+            parser::parse("sum(lhs)").unwrap()
+        else {
+            unreachable!()
+        };
+
+        let collector = PromqlAnnotationCollector::default();
+        let (mut planner, input) = mixed_direct_or(false).await;
+        planner.promql_annotations = Some(collector.clone());
+        let float_column = planner.ctx.field_columns[0].clone();
+        let histogram_column = planner.ctx.field_columns[1].clone();
+        let (aggregate_exprs, _) = planner.create_aggregate_exprs(op, &param, &input).unwrap();
+        let plan = LogicalPlanBuilder::from(input)
+            .aggregate(vec![col("ts"), col("k")], aggregate_exprs)
+            .unwrap()
+            .filter(
+                planner
+                    .mixed_aggregate_filter_expr(op, &float_column, &histogram_column)
+                    .unwrap(),
+            )
+            .unwrap()
+            .project([
+                col(&float_column),
+                col(&histogram_column),
+                col("ts"),
+                col("k"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(values(&batches, &float_column), vec![1.25]);
+        let histogram = batches
+            .iter()
+            .find_map(|batch| {
+                let values = batch
+                    .column_by_name(&histogram_column)?
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StructArray>()?;
+                (0..values.len()).find_map(|row| {
+                    common_query::native_histogram::read_histogram(values, row).unwrap()
+                })
+            })
+            .unwrap();
+        assert_eq!(histogram.count, 1.0);
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty());
+
+        let collector = PromqlAnnotationCollector::default();
+        let (mut planner, input) = mixed_direct_or(false).await;
+        planner.promql_annotations = Some(collector.clone());
+        let float_column = planner.ctx.field_columns[0].clone();
+        let histogram_column = planner.ctx.field_columns[1].clone();
+        let (aggregate_exprs, _) = planner.create_aggregate_exprs(op, &param, &input).unwrap();
+        let plan = LogicalPlanBuilder::from(input)
+            .aggregate(vec![col("ts")], aggregate_exprs)
+            .unwrap()
+            .filter(
+                planner
+                    .mixed_aggregate_filter_expr(op, &float_column, &histogram_column)
+                    .unwrap(),
+            )
+            .unwrap()
+            .project([col(&float_column), col(&histogram_column), col("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        collector.append_to(&mut warnings, &mut infos);
+        assert_eq!(
+            warnings,
+            vec![
+                "sum: dropped aggregation result containing both float and native histogram samples"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mixed_or_sum_drops_incompatible_mixed_group() {
+        let PromExpr::Aggregate(AggregateExpr { op, param, .. }) =
+            parser::parse("sum(lhs)").unwrap()
+        else {
+            unreachable!()
+        };
+        let mut custom = direct_or_histogram();
+        custom.schema = CUSTOM_BUCKETS_SCHEMA;
+        custom.custom_values = vec![1.0];
+        let collector = PromqlAnnotationCollector::default();
+        let (mut planner, input) = mixed_aggregate_input(vec![direct_or_histogram(), custom]).await;
+        planner.promql_annotations = Some(collector.clone());
+        let float_column = planner.ctx.field_columns[0].clone();
+        let histogram_column = planner.ctx.field_columns[1].clone();
+        let (aggregate_exprs, _) = planner.create_aggregate_exprs(op, &param, &input).unwrap();
+        let plan = LogicalPlanBuilder::from(input)
+            .aggregate(vec![col("ts")], aggregate_exprs)
+            .unwrap()
+            .filter(
+                planner
+                    .mixed_aggregate_filter_expr(op, &float_column, &histogram_column)
+                    .unwrap(),
+            )
+            .unwrap()
+            .project([col(&float_column), col(&histogram_column), col("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.iter().any(|warning| {
+            warning
+                == "sum: dropped aggregation result containing both float and native histogram samples"
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_mixed_or_min_records_only_present_histograms() {
+        let PromExpr::Aggregate(AggregateExpr { op, param, .. }) =
+            parser::parse("min(lhs)").unwrap()
+        else {
+            unreachable!()
+        };
+        let expected_info = "min: dropped native histogram samples because this aggregation is not supported for native histograms";
+
+        for (histograms, expected_infos) in [
+            (vec![], vec![]),
+            (vec![direct_or_histogram()], vec![expected_info]),
+        ] {
+            let collector = PromqlAnnotationCollector::default();
+            let (mut planner, input) = mixed_aggregate_input(histograms).await;
+            planner.promql_annotations = Some(collector.clone());
+            let float_column = planner.ctx.field_columns[0].clone();
+            let histogram_column = planner.ctx.field_columns[1].clone();
+            let (aggregate_exprs, _) = planner.create_aggregate_exprs(op, &param, &input).unwrap();
+            let plan = LogicalPlanBuilder::from(input)
+                .aggregate(vec![col("ts")], aggregate_exprs)
+                .unwrap()
+                .filter(
+                    planner
+                        .mixed_ignored_histogram_filter_expr(op, &histogram_column)
+                        .unwrap(),
+                )
+                .unwrap()
+                .project([col(&float_column), col("ts")])
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let (_, batches) = execute(plan, &build_query_engine_state()).await;
+            assert_eq!(values(&batches, &float_column), vec![1.25]);
+            let mut warnings = vec![];
+            let mut infos = vec![];
+            collector.append_to(&mut warnings, &mut infos);
+            assert!(warnings.is_empty());
+            assert_eq!(infos, expected_infos);
         }
     }
 
