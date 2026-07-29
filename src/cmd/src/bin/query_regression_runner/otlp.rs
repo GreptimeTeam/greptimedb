@@ -23,11 +23,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::measure::round_ties_even;
-use super::model::{OtlpLoad, OtlpThresholds};
-use super::plan::normalized_otlp_load;
-use super::sql::{extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64};
-use super::{FinalizeOtlpArgs, Result, RunOtlpTargetArgs};
+use crate::query_regression_runner::measure::round_ties_even;
+use crate::query_regression_runner::model::{OtlpLoad, OtlpThresholds};
+use crate::query_regression_runner::plan::normalized_otlp_load;
+use crate::query_regression_runner::sql::{
+    extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64,
+};
+use crate::query_regression_runner::{FinalizeOtlpArgs, Result, RunOtlpTargetArgs};
 
 const OTLP_ROWS: &str = "greptime_frontend_otlp_traces_rows";
 const OTLP_FAILURES: &str = "greptime_frontend_otlp_traces_failure_count";

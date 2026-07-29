@@ -20,9 +20,9 @@ use std::time::Instant;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use super::super::Result;
-use super::super::measure::median;
-use super::super::model::ReadBenchConfig;
+use crate::query_regression_runner::Result;
+use crate::query_regression_runner::measure::median;
+use crate::query_regression_runner::model::ReadBenchConfig;
 
 #[derive(Clone, Debug)]
 struct BenchTarget {

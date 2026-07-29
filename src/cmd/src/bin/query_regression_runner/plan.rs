@@ -18,8 +18,10 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::Result;
-use super::model::{Layout, OtlpLoad, Query, RemoteWrite, Scenario, Table};
+use crate::query_regression_runner::Result;
+use crate::query_regression_runner::model::{
+    Layout, OtlpLoad, Query, RemoteWrite, Scenario, Table,
+};
 
 pub(super) fn load_plan(generator: &PathBuf, case_path: &PathBuf) -> Result<Value> {
     let output = Command::new(generator)

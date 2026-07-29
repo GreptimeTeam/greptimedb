@@ -17,7 +17,7 @@ use std::time::Instant;
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use super::Result;
+use crate::query_regression_runner::Result;
 
 pub(super) fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))

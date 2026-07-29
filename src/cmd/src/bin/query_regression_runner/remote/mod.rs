@@ -19,8 +19,10 @@ use serde_json::{Value, json};
 
 use self::read_bench::run_read_bench;
 use self::storage::{enforce_storage_thresholds, run_storage_inspection};
-use super::plan::normalized_remote_write;
-use super::{FinalizeRemoteArgs, PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
+use crate::query_regression_runner::plan::normalized_remote_write;
+use crate::query_regression_runner::{
+    FinalizeRemoteArgs, PrepareRemoteArgs, RenderRemoteConfigArgs, Result,
+};
 
 pub(super) mod ingest;
 mod read_bench;

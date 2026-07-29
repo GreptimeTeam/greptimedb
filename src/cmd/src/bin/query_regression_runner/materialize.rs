@@ -20,8 +20,10 @@ use object_store::ObjectStore;
 use object_store::factory::new_raw_object_store;
 use object_store::services::Fs;
 
-use super::model::{CopyCounts, DestinationConfig, FixtureSummary, MaterializeResult};
-use super::{MaterializeArgs, Result};
+use crate::query_regression_runner::model::{
+    CopyCounts, DestinationConfig, FixtureSummary, MaterializeResult,
+};
+use crate::query_regression_runner::{MaterializeArgs, Result};
 
 pub(super) async fn run_materialize(args: MaterializeArgs) -> Result<()> {
     let destination: DestinationConfig = toml::from_str(&fs::read_to_string(args.destination)?)?;

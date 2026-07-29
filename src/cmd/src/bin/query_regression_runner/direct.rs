@@ -21,12 +21,12 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::model::{Scenario, Table};
-use super::plan::{load_plan, validate_direct_tables};
-use super::sql::{
+use crate::query_regression_runner::model::{Scenario, Table};
+use crate::query_regression_runner::plan::{load_plan, validate_direct_tables};
+use crate::query_regression_runner::sql::{
     extract_rows, http_post_sql, row_u64, row_value, sql_ident, sql_string, value_text,
 };
-use super::{PrepareDirectArgs, Result};
+use crate::query_regression_runner::{PrepareDirectArgs, Result};
 
 #[derive(Clone, Debug, Serialize)]
 struct Discovery {

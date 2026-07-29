@@ -19,10 +19,10 @@ use std::{fs, io};
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 
-use super::model::{Measurement, Query, QueryResult, Scenario, Table};
-use super::plan::{load_plan, normalize_scenario};
-use super::sql::{http_post_sql, sql_ident};
-use super::{MeasureArgs, Result};
+use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
+use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
+use crate::query_regression_runner::sql::{http_post_sql, sql_ident};
+use crate::query_regression_runner::{MeasureArgs, Result};
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     if !args.http_timeout.is_finite() || args.http_timeout < 0.0 {

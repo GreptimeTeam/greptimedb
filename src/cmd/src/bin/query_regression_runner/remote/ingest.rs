@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use super::super::model::{PromStore, RemoteWrite};
-use super::super::plan::normalized_remote_write;
-use super::super::sql::{http_post_sql, sql_ident, sql_string};
-use super::super::{PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
+use crate::query_regression_runner::model::{PromStore, RemoteWrite};
+use crate::query_regression_runner::plan::normalized_remote_write;
+use crate::query_regression_runner::sql::{http_post_sql, sql_ident, sql_string};
+use crate::query_regression_runner::{PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
 
 pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Result<()> {
     let (_, remote) = normalized_remote_write(&args.fixture_generator, &args.case)?;

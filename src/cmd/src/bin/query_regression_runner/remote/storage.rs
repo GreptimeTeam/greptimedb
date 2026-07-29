@@ -18,9 +18,9 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use super::super::Result;
-use super::super::model::StorageConfig;
-use super::super::sql::{value_f64, value_u64};
+use crate::query_regression_runner::Result;
+use crate::query_regression_runner::model::StorageConfig;
+use crate::query_regression_runner::sql::{value_f64, value_u64};
 
 pub(super) fn run_storage_inspection(
     generator: &Path,
