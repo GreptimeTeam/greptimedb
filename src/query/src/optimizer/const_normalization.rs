@@ -217,6 +217,10 @@ fn rewrite_like_expr(
 }
 
 fn rewrite_binary_expr(binary: BinaryExpr, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+    if let Some(expr) = rewrite_dictionary_string_regex(binary.clone(), schema)? {
+        return Ok(Some(expr));
+    }
+
     if !binary.op.supports_propagation() {
         return Ok(None);
     }
@@ -233,6 +237,46 @@ fn rewrite_binary_expr(binary: BinaryExpr, schema: &DFSchemaRef) -> Result<Optio
     };
 
     rewrite_binary_side(right, swapped_op, left, schema)
+}
+
+/// Removes the string coercion/schema-reconciliation cast present before physical regex planning.
+///
+/// Keeping the dictionary input lets DataFusion's physical regex kernel evaluate scalar patterns
+/// against dictionary values instead of materializing the string column first.
+fn rewrite_dictionary_string_regex(
+    binary: BinaryExpr,
+    schema: &DFSchemaRef,
+) -> Result<Option<Expr>> {
+    let BinaryExpr { left, op, right } = binary;
+    if !matches!(
+        &op,
+        Operator::RegexMatch
+            | Operator::RegexIMatch
+            | Operator::RegexNotMatch
+            | Operator::RegexNotIMatch
+    ) || !matches!(right.as_literal(), Some(ScalarValue::Utf8(Some(_))))
+    {
+        return Ok(None);
+    }
+
+    let Some((CastInputKind::Cast, source, DataType::Utf8)) = extract_cast_input(&left) else {
+        return Ok(None);
+    };
+    if !matches!(source, Expr::Column(_))
+        || !matches!(
+            source.get_type(schema)?,
+            DataType::Dictionary(key_type, value_type)
+                if key_type.as_ref() == &DataType::UInt32 && value_type.as_ref() == &DataType::Utf8
+        )
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(Expr::BinaryExpr(BinaryExpr {
+        left: Box::new(source.clone()),
+        op,
+        right,
+    })))
 }
 
 fn rewrite_binary_side(
@@ -595,6 +639,7 @@ fn timestamp_scalar(unit: ArrowTimeUnit, timezone: Option<Arc<str>>, value: i64)
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{DictionaryArray, StringArray, UInt32Array};
     use arrow_schema::{DataType, TimeUnit as ArrowTimeUnit};
     use async_trait::async_trait;
     use common_time::Timestamp;
@@ -602,15 +647,19 @@ mod tests {
     use common_time::timestamp::TimeUnit;
     use datafusion::catalog::Session;
     use datafusion::config::ConfigOptions;
-    use datafusion::datasource::{TableProvider, provider_as_source};
-    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::datasource::{MemTable, TableProvider, provider_as_source};
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::execution::context::SessionContext;
+    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion::physical_plan::{ExecutionPlan, collect};
+    use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{DFSchema, ScalarValue, ToDFSchema};
-    use datafusion_expr::expr::{Between, Like};
+    use datafusion_expr::expr::{Between, BinaryExpr, Like};
     use datafusion_expr::expr_fn::{cast, col, try_cast};
     use datafusion_expr::{
-        Expr, LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableScan, TableSource,
-        TableType, lit,
+        Expr, LogicalPlan, LogicalPlanBuilder, Operator, TableProviderFilterPushDown, TableScan,
+        TableSource, TableType, lit,
     };
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datafusion_optimizer::optimizer::{Optimizer, OptimizerContext};
@@ -619,7 +668,8 @@ mod tests {
     use table::predicate::build_time_range_predicate;
 
     use super::{
-        ConstNormalizationRule, PatternMatchKind, lower_bound_for_ge, try_cast_literal_to_type,
+        ConstNormalizationRule, PatternMatchKind, lower_bound_for_ge,
+        rewrite_dictionary_string_regex, try_cast_literal_to_type,
     };
 
     #[test]
@@ -807,6 +857,199 @@ mod tests {
             PatternMatchKind::SimilarTo,
             ScalarValue::LargeUtf8(Some("api.*".to_string())),
             "Filter: t.s SIMILAR TO Utf8(\"api.*\")\n  TableScan: t",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dictionary_regex_filter_keeps_dictionary_input() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "host",
+            dictionary_type.clone(),
+            true,
+        )]));
+        let host = DictionaryArray::new(
+            UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(3)]),
+            Arc::new(StringArray::from(vec![
+                Some("api"),
+                Some("API"),
+                Some("db"),
+                None,
+            ])),
+        );
+        let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(host)],
+        )
+        .unwrap();
+
+        for (op, expected_rows) in [
+            (Operator::RegexMatch, 1),
+            (Operator::RegexIMatch, 2),
+            (Operator::RegexNotMatch, 2),
+            (Operator::RegexNotIMatch, 1),
+        ] {
+            let table = MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap();
+            let predicate = Expr::BinaryExpr(BinaryExpr {
+                // This string coercion/schema-reconciliation cast is present before physical
+                // regex planning and would bypass DataFusion's dictionary-aware scalar regex
+                // kernel.
+                left: Box::new(cast(col("host"), DataType::Utf8)),
+                op,
+                right: Box::new(lit("^api$")),
+            });
+            let plan = LogicalPlanBuilder::scan("t", provider_as_source(Arc::new(table)), None)
+                .unwrap()
+                .filter(predicate)
+                .unwrap()
+                .build()
+                .unwrap();
+            let analyzed = analyze_plan(plan);
+
+            let LogicalPlan::Filter(filter) = &analyzed else {
+                panic!("expected filter plan");
+            };
+            let Expr::BinaryExpr(BinaryExpr { left, .. }) = &filter.predicate else {
+                panic!("expected regex binary predicate");
+            };
+            assert!(matches!(left.as_ref(), Expr::Column(_)));
+
+            let session_state = SessionStateBuilder::new().with_default_features().build();
+            let physical_plan = DefaultPhysicalPlanner::default()
+                .create_physical_plan(&analyzed, &session_state)
+                .await
+                .unwrap();
+            let filter = physical_plan
+                .as_any()
+                .downcast_ref::<FilterExec>()
+                .expect("regex residual must remain a FilterExec");
+            assert!(matches!(
+                filter.schema().field(0).data_type(),
+                DataType::Dictionary(_, value_type) if value_type.as_ref() == &DataType::Utf8
+            ));
+            assert!(!format!("{:?}", filter.predicate()).contains("Cast"));
+
+            let batches = collect(physical_plan, SessionContext::new().task_ctx())
+                .await
+                .unwrap();
+            assert_eq!(
+                expected_rows,
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_dictionary_regex_rewrite_requires_scalar_utf8_pattern() {
+        assert_filter_left_is_cast(
+            vec![
+                Field::new(
+                    "host",
+                    DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                    true,
+                ),
+                Field::new("pattern", DataType::Utf8, true),
+            ],
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(cast(col("host"), DataType::Utf8)),
+                op: Operator::RegexMatch,
+                right: Box::new(col("pattern")),
+            }),
+        );
+    }
+
+    #[test]
+    fn test_dictionary_regex_rewrite_excludes_non_regex_and_non_utf8_dictionary() {
+        assert_filter_left_is_cast(
+            vec![Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                true,
+            )],
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(cast(col("host"), DataType::Utf8)),
+                op: Operator::Eq,
+                right: Box::new(lit("api")),
+            }),
+        );
+        assert_filter_left_is_cast(
+            vec![Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::LargeUtf8)),
+                true,
+            )],
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(cast(col("host"), DataType::Utf8)),
+                op: Operator::RegexMatch,
+                right: Box::new(lit("^api$")),
+            }),
+        );
+    }
+
+    #[test]
+    fn test_dictionary_regex_rewrite_requires_exact_contract() {
+        let dictionary_utf8 = || {
+            vec![Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                true,
+            )]
+        };
+
+        for op in [
+            Operator::RegexMatch,
+            Operator::RegexIMatch,
+            Operator::RegexNotMatch,
+            Operator::RegexNotIMatch,
+        ] {
+            let rewritten = rewrite_dictionary_regex(
+                dictionary_utf8(),
+                cast(col("host"), DataType::Utf8),
+                lit("^api$"),
+                op,
+            );
+            assert!(matches!(
+                rewritten,
+                Some(Expr::BinaryExpr(BinaryExpr { left, .. })) if matches!(left.as_ref(), Expr::Column(_))
+            ));
+        }
+
+        for left in [
+            try_cast(col("host"), DataType::Utf8),
+            cast(cast(col("host"), DataType::Utf8), DataType::Utf8),
+        ] {
+            assert!(
+                rewrite_dictionary_regex(
+                    dictionary_utf8(),
+                    left,
+                    lit("^api$"),
+                    Operator::RegexMatch,
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            rewrite_dictionary_regex(
+                dictionary_utf8(),
+                cast(col("host"), DataType::Utf8),
+                lit(ScalarValue::Utf8(None)),
+                Operator::RegexMatch,
+            )
+            .is_none()
+        );
+        assert!(
+            rewrite_dictionary_regex(
+                vec![Field::new(
+                    "host",
+                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                    true,
+                )],
+                cast(col("host"), DataType::Utf8),
+                lit("^api$"),
+                Operator::RegexMatch,
+            )
+            .is_none()
         );
     }
 
@@ -1131,6 +1374,34 @@ mod tests {
 
     fn assert_filter_plan(fields: Vec<Field>, predicate: Expr, expected: &str) {
         assert_eq!(expected, analyze_filter(fields, predicate).to_string());
+    }
+
+    fn assert_filter_left_is_cast(fields: Vec<Field>, predicate: Expr) {
+        let analyzed = analyze_filter(fields, predicate);
+        let LogicalPlan::Filter(filter) = analyzed else {
+            panic!("expected filter plan");
+        };
+        let Expr::BinaryExpr(BinaryExpr { left, .. }) = filter.predicate else {
+            panic!("expected binary predicate");
+        };
+        assert!(matches!(left.as_ref(), Expr::Cast(_)));
+    }
+
+    fn rewrite_dictionary_regex(
+        fields: Vec<Field>,
+        left: Expr,
+        right: Expr,
+        op: Operator,
+    ) -> Option<Expr> {
+        rewrite_dictionary_string_regex(
+            BinaryExpr {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            },
+            &test_schema(fields),
+        )
+        .unwrap()
     }
 
     fn assert_timestamp_pushdown(
