@@ -80,12 +80,12 @@ impl RepartitionEvent {
                 source_partition_exprs: intent
                     .source_partition_exprs()
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|expr| expr.to_string())
                     .collect(),
                 target_partition_exprs: intent
                     .target_partition_exprs()
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|expr| expr.to_string())
                     .collect(),
                 target_partition_columns: intent.target_partition_columns().map(ToOwned::to_owned),
                 timeout: persistent_ctx.timeout,
@@ -158,11 +158,65 @@ struct RepartitionGroupSubmittedPayload {
 }
 
 #[derive(Debug)]
-struct RepartitionTopologyRow {
-    source_region_id: Option<RegionId>,
-    source_partition_expr: Option<String>,
-    target_region_id: Option<RegionId>,
-    target_partition_expr: Option<String>,
+struct RepartitionTopology {
+    sources: Vec<RepartitionTopologySource>,
+    target_partition_exprs: HashMap<RegionId, String>,
+    region_mapping: HashMap<RegionId, Vec<RegionId>>,
+}
+
+#[derive(Debug)]
+struct RepartitionTopologySource {
+    region_id: RegionId,
+    partition_expr: Option<String>,
+}
+
+#[derive(Debug)]
+struct RepartitionTopologyRow<'a> {
+    source_region_id: RegionId,
+    source_partition_expr: Option<&'a str>,
+    target_region_id: RegionId,
+    target_partition_expr: Option<&'a str>,
+}
+
+impl RepartitionTopology {
+    fn new(
+        sources: &[SourceRegionDescriptor],
+        targets: &[TargetRegionDescriptor],
+        region_mapping: &HashMap<RegionId, Vec<RegionId>>,
+    ) -> Self {
+        Self {
+            sources: sources
+                .iter()
+                .map(|source| RepartitionTopologySource {
+                    region_id: source.region_id(),
+                    partition_expr: source.partition_expr().map(|expr| expr.to_string()),
+                })
+                .collect(),
+            target_partition_exprs: targets
+                .iter()
+                .map(|target| (target.region_id, target.partition_expr.to_string()))
+                .collect(),
+            region_mapping: region_mapping.clone(),
+        }
+    }
+
+    fn rows(&self) -> impl Iterator<Item = RepartitionTopologyRow<'_>> {
+        self.sources.iter().flat_map(|source| {
+            self.region_mapping
+                .get(&source.region_id)
+                .into_iter()
+                .flatten()
+                .map(|target_region_id| RepartitionTopologyRow {
+                    source_region_id: source.region_id,
+                    source_partition_expr: source.partition_expr.as_deref(),
+                    target_region_id: *target_region_id,
+                    target_partition_expr: self
+                        .target_partition_exprs
+                        .get(target_region_id)
+                        .map(String::as_str),
+                })
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -173,7 +227,7 @@ pub(crate) struct RepartitionGroupEvent {
     table_id: Option<TableId>,
     parent_procedure_id: Option<String>,
     group_id: Option<String>,
-    topology: Vec<RepartitionTopologyRow>,
+    topology: Option<RepartitionTopology>,
     payload: Option<RepartitionGroupSubmittedPayload>,
 }
 
@@ -186,11 +240,11 @@ impl RepartitionGroupEvent {
             table_id: Some(persistent_ctx.table_id),
             parent_procedure_id: persistent_ctx.parent_procedure_id.map(|id| id.to_string()),
             group_id: Some(persistent_ctx.group_id.to_string()),
-            topology: topology_rows(
+            topology: Some(RepartitionTopology::new(
                 &persistent_ctx.sources,
                 &persistent_ctx.targets,
                 &persistent_ctx.region_mapping,
-            ),
+            )),
             payload: Some(RepartitionGroupSubmittedPayload {
                 version: PAYLOAD_VERSION,
                 sync_region: persistent_ctx.sync_region,
@@ -217,13 +271,38 @@ impl RepartitionGroupEvent {
             table_id: None,
             parent_procedure_id: None,
             group_id: None,
-            topology: vec![RepartitionTopologyRow {
-                source_region_id: None,
-                source_partition_expr: None,
-                target_region_id: None,
-                target_partition_expr: None,
-            }],
+            topology: None,
             payload: None,
+        }
+    }
+
+    fn extra_row(&self, topology: Option<RepartitionTopologyRow<'_>>) -> Row {
+        let (source_region_id, source_partition_expr, target_region_id, target_partition_expr) =
+            match topology {
+                Some(topology) => (
+                    Some(topology.source_region_id),
+                    topology.source_partition_expr,
+                    Some(topology.target_region_id),
+                    topology.target_partition_expr,
+                ),
+                None => (None, None, None, None),
+            };
+
+        Row {
+            values: vec![
+                nullable_string(self.catalog_name.as_deref()),
+                nullable_string(self.schema_name.as_deref()),
+                nullable_string(self.table_name.as_deref()),
+                nullable_value(self.table_id.map(ValueData::U32Value)),
+                nullable_string(self.parent_procedure_id.as_deref()),
+                nullable_string(self.group_id.as_deref()),
+                nullable_value(source_region_id.map(|id| ValueData::U64Value(id.as_u64()))),
+                nullable_value(source_region_id.map(|id| ValueData::U32Value(id.region_number()))),
+                nullable_string(source_partition_expr),
+                nullable_value(target_region_id.map(|id| ValueData::U64Value(id.as_u64()))),
+                nullable_value(target_region_id.map(|id| ValueData::U32Value(id.region_number()))),
+                nullable_string(target_partition_expr),
+            ],
         }
     }
 
@@ -262,83 +341,18 @@ impl Event for RepartitionGroupEvent {
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
-        Ok(self
-            .topology
-            .iter()
-            .map(|topology| Row {
-                values: vec![
-                    nullable_string(self.catalog_name.as_deref()),
-                    nullable_string(self.schema_name.as_deref()),
-                    nullable_string(self.table_name.as_deref()),
-                    nullable_value(self.table_id.map(ValueData::U32Value)),
-                    nullable_string(self.parent_procedure_id.as_deref()),
-                    nullable_string(self.group_id.as_deref()),
-                    nullable_value(
-                        topology
-                            .source_region_id
-                            .map(|id| ValueData::U64Value(id.as_u64())),
-                    ),
-                    nullable_value(
-                        topology
-                            .source_region_id
-                            .map(|id| ValueData::U32Value(id.region_number())),
-                    ),
-                    nullable_string(topology.source_partition_expr.as_deref()),
-                    nullable_value(
-                        topology
-                            .target_region_id
-                            .map(|id| ValueData::U64Value(id.as_u64())),
-                    ),
-                    nullable_value(
-                        topology
-                            .target_region_id
-                            .map(|id| ValueData::U32Value(id.region_number())),
-                    ),
-                    nullable_string(topology.target_partition_expr.as_deref()),
-                ],
-            })
-            .collect())
+        match &self.topology {
+            Some(topology) => Ok(topology
+                .rows()
+                .map(|row| self.extra_row(Some(row)))
+                .collect()),
+            None => Ok(vec![self.extra_row(None)]),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
-
-fn topology_rows(
-    sources: &[SourceRegionDescriptor],
-    targets: &[TargetRegionDescriptor],
-    region_mapping: &HashMap<RegionId, Vec<RegionId>>,
-) -> Vec<RepartitionTopologyRow> {
-    let targets = targets
-        .iter()
-        .map(|target| (target.region_id, target))
-        .collect::<HashMap<_, _>>();
-    let mut rows = Vec::new();
-    for source in sources {
-        let source_region_id = source.region_id();
-        let source_partition_expr = source.partition_expr().map(ToString::to_string);
-        if let Some(target_ids) = region_mapping.get(&source_region_id) {
-            for target_region_id in target_ids {
-                let target = targets.get(target_region_id);
-                rows.push(RepartitionTopologyRow {
-                    source_region_id: Some(source_region_id),
-                    source_partition_expr: source_partition_expr.clone(),
-                    target_region_id: Some(*target_region_id),
-                    target_partition_expr: target.map(|target| target.partition_expr.to_string()),
-                });
-            }
-        }
-    }
-    if rows.is_empty() {
-        rows.push(RepartitionTopologyRow {
-            source_region_id: None,
-            source_partition_expr: None,
-            target_region_id: None,
-            target_partition_expr: None,
-        });
-    }
-    rows
 }
 
 #[cfg(test)]
@@ -469,7 +483,7 @@ mod tests {
                 partition_expr: expr(50, 100),
             },
         ];
-        let rows = topology_rows(
+        let topology = RepartitionTopology::new(
             &[SourceRegionDescriptor::partitioned(
                 source,
                 source_expr.clone(),
@@ -477,12 +491,14 @@ mod tests {
             &targets,
             &HashMap::from([(source, vec![left, right])]),
         );
+        let rows = topology.rows().collect::<Vec<_>>();
+        let source_expr = source_expr.to_string();
 
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|row| row.source_region_id == Some(source)));
-        assert_eq!(rows[0].source_partition_expr, Some(source_expr.to_string()));
-        assert_eq!(rows[0].target_region_id, Some(left));
-        assert_eq!(rows[1].target_region_id, Some(right));
+        assert!(rows.iter().all(|row| row.source_region_id == source));
+        assert_eq!(rows[0].source_partition_expr, Some(source_expr.as_str()));
+        assert_eq!(rows[0].target_region_id, left);
+        assert_eq!(rows[1].target_region_id, right);
     }
 
     #[test]
@@ -551,7 +567,7 @@ mod tests {
         let left = RegionId::new(table_id, 1);
         let right = RegionId::new(table_id, 2);
         let merged = RegionId::new(table_id, 3);
-        let rows = topology_rows(
+        let topology = RepartitionTopology::new(
             &[
                 SourceRegionDescriptor::partitioned(left, expr(0, 50)),
                 SourceRegionDescriptor::partitioned(right, expr(50, 100)),
@@ -562,11 +578,12 @@ mod tests {
             }],
             &HashMap::from([(left, vec![merged]), (right, vec![merged])]),
         );
+        let rows = topology.rows().collect::<Vec<_>>();
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].source_region_id, Some(left));
-        assert_eq!(rows[1].source_region_id, Some(right));
-        assert!(rows.iter().all(|row| row.target_region_id == Some(merged)));
+        assert_eq!(rows[0].source_region_id, left);
+        assert_eq!(rows[1].source_region_id, right);
+        assert!(rows.iter().all(|row| row.target_region_id == merged));
     }
 
     #[test]
@@ -574,7 +591,7 @@ mod tests {
         let table_id = 1024;
         let source = RegionId::new(table_id, 0);
         let target = RegionId::new(table_id, 1);
-        let rows = topology_rows(
+        let topology = RepartitionTopology::new(
             &[SourceRegionDescriptor::Default { region_id: source }],
             &[TargetRegionDescriptor {
                 region_id: target,
@@ -582,24 +599,24 @@ mod tests {
             }],
             &HashMap::from([(source, vec![target])]),
         );
+        let rows = topology.rows().collect::<Vec<_>>();
+        let target_partition_expr = expr(0, 100).to_string();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_partition_expr, None);
-        assert_eq!(rows[0].source_region_id.unwrap().region_number(), 0);
-        assert_eq!(rows[0].target_region_id.unwrap().region_number(), 1);
+        assert_eq!(rows[0].source_region_id.region_number(), 0);
+        assert_eq!(rows[0].target_region_id.region_number(), 1);
         assert_eq!(
             rows[0].target_partition_expr,
-            Some(expr(0, 100).to_string())
+            Some(target_partition_expr.as_str())
         );
     }
 
     #[test]
-    fn test_topology_rows_fall_back_for_empty_mapping() {
-        let rows = topology_rows(&[], &[], &HashMap::new());
+    fn test_topology_rows_skip_empty_mapping() {
+        let topology = RepartitionTopology::new(&[], &[], &HashMap::new());
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].source_region_id, None);
-        assert_eq!(rows[0].target_region_id, None);
+        assert!(topology.rows().next().is_none());
     }
 
     #[test]

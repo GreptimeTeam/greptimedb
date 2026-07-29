@@ -39,7 +39,7 @@ use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
-    Procedure, Result as ProcedureResult, Status, StringKey,
+    Procedure, ProcedureId, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
@@ -334,7 +334,7 @@ pub struct PersistentContext {
     pub group_id: GroupId,
     /// The parent repartition procedure id, when the group was created by a live parent.
     #[serde(default)]
-    pub parent_procedure_id: Option<common_procedure::ProcedureId>,
+    pub parent_procedure_id: Option<ProcedureId>,
     /// The table id of the repartition group.
     pub table_id: TableId,
     /// The catalog name of the repartition group.
@@ -372,7 +372,7 @@ impl PersistentContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: GroupId,
-        parent_procedure_id: common_procedure::ProcedureId,
+        parent_procedure_id: ProcedureId,
         table_id: TableId,
         catalog_name: String,
         schema_name: String,
@@ -631,7 +631,7 @@ mod tests {
     use common_event_recorder::EventTypeFilter;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
-    use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureState};
+    use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState};
 
     use crate::error::Error;
     use crate::event::repartition::REPARTITION_GROUP_EVENT_TYPE;
@@ -709,7 +709,7 @@ mod tests {
         };
         let state = ProcedureState::Running;
         let event_context = |event_type_filter| EventContext {
-            procedure_id: common_procedure::ProcedureId::random(),
+            procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(event_type_filter),
