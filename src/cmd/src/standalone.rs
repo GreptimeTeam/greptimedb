@@ -86,12 +86,12 @@ fn standalone_local_file_access(
 ) -> common_datasource::error::Result<LocalFileAccess> {
     let data_home = configured_local_path(&storage.data_home)?;
     let copy_root = match &storage.copy_root {
-        Some(root) => configured_local_path(root)?.context(
+        Some(root) => configured_local_path(root)?.with_context(|| {
             common_datasource::error::InvalidLocalFileRootConfigSnafu {
                 root: root.clone(),
                 reason: "copy_root must be a local path or file URL".to_string(),
-            },
-        )?,
+            }
+        })?,
         None => {
             let Some(data_home) = &data_home else {
                 info!(
@@ -110,12 +110,12 @@ fn standalone_local_file_access(
                 root: data_home.display().to_string(),
             }
         })?;
-        let canonical_copy_root = access.sandbox_root().context(
+        let canonical_copy_root = access.sandbox_root().with_context(|| {
             common_datasource::error::InvalidLocalFileRootConfigSnafu {
                 root: copy_root.display().to_string(),
                 reason: "sandboxed local file access has no root".to_string(),
-            },
-        )?;
+            }
+        })?;
         let default_copy_root = canonical_data_home.join("copy");
         let exposes_internal_files = canonical_data_home.starts_with(canonical_copy_root)
             || (canonical_copy_root.starts_with(&canonical_data_home)

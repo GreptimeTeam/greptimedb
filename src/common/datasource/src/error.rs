@@ -97,7 +97,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid local filesystem copy root '{}'", root))]
+    #[snafu(display("Invalid local filesystem root '{}'", root))]
     InvalidLocalFileRoot {
         root: String,
         #[snafu(source)]
@@ -106,7 +106,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid local filesystem copy root '{}': {}", root, reason))]
+    #[snafu(display("Invalid local filesystem root '{}': {}", root, reason))]
     InvalidLocalFileRootConfig {
         root: String,
         reason: String,
@@ -318,5 +318,22 @@ impl ErrorExt for Error {
             WriteParquet { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_invalid_local_file_root_config_display() {
+        let error = super::InvalidLocalFileRootConfigSnafu {
+            root: "file:///data",
+            reason: "file URL must contain a local absolute path",
+        }
+        .build();
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid local filesystem root 'file:///data': file URL must contain a local absolute path"
+        );
     }
 }
