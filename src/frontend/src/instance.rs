@@ -161,6 +161,19 @@ impl Instance {
         &self.plugins
     }
 
+    fn check_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+    ) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), req)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
     pub fn statement_executor(&self) -> &StatementExecutorRef {
         &self.statement_executor
     }
@@ -1682,7 +1695,10 @@ mod tests {
     use datatypes::vectors::{StringVector, VectorRef};
     use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
-    use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
+    use servers::query_handler::{
+        DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler,
+        PromStoreProtocolHandler,
+    };
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
@@ -1697,6 +1713,7 @@ mod tests {
     use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::frontend::FrontendOptions;
@@ -1932,6 +1949,54 @@ mod tests {
             } else {
                 PermissionResp::Allow
             })
+        }
+    }
+
+    struct RejectEndpointPermissionChecker;
+
+    impl PermissionChecker for RejectEndpointPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(
+                if matches!(
+                    req,
+                    PermissionReq::PipelineQuery
+                        | PermissionReq::PipelineManage
+                        | PermissionReq::DashboardQuery
+                        | PermissionReq::DashboardManage
+                ) {
+                    PermissionResp::Reject
+                } else {
+                    PermissionResp::Allow
+                },
+            )
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            user_info: UserInfoRef,
+            req: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            match req {
+                PermissionReq::JaegerQuery => {
+                    let reject = match targets {
+                        PermissionTableTargets::Unresolved => true,
+                        PermissionTableTargets::Resolved(targets) => {
+                            targets.iter().any(|target| target.table == "denied")
+                        }
+                    };
+                    Ok(if reject {
+                        PermissionResp::Reject
+                    } else {
+                        PermissionResp::Allow
+                    })
+                }
+                req => self.check_permission(user_info, req),
+            }
         }
     }
 
@@ -2412,6 +2477,14 @@ mod tests {
         })
     }
 
+    fn assert_permission_denied<T>(result: servers::error::Result<T>) {
+        let err = match result {
+            Ok(_) => panic!("request should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+    }
+
     #[tokio::test]
     async fn test_event_recorder_is_exposed() -> TestResult<()> {
         let instance =
@@ -2419,6 +2492,90 @@ mod tests {
                 .await?;
 
         let _event_recorder = instance.event_recorder();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_restricted_endpoint_handlers_check_permissions() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectEndpointPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "denied")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let mut ctx = test_query_ctx(1);
+        Arc::get_mut(&mut ctx).unwrap().set_extension(
+            servers::http::jaeger::JAEGER_QUERY_TABLE_NAME_KEY,
+            "denied".to_string(),
+        );
+
+        assert_permission_denied(JaegerQueryHandler::get_services(&instance, ctx.clone()).await);
+        assert_permission_denied(
+            JaegerQueryHandler::get_operations(&instance, ctx.clone(), "service", None).await,
+        );
+        assert_permission_denied(
+            JaegerQueryHandler::get_trace(&instance, ctx.clone(), "trace", None, None, None).await,
+        );
+        assert_permission_denied(
+            JaegerQueryHandler::find_traces(
+                &instance,
+                ctx.clone(),
+                servers::http::jaeger::QueryTraceParams {
+                    service_name: "service".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+
+        assert_permission_denied(
+            PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
+        );
+        assert_permission_denied(
+            PipelineHandler::insert_pipeline(
+                &instance,
+                "pipeline",
+                "application/yaml",
+                "",
+                ctx.clone(),
+            )
+            .await,
+        );
+        assert_permission_denied(
+            PipelineHandler::delete_pipeline(&instance, "pipeline", None, ctx.clone()).await,
+        );
+        let app = axum::Router::new()
+            .route(
+                "/pipelines/_dryrun",
+                axum::routing::post(servers::http::event::pipeline_dryrun),
+            )
+            .with_state(servers::http::event::LogState {
+                log_handler: Arc::new(instance.clone()),
+                log_validator: None,
+                ingest_interceptor: None,
+            })
+            .layer(axum::Extension((*ctx).clone()));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/pipelines/_dryrun")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+
+        assert_permission_denied(
+            DashboardHandler::save(&instance, "dashboard", "{}", ctx.clone()).await,
+        );
+        assert_permission_denied(DashboardHandler::list(&instance, ctx.clone()).await);
+        assert_permission_denied(
+            DashboardHandler::delete(&instance, "dashboard", ctx.clone()).await,
+        );
 
         Ok(())
     }
