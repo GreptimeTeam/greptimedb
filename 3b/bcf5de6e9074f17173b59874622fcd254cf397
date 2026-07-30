@@ -1,0 +1,57 @@
+src/common/event-recorder/src/event_table.rs
+  s_2a9e18b5bc423a::t_eff8c309858f4a 127-141,454-455,458-460,462-465
+  s_bab36d2c764e36::t_03c751fc4a2f15 467-469
+  s_2a9e18b5bc423a::t_5ae9ba2c88da3a 452-453,456-457,461,466
+tests-integration/tests/wal_prune_event.rs
+  s_2a9e18b5bc423a::t_7edac935f64fb4 70
+  s_2a9e18b5bc423a::t_5ac8f979d7f638 1-69,71-115
+tests-integration/tests/main.rs
+  s_2a9e18b5bc423a::t_5ac8f979d7f638 38
+src/meta-srv/src/event/wal_prune.rs
+  s_2a9e18b5bc423a::t_701f1879808cc0 90,141-145
+  s_2a9e18b5bc423a::t_eff8c309858f4a 1-89,91-140,146-154
+src/meta-srv/Cargo.toml
+  s_2a9e18b5bc423a::t_eff8c309858f4a 99
+src/meta-srv/src/procedure/wal_prune/utils.rs
+  s_2a9e18b5bc423a::t_7a43485749d5a8 26,145-146,152,160
+src/meta-srv/src/procedure/wal_prune.rs
+  s_2a9e18b5bc423a::t_8486249eb7eaa9 497
+  s_2a9e18b5bc423a::t_7a43485749d5a8 28-29,69-74,150,168-171,212-233
+  s_2a9e18b5bc423a::t_b09acf38a68f89 242,390,450,523,528,533-535,540
+  s_2a9e18b5bc423a::t_40a7dc3c48afe2 234,240,243,386-389,391-392,446-449,451-452,473-496,498-522,524-527,529-532,536-539,541-577
+  s_2a9e18b5bc423a::t_5ae9ba2c88da3a 40
+tests-integration/Cargo.toml
+  s_2a9e18b5bc423a::t_5ac8f979d7f638 119
+Cargo.lock
+  s_2a9e18b5bc423a::t_83a50294c8cd00 14775
+config/metasrv.example.toml
+  s_2a9e18b5bc423a::t_5ae9ba2c88da3a 320
+src/meta-srv/src/event.rs
+  s_2a9e18b5bc423a::t_5ae9ba2c88da3a 25
+config/standalone.example.toml
+  s_2a9e18b5bc423a::t_5ae9ba2c88da3a 910
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3bbcf5de6e9074f17173b59874622fcd254cf397",
+  "prompts": {},
+  "sessions": {
+    "s_2a9e18b5bc423a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fabec-71ad-7f72-95c4-75227a000213",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
