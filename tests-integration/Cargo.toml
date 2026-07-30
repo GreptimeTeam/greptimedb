@@ -25,7 +25,7 @@ auth.workspace = true
 axum.workspace = true
 base64.workspace = true
 cache.workspace = true
-catalog.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 clap.workspace = true
 client = { workspace = true, features = ["testing"] }
