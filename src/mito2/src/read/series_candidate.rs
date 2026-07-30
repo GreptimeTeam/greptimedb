@@ -62,7 +62,7 @@ use crate::sst::parquet::row_group::ParquetFetchMetrics;
 const CANDIDATE_SERIES_BATCH_SIZE: usize = 500;
 
 /// Identifies one series in a physical metric region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct MetricSeriesId {
     pub(crate) table_id: u32,
     pub(crate) tsid: u64,
@@ -75,7 +75,7 @@ pub(crate) type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSerie
 pub(crate) struct SeriesCandidateScanner {
     stream_ctx: Arc<StreamContext>,
     partitions: Vec<Vec<PartitionRange>>,
-    pruner: Arc<Pruner>,
+    partition_pruner: Arc<PartitionPruner>,
     range_semaphore: Arc<Semaphore>,
     memory_pool: Arc<dyn MemoryPool>,
     metrics_set: ExecutionPlanMetricsSet,
@@ -106,10 +106,13 @@ impl SeriesCandidateScanner {
                 reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
             }
         );
+        let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
+        pruner.add_partition_ranges(&all_ranges);
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &all_ranges));
         Ok(Self {
             stream_ctx,
             partitions,
-            pruner,
+            partition_pruner,
             range_semaphore,
             memory_pool,
             metrics_set,
@@ -125,11 +128,9 @@ impl SeriesCandidateScanner {
             .flatten()
             .copied()
             .collect::<Vec<_>>();
-        self.pruner.add_partition_ranges(&all_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(self.pruner.clone(), &all_ranges));
-
         let range_builder = SeriesCandidateRangeBuilder {
             stream_ctx: self.stream_ctx.clone(),
+            partition_pruner: self.partition_pruner.clone(),
             range_semaphore: self.range_semaphore.clone(),
             memory_pool: self.memory_pool.clone(),
             metrics_set: self.metrics_set.clone(),
@@ -138,7 +139,6 @@ impl SeriesCandidateScanner {
         let mut tasks = Vec::with_capacity(all_ranges.len());
         for (range_idx, part_range) in all_ranges.into_iter().enumerate() {
             let range_builder = range_builder.clone();
-            let partition_pruner = partition_pruner.clone();
             tasks.push(common_runtime::spawn_query(async move {
                 let _permit = range_builder
                     .range_semaphore
@@ -152,7 +152,7 @@ impl SeriesCandidateScanner {
                         .build()
                     })?;
                 range_builder
-                    .build_range_stream(part_range, partition_pruner, range_idx)
+                    .build_range_stream(part_range, range_idx)
                     .await
             }));
         }
@@ -173,11 +173,17 @@ impl SeriesCandidateScanner {
         )?;
         decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
     }
+
+    /// Returns the partition pruner shared with the data phase.
+    pub(crate) fn partition_pruner(&self) -> Arc<PartitionPruner> {
+        self.partition_pruner.clone()
+    }
 }
 
 #[derive(Clone)]
 struct SeriesCandidateRangeBuilder {
     stream_ctx: Arc<StreamContext>,
+    partition_pruner: Arc<PartitionPruner>,
     range_semaphore: Arc<Semaphore>,
     memory_pool: Arc<dyn MemoryPool>,
     metrics_set: ExecutionPlanMetricsSet,
@@ -188,7 +194,6 @@ impl SeriesCandidateRangeBuilder {
     async fn build_range_stream(
         &self,
         part_range: PartitionRange,
-        partition_pruner: Arc<PartitionPruner>,
         merge_partition: usize,
     ) -> Result<BoxedRecordBatchStream> {
         let cache_key = build_candidate_range_cache_key(&self.stream_ctx, &part_range);
@@ -203,9 +208,7 @@ impl SeriesCandidateRangeBuilder {
         let range_meta = &self.stream_ctx.ranges[part_range.identifier];
         let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
         for index in &range_meta.row_group_indices {
-            let source = self
-                .build_source(*index, range_meta.time_range, partition_pruner.clone())
-                .await?;
+            let source = self.build_source(*index, range_meta.time_range).await?;
             if let Some(source) = source {
                 sources.push(source);
             }
@@ -239,7 +242,6 @@ impl SeriesCandidateRangeBuilder {
         &self,
         index: RowGroupIndex,
         time_range: crate::sst::file::FileTimeRange,
-        partition_pruner: Arc<PartitionPruner>,
     ) -> Result<Option<BoxedRecordBatchStream>> {
         let metadata = self.stream_ctx.input.region_metadata().clone();
         if self.stream_ctx.is_mem_range_index(index) {
@@ -257,15 +259,18 @@ impl SeriesCandidateRangeBuilder {
         }
 
         if self.stream_ctx.is_file_range_index(index) {
-            if partition_pruner.try_skip_manifest_pruned_file_range(index, &self.part_metrics) {
+            if self
+                .partition_pruner
+                .try_skip_manifest_pruned_file_range(index, &self.part_metrics)
+            {
                 return Ok(None);
             }
-
             let mut reader_metrics = ReaderMetrics {
                 filter_metrics: new_filter_metrics(self.part_metrics.explain_verbose()),
                 ..Default::default()
             };
-            let ranges = partition_pruner
+            let ranges = self
+                .partition_pruner
                 .build_file_ranges(index, &self.part_metrics, &mut reader_metrics)
                 .await?;
             self.part_metrics.inc_num_file_ranges(ranges.len());
@@ -319,7 +324,7 @@ impl SeriesCandidateRangeBuilder {
     }
 }
 
-fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
+pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
     let metadata = stream_ctx.input.region_metadata();
     let valid_prefix = metadata
         .primary_key
