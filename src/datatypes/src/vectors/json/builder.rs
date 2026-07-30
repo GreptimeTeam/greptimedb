@@ -45,6 +45,12 @@ impl JsonVectorBuilder {
     }
 
     fn try_build(&mut self) -> Result<VectorRef> {
+        if self.merged_type.is_null() {
+            // An all-null JSON2 vector has no value from which to infer an
+            // object shape. Use the valid empty-object physical type; callers
+            // may align it to a more concrete target schema later.
+            self.merged_type = JsonNativeType::Object(Default::default());
+        }
         let DataType::Struct(fields) = self.merged_type.as_arrow_type() else {
             return UnexpectedSnafu {
                 reason: "merged JSON2 type must map to Arrow Struct in JsonVectorBuilder",
@@ -197,6 +203,11 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        if value.is_null() {
+            self.push_null();
+            return Ok(());
+        }
+
         let ValueRef::Json(value) = value else {
             return TryFromValueSnafu {
                 reason: format!("expected json value, got {value:?}"),
@@ -261,7 +272,7 @@ mod tests {
         let first = parse_json_value(r#"{"id":1,"payload":{"name":"foo"}}"#);
         let second = parse_json_value(r#"{"id":2,"extra":true,"payload":"raw"}"#);
         builder.try_push_value_ref(&first.as_value_ref())?;
-        builder.push_null();
+        builder.try_push_value_ref(&ValueRef::Null)?;
         builder.try_push_value_ref(&second.as_value_ref())?;
 
         let merged_type = JsonNativeType::Object(JsonObjectType::from([
@@ -332,6 +343,15 @@ mod tests {
                 vec![Value::Int64(3)],
                 inferred_struct_type,
             ))
+        );
+
+        let mut all_null_builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
+        all_null_builder.try_push_value_ref(&ValueRef::Null)?;
+        let vector = all_null_builder.to_vector();
+        assert_eq!(vector.get(0), Value::Null);
+        assert_eq!(
+            all_null_builder.data_type(),
+            ConcreteDataType::json2(JsonNativeType::Object(Default::default()))
         );
 
         // Non-object initial types are rejected by the builder invariant.

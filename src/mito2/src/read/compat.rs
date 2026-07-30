@@ -194,9 +194,14 @@ impl FlatCompatBatch {
                     cast_type,
                 });
             } else {
+                // TODO(fys): need check again.
                 // Create a default vector with 1 element for that column.
-                let default_vector = expect_column
-                    .column_schema
+                // `expect_data_type` may be a query-concretized JSON2 type,
+                // while region metadata still carries its unconcretized type.
+                // The default vector must match the target Arrow field above.
+                let mut column_schema = expect_column.column_schema.clone();
+                column_schema.data_type = expect_data_type.clone();
+                let default_vector = column_schema
                     .create_default_vector(1)
                     .context(CreateDefaultSnafu {
                         region_id: expect_metadata.region_id,
