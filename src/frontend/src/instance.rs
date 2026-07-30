@@ -1667,9 +1667,13 @@ mod tests {
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-    use auth::{PermissionResp, UserInfoRef};
+    use auth::{
+        AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY,
+        PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PermissionResp, UserInfoRef,
+    };
     use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
+    use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
     use common_error::ext::{BoxedError, PlainError};
     use common_error::status_code::StatusCode;
     use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
@@ -1692,11 +1696,11 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
-    use datatypes::vectors::{StringVector, VectorRef};
+    use datatypes::vectors::{StringVector, TimestampNanosecondVector, VectorRef};
     use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
     use servers::query_handler::{
-        DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler,
+        DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler, PipelineHandlerRef,
         PromStoreProtocolHandler,
     };
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
@@ -1952,7 +1956,39 @@ mod tests {
         }
     }
 
-    struct RejectEndpointPermissionChecker;
+    #[derive(Debug, PartialEq, Eq)]
+    struct CheckedAction {
+        access_mode: AccessMode,
+        action: &'static str,
+        targets: Option<PermissionTableTargets>,
+    }
+
+    #[derive(Default)]
+    struct RejectEndpointPermissionChecker {
+        checks: std::sync::Mutex<Vec<CheckedAction>>,
+    }
+
+    impl RejectEndpointPermissionChecker {
+        fn reject(
+            &self,
+            access_mode: AccessMode,
+            action: &'static str,
+            targets: Option<PermissionTableTargets>,
+        ) -> PermissionResp {
+            self.checks.lock().unwrap().push(CheckedAction {
+                access_mode,
+                action,
+                targets,
+            });
+            PermissionResp::Reject
+        }
+
+        fn take_check(&self) -> CheckedAction {
+            let mut checks = self.checks.lock().unwrap();
+            assert_eq!(1, checks.len());
+            checks.pop().unwrap()
+        }
+    }
 
     impl PermissionChecker for RejectEndpointPermissionChecker {
         fn check_permission(
@@ -1960,43 +1996,53 @@ mod tests {
             _user_info: UserInfoRef,
             req: PermissionReq,
         ) -> auth::error::Result<PermissionResp> {
-            Ok(
-                if matches!(
-                    req,
-                    PermissionReq::PipelineQuery
-                        | PermissionReq::PipelineManage
-                        | PermissionReq::DashboardQuery
-                        | PermissionReq::DashboardManage
-                ) {
-                    PermissionResp::Reject
-                } else {
-                    PermissionResp::Allow
-                },
-            )
+            Ok(match req {
+                PermissionReq::ReadAction(action) => self.reject(AccessMode::Read, action, None),
+                PermissionReq::WriteAction(action) => self.reject(AccessMode::Write, action, None),
+                _ => PermissionResp::Allow,
+            })
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(match req {
+                PermissionReq::ReadAction(action) => {
+                    self.reject(AccessMode::Read, action, Some(targets))
+                }
+                PermissionReq::WriteAction(action) => {
+                    self.reject(AccessMode::Write, action, Some(targets))
+                }
+                _ => PermissionResp::Allow,
+            })
+        }
+    }
+
+    struct WriteOnlyPermissionChecker;
+
+    impl PermissionChecker for WriteOnlyPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(if req.is_readonly() {
+                PermissionResp::Reject
+            } else {
+                PermissionResp::Allow
+            })
         }
 
         fn check_permission_with_table_targets(
             &self,
             user_info: UserInfoRef,
             req: PermissionReq,
-            targets: PermissionTableTargets,
+            _targets: PermissionTableTargets,
         ) -> auth::error::Result<PermissionResp> {
-            match req {
-                PermissionReq::JaegerQuery => {
-                    let reject = match targets {
-                        PermissionTableTargets::Unresolved => true,
-                        PermissionTableTargets::Resolved(targets) => {
-                            targets.iter().any(|target| target.table == "denied")
-                        }
-                    };
-                    Ok(if reject {
-                        PermissionResp::Reject
-                    } else {
-                        PermissionResp::Allow
-                    })
-                }
-                req => self.check_permission(user_info, req),
-            }
+            self.check_permission(user_info, req)
         }
     }
 
@@ -2354,6 +2400,38 @@ mod tests {
         )
     }
 
+    fn test_pipeline_table() -> TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("content_type", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("pipeline", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "created_at",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(StringVector::from(vec!["pipeline"])),
+            Arc::new(StringVector::from(vec!["public"])),
+            Arc::new(StringVector::from(vec!["application/yaml"])),
+            Arc::new(StringVector::from(vec![
+                "transform:\n- field: ts\n  type: timestamp, ns\n  index: time\n",
+            ])),
+            Arc::new(TimestampNanosecondVector::from_values([1])),
+        ];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        MemTable::new_with_catalog(
+            "pipelines",
+            record_batch,
+            2049,
+            "greptime".to_string(),
+            DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+        )
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -2485,6 +2563,22 @@ mod tests {
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
     }
 
+    fn assert_action_checked(
+        checker: &RejectEndpointPermissionChecker,
+        access_mode: AccessMode,
+        action: &'static str,
+        targets: Option<PermissionTableTargets>,
+    ) {
+        assert_eq!(
+            CheckedAction {
+                access_mode,
+                action,
+                targets,
+            },
+            checker.take_check()
+        );
+    }
+
     #[tokio::test]
     async fn test_event_recorder_is_exposed() -> TestResult<()> {
         let instance =
@@ -2498,8 +2592,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_restricted_endpoint_handlers_check_permissions() -> TestResult<()> {
+        let checker = Arc::new(RejectEndpointPermissionChecker::default());
         let plugins = Plugins::new();
-        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectEndpointPermissionChecker));
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
         let instance = test_instance_with_plugins(
             test_table(1024, "denied")?,
             test_table(1025, "target")?,
@@ -2511,13 +2606,34 @@ mod tests {
             servers::http::jaeger::JAEGER_QUERY_TABLE_NAME_KEY,
             "denied".to_string(),
         );
+        let jaeger_targets = Some(PermissionTableTargets::resolved(vec![
+            PermissionTableTarget::new("greptime", "public", "denied"),
+        ]));
 
         assert_permission_denied(JaegerQueryHandler::get_services(&instance, ctx.clone()).await);
+        assert_action_checked(
+            &checker,
+            AccessMode::Read,
+            JAEGER_QUERY,
+            jaeger_targets.clone(),
+        );
         assert_permission_denied(
             JaegerQueryHandler::get_operations(&instance, ctx.clone(), "service", None).await,
         );
+        assert_action_checked(
+            &checker,
+            AccessMode::Read,
+            JAEGER_QUERY,
+            jaeger_targets.clone(),
+        );
         assert_permission_denied(
             JaegerQueryHandler::get_trace(&instance, ctx.clone(), "trace", None, None, None).await,
+        );
+        assert_action_checked(
+            &checker,
+            AccessMode::Read,
+            JAEGER_QUERY,
+            jaeger_targets.clone(),
         );
         assert_permission_denied(
             JaegerQueryHandler::find_traces(
@@ -2530,10 +2646,12 @@ mod tests {
             )
             .await,
         );
+        assert_action_checked(&checker, AccessMode::Read, JAEGER_QUERY, jaeger_targets);
 
         assert_permission_denied(
             PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
         );
+        assert_action_checked(&checker, AccessMode::Read, PIPELINE_QUERY, None);
         assert_permission_denied(
             PipelineHandler::insert_pipeline(
                 &instance,
@@ -2544,9 +2662,11 @@ mod tests {
             )
             .await,
         );
+        assert_action_checked(&checker, AccessMode::Write, PIPELINE_INSERT, None);
         assert_permission_denied(
             PipelineHandler::delete_pipeline(&instance, "pipeline", None, ctx.clone()).await,
         );
+        assert_action_checked(&checker, AccessMode::Write, PIPELINE_DELETE, None);
         let app = axum::Router::new()
             .route(
                 "/pipelines/_dryrun",
@@ -2568,14 +2688,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+        assert_action_checked(&checker, AccessMode::Read, PIPELINE_QUERY, None);
 
         assert_permission_denied(
             DashboardHandler::save(&instance, "dashboard", "{}", ctx.clone()).await,
         );
+        assert_action_checked(&checker, AccessMode::Write, DASHBOARD_SAVE, None);
         assert_permission_denied(DashboardHandler::list(&instance, ctx.clone()).await);
+        assert_action_checked(&checker, AccessMode::Read, DASHBOARD_QUERY, None);
         assert_permission_denied(
             DashboardHandler::delete(&instance, "dashboard", ctx.clone()).await,
         );
+        assert_action_checked(&checker, AccessMode::Write, DASHBOARD_DELETE, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_only_ingestion_loads_named_pipeline() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+                table_name: "pipelines".to_string(),
+                table_id: 2049,
+                table: test_pipeline_table(),
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "pipelines".to_string(),
+            })?;
+        let ctx = test_query_ctx(1);
+        let handler: PipelineHandlerRef = Arc::new(instance.clone());
+
+        handler
+            .get_pipeline("pipeline", None, ctx.clone())
+            .await
+            .unwrap();
+        assert_permission_denied(
+            PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
+        );
+
+        let app = axum::Router::new()
+            .route(
+                "/pipelines/_dryrun",
+                axum::routing::post(servers::http::event::pipeline_dryrun),
+            )
+            .with_state(servers::http::event::LogState {
+                log_handler: handler,
+                log_validator: None,
+                ingest_interceptor: None,
+            })
+            .layer(axum::Extension((*ctx).clone()));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/pipelines/_dryrun")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
         Ok(())
     }

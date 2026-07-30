@@ -93,6 +93,32 @@ impl PermissionTableTargets {
     }
 }
 
+/// The access mode of a named permission action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    Read,
+    Write,
+}
+
+pub const JAEGER_QUERY: &str = "jaeger.query";
+pub const PIPELINE_QUERY: &str = "pipeline.query";
+pub const PIPELINE_INSERT: &str = "pipeline.insert";
+pub const PIPELINE_DELETE: &str = "pipeline.delete";
+pub const DASHBOARD_QUERY: &str = "dashboard.query";
+pub const DASHBOARD_SAVE: &str = "dashboard.save";
+pub const DASHBOARD_DELETE: &str = "dashboard.delete";
+
+/// All named permission actions and their access modes.
+pub const ALL_ACTIONS: &[(&str, AccessMode)] = &[
+    (JAEGER_QUERY, AccessMode::Read),
+    (PIPELINE_QUERY, AccessMode::Read),
+    (PIPELINE_INSERT, AccessMode::Write),
+    (PIPELINE_DELETE, AccessMode::Write),
+    (DASHBOARD_QUERY, AccessMode::Read),
+    (DASHBOARD_SAVE, AccessMode::Write),
+    (DASHBOARD_DELETE, AccessMode::Write),
+];
+
 #[derive(Debug, Clone)]
 pub enum PermissionReq<'a> {
     GrpcRequest(&'a Request),
@@ -105,11 +131,8 @@ pub enum PermissionReq<'a> {
     PromStoreRead,
     Otlp,
     LogWrite,
-    JaegerQuery,
-    PipelineQuery,
-    PipelineManage,
-    DashboardQuery,
-    DashboardManage,
+    ReadAction(&'static str),
+    WriteAction(&'static str),
     BulkInsert {
         catalog: &'a str,
         schema: &'a str,
@@ -127,9 +150,7 @@ impl<'a> PermissionReq<'a> {
             PermissionReq::PromQuery
             | PermissionReq::LogQuery
             | PermissionReq::PromStoreRead
-            | PermissionReq::JaegerQuery
-            | PermissionReq::PipelineQuery
-            | PermissionReq::DashboardQuery => true,
+            | PermissionReq::ReadAction(_) => true,
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
 
             PermissionReq::GrpcRequest(_)
@@ -138,8 +159,7 @@ impl<'a> PermissionReq<'a> {
             | PermissionReq::PromStoreWrite
             | PermissionReq::Otlp
             | PermissionReq::LogWrite
-            | PermissionReq::PipelineManage
-            | PermissionReq::DashboardManage
+            | PermissionReq::WriteAction(_)
             | PermissionReq::BulkInsert { .. } => false,
         }
     }
@@ -500,20 +520,33 @@ mod tests {
     }
 
     #[test]
-    fn test_management_request_access_modes() {
-        for req in [
-            PermissionReq::JaegerQuery,
-            PermissionReq::PipelineQuery,
-            PermissionReq::DashboardQuery,
-        ] {
-            assert!(req.is_readonly());
-        }
+    fn test_action_access_modes() {
+        let checker = DefaultPermissionChecker;
 
-        for req in [
-            PermissionReq::PipelineManage,
-            PermissionReq::DashboardManage,
-        ] {
-            assert!(req.is_write());
+        for &(action, access_mode) in ALL_ACTIONS {
+            let req = match access_mode {
+                AccessMode::Read => PermissionReq::ReadAction(action),
+                AccessMode::Write => PermissionReq::WriteAction(action),
+            };
+            assert_eq!(
+                access_mode == AccessMode::Read,
+                req.is_readonly(),
+                "{action}"
+            );
+
+            for (permission_mode, allowed) in [
+                (PermissionMode::ReadOnly, access_mode == AccessMode::Read),
+                (PermissionMode::WriteOnly, access_mode == AccessMode::Write),
+                (PermissionMode::ReadWrite, true),
+            ] {
+                let user = DefaultUserInfo::with_name_and_permission("test_user", permission_mode);
+                let result = checker.check_permission(user, req.clone()).unwrap();
+                assert_eq!(
+                    allowed,
+                    matches!(result, PermissionResp::Allow),
+                    "{permission_mode:?}: {action}"
+                );
+            }
         }
     }
 
