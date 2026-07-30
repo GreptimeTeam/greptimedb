@@ -40,7 +40,7 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
-use crate::events::gc::{BATCH_GC_EVENT_TYPE, BatchGcEvent};
+use crate::event::gc::{BATCH_GC_EVENT_TYPE, BatchGcEvent};
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
