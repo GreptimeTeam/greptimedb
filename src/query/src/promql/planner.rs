@@ -4462,7 +4462,7 @@ impl PromPlanner {
         ensure!(
             !left.schema().fields().is_empty() && !right.schema().fields().is_empty(),
             UnexpectedPlanExprSnafu {
-                desc: "OR operator input has zero columns".to_string(),
+                desc: "OR operator input has zero columns",
             }
         );
 
