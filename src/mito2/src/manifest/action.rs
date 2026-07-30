@@ -263,11 +263,14 @@ impl RegionManifestBuilder {
                 removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
             }
         }
-        removed_files.extend(
-            edit.files_to_remove
-                .iter()
-                .map(|f| RemovedFile::File(f.file_id, f.index_version())),
-        );
+        removed_files.extend(edit.files_to_remove.iter().map(|file| {
+            let index_version = self
+                .files
+                .get(&file.file_id)
+                .and_then(FileMeta::index_version)
+                .or_else(|| file.index_version());
+            RemovedFile::File(file.file_id, index_version)
+        }));
         let at = edit
             .timestamp_ms
             .unwrap_or_else(|| Utc::now().timestamp_millis());
@@ -914,6 +917,54 @@ mod tests {
         let new: RegionManifest = serde_json::from_str(&json).unwrap();
 
         assert_eq!(manifest, new);
+    }
+
+    #[test]
+    fn test_remove_tracks_current_manifest_index_version() {
+        let file_id = FileId::random();
+        let current = FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id,
+            available_indexes: smallvec::smallvec![crate::sst::file::IndexType::InvertedIndex],
+            index_file_size: 1024,
+            index_version: 2,
+            ..Default::default()
+        };
+        let mut stale = current.clone();
+        stale.available_indexes.clear();
+        stale.index_file_size = 0;
+        stale.index_version = 0;
+
+        let mut builder = RegionManifestBuilder::default();
+        builder.apply_edit(
+            1,
+            RegionEdit {
+                files_to_add: vec![current],
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        );
+        builder.apply_edit(
+            2,
+            RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: vec![stale],
+                timestamp_ms: Some(42),
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        );
+
+        assert_eq!(
+            builder.removed_files.removed_files[0].files,
+            HashSet::from([RemovedFile::File(file_id, Some(2))])
+        );
     }
 
     /// Test if old version can still be deserialized then serialized to the new version.

@@ -1057,6 +1057,18 @@ impl Drop for MitoRegion {
     }
 }
 
+/// Result of publishing rebuilt index metadata to the manifest.
+#[derive(Debug)]
+pub(crate) enum IndexPublication {
+    /// The index metadata was committed.
+    Committed {
+        manifest_version: ManifestVersion,
+        file_meta: FileMeta,
+    },
+    /// The source SST or region incarnation is no longer publishable.
+    Stale,
+}
+
 /// Context to update the region manifest.
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
@@ -1245,6 +1257,57 @@ impl ManifestContext {
         .await
     }
 
+    /// Conditionally publishes rebuilt index metadata for `source`.
+    ///
+    /// The source-generation check and manifest update share the manifest write
+    /// lock, so a concurrent compaction or another index build cannot commit
+    /// between them.
+    pub(crate) async fn update_manifest_for_index(
+        &self,
+        source: &FileMeta,
+        updated: FileMeta,
+    ) -> Result<IndexPublication> {
+        let manager = self.manifest_manager.write().await;
+        let manifest = manager.manifest();
+        let current_state = self.state.load();
+        if !matches!(
+            current_state,
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        ) || manager.is_stopped()
+        {
+            return Ok(IndexPublication::Stale);
+        }
+
+        if manifest.files.get(&source.file_id) != Some(source) {
+            return Ok(IndexPublication::Stale);
+        }
+
+        // Only index metadata is allowed to change in this publication.
+        let mut committed = source.clone();
+        committed.available_indexes = updated.available_indexes;
+        committed.indexes = updated.indexes;
+        committed.index_file_size = updated.index_file_size;
+        committed.index_version = updated.index_version;
+
+        let edit = crate::manifest::action::RegionEdit {
+            files_to_add: vec![committed.clone()],
+            files_to_remove: Vec::new(),
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+            flushed_sequence: None,
+            flushed_entry_id: None,
+            committed_sequence: None,
+            compaction_time_window: None,
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
+
+        Ok(IndexPublication::Committed {
+            manifest_version,
+            file_meta: committed,
+        })
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. This is the sole caller of
@@ -1278,6 +1341,38 @@ impl ManifestContext {
         ))
     }
 
+    /// Updates the manifest using a caller-held write lock, releases the lock,
+    /// and then fires the manifest hook.
+    ///
+    /// Callers must perform state and applicability checks before calling this
+    /// method so the checks and update remain in the same lock critical section.
+    async fn update_and_fire(
+        &self,
+        mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<ManifestVersion> {
+        let region_id = manager.manifest().metadata.region_id;
+        let pending = self
+            .update_locked(&mut manager, action_list, is_staging)
+            .await?;
+        let version = pending.version();
+
+        // Hook implementations may read the manifest or send region requests
+        // that acquire this lock.
+        drop(manager);
+
+        if self.state.load() == RegionRoleState::Follower {
+            warn!(
+                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
+                region_id
+            );
+        }
+
+        pending.fire().await;
+        Ok(version)
+    }
+
     async fn update_manifest_with_state_check(
         &self,
         action_list: RegionMetaActionList,
@@ -1285,7 +1380,7 @@ impl ManifestContext {
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
-        let mut manager = self.manifest_manager.write().await;
+        let manager = self.manifest_manager.write().await;
         // Gets current manifest.
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
@@ -1343,28 +1438,7 @@ impl ManifestContext {
             }
         }
 
-        // `update_locked` returns a `PendingManifestHook` we fire after releasing the lock.
-        let region_id = manifest.metadata.region_id;
-        let pending = self
-            .update_locked(&mut manager, action_list, is_staging)
-            .await?;
-        let version = pending.version();
-
-        // Drop the write lock before invoking the hook. Hook implementations may
-        // read the manifest or send region requests that acquire this lock;
-        // holding it would deadlock. Slow hooks also must not block manifest updates.
-        drop(manager);
-
-        if self.state.load() == RegionRoleState::Follower {
-            warn!(
-                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
-                region_id
-            );
-        }
-
-        pending.fire().await;
-
-        Ok(version)
+        self.update_and_fire(manager, action_list, is_staging).await
     }
 
     /// Sets the [`RegionRole`].
@@ -1840,7 +1914,8 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
+        IndexPublication, ManifestContext, ManifestStats, MitoRegion, RegionLeaderState,
+        RegionRoleState, RegionStats,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -1962,6 +2037,88 @@ mod tests {
                 .await
                 .files
                 .contains_key(&file_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_publication_rejects_older_source_generation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let source = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            ..Default::default()
+        };
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![source.clone()],
+                    ..empty_edit()
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut first_update = source.clone();
+        first_update.index_version = 1;
+        first_update.index_file_size = 128;
+        let first_committed = match region
+            .manifest_ctx
+            .update_manifest_for_index(&source, first_update)
+            .await
+            .unwrap()
+        {
+            IndexPublication::Committed { file_meta, .. } => file_meta,
+            IndexPublication::Stale => panic!("first index publication should commit"),
+        };
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let delayed_manifest_ctx = region.manifest_ctx.clone();
+        let delayed_source = first_committed.clone();
+        let delayed_publication = tokio::spawn(async move {
+            let mut delayed_update = delayed_source.clone();
+            delayed_update.index_version = 2;
+            delayed_update.index_file_size = 128;
+            ready_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            delayed_manifest_ctx
+                .update_manifest_for_index(&delayed_source, delayed_update)
+                .await
+        });
+        ready_rx.await.unwrap();
+
+        let mut newer_update = first_committed.clone();
+        newer_update.index_version = 3;
+        newer_update.index_file_size = 256;
+        let newer_committed = match region
+            .manifest_ctx
+            .update_manifest_for_index(&first_committed, newer_update)
+            .await
+            .unwrap()
+        {
+            IndexPublication::Committed { file_meta, .. } => file_meta,
+            IndexPublication::Stale => panic!("newer index publication should commit"),
+        };
+
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            delayed_publication.await.unwrap().unwrap(),
+            IndexPublication::Stale
+        ));
+        assert_eq!(
+            region
+                .manifest_ctx
+                .manifest()
+                .await
+                .files
+                .get(&source.file_id),
+            Some(&newer_committed)
         );
     }
 

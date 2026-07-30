@@ -1482,6 +1482,27 @@ impl WorkerListener {
             listener.on_index_build_abort(_region_file_id).await;
         }
     }
+
+    pub(crate) async fn on_index_build_before_manifest_commit(
+        &self,
+        _region_file_id: RegionFileId,
+    ) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_index_build_before_manifest_commit(_region_file_id)
+                .await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_manifest_committed(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_index_build_manifest_committed(_region_file_id)
+                .await;
+        }
+    }
 }
 
 #[cfg(test)]
