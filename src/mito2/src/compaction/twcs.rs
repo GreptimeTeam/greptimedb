@@ -26,14 +26,14 @@ use common_time::timestamp_millis::BucketAligned;
 use rayon::prelude::*;
 use store_api::storage::RegionId;
 
+use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
-use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
     FileGroup, Item, Ranged, find_sorted_runs, find_sorted_runs_by_time_range,
     merge_primary_key_ranges, merge_seq_files, primary_key_ranges_overlap, reduce_runs,
 };
-use crate::compaction::{CompactionOutput, get_expired_ssts};
 use crate::sst::file::{FileHandle, Level, overlaps};
 use crate::sst::version::LevelMeta;
 
