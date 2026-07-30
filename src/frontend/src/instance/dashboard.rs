@@ -21,7 +21,7 @@ use api::v1::{
     RowInsertRequests, Rows, SemanticType,
 };
 use async_trait::async_trait;
-use auth::PermissionReq;
+use auth::{DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, PermissionReq};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
 use common_error::ext::BoxedError;
 use common_query::OutputData;
@@ -393,17 +393,17 @@ impl servers::query_handler::DashboardHandler for Instance {
         definition: &str,
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
-        self.check_permission(&ctx, PermissionReq::DashboardManage)?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_SAVE))?;
         self.insert_dashboard(name, definition, ctx).await
     }
 
     async fn list(&self, ctx: QueryContextRef) -> servers::error::Result<Vec<DashboardDefinition>> {
-        self.check_permission(&ctx, PermissionReq::DashboardQuery)?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_QUERY))?;
         self.list_dashboards(ctx).await
     }
 
     async fn delete(&self, name: &str, ctx: QueryContextRef) -> servers::error::Result<()> {
-        self.check_permission(&ctx, PermissionReq::DashboardManage)?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_DELETE))?;
         self.delete_dashboard(name, ctx).await
     }
 }
