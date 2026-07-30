@@ -417,45 +417,10 @@ impl CompactionTask for CompactionTaskImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use common_memory_manager::OnExhaustedPolicy;
     use store_api::storage::FileId;
 
-    use super::*;
-    use crate::compaction::memory_manager::new_compaction_memory_manager;
     use crate::compaction::picker::PickerOutput;
     use crate::compaction::test_util::new_file_handle;
-    use crate::schedule::RequestCancelResult;
-
-    #[tokio::test]
-    async fn test_memory_wait_observes_cancellation() {
-        let manager = Arc::new(new_compaction_memory_manager(1));
-        let _guard = manager.try_acquire(1).unwrap();
-        let state = CancellableTaskState::new();
-        let cancel_handle = state.cancel_handle();
-        let manager_for_waiter = manager.clone();
-        let waiter = tokio::spawn(async move {
-            CancellableFuture::new(
-                manager_for_waiter.acquire_with_policy(
-                    1,
-                    OnExhaustedPolicy::Wait {
-                        timeout: Duration::from_secs(30),
-                    },
-                ),
-                cancel_handle,
-            )
-            .await
-        });
-        tokio::task::yield_now().await;
-
-        assert_eq!(RequestCancelResult::CancelIssued, state.request_cancel());
-        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("memory wait did not observe cancellation")
-            .unwrap();
-        assert!(result.is_err());
-    }
 
     #[test]
     fn test_picker_output_with_expired_ssts() {

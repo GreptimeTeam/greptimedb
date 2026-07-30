@@ -1663,7 +1663,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_manifest_update_persistence_for_opendal_errors() {
+    fn test_manifest_update_persistence() {
         let rejected_kinds = [
             ErrorKind::Unsupported,
             ErrorKind::ConfigInvalid,
@@ -1688,10 +1688,7 @@ mod tests {
         let error =
             OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
         assert!(error.may_have_persisted_manifest_update());
-    }
 
-    #[test]
-    fn test_manifest_update_persistence_for_mito_errors() {
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());

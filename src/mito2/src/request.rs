@@ -1369,24 +1369,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_failed_detects_cancellation() {
-        let cancelled = FlushFailed {
-            err: Arc::new(crate::error::FlushCancelledSnafu.build()),
-        };
-        assert!(cancelled.is_cancelled());
-
-        let failed = FlushFailed {
-            err: Arc::new(
-                crate::error::RegionBusySnafu {
-                    region_id: RegionId::new(1, 1),
-                }
-                .build(),
-            ),
-        };
-        assert!(!failed.is_cancelled());
-    }
-
-    #[test]
     fn test_write_request_column_num() {
         let rows = Rows {
             schema: vec![

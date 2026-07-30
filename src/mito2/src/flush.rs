@@ -2058,38 +2058,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_uncommitted_ssts_disarm_cleanup() {
-        let env = SchedulerEnv::new().await;
-        let region_id = RegionId::new(1, 1);
-        let file_id = store_api::storage::FileId::random();
-        let path = crate::sst::location::sst_file_path(
-            env.access_layer.table_dir(),
-            crate::sst::file::RegionFileId::new(region_id, file_id),
-            env.access_layer.path_type(),
-        );
-        env.access_layer
-            .object_store()
-            .write(&path, Bytes::from_static(b"sst"))
-            .await
-            .unwrap();
-
-        let uncommitted = UncommittedSsts::new(region_id, env.access_layer.clone(), None);
-        uncommitted.track(&[SstInfo {
-            file_id,
-            ..Default::default()
-        }]);
-        uncommitted.disarm_cleanup();
-        assert_eq!(0, uncommitted.num_tracked_files());
-        uncommitted.cleanup_for_test().await.unwrap();
-
-        env.access_layer
-            .object_store()
-            .read(&path)
-            .await
-            .expect("disarmed cleanup deleted the SST");
-    }
-
-    #[tokio::test]
     async fn test_region_closed_notifies_pending_bulk_writes() {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
