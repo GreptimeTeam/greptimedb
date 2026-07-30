@@ -124,6 +124,19 @@ pub const VIEW_NAME_COLUMN: EventTableColumn =
 /// The canonical View identifier dimension.
 pub const VIEW_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("view_id", ColumnDataType::Uint32, SemanticType::Field);
+/// The canonical Kafka topic name dimension.
+pub const TOPIC_NAME_COLUMN: EventTableColumn =
+    EventTableColumn::new("topic_name", ColumnDataType::String, SemanticType::Field);
+/// The requested WAL prune boundary. It is only an attempted boundary on non-`Succeeded`
+/// procedure events.
+pub const PRUNABLE_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
+    "prunable_entry_id",
+    ColumnDataType::Uint64,
+    SemanticType::Field,
+);
+/// The canonical Kafka latest offset, which is an exclusive upper bound.
+pub const LATEST_OFFSET_COLUMN: EventTableColumn =
+    EventTableColumn::new("latest_offset", ColumnDataType::Uint64, SemanticType::Field);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -432,6 +445,22 @@ mod tests {
                 ("target_region_id", ColumnDataType::Uint64),
                 ("target_region_number", ColumnDataType::Uint32),
                 ("target_partition_expr", ColumnDataType::String),
+            ],
+        );
+    }
+
+    #[test]
+    fn wal_prune_schema_preserves_names_types_semantics_and_order() {
+        assert_field_columns(
+            [
+                &TOPIC_NAME_COLUMN,
+                &PRUNABLE_ENTRY_ID_COLUMN,
+                &LATEST_OFFSET_COLUMN,
+            ],
+            [
+                ("topic_name", ColumnDataType::String),
+                ("prunable_entry_id", ColumnDataType::Uint64),
+                ("latest_offset", ColumnDataType::Uint64),
             ],
         );
     }

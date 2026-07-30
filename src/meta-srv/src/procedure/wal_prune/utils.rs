@@ -23,6 +23,7 @@ use itertools::{Itertools, MinMaxResult};
 use rskafka::client::Client;
 use rskafka::client::partition::{OffsetAt, PartitionClient, UnknownTopicHandling};
 use snafu::ResultExt;
+use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -141,7 +142,7 @@ pub(crate) async fn get_offsets_for_topic(
 pub(crate) async fn update_pruned_entry_id(
     table_metadata_manager: &TableMetadataManagerRef,
     topic: &str,
-    pruned_entry_id: u64,
+    pruned_entry_id: EntryId,
 ) -> Result<()> {
     let prev = table_metadata_manager
         .topic_name_manager()
