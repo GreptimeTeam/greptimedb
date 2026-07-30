@@ -88,6 +88,30 @@ CREATE TABLE json2_type_hints_timestamp (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP
 
+CREATE TABLE json2_default_null_ok (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        a BIGINT NULL DEFAULT NULL
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+DROP TABLE json2_default_null_ok;
+
+Affected Rows: 0
+
+CREATE TABLE json2_default_null_check (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        a BIGINT NOT NULL DEFAULT NULL
+    )
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
+
 -- A type hint at the maximum supported depth is accepted.
 CREATE TABLE json2_type_hint_depth_50 (
     ts TIMESTAMP TIME INDEX,

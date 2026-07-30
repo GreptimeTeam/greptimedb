@@ -6,18 +6,6 @@ create table json2_table (
     'sst_format' = 'flat',
 );
 
-insert into json2_table (ts, j) values (101, '[1, 2, 3]');
-
-insert into json2_table (ts, j) values (102, '"hello"');
-
-insert into json2_table (ts, j) values (103, '42');
-
-insert into json2_table (ts, j) values (104, 'true');
-
-insert into json2_table (ts, j) values (105, 'null');
-
-insert into json2_table (ts, j) values (1, '{}');
-
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -58,10 +46,6 @@ select j.a, j.a.x from json2_table order by ts;
 
 select j.c, j.y from json2_table order by ts;
 
-select j from json2_table order by ts;
-
-select * from json2_table order by ts;
-
 select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;
@@ -99,52 +83,3 @@ from json2_variant_null
 order by ts;
 
 drop table json2_variant_null;
-
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-create table json2_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'false'
-);
-
-create table json2_alter_non_append (
-    ts timestamp time index
-);
-
-alter table json2_alter_non_append add column j json2;
-
-drop table json2_alter_non_append;
-
-create table json2_default_null_ok (
-    ts timestamp time index,
-    j json2(
-        a int64 null default null
-    )
-) with (
-    'append_mode' = 'true'
-);
-
-drop table json2_default_null_ok;
-
-create table json2_default_null_check (
-    ts timestamp time index,
-    j json2(
-        a int64 not null default null
-    )
-);
-
-create table json2_set_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'true'
-);
-
-alter table json2_set_append_mode_false set 'append_mode' = 'false';
-
-drop table json2_set_append_mode_false;

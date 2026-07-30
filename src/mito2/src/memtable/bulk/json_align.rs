@@ -136,7 +136,7 @@ impl Json2Aligner {
         for (idx, expected_type) in &self.json_columns {
             if batch.schema_ref().field(*idx).data_type() != expected_type {
                 cols[*idx] = JsonArray::from(batch.column(*idx))
-                    .try_align(expected_type)
+                    .widen_to(expected_type)
                     .context(ConvertValueSnafu)?;
             }
         }
@@ -189,10 +189,11 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        Array, ArrayRef, Int64Array, StringViewArray, StructArray, UInt64Array,
+        Array, ArrayRef, AsArray, Int64Array, StringViewArray, StructArray, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use serde_json::json;
 
     use super::*;
 
@@ -336,6 +337,51 @@ mod tests {
         assert!(missing_ids.is_null(1));
         assert_eq!("alice", name_values.value(0));
         assert_eq!("bob", name_values.value(1));
+    }
+
+    #[test]
+    fn test_align_conflicting_number_types_as_variant() {
+        let u64_fields = Fields::from(vec![Arc::new(Field::new("value", DataType::UInt64, true))]);
+        let i64_fields = Fields::from(vec![Arc::new(Field::new("value", DataType::Int64, true))]);
+        let u64_schema = schema_with_json_field(json_field("data", u64_fields.clone()));
+        let i64_schema = schema_with_json_field(json_field("data", i64_fields.clone()));
+        let u64_batch = RecordBatch::try_new(
+            u64_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from_iter_values([1])) as ArrayRef,
+                struct_array(
+                    u64_fields,
+                    vec![Arc::new(UInt64Array::from_iter_values([u64::MAX])) as ArrayRef],
+                ),
+            ],
+        )
+        .unwrap();
+        let i64_batch = RecordBatch::try_new(
+            i64_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from_iter_values([2])) as ArrayRef,
+                struct_array(
+                    i64_fields,
+                    vec![Arc::new(Int64Array::from_iter_values([i64::MIN])) as ArrayRef],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let aligner = Json2Aligner::try_new([u64_schema, i64_schema]).unwrap();
+        let DataType::Struct(fields) = aligner.schema().field(1).data_type() else {
+            panic!("expected JSON2 field to be a struct");
+        };
+        assert_eq!(&DataType::Binary, fields[0].data_type());
+
+        for (batch, expected) in [(u64_batch, json!(u64::MAX)), (i64_batch, json!(i64::MIN))] {
+            let aligned = aligner.align_batch(batch).unwrap();
+            let data = aligned.column(1).as_struct();
+            assert_eq!(
+                expected,
+                JsonArray::from(data.column(0)).try_get_value(0).unwrap()
+            );
+        }
     }
 
     #[test]

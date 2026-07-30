@@ -384,11 +384,11 @@ impl DataType for Int32Type {
             Value::Int8(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int16(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int32(v) => Some(Value::Int32(v)),
-            Value::Int64(v) => num::cast::cast(v).map(Value::Int64),
+            Value::Int64(v) => num::cast::cast(v).map(Value::Int32),
             Value::UInt8(v) => num::cast::cast(v).map(Value::Int32),
             Value::UInt16(v) => num::cast::cast(v).map(Value::Int32),
-            Value::UInt32(v) => num::cast::cast(v).map(Value::UInt32),
-            Value::UInt64(v) => num::cast::cast(v).map(Value::UInt64),
+            Value::UInt32(v) => num::cast::cast(v).map(Value::Int32),
+            Value::UInt64(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
             Value::String(v) => v.as_utf8().parse::<i32>().map(Value::Int32).ok(),
@@ -521,6 +521,21 @@ mod tests {
             Value::Int32(12345),
             ConcreteDataType::int64_datatype(),
             Value::Int64(12345)
+        );
+        assert_primitive_cast!(
+            Value::Int64(12345),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(12345)
+        );
+        assert_primitive_cast!(
+            Value::UInt32(12345),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(12345)
+        );
+        assert_primitive_cast!(
+            Value::UInt64(12345),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(12345)
         );
     }
 

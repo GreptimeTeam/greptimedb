@@ -116,13 +116,6 @@ impl JsonNativeType {
             (this, JsonNativeType::Null) => this,
             (this, that) if this == *that => this,
 
-            (JsonNativeType::Number(x), JsonNativeType::Number(y)) => {
-                JsonNativeType::Number(match (x, y) {
-                    (x, y) if x == *y => x,
-                    (JsonNumberType::F64, _) | (_, JsonNumberType::F64) => JsonNumberType::F64,
-                    _ => JsonNumberType::I64,
-                })
-            }
             _ => JsonNativeType::Variant,
         };
     }
@@ -746,11 +739,13 @@ mod tests {
         );
 
         // Conflicting number categories should be lifted to Variant.
-        test(
-            JsonNativeType::f64(),
-            &mut JsonNativeType::i64(),
-            r#""<Number>""#,
-        );
+        for (mut this, other) in [
+            (JsonNativeType::u64(), JsonNativeType::i64()),
+            (JsonNativeType::u64(), JsonNativeType::f64()),
+            (JsonNativeType::i64(), JsonNativeType::f64()),
+        ] {
+            test(other, &mut this, r#""<Variant>""#);
+        }
 
         // Object merge should preserve existing fields and append missing fields.
         test(
