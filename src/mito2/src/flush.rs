@@ -542,11 +542,28 @@ impl RegionFlushTask {
                 RegionLeaderState::Writable
             }
         };
-        let manifest_version = self
+        let manifest_version = match self
             .manifest_ctx
             .update_manifest(expected_state, action_list, self.is_staging)
-            .await?;
-        uncommitted.commit();
+            .await
+        {
+            Ok(manifest_version) => {
+                uncommitted.disarm_cleanup();
+                manifest_version
+            }
+            Err(e) => {
+                if e.may_have_persisted_manifest_update() {
+                    uncommitted.disarm_cleanup();
+                } else {
+                    info!(
+                        "Cleaning uncommitted SSTs because the manifest update was not persisted, region: {}, job: flush, error: {:?}",
+                        self.region_id, e
+                    );
+                    uncommitted.cleanup().await;
+                }
+                return Err(e);
+            }
+        };
         info!(
             "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
@@ -2038,6 +2055,38 @@ mod tests {
             .await
             .unwrap();
         assert!(entries.iter().all(|entry| entry.path() != path));
+    }
+
+    #[tokio::test]
+    async fn test_uncommitted_ssts_disarm_cleanup() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let file_id = store_api::storage::FileId::random();
+        let path = crate::sst::location::sst_file_path(
+            env.access_layer.table_dir(),
+            crate::sst::file::RegionFileId::new(region_id, file_id),
+            env.access_layer.path_type(),
+        );
+        env.access_layer
+            .object_store()
+            .write(&path, Bytes::from_static(b"sst"))
+            .await
+            .unwrap();
+
+        let uncommitted = UncommittedSsts::new(region_id, env.access_layer.clone(), None);
+        uncommitted.track(&[SstInfo {
+            file_id,
+            ..Default::default()
+        }]);
+        uncommitted.disarm_cleanup();
+        assert_eq!(0, uncommitted.num_tracked_files());
+        uncommitted.cleanup_for_test().await.unwrap();
+
+        env.access_layer
+            .object_store()
+            .read(&path)
+            .await
+            .expect("disarmed cleanup deleted the SST");
     }
 
     #[tokio::test]

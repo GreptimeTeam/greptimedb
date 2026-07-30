@@ -16,6 +16,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
@@ -101,6 +102,15 @@ impl CompactionTaskImpl {
                 region_id,
                 policy: format!("{policy:?}"),
             })
+    }
+
+    fn cancelled_notify(&mut self) -> BackgroundNotify {
+        let senders = std::mem::take(&mut self.waiters);
+        BackgroundNotify::CompactionCancelled(CompactionCancelled {
+            region_id: self.compaction_region.region_id,
+            execution: self.execution.clone(),
+            senders,
+        })
     }
 
     /// Remove expired ssts files, update manifest immediately
@@ -284,9 +294,15 @@ impl CompactionTaskImpl {
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
         // Acquire memory budget before starting compaction
-        let _memory_guard = match self.acquire_memory_with_policy().await {
-            Ok(guard) => guard,
-            Err(e) => {
+        let cancel_handle = self.state.cancel_handle();
+        let _memory_guard = match CancellableFuture::new(
+            self.acquire_memory_with_policy(),
+            cancel_handle,
+        )
+        .await
+        {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(e)) => {
                 error!(e; "Failed to acquire memory for compaction, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);
                 self.on_failure(err.clone());
@@ -302,7 +318,31 @@ impl CompactionTask for CompactionTaskImpl {
                 .await;
                 return;
             }
+            Err(_) => {
+                info!(
+                    "Compaction cancelled while waiting for memory, region id: {}",
+                    self.compaction_region.region_id
+                );
+                let notify = self.cancelled_notify();
+                self.send_to_worker(WorkerRequest::Background {
+                    region_id: self.compaction_region.region_id,
+                    notify,
+                })
+                .await;
+                return;
+            }
         };
+
+        // Cancellation may be requested immediately after memory acquisition completes.
+        if self.state.is_cancelled() {
+            let notify = self.cancelled_notify();
+            self.send_to_worker(WorkerRequest::Background {
+                region_id: self.compaction_region.region_id,
+                notify,
+            })
+            .await;
+            return;
+        }
 
         self.handle_expiration().await;
 
@@ -314,19 +354,14 @@ impl CompactionTask for CompactionTaskImpl {
                 // Stop accepting cancellation once we are about to publish the compaction edit.
                 if !self.state.mark_commit_started() {
                     self.uncommitted.cleanup().await;
-                    let senders = std::mem::take(&mut self.waiters);
-                    BackgroundNotify::CompactionCancelled(CompactionCancelled {
-                        region_id: self.compaction_region.region_id,
-                        execution: self.execution.clone(),
-                        senders,
-                    })
+                    self.cancelled_notify()
                 } else {
                     self.listener
                         .on_compaction_commit_begin(self.compaction_region.region_id)
                         .await;
                     match self.update_manifest(merge_output).await {
                         Ok((edit, _manifest_version)) => {
-                            self.uncommitted.commit();
+                            self.uncommitted.disarm_cleanup();
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,
@@ -337,8 +372,16 @@ impl CompactionTask for CompactionTaskImpl {
                             })
                         }
                         Err(e) => {
+                            if e.may_have_persisted_manifest_update() {
+                                self.uncommitted.disarm_cleanup();
+                            } else {
+                                info!(
+                                    "Cleaning uncommitted SSTs because the manifest update was not persisted, region: {}, job: compaction, error: {:?}",
+                                    self.compaction_region.region_id, e
+                                );
+                                self.uncommitted.cleanup().await;
+                            }
                             error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
-                            self.uncommitted.cleanup().await;
                             let err = Arc::new(e);
                             self.on_failure(err.clone());
                             BackgroundNotify::CompactionFailed(CompactionFailed {
@@ -374,10 +417,45 @@ impl CompactionTask for CompactionTaskImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use common_memory_manager::OnExhaustedPolicy;
     use store_api::storage::FileId;
 
+    use super::*;
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
     use crate::compaction::picker::PickerOutput;
     use crate::compaction::test_util::new_file_handle;
+    use crate::schedule::RequestCancelResult;
+
+    #[tokio::test]
+    async fn test_memory_wait_observes_cancellation() {
+        let manager = Arc::new(new_compaction_memory_manager(1));
+        let _guard = manager.try_acquire(1).unwrap();
+        let state = CancellableTaskState::new();
+        let cancel_handle = state.cancel_handle();
+        let manager_for_waiter = manager.clone();
+        let waiter = tokio::spawn(async move {
+            CancellableFuture::new(
+                manager_for_waiter.acquire_with_policy(
+                    1,
+                    OnExhaustedPolicy::Wait {
+                        timeout: Duration::from_secs(30),
+                    },
+                ),
+                cancel_handle,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        assert_eq!(RequestCancelResult::CancelIssued, state.request_cancel());
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("memory wait did not observe cancellation")
+            .unwrap();
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_picker_output_with_expired_ssts() {

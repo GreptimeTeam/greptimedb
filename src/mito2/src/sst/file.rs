@@ -730,8 +730,11 @@ impl UncommittedSsts {
         }
     }
 
-    /// Disarms cleanup after the manifest edit has committed.
-    pub(crate) fn commit(&self) {
+    /// Disarms cleanup after the manifest edit has committed or may have committed.
+    ///
+    /// A manifest update error does not guarantee that the edit was not persisted. Once an edit
+    /// may become visible, its SSTs must be retained to avoid deleting referenced files.
+    pub(crate) fn disarm_cleanup(&self) {
         self.files.lock().unwrap().clear();
     }
 
