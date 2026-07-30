@@ -40,7 +40,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionDeleteRequest, RegionPutRequest};
+use store_api::region_request::{RegionDeleteRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -73,6 +73,10 @@ pub struct MetadataRegion {
     /// The cache should be invalidated when any new values are put into the metadata region or any
     /// values are deleted from the metadata region.
     cache: Cache<RegionId, RegionMetadataCacheEntry>,
+    /// Serializes cache fills with metadata writes and invalidation.
+    ///
+    /// ponytail: This is global; shard it by metadata region if DDL contention becomes measurable.
+    cache_access_lock: RwLock<()>,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
@@ -104,6 +108,7 @@ impl MetadataRegion {
         Self {
             mito,
             cache,
+            cache_access_lock: RwLock::new(()),
             logical_region_lock: RwLock::new(HashMap::new()),
         }
     }
@@ -395,6 +400,7 @@ impl MetadataRegion {
         metadata_region_id: RegionId,
         prefix: &str,
     ) -> Result<HashMap<String, String>> {
+        let _cache_guard = self.cache_access_lock.read().await;
         let region_metadata = self
             .cache
             .try_get_with(metadata_region_id, self.load_all(metadata_region_id))
@@ -430,14 +436,20 @@ impl MetadataRegion {
     /// doesn't check if those keys exist or not.
     async fn delete(&self, metadata_region_id: RegionId, keys: &[String]) -> Result<()> {
         let delete_request = Self::build_delete_request(keys);
+        self.write_metadata(metadata_region_id, RegionRequest::Delete(delete_request))
+            .await
+    }
+
+    async fn write_metadata(
+        &self,
+        metadata_region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<()> {
+        let _cache_guard = self.cache_access_lock.write().await;
         self.mito
-            .handle_request(
-                metadata_region_id,
-                store_api::region_request::RegionRequest::Delete(delete_request),
-            )
+            .handle_request(metadata_region_id, request)
             .await
             .context(MitoWriteOperationSnafu)?;
-        // Invalidates the region metadata cache if any values are deleted from the metadata region.
         self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
@@ -552,17 +564,8 @@ impl MetadataRegion {
             .collect::<Vec<_>>();
 
         let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                store_api::region_request::RegionRequest::Put(put_request),
-            )
+        self.write_metadata(metadata_region_id, RegionRequest::Put(put_request))
             .await
-            .context(MitoWriteOperationSnafu)?;
-        // Invalidates the region metadata cache if any new values are put into the metadata region.
-        self.cache.invalidate(&metadata_region_id).await;
-
-        Ok(())
     }
 
     /// Updates logical region metadata so that any entries previously referencing
@@ -636,20 +639,14 @@ impl MetadataRegion {
         );
 
         let put_request = MetadataRegion::build_put_request_from_iter(output.into_iter());
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                store_api::region_request::RegionRequest::Put(put_request),
-            )
-            .await
-            .context(MitoWriteOperationSnafu)?;
+        self.write_metadata(metadata_region_id, RegionRequest::Put(put_request))
+            .await?;
         info!(
             "Transformed {} logical regions metadata to physical region {}, source region: {}",
             logical_regions.len(),
             data_region_id,
             source_region_id
         );
-        self.cache.invalidate(&metadata_region_id).await;
         Ok(())
     }
 }
@@ -881,5 +878,68 @@ mod test {
             .collect::<HashMap<_, _>>();
         assert_eq!(logical_columns.len(), 2);
         assert_eq!(column_metadatas, logical_columns);
+    }
+
+    #[tokio::test]
+    async fn metadata_write_waits_for_cache_fill() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = Arc::new(env.metadata_region());
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
+
+        let (snapshot_loaded_tx, snapshot_loaded_rx) = tokio::sync::oneshot::channel();
+        let (release_snapshot_tx, release_snapshot_rx) = tokio::sync::oneshot::channel();
+        let cache_fill = {
+            let metadata_region = Arc::clone(&metadata_region);
+            tokio::spawn(async move {
+                let _cache_guard = metadata_region.cache_access_lock.read().await;
+                metadata_region
+                    .cache
+                    .try_get_with(metadata_region_id, async {
+                        let snapshot = metadata_region.load_all(metadata_region_id).await?;
+                        snapshot_loaded_tx.send(()).unwrap();
+                        release_snapshot_rx.await.unwrap();
+                        Ok::<_, crate::error::Error>(snapshot)
+                    })
+                    .await
+                    .unwrap();
+            })
+        };
+        snapshot_loaded_rx.await.unwrap();
+
+        let logical_region_id = RegionId::new(1024, 1);
+        let column_metadatas = test_column_metadatas();
+        let metadata_write = {
+            let metadata_region = Arc::clone(&metadata_region);
+            tokio::spawn(async move {
+                let logical_regions = vec![(
+                    logical_region_id,
+                    column_metadatas
+                        .iter()
+                        .map(|(name, metadata)| (name.as_str(), metadata))
+                        .collect::<HashMap<_, _>>(),
+                )];
+                metadata_region
+                    .add_logical_regions(physical_region_id, true, logical_regions.into_iter())
+                    .await
+            })
+        };
+        let mut metadata_write = metadata_write;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut metadata_write)
+                .await
+                .is_err()
+        );
+
+        release_snapshot_tx.send(()).unwrap();
+        cache_fill.await.unwrap();
+        metadata_write.await.unwrap().unwrap();
+
+        let logical_columns = metadata_region
+            .logical_columns(physical_region_id, logical_region_id)
+            .await
+            .unwrap();
+        assert_eq!(logical_columns.len(), 2);
     }
 }
