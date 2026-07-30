@@ -1,0 +1,210 @@
+tests-integration/tests/grpc.rs
+  s_6da44af1c98120::t_db03aa7e485ee3 792-794
+tests-integration/src/grpc/flight.rs
+  s_be1f226caa6cac::t_a38306c4a77fed 20,134,151,161,289-299
+  s_cc78b33843374e::t_8ed29c5cfc7fe0 137-141
+  s_be1f226caa6cac::t_cff449d5662d9d 300-301
+src/client/src/client.rs
+  s_06663e8c5db4ea::t_90ceab84c5d57e 147,149-150,152,246,259,267,270,273-274,388-389,391-395,400-463,518-523,526-548
+  s_cc78b33843374e::t_eda37bcfffc1f7 76,91-92,104,117-121,131,134-146,483,501-502
+  s_06663e8c5db4ea::t_1240e868bebc4e 524-525
+  s_cc78b33843374e::t_eaf4dc203b12db 36-40,42-51,79,110,173-182,186-198,207-211,219,222-227,262-264
+  s_cc78b33843374e::t_4556db58bc22d8 85
+  s_cc78b33843374e::t_2ad7cdcd90164a 365
+  s_cc78b33843374e::t_145f97ef04e0fd 366
+  s_cc78b33843374e::t_ca7e2be83a3d5d 41,249-252,258,492,506-517
+  s_cc78b33843374e::t_7a6a2b31206490 375-378
+  s_cc78b33843374e::t_c048524329e3fb 238-242
+  s_cc78b33843374e::t_f204dbff9d3e53 484-485
+  s_cc78b33843374e::t_13fc3f482ba9ef 73,81-84,86-87,109,111
+  s_cc78b33843374e::t_124d3fdb10a881 385-386,397
+  s_cc78b33843374e::t_0a4a58a24abdb0 101,107
+  s_cc78b33843374e::t_837bfd2325b4bd 157,243,364,367-374,379,503
+  s_cc78b33843374e::t_751f8e88ac7008 96-100,105-106,108,125-130,132-133,495-499
+  s_cc78b33843374e::t_76186d2d7515c5 390,396
+  s_cc78b33843374e::t_e78fc2853e3d3a 52
+  s_cc78b33843374e::t_902c3eaa35452c 77
+  s_cc78b33843374e::t_dee670e239d0c3 80
+  s_cc78b33843374e::t_7ab7eaf1fe8de5 88-90
+  s_cc78b33843374e::t_ab67fffa842f3e 115-116
+  s_cc78b33843374e::t_ca0c37d9afb8ca 124
+  s_06663e8c5db4ea::t_1acd0bc1788776 148
+  s_06663e8c5db4ea::t_859012d2eff42d 151
+  s_cc78b33843374e::t_60dfecd81a2b49 158-159
+  s_cc78b33843374e::t_119c542639e2e1 237
+  s_cc78b33843374e::t_b265818f89c5f3 253-257
+  s_cc78b33843374e::t_c1813c2d37b4c2 261
+  s_06663e8c5db4ea::t_c078d02e430825 268-269
+  s_06663e8c5db4ea::t_02216c6fc6d7b1 271-272
+  s_cc78b33843374e::t_921f0172137402 491
+  s_cc78b33843374e::t_9710b878f1e228 493-494
+  s_cc78b33843374e::t_e385559893309a 500
+  s_cc78b33843374e::t_032b149a1b3189 504-505
+src/client/src/lib.rs
+  s_cc78b33843374e::t_eaf4dc203b12db 35
+src/client/src/load_balance.rs
+  s_cc78b33843374e::t_eda37bcfffc1f7 20,39-40,52-53,57-58
+tests-integration/src/cluster.rs
+  s_43828e19b033dc::t_b551202ce1f534 691-706,708-751,844,857-859,874-878
+  s_cc78b33843374e::t_d759a06d084d2f 681
+  s_984e23a92917a7::t_8bd7ba47192c08 752-764,766-809,884,886-887,892-894,904-908
+  s_352512f5f404b6::t_3fb66d88a35dcc 22,71,307,587,624,630,632,646,649
+  s_48c3b88cfb74b3::t_fea724920ac3ad 313-317
+  s_352512f5f404b6::t_b1697bdf4ced31 639-641
+  s_cc6156f313ce71::t_ea79ee9edde675 674,689,840-841,880-883,888,903
+  s_48c3b88cfb74b3::t_7cd0e89350654d 652-654,656-658,669-671,842-843,845-849,864-873,879,914
+  s_404b7bdb100a9f::t_51d1e1a79a7c18 661-662
+  s_404b7bdb100a9f::t_848a528e9aa690 441
+  s_cc78b33843374e::t_837bfd2325b4bd 680
+  s_cc78b33843374e::t_0e6c18052eaa6a 690,707,765
+  s_404b7bdb100a9f::t_916105c6a48166 660
+  s_43828e19b033dc::t_60e6734d6e12a2 850-852
+  s_984e23a92917a7::t_a1b575e6320588 885
+  s_cc78b33843374e::t_8ed29c5cfc7fe0 898,900-902
+  s_404b7bdb100a9f::t_31a9ef31e0fdbe 81,655,659,663-665,668,672-673,675-679,682-688,810-839,853,860-863,895-897,899,913
+  s_cc78b33843374e::t_7a6a2b31206490 666-667,854-856,889-891,909-912
+  s_48c3b88cfb74b3::t_a8f7b0f3f4e910 915
+tests-integration/Cargo.toml
+  s_cc78b33843374e::t_dc8531141e98e5 28
+src/datanode/src/service.rs
+  s_9b7880440935f7::t_b6495616f21f9a 100-103,105-152
+  s_cc78b33843374e::t_0e6c18052eaa6a 104
+src/flow/src/server.rs
+  s_cc78b33843374e::t_0e6c18052eaa6a 724
+  s_fbbbb2ca19eacb::t_01c5bfaf8760db 725,734,838-856,859-861
+  s_fbbbb2ca19eacb::t_c14114f48654f4 857-858
+  s_fbbbb2ca19eacb::t_6af1108bd66d74 862
+src/frontend/src/server.rs
+  s_cc78b33843374e::t_0e6c18052eaa6a 448
+  s_8a393af3444a3e::t_05ea90b9a9480f 449-453,455,546-592
+  s_8a393af3444a3e::t_1f3321a81f011d 593
+Cargo.lock
+  s_386ae40ce19d4b::t_dbe39ded0c5088 2035
+src/client/Cargo.toml
+  s_386ae40ce19d4b::t_6e0c0def1bf1ee 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "81e917cfc9ff6fa58d6c48e30951b0a6ccf375af",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_06663e8c5db4ea": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04ebe10cfffeeY1JAUWkCKJnKN",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_352512f5f404b6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04db87ddfffeyaKVhBFnMt7jQr",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_386ae40ce19d4b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa417-65b4-7d13-a763-977980c6e9cb",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_404b7bdb100a9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04e37cb3fffedeLQxZF3Ic1QtZ",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_43828e19b033dc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04db2128effeH4RiUzh3BjoUoS",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_48c3b88cfb74b3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04ebc8afbffe6wDR893Z37BtLQ",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_6da44af1c98120": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04ebe14feffe8Xv39zZLmtn182",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_8a393af3444a3e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04db20667ffeqHh2qTM5DTp8lh",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_984e23a92917a7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04dadecc5ffeKWtB6NKyT3GYNj",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_9b7880440935f7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04db20e77ffeohRZGyRWjvtRzn",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_be1f226caa6cac": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04ebd888cffeAlYtA0c1oTs3HB",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cc6156f313ce71": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04eb86ee5ffefnTYQ7bR1iiRbk",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cc78b33843374e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_051b70c61ffeBPvFQ313ZXgGFS",
+        "model": "gpt-5.6-luna-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_fbbbb2ca19eacb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04db20a6dffe5XYNlHWMLAbmH6",
+        "model": "gpt-5.6-terra-fast"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
