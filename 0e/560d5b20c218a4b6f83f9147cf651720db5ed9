@@ -14,6 +14,9 @@ config/standalone.example.toml
   s_bab36d2c764e36::t_cba74eb18a4a79 910
 config/config.md
   s_bab36d2c764e36::t_cba74eb18a4a79 234
+  s_bab36d2c764e36::t_d69fbfb067d598 447
+config/metasrv.example.toml
+  s_bab36d2c764e36::t_d69fbfb067d598 320
 ---
 {
   "schema_version": "authorship/3.0.0",
