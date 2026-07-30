@@ -422,17 +422,17 @@ async fn test_compaction_wins_before_index_worker_apply() {
 }
 
 #[tokio::test]
-async fn test_index_build_routes_cross_region_file_to_logical_region() {
+async fn test_index_build_uses_physical_file_region_and_logical_manifest_region() {
     let mut env = TestEnv::with_prefix("test_cross_region_index_build_").await;
     let listener = Arc::new(IndexBuildListener::default());
+    let config = async_build_mode_config(false).enable_write_cache(
+        env.data_home().join("write_cache").display().to_string(),
+        ReadableSize::mb(32),
+        None,
+    );
     let engine = Arc::new(
-        env.create_engine_with(
-            async_build_mode_config(false),
-            None,
-            Some(listener.clone()),
-            None,
-        )
-        .await,
+        env.create_engine_with(config, None, Some(listener.clone()), None)
+            .await,
     );
 
     let source_region_id = RegionId::new(1, 1);
@@ -498,6 +498,14 @@ async fn test_index_build_routes_cross_region_file_to_logical_region() {
     assert_eq!(target_files.len(), 1);
     assert_eq!(target_files[0].region_id, source_region_id);
     assert!(target_files[0].exists_index());
+    let scanner = engine
+        .scanner(target_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        num_of_index_files(&engine, &scanner, target_region_id).await,
+        1
+    );
     assert_eq!(
         engine
             .get_region(target_region_id)

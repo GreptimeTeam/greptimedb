@@ -257,7 +257,10 @@ pub type VectorIndexOutput = IndexBaseOutput;
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
+    /// The logical region used for metadata and intermediate index files.
     region_id: RegionId,
+    /// The region that owns the physical SST and Puffin files.
+    physical_region_id: RegionId,
     index_version: u64,
     puffin_manager: Option<SstPuffinManager>,
     write_cache_enabled: bool,
@@ -348,10 +351,10 @@ impl Indexer {
 
 #[async_trait::async_trait]
 pub trait IndexerBuilder {
-    /// Builds indexer of given file id to [index_file_path].
+    /// Builds an indexer for the physical SST file.
     async fn build(
         &self,
-        file_id: FileId,
+        region_file_id: RegionFileId,
         index_version: u64,
         row_group_size: Option<usize>,
     ) -> Indexer;
@@ -376,24 +379,26 @@ impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
     async fn build(
         &self,
-        file_id: FileId,
+        region_file_id: RegionFileId,
         index_version: u64,
         row_group_size: Option<usize>,
     ) -> Indexer {
         let mut indexer = Indexer {
-            file_id,
+            file_id: region_file_id.file_id(),
             region_id: self.metadata.region_id,
+            physical_region_id: region_file_id.region_id(),
             index_version,
             write_cache_enabled: self.write_cache_enabled,
             ..Default::default()
         };
 
-        indexer.inverted_indexer = self.build_inverted_indexer(file_id, row_group_size);
-        indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
-        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
+        indexer.inverted_indexer =
+            self.build_inverted_indexer(region_file_id.file_id(), row_group_size);
+        indexer.fulltext_indexer = self.build_fulltext_indexer(region_file_id.file_id()).await;
+        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(region_file_id.file_id());
         #[cfg(feature = "vector_index")]
         {
-            indexer.vector_indexer = self.build_vector_indexer(file_id);
+            indexer.vector_indexer = self.build_vector_indexer(region_file_id.file_id());
         }
         indexer.intermediate_manager = Some(self.intermediate_manager.clone());
 
@@ -854,10 +859,11 @@ impl IndexBuildTask {
         });
 
         // Use the same file_id but with new version for index file.
-        let index_file_id = self.file_meta.file_id;
+        let region_file_id = RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id);
+        let index_file_id = region_file_id.file_id();
         let mut indexer = self
             .indexer_builder
-            .build(index_file_id, new_index_version, row_group_size)
+            .build(region_file_id, new_index_version, row_group_size)
             .await;
 
         if let Some(mut parquet_reader) = parquet_reader.take() {
@@ -898,8 +904,6 @@ impl IndexBuildTask {
             self.maybe_upload_index_file(index_output.clone(), index_file_id, new_index_version)
                 .await?;
 
-            let region_file_id =
-                RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id);
             self.listener
                 .on_index_build_before_manifest_commit(region_file_id)
                 .await;
@@ -1505,6 +1509,11 @@ mod tests {
     async fn mock_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
         IntermediateManager::init_fs(path).await.unwrap()
     }
+
+    fn random_region_file_id() -> RegionFileId {
+        RegionFileId::new(RegionId::new(1, 2), FileId::random())
+    }
+
     struct NoopPathProvider;
 
     impl FilePathProvider for NoopPathProvider {
@@ -1628,7 +1637,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1665,7 +1674,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1688,7 +1697,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1711,7 +1720,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1745,7 +1754,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1772,7 +1781,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1799,7 +1808,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1833,7 +1842,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(0))
+        .build(random_region_file_id(), 0, Some(0))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1892,7 +1901,7 @@ mod tests {
             bloom_filter_index_config: BloomFilterConfig::default(),
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0, Some(1024))
+        .build(random_region_file_id(), 0, Some(1024))
         .await;
 
         assert!(indexer.vector_indexer.is_some());
