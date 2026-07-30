@@ -285,6 +285,21 @@ impl BatchGcProcedure {
         })
     }
 
+    fn merge_gc_report(&mut self, report: GcReport) {
+        self.data.gc_report.get_or_insert_default().merge(report);
+    }
+
+    fn done_with_gc_report(&self) -> ProcedureResult<Status> {
+        let Some(report) = self.data.gc_report.clone() else {
+            return common_procedure::error::UnexpectedSnafu {
+                err_msg: "GC report should be present after GC completion".to_string(),
+            }
+            .fail();
+        };
+
+        Ok(Status::done_with_output(report))
+    }
+
     #[cfg(test)]
     pub(crate) fn set_gc_report_for_test(&mut self, report: GcReport) {
         self.data.gc_report = Some(report);
@@ -743,9 +758,8 @@ impl BatchGcProcedure {
         })
     }
 
-    /// Send GC instruction to all datanodes that host the regions,
-    /// returns regions that need retry.
-    async fn send_gc_instructions(&self) -> Result<GcReport> {
+    /// Sends GC instructions to all datanodes that host the regions.
+    async fn send_gc_instructions(&mut self) -> Result<()> {
         let regions = &self.data.regions;
         let region_routes = &self.data.region_routes;
         let file_refs = &self.data.file_refs;
@@ -865,6 +879,8 @@ impl BatchGcProcedure {
             all_report.merge(report);
         }
 
+        self.merge_gc_report(all_report);
+
         if let Some(e) = first_error {
             return Err(e);
         }
@@ -873,7 +889,7 @@ impl BatchGcProcedure {
             warn!("Regions need retry after batch GC: {:?}", all_need_retry);
         }
 
-        Ok(all_report)
+        Ok(())
     }
 }
 
@@ -945,27 +961,31 @@ impl Procedure for BatchGcProcedure {
                 );
                 // Send GC instructions to all datanodes
                 // TODO(discord9): handle need-retry regions
+                let debug_span = common_telemetry::tracing::debug_span!(
+                    "meta_gc_procedure_regions",
+                    state = "gcing",
+                    regions = ?self.data.regions
+                );
+                let info_span = common_telemetry::tracing::info_span!(
+                    "meta_gc_procedure_send_gc_instructions",
+                    region_count = self.data.regions.len(),
+                    full_file_listing = self.data.full_file_listing
+                );
                 match self
                     .send_gc_instructions()
-                    .instrument(common_telemetry::tracing::debug_span!(
-                        "meta_gc_procedure_regions",
-                        state = "gcing",
-                        regions = ?self.data.regions
-                    ))
-                    .instrument(common_telemetry::tracing::info_span!(
-                        "meta_gc_procedure_send_gc_instructions",
-                        region_count = self.data.regions.len(),
-                        full_file_listing = self.data.full_file_listing
-                    ))
+                    .instrument(debug_span)
+                    .instrument(info_span)
                     .await
                 {
-                    Ok(report) => {
+                    Ok(()) => {
                         info!(
                             "Batch GC procedure received GC report, retry region count: {}",
-                            report.need_retry_regions.len()
+                            self.data
+                                .gc_report
+                                .as_ref()
+                                .map_or(0, |report| report.need_retry_regions.len())
                         );
                         self.data.state = State::UpdateRepartition;
-                        self.data.gc_report = Some(report);
                         Ok(Status::executing(false))
                     }
                     Err(e) => {
@@ -996,14 +1016,8 @@ impl Procedure for BatchGcProcedure {
                         "Batch GC completed successfully for regions {:?}",
                         self.data.regions
                     );
-                    let Some(report) = self.data.gc_report.take() else {
-                        return common_procedure::error::UnexpectedSnafu {
-                            err_msg: "GC report should be present after GC completion".to_string(),
-                        }
-                        .fail();
-                    };
-                    info!("GC report: {:?}", report);
-                    Ok(Status::done_with_output(report))
+                    info!("GC report: {:?}", self.data.gc_report);
+                    self.done_with_gc_report()
                 }
                 Err(e) => {
                     error!(e; "Failed to cleanup region repartition info");
@@ -1070,5 +1084,147 @@ impl Procedure for BatchGcProcedure {
                 }),
         };
         Some(Box::new(event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use api::v1::meta::MailboxMessage;
+    use api::v1::meta::mailbox_message::Payload;
+    use common_meta::instruction::{GcRegionsReply, InstructionReply};
+    use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::peer::Peer;
+    use common_meta::sequence::SequenceBuilder;
+    use common_time::util::current_time_millis;
+    use store_api::storage::FileId;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::procedure::test_util::{MailboxContext, send_mock_reply};
+    use crate::service::mailbox::Channel;
+
+    #[test]
+    fn test_done_with_gc_report_keeps_report() {
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let mut procedure = batch_gc_procedure();
+        procedure.data.gc_report = Some(GcReport {
+            deleted_files: HashMap::from([(region_id, vec![file_id])]),
+            ..Default::default()
+        });
+
+        for _ in 0..2 {
+            let status = procedure.done_with_gc_report().unwrap();
+            assert_eq!(
+                status.downcast_output_ref::<GcReport>(),
+                procedure.data.gc_report.as_ref()
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_gc_report_preserves_partial_outcomes() {
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let first_file = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let second_file = FileId::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut procedure = batch_gc_procedure();
+
+        procedure.merge_gc_report(GcReport {
+            deleted_files: HashMap::from([(first_region, vec![first_file])]),
+            ..Default::default()
+        });
+        procedure.merge_gc_report(GcReport {
+            deleted_files: HashMap::from([
+                (first_region, vec![first_file]),
+                (second_region, vec![second_file]),
+            ]),
+            ..Default::default()
+        });
+
+        let report = procedure.data.gc_report.unwrap();
+        assert_eq!(report.deleted_files.len(), 2);
+        assert_eq!(report.deleted_files[&first_region], vec![first_file]);
+        assert_eq!(report.deleted_files[&second_region], vec![second_file]);
+    }
+
+    #[tokio::test]
+    async fn test_send_gc_instructions_preserves_partial_report() {
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let first_peer = Peer::new(1, "first");
+        let second_peer = Peer::new(2, "second");
+        let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let report = GcReport {
+            deleted_files: HashMap::from([(first_region, vec![file_id])]),
+            ..Default::default()
+        };
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let mailbox_sequence =
+            SequenceBuilder::new("test_batch_gc_partial_report", kv_backend).build();
+        let mut mailbox = MailboxContext::new(mailbox_sequence);
+        let (tx, rx) = mpsc::channel(1);
+        mailbox
+            .insert_heartbeat_response_receiver(Channel::Datanode(first_peer.id), tx)
+            .await;
+        send_mock_reply(mailbox.mailbox().clone(), rx, {
+            let report = report.clone();
+            move |id| gc_reply(id, report.clone())
+        });
+
+        let mut procedure = BatchGcProcedure::new(
+            mailbox.mailbox().clone(),
+            table_metadata_manager,
+            "localhost".to_string(),
+            vec![first_region, second_region],
+            true,
+            Duration::from_secs(10),
+            HashMap::new(),
+        );
+        procedure.data.region_routes = HashMap::from([
+            (first_region, (first_peer, vec![])),
+            (second_region, (second_peer, vec![])),
+        ]);
+
+        assert!(procedure.send_gc_instructions().await.is_err());
+        assert_eq!(procedure.data.gc_report.as_ref(), Some(&report));
+    }
+
+    fn gc_reply(id: u64, report: GcReport) -> Result<MailboxMessage> {
+        Ok(MailboxMessage {
+            id,
+            subject: "mock".to_string(),
+            from: "datanode".to_string(),
+            to: "meta".to_string(),
+            timestamp_millis: current_time_millis(),
+            payload: Some(Payload::Json(
+                serde_json::to_string(&InstructionReply::GcRegions(GcRegionsReply {
+                    result: Ok(report),
+                }))
+                .unwrap(),
+            )),
+            header: None,
+        })
+    }
+
+    fn batch_gc_procedure() -> BatchGcProcedure {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let mailbox_sequence = SequenceBuilder::new("test_batch_gc_procedure", kv_backend).build();
+        let mailbox = MailboxContext::new(mailbox_sequence);
+        BatchGcProcedure::new(
+            mailbox.mailbox().clone(),
+            table_metadata_manager,
+            "localhost".to_string(),
+            vec![RegionId::new(1024, 1)],
+            true,
+            Duration::from_secs(10),
+            HashMap::new(),
+        )
     }
 }
