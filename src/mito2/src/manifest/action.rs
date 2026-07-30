@@ -198,6 +198,15 @@ pub struct RegionManifestBuilder {
 }
 
 impl RegionManifestBuilder {
+    fn removed_file(&self, file: &FileMeta) -> RemovedFile {
+        let index_version = self
+            .files
+            .get(&file.file_id)
+            .and_then(FileMeta::index_version)
+            .or_else(|| file.index_version());
+        RemovedFile::File(file.file_id, index_version)
+    }
+
     /// Start with a checkpoint.
     pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
         if let Some(s) = checkpoint {
@@ -263,14 +272,11 @@ impl RegionManifestBuilder {
                 removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
             }
         }
-        removed_files.extend(edit.files_to_remove.iter().map(|file| {
-            let index_version = self
-                .files
-                .get(&file.file_id)
-                .and_then(FileMeta::index_version)
-                .or_else(|| file.index_version());
-            RemovedFile::File(file.file_id, index_version)
-        }));
+        removed_files.extend(
+            edit.files_to_remove
+                .iter()
+                .map(|file| self.removed_file(file)),
+        );
         let at = edit
             .timestamp_ms
             .unwrap_or_else(|| Utc::now().timestamp_millis());
@@ -319,10 +325,15 @@ impl RegionManifestBuilder {
                 self.files.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
+                // TODO: With GC disabled, VersionControl may still hold an older
+                // FileMeta and LocalFilePurger can miss a just-committed newer
+                // index generation. We accept this narrow local-mode orphan
+                // window; object-store deployments enable GC and collect the
+                // generation recorded here.
                 self.removed_files.add_removed_files(
                     files_to_remove
                         .iter()
-                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .map(|file| self.removed_file(file))
                         .collect(),
                     truncate
                         .timestamp_ms
@@ -939,7 +950,7 @@ mod tests {
         builder.apply_edit(
             1,
             RegionEdit {
-                files_to_add: vec![current],
+                files_to_add: vec![current.clone()],
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
                 compaction_time_window: None,
@@ -952,12 +963,41 @@ mod tests {
             2,
             RegionEdit {
                 files_to_add: Vec::new(),
-                files_to_remove: vec![stale],
+                files_to_remove: vec![stale.clone()],
                 timestamp_ms: Some(42),
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+            },
+        );
+
+        assert_eq!(
+            builder.removed_files.removed_files[0].files,
+            HashSet::from([RemovedFile::File(file_id, Some(2))])
+        );
+
+        let mut builder = RegionManifestBuilder::default();
+        builder.apply_edit(
+            1,
+            RegionEdit {
+                files_to_add: vec![current],
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        );
+        builder.apply_truncate(
+            2,
+            RegionTruncate {
+                region_id: RegionId::new(1, 1),
+                kind: TruncateKind::Partial {
+                    files_to_remove: vec![stale],
+                },
+                timestamp_ms: Some(42),
             },
         );
 

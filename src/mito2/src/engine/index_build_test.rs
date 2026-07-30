@@ -26,6 +26,7 @@ use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
+use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
@@ -819,6 +820,223 @@ async fn test_index_build_type_schema_change_multiple_files() {
         .unwrap();
     assert_eq!(scanner.num_files(), 3);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 3);
+}
+
+#[tokio::test]
+async fn test_consecutive_schema_changes_publish_latest_index_generation() {
+    let mut env = TestEnv::with_prefix("test_consecutive_schema_change_index_builds_").await;
+    let mut config = async_build_mode_config(false);
+    config.max_background_index_builds = 2;
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::BeforeManifestCommit,
+    ));
+    let engine = Arc::new(
+        env.create_engine_with(config, None, Some(gate.clone()), None)
+            .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+
+    let set_index = |option| {
+        RegionRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::SetIndexes {
+                options: vec![option],
+            },
+        })
+    };
+
+    engine
+        .handle_request(
+            region_id,
+            set_index(SetIndexOption::Inverted {
+                column_name: "tag_0".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("first schema generation did not reach manifest publication");
+
+    engine
+        .handle_request(
+            region_id,
+            set_index(SetIndexOption::Inverted {
+                column_name: "field_0".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            set_index(SetIndexOption::Skipping {
+                column_name: "field_0".to_string(),
+                options: SkippingIndexOptions::new_unchecked(
+                    1024,
+                    0.01,
+                    SkippingIndexType::BloomFilter,
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(1))
+        .await
+        .expect("superseded schema-change build was not coalesced");
+    assert_eq!(
+        gate.entered.load(Ordering::Relaxed),
+        1,
+        "the same SST was built concurrently"
+    );
+    gate.release(1);
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(2))
+        .await
+        .expect("latest schema generation was not scheduled");
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(3))
+        .await
+        .expect("coalesced schema-change builds did not stop");
+
+    assert_eq!(gate.entered.load(Ordering::Relaxed), 2);
+    assert_eq!(gate.abort_count.load(Ordering::Relaxed), 2);
+    assert_eq!(gate.finish_count.load(Ordering::Relaxed), 1);
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = current_file_metas(&engine, region_id).await;
+    assert_eq!(files.len(), 1);
+    assert!(
+        files[0].is_index_consistent_with_region(&version.metadata.column_metadatas),
+        "the published index must match the latest schema generation, file: {:?}, metadata: {:?}",
+        files[0],
+        version.metadata
+    );
+    assert_eq!(
+        region.manifest_ctx.manifest().await.metadata.schema_version,
+        version.metadata.schema_version
+    );
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let reopened = engine.get_region(region_id).unwrap();
+    let reopened_files = current_file_metas(&engine, region_id).await;
+    assert_eq!(reopened_files.len(), 1);
+    assert!(
+        reopened_files[0]
+            .is_index_consistent_with_region(&reopened.version().metadata.column_metadatas)
+    );
+}
+
+#[tokio::test]
+async fn test_schema_change_uses_manifest_file_generation() {
+    let mut env = TestEnv::with_prefix("test_schema_change_uses_manifest_file_generation_").await;
+    let mut config = async_build_mode_config(false);
+    config.max_background_index_builds = 2;
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::AfterManifestCommit,
+    ));
+    let engine = Arc::new(
+        env.create_engine_with(config, None, Some(gate.clone()), None)
+            .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetIndexes {
+                    options: vec![SetIndexOption::Inverted {
+                        column_name: "tag_0".to_string(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("first index generation did not commit");
+
+    // The first publication is committed to the manifest but its worker
+    // notification is blocked, so version control still has the previous file
+    // metadata when the next schema generation is created.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetIndexes {
+                    options: vec![SetIndexOption::Inverted {
+                        column_name: "field_0".to_string(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(2))
+        .await
+        .expect("latest schema generation did not commit");
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(2))
+        .await
+        .expect("index builds did not stop");
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = current_file_metas(&engine, region_id).await;
+    assert_eq!(files.len(), 1);
+    assert!(
+        files[0].is_index_consistent_with_region(&version.metadata.column_metadatas),
+        "the latest index definition was not published"
+    );
 }
 
 #[tokio::test]

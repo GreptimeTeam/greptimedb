@@ -63,14 +63,14 @@ use crate::metrics::{
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{IndexPublication, ManifestContextRef};
+use crate::region::{IndexBuildSource, IndexPublication, ManifestContextRef};
 use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
     WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId, RegionIndexId,
+    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
@@ -90,9 +90,8 @@ pub(crate) const TYPE_VECTOR_INDEX: &str = "vector_index";
 /// Evicts local state for a stale index artifact.
 ///
 /// The remote artifact may already be referenced by another region manifest
-/// because repartitioned regions share physical SST and index paths. Remote
-/// deletion therefore stays in the normal FilePurger/GC lifecycle; object-store
-/// GC can account for cross-region references and the configured lingering time.
+/// because repartitioned regions share physical SST and index paths. With GC
+/// enabled, remote deletion therefore stays in the reference-aware GC lifecycle.
 pub(crate) async fn cleanup_stale_index_caches(
     index_id: RegionIndexId,
     access_layer: &AccessLayerRef,
@@ -705,8 +704,8 @@ pub struct IndexBuildTask {
     pub region_id: RegionId,
     /// The SST file handle to build index for.
     pub file: FileHandle,
-    /// The file meta to build index for.
-    pub file_meta: FileMeta,
+    /// The manifest state this build is based on.
+    pub(crate) source: IndexBuildSource,
     pub reason: IndexBuildType,
     pub access_layer: AccessLayerRef,
     pub(crate) listener: WorkerListener,
@@ -727,8 +726,9 @@ impl std::fmt::Debug for IndexBuildTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexBuildTask")
             .field("region_id", &self.region_id)
-            .field("origin_region_id", &self.file_meta.region_id)
-            .field("file_id", &self.file_meta.file_id)
+            .field("origin_region_id", &self.source.file_meta.region_id)
+            .field("file_id", &self.source.file_meta.file_id)
+            .field("schema_version", &self.source.schema_version)
             .field("reason", &self.reason)
             .finish()
     }
@@ -759,8 +759,8 @@ impl IndexBuildTask {
     async fn do_index_build(&mut self, version_control: VersionControlRef) {
         self.listener
             .on_index_build_begin(RegionFileId::new(
-                self.file_meta.region_id,
-                self.file_meta.file_id,
+                self.source.file_meta.region_id,
+                self.source.file_meta.file_id,
             ))
             .await;
         match self.index_build(version_control).await {
@@ -768,7 +768,7 @@ impl IndexBuildTask {
             Err(e) => {
                 warn!(
                     e; "Index build task failed, region: {}, file_id: {}",
-                    self.region_id, self.file_meta.file_id,
+                    self.region_id, self.source.file_meta.file_id,
                 );
                 self.on_failure(e.into()).await
             }
@@ -776,7 +776,7 @@ impl IndexBuildTask {
         let worker_request = WorkerRequest::Background {
             region_id: self.region_id,
             notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
-                file_id: self.file_meta.file_id,
+                file_id: self.source.file_meta.file_id,
             }),
         };
         let _ = self
@@ -787,8 +787,8 @@ impl IndexBuildTask {
 
     // Checks if the SST file still exists in object store and version to avoid conflict with compaction.
     async fn check_sst_file_exists(&self, version_control: &VersionControlRef) -> bool {
-        let file_id = self.file_meta.file_id;
-        let level = self.file_meta.level;
+        let file_id = self.source.file_meta.file_id;
+        let level = self.source.file_meta.level;
         // We should check current version instead of the version when the job is created.
         let version = version_control.current().version;
 
@@ -822,6 +822,7 @@ impl IndexBuildTask {
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
         let new_index_version = self
+            .source
             .file_meta
             .index_version()
             .map_or(0, |version| version + 1);
@@ -830,13 +831,13 @@ impl IndexBuildTask {
         if !self.check_sst_file_exists(&version_control).await {
             self.listener
                 .on_index_build_abort(RegionFileId::new(
-                    self.file_meta.region_id,
-                    self.file_meta.file_id,
+                    self.source.file_meta.region_id,
+                    self.source.file_meta.file_id,
                 ))
                 .await;
             return Ok(IndexBuildOutcome::Aborted(format!(
                 "SST file not found during index build, region: {}, file_id: {}",
-                self.region_id, self.file_meta.file_id
+                self.region_id, self.source.file_meta.file_id
             )));
         }
 
@@ -856,7 +857,10 @@ impl IndexBuildTask {
         });
 
         // Use the same file_id but with new version for index file.
-        let region_file_id = RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id);
+        let region_file_id = RegionFileId::new(
+            self.source.file_meta.region_id,
+            self.source.file_meta.file_id,
+        );
         let index_file_id = region_file_id.file_id();
         let mut indexer = self
             .indexer_builder
@@ -887,13 +891,13 @@ impl IndexBuildTask {
                 indexer.abort().await;
                 self.listener
                     .on_index_build_abort(RegionFileId::new(
-                        self.file_meta.region_id,
-                        self.file_meta.file_id,
+                        self.source.file_meta.region_id,
+                        self.source.file_meta.file_id,
                     ))
                     .await;
                 return Ok(IndexBuildOutcome::Aborted(format!(
                     "SST file not found during index build, region: {}, file_id: {}",
-                    self.region_id, self.file_meta.file_id
+                    self.region_id, self.source.file_meta.file_id
                 )));
             }
 
@@ -927,6 +931,11 @@ impl IndexBuildTask {
                         .with_label_values(&["manifest_commit"])
                         .inc();
                     let index_id = RegionIndexId::new(region_file_id, new_index_version);
+                    // TODO: If no successor publishes the same version, remove the
+                    // remote artifact when GC is disabled. Repartition requires GC,
+                    // so a GC-disabled region cannot share this physical index path.
+                    // With GC enabled, remote cleanup must remain in GC because
+                    // repartitioned regions may reference the same artifact.
                     cleanup_stale_index_caches(
                         index_id,
                         &self.access_layer,
@@ -937,7 +946,7 @@ impl IndexBuildTask {
                     self.listener.on_index_build_abort(region_file_id).await;
                     return Ok(IndexBuildOutcome::Aborted(format!(
                         "Source SST or region incarnation changed before index publication, region: {}, file_id: {}",
-                        self.region_id, self.file_meta.file_id
+                        self.region_id, self.source.file_meta.file_id
                     )));
                 }
                 Err(e) => {
@@ -964,8 +973,8 @@ impl IndexBuildTask {
         index_version: u64,
     ) -> Result<()> {
         if let Some(write_cache) = &self.write_cache {
-            let file_id = self.file_meta.file_id;
-            let region_id = self.file_meta.region_id;
+            let file_id = self.source.file_meta.file_id;
+            let region_id = self.source.file_meta.region_id;
             let remote_store = self.access_layer.object_store();
             let mut upload_tracker = UploadTracker::new(region_id);
             let mut err = None;
@@ -1010,14 +1019,14 @@ impl IndexBuildTask {
         output: IndexOutput,
         new_index_version: u64,
     ) -> Result<IndexPublication> {
-        let mut updated = self.file_meta.clone();
+        let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_indexes();
         updated.indexes = output.build_indexes();
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
         let publication = self
             .manifest_ctx
-            .update_manifest_for_index(&self.file_meta, updated)
+            .update_manifest_for_index(&self.source, updated)
             .await?;
         if let IndexPublication::Committed {
             manifest_version, ..
@@ -1080,10 +1089,90 @@ impl Ord for PendingIndexBuild {
     }
 }
 
+impl PendingIndexBuild {
+    /// Returns whether this task should replace another pending task for the
+    /// same SST.
+    fn supersedes(&self, other: &Self) -> bool {
+        match self
+            .task
+            .source
+            .schema_version
+            .cmp(&other.task.source.schema_version)
+        {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal if self.task.source.file_meta != other.task.source.file_meta => true,
+            Ordering::Equal => self.task.reason.priority() >= other.task.reason.priority(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PendingIndexBuilds {
+    heap: BinaryHeap<PendingIndexBuild>,
+}
+
+impl PendingIndexBuilds {
+    fn insert(&mut self, pending: PendingIndexBuild) -> Option<IndexBuildTask> {
+        let file_id = pending.task.source.file_meta.file_id;
+        let Some(existing) = self
+            .heap
+            .iter()
+            .find(|queued| queued.task.source.file_meta.file_id == file_id)
+            .cloned()
+        else {
+            self.heap.push(pending);
+            return None;
+        };
+
+        if pending.supersedes(&existing) {
+            self.heap
+                .retain(|queued| queued.task.source.file_meta.file_id != file_id);
+            self.heap.push(pending);
+            Some(existing.task)
+        } else {
+            Some(pending.task)
+        }
+    }
+
+    fn highest_ready(&self, building_files: &HashSet<FileId>) -> Option<PendingIndexBuild> {
+        if let Some(pending) = self.heap.peek()
+            && !building_files.contains(&pending.task.source.file_meta.file_id)
+        {
+            return Some(pending.clone());
+        }
+
+        self.heap
+            .iter()
+            .filter(|pending| !building_files.contains(&pending.task.source.file_meta.file_id))
+            .max()
+            .cloned()
+    }
+
+    fn remove(&mut self, file_id: FileId) {
+        self.heap
+            .retain(|queued| queued.task.source.file_meta.file_id != file_id);
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = PendingIndexBuild> {
+        std::mem::take(&mut self.heap).into_iter()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+}
+
 /// Tracks the index build status of a region scheduled by the [IndexBuildScheduler].
 struct IndexBuildStatus {
     building_files: HashSet<FileId>,
-    pending_tasks: BinaryHeap<PendingIndexBuild>,
+    /// At most one coalesced pending task is kept for each SST.
+    pending_tasks: PendingIndexBuilds,
     /// Whether the active builds belong to a region incarnation that has
     /// stopped accepting index publications.
     retiring: bool,
@@ -1093,13 +1182,13 @@ impl IndexBuildStatus {
     fn new() -> Self {
         IndexBuildStatus {
             building_files: HashSet::new(),
-            pending_tasks: BinaryHeap::new(),
+            pending_tasks: PendingIndexBuilds::default(),
             retiring: false,
         }
     }
 
     async fn fail_pending(&mut self, err: Arc<Error>) {
-        for pending in std::mem::take(&mut self.pending_tasks) {
+        for pending in self.pending_tasks.drain() {
             pending.task.on_failure(err.clone()).await;
         }
     }
@@ -1139,36 +1228,38 @@ impl IndexBuildScheduler {
             .entry(task.region_id)
             .or_insert_with(IndexBuildStatus::new);
 
-        let duplicate = if status.retiring {
-            status
-                .pending_tasks
-                .iter()
-                .any(|pending| pending.task.file_meta.file_id == task.file_meta.file_id)
+        let file_id = task.source.file_meta.file_id;
+        let region_file_id = RegionFileId::new(
+            task.source.file_meta.region_id,
+            task.source.file_meta.file_id,
+        );
+        let can_wait_for_active = status.retiring || task.reason == IndexBuildType::SchemaChange;
+        let rejected = if status.building_files.contains(&file_id) && !can_wait_for_active {
+            Some(task)
         } else {
-            status.building_files.contains(&task.file_meta.file_id)
+            let pending = PendingIndexBuild {
+                task,
+                version_control: version_control.clone(),
+            };
+            status.pending_tasks.insert(pending)
         };
-        if duplicate {
-            let region_file_id =
-                RegionFileId::new(task.file_meta.region_id, task.file_meta.file_id);
+        let should_schedule = !status.retiring;
+
+        if let Some(rejected) = rejected {
             debug!(
-                "Aborting index build task since index is already being built for region file {:?}",
+                "Coalescing redundant index build task for region file {:?}",
                 region_file_id
             );
-            task.on_success(IndexBuildOutcome::Aborted(format!(
-                "Index is already being built for region file {:?}",
-                region_file_id
-            )))
-            .await;
-            task.listener.on_index_build_abort(region_file_id).await;
-            return Ok(());
+            rejected
+                .on_success(IndexBuildOutcome::Aborted(format!(
+                    "Index build was coalesced for region file {:?}",
+                    region_file_id
+                )))
+                .await;
+            rejected.listener.on_index_build_abort(region_file_id).await;
         }
 
-        status.pending_tasks.push(PendingIndexBuild {
-            task,
-            version_control: version_control.clone(),
-        });
-
-        if !status.retiring {
+        if should_schedule {
             self.schedule_next_build_batch();
         }
         Ok(())
@@ -1176,52 +1267,63 @@ impl IndexBuildScheduler {
 
     /// Schedule tasks until reaching the files limit or no more tasks.
     fn schedule_next_build_batch(&mut self) {
-        let mut building_count = 0;
-        for status in self.region_status.values() {
-            building_count += status.building_files.len();
-        }
+        let mut building_count = self
+            .region_status
+            .values()
+            .map(|status| status.building_files.len())
+            .sum::<usize>();
 
         while building_count < self.files_limit {
-            if let Some(pending) = self.find_next_task() {
-                let task = pending.task;
-                let region_id = task.region_id;
-                let file_id = task.file_meta.file_id;
-                let job = task.into_index_build_job(pending.version_control);
-                if self.scheduler.schedule(job).is_ok() {
+            let Some(pending) = self.find_next_task() else {
+                break;
+            };
+
+            let task = pending.task;
+            let region_id = task.region_id;
+            let file_id = task.source.file_meta.file_id;
+            let job = task.clone().into_index_build_job(pending.version_control);
+            match self.scheduler.schedule(job) {
+                Ok(()) => {
                     if let Some(status) = self.region_status.get_mut(&region_id) {
+                        status.pending_tasks.remove(file_id);
                         status.building_files.insert(file_id);
                         building_count += 1;
-                        status
-                            .pending_tasks
-                            .retain(|pending| pending.task.file_meta.file_id != file_id);
                     } else {
                         error!(
                             "Region status not found when scheduling index build task, region: {}",
                             region_id
                         );
                     }
-                } else {
-                    error!(
-                        "Failed to schedule index build job, region: {}, file_id: {}",
-                        region_id, file_id
-                    );
-                    break;
                 }
-            } else {
-                // No more tasks to schedule.
-                break;
+                Err(err) => {
+                    error!(
+                        err;
+                        "Failed to schedule index build job, region: {}, file_id: {}",
+                        region_id,
+                        file_id
+                    );
+                    if let Some(status) = self.region_status.get_mut(&region_id) {
+                        status.pending_tasks.remove(file_id);
+                    }
+                    common_runtime::spawn_global(async move {
+                        task.on_failure(Arc::new(err)).await;
+                    });
+                }
             }
         }
+
+        self.region_status.retain(|_, status| {
+            !status.building_files.is_empty() || !status.pending_tasks.is_empty()
+        });
     }
 
-    /// Find the next task which has the highest priority to run.
+    /// Find the ready task with the highest priority.
     fn find_next_task(&self) -> Option<PendingIndexBuild> {
         self.region_status
             .values()
             .filter(|status| !status.retiring)
-            .filter_map(|status| status.pending_tasks.peek())
+            .filter_map(|status| status.pending_tasks.highest_ready(&status.building_files))
             .max()
-            .cloned()
     }
 
     pub(crate) fn on_task_stopped(&mut self, region_id: RegionId, file_id: FileId) {
@@ -1373,12 +1475,12 @@ mod tests {
     use crate::memtable::time_partition::TimePartitions;
     use crate::region::RegionLeaderState;
     use crate::region::version::{VersionBuilder, VersionControl};
-    use crate::sst::file::RegionFileId;
+    use crate::sst::file::{FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::location;
     use crate::sst::parquet::WriteOptions;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
-    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::sst_util::{
         new_flat_source_from_record_batches, new_record_batch_by_range, sst_region_metadata,
     };
@@ -1952,7 +2054,10 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta,
+            source: IndexBuildSource::new(
+                file_meta,
+                version_control.current().version.metadata.schema_version,
+            ),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2016,7 +2121,10 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta: file_meta.clone(),
+            source: IndexBuildSource::new(
+                file_meta.clone(),
+                version_control.current().version.metadata.schema_version,
+            ),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2094,7 +2202,10 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta: file_meta.clone(),
+            source: IndexBuildSource::new(
+                file_meta.clone(),
+                version_control.current().version.metadata.schema_version,
+            ),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2201,7 +2312,10 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta: file_meta.clone(),
+            source: IndexBuildSource::new(
+                file_meta.clone(),
+                version_control.current().version.metadata.schema_version,
+            ),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2296,7 +2410,10 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta: file_meta.clone(),
+            source: IndexBuildSource::new(
+                file_meta.clone(),
+                version_control.current().version.metadata.schema_version,
+            ),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2351,6 +2468,7 @@ mod tests {
         reason: IndexBuildType,
     ) -> (IndexBuildTask, mpsc::Receiver<Result<IndexBuildOutcome>>) {
         let metadata = Arc::new(sst_region_metadata());
+        let schema_version = metadata.schema_version;
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
         let indexer_builder = mock_indexer_builder(metadata, env).await;
@@ -2369,7 +2487,7 @@ mod tests {
         let task = IndexBuildTask {
             region_id,
             file,
-            file_meta,
+            source: IndexBuildSource::new(file_meta, schema_version),
             reason,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
@@ -2382,6 +2500,90 @@ mod tests {
             result_sender: result_tx,
         };
         (task, result_rx)
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_coalesces_latest_schema_generation_per_sst() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let mut scheduler = env.mock_index_build_scheduler(2);
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let file_purger = Arc::new(NoopFilePurger {});
+        let files = HashMap::from([(
+            file_id,
+            FileMeta {
+                region_id,
+                file_id,
+                file_size: 100,
+                ..Default::default()
+            },
+        )]);
+        let version_control = mock_version_control(metadata, file_purger, files).await;
+
+        let (active, _active_rx) = create_mock_task_for_schedule_with_result(
+            &env,
+            file_id,
+            region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        scheduler
+            .schedule_build(&version_control, active)
+            .await
+            .unwrap();
+        assert_eq!(job_scheduler.num_jobs(), 1);
+
+        let (mut older, mut older_rx) = create_mock_task_for_schedule_with_result(
+            &env,
+            file_id,
+            region_id,
+            IndexBuildType::SchemaChange,
+        )
+        .await;
+        older.source.schema_version = 1;
+        scheduler
+            .schedule_build(&version_control, older)
+            .await
+            .unwrap();
+
+        let (mut latest, mut latest_rx) = create_mock_task_for_schedule_with_result(
+            &env,
+            file_id,
+            region_id,
+            IndexBuildType::SchemaChange,
+        )
+        .await;
+        latest.source.schema_version = 2;
+        scheduler
+            .schedule_build(&version_control, latest)
+            .await
+            .unwrap();
+
+        let replaced = tokio::time::timeout(std::time::Duration::from_secs(5), older_rx.recv())
+            .await
+            .expect("replaced pending task result sender was not completed")
+            .expect("replaced pending task result channel closed");
+        assert!(matches!(
+            replaced,
+            Ok(IndexBuildOutcome::Aborted(reason)) if reason.contains("coalesced")
+        ));
+        assert!(matches!(
+            latest_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let status = &scheduler.region_status[&region_id];
+        assert_eq!(status.building_files.len(), 1);
+        assert_eq!(status.pending_tasks.len(), 1);
+        assert_eq!(job_scheduler.num_jobs(), 1);
+
+        scheduler.on_task_stopped(region_id, file_id);
+        let status = &scheduler.region_status[&region_id];
+        assert_eq!(status.building_files.len(), 1);
+        assert!(status.pending_tasks.is_empty());
+        assert_eq!(job_scheduler.num_jobs(), 2);
     }
 
     #[tokio::test]

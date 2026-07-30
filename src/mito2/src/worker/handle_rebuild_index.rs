@@ -26,7 +26,7 @@ use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
-use crate::region::MitoRegionRef;
+use crate::region::{IndexBuildSource, MitoRegionRef};
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
 };
@@ -42,6 +42,7 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: &MitoRegionRef,
         file: FileHandle,
+        source: IndexBuildSource,
         build_type: IndexBuildType,
         result_sender: ResultMpscSender,
     ) -> IndexBuildTask {
@@ -77,7 +78,7 @@ impl<S> RegionWorkerLoop<S> {
         IndexBuildTask {
             region_id: region.region_id,
             file: file.clone(),
-            file_meta: file.meta_ref().clone(),
+            source,
             reason: build_type,
             access_layer: access_layer.clone(),
             listener: self.listener.clone(),
@@ -121,6 +122,11 @@ impl<S> RegionWorkerLoop<S> {
 
         let version_control = region.version_control.clone();
         let version = version_control.current().version;
+        // A committed index publication may not have reached version control
+        // yet. Use the manifest's FileMeta as the conditional publication
+        // source while keeping the builder's schema generation from `version`.
+        let manifest = region.manifest_ctx.manifest().await;
+        let schema_version = version.metadata.schema_version;
 
         let all_files: HashMap<FileId, FileHandle> = version
             .ssts
@@ -135,18 +141,29 @@ impl<S> RegionWorkerLoop<S> {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             all_files
                 .values()
-                .filter(|file| {
-                    !file
-                        .meta_ref()
-                        .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                .filter_map(|file| {
+                    let file_meta = manifest.files.get(&file.meta_ref().file_id)?;
+                    (!file_meta.is_index_consistent_with_region(&version.metadata.column_metadatas))
+                        .then(|| {
+                            (
+                                file.clone(),
+                                IndexBuildSource::new(file_meta.clone(), schema_version),
+                            )
+                        })
                 })
-                .cloned()
                 .collect::<Vec<_>>()
         } else {
             request
                 .file_metas
                 .iter()
-                .filter_map(|meta| all_files.get(&meta.file_id).cloned())
+                .filter_map(|meta| {
+                    let file = all_files.get(&meta.file_id)?;
+                    let file_meta = manifest.files.get(&meta.file_id)?;
+                    Some((
+                        file.clone(),
+                        IndexBuildSource::new(file_meta.clone(), schema_version),
+                    ))
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -162,7 +179,7 @@ impl<S> RegionWorkerLoop<S> {
         let num_tasks = build_tasks.len();
         let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(num_tasks);
 
-        for file_handle in build_tasks {
+        for (file_handle, source) in build_tasks {
             debug!(
                 "Scheduling index build for region {}, file_id {}",
                 region_id,
@@ -182,6 +199,7 @@ impl<S> RegionWorkerLoop<S> {
             let task = self.new_index_build_task(
                 &region,
                 file_handle.clone(),
+                source,
                 request.build_type.clone(),
                 tx.clone(),
             );
