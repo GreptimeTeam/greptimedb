@@ -21,6 +21,8 @@ use client::{Output, OutputData, OutputMeta};
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
+#[cfg(windows)]
+use common_datasource::object_store::{FS_SCHEMA, parse_url};
 use common_datasource::object_store::{LocalFileAccess, build_backend, build_backend_for_write};
 use common_stat::get_total_cpu_cores;
 use common_telemetry::{debug, error, info, tracing};
@@ -43,6 +45,24 @@ pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
 pub(crate) const CONTINUE_ON_ERROR_KEY: &str = "continue_on_error";
 pub(crate) const PARALLELISM_KEY: &str = "parallelism";
 
+fn is_directory_location(location: &str) -> bool {
+    if location.ends_with('/') {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        location.ends_with(std::path::MAIN_SEPARATOR)
+            && matches!(
+                parse_url(location),
+                Ok((schema, _, _)) if schema.eq_ignore_ascii_case(FS_SCHEMA)
+            )
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
 /// Get parallelism from options, default to total CPU cores.
 fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
     options
@@ -59,9 +79,9 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        // location must end with / so that every table is exported to a file.
+        // Location must end with a separator so that every table is exported to a file.
         ensure!(
-            req.location.ends_with('/'),
+            is_directory_location(&req.location),
             InvalidCopyDatabasePathSnafu {
                 value: req.location,
             }
@@ -156,9 +176,9 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        // location must end with /
+        // Location must end with a directory separator.
         ensure!(
-            req.location.ends_with('/'),
+            is_directory_location(&req.location),
             InvalidCopyDatabasePathSnafu {
                 value: req.location,
             }
@@ -201,7 +221,7 @@ impl StatementExecutor {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
                 table_name: table_name.clone(),
-                location: format!("{}/{}", req.location, e.path()),
+                location: format!("{}{}", req.location, e.path()),
                 with: req.with.clone(),
                 connection: req.connection.clone(),
                 pattern: None,
@@ -286,6 +306,7 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
+    #[cfg(not(windows))]
     use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 
@@ -305,7 +326,10 @@ mod tests {
         object_store.write("d", "").await.unwrap();
         object_store.write("e.f.parquet", "").await.unwrap();
 
+        #[cfg(not(windows))]
         let location = normalize_dir(&dir.path().to_slash().unwrap());
+        #[cfg(windows)]
+        let location = format!("{}\\", dir.path().display());
         let request = CopyDatabaseRequest {
             catalog_name: "catalog_0".to_string(),
             schema_name: "schema_0".to_string(),

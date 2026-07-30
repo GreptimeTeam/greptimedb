@@ -45,6 +45,13 @@ pub const OSS_SCHEMA: &str = "OSS";
 pub const GCS_SCHEMA: &str = "GCS";
 pub const AZBLOB_SCHEMA: &str = "AZBLOB";
 
+/// An object store rooted at the target's parent, together with the optional
+/// target path relative to that root.
+pub struct BuiltBackend {
+    pub object_store: ObjectStore,
+    pub object_path: Option<String>,
+}
+
 /// Controls whether SQL paths may access the local filesystem.
 #[derive(Clone, Debug, Default)]
 pub enum LocalFileAccess {
@@ -293,6 +300,17 @@ pub async fn build_backend(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<ObjectStore> {
+    Ok(build_backend_with_path(url, connection, local_file_access)
+        .await?
+        .object_store)
+}
+
+/// Builds a backend and returns the target path relative to the backend root.
+pub async fn build_backend_with_path(
+    url: &str,
+    connection: &HashMap<String, String>,
+    local_file_access: &LocalFileAccess,
+) -> Result<BuiltBackend> {
     build_backend_inner(url, connection, local_file_access, false).await
 }
 
@@ -302,6 +320,19 @@ pub async fn build_backend_for_write(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<ObjectStore> {
+    Ok(
+        build_backend_for_write_with_path(url, connection, local_file_access)
+            .await?
+            .object_store,
+    )
+}
+
+/// Builds a writable backend and returns the target path relative to the backend root.
+pub async fn build_backend_for_write_with_path(
+    url: &str,
+    connection: &HashMap<String, String>,
+    local_file_access: &LocalFileAccess,
+) -> Result<BuiltBackend> {
     build_backend_inner(url, connection, local_file_access, true).await
 }
 
@@ -310,7 +341,7 @@ async fn build_backend_inner(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
     create_local_root: bool,
-) -> Result<ObjectStore> {
+) -> Result<BuiltBackend> {
     let (schema, host, path) = parse_url(url)?;
     let normalized_schema = schema.to_uppercase();
 
@@ -326,49 +357,59 @@ async fn build_backend_inner(
             })?;
             (path, url.path().ends_with('/'))
         } else {
-            (PathBuf::from(&path), path.ends_with('/'))
+            (
+                PathBuf::from(&path),
+                path.ends_with('/') || cfg!(windows) && path.ends_with(std::path::MAIN_SEPARATOR),
+            )
         };
         let authorized = local_file_access.authorize(url, &local_path, trailing_slash)?;
-        let (root, _) = find_dir_and_filename(&authorized);
+        let (root, object_path) = find_dir_and_filename(&authorized);
         let root = local_file_access
             .open_backend_root(url, &root, create_local_root)
             .await?;
-        return build_fs_backend(&root);
+        return Ok(BuiltBackend {
+            object_store: build_fs_backend(&root)?,
+            object_path,
+        });
     }
 
-    let (root, _) = find_dir_and_filename(&path);
+    let (root, object_path) = find_dir_and_filename(&path);
 
-    match normalized_schema.as_str() {
+    let object_store = match normalized_schema.as_str() {
         S3_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            Ok(build_s3_backend(&host, &root, connection)?)
+            build_s3_backend(&host, &root, connection)?
         }
         OSS_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            Ok(build_oss_backend(&host, &root, connection)?)
+            build_oss_backend(&host, &root, connection)?
         }
         GCS_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            Ok(build_gcs_backend(&host, &root, connection)?)
+            build_gcs_backend(&host, &root, connection)?
         }
         AZBLOB_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            Ok(build_azblob_backend(&host, &root, connection)?)
+            build_azblob_backend(&host, &root, connection)?
         }
         _ => error::UnsupportedBackendProtocolSnafu {
             protocol: schema,
             url,
         }
-        .fail(),
-    }
+        .fail()?,
+    };
+    Ok(BuiltBackend {
+        object_store,
+        object_path,
+    })
 }
 
 lazy_static! {
@@ -391,7 +432,12 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use url::Url;
 
-    use super::{LocalFileAccess, build_backend, build_backend_for_write, handle_windows_path};
+    #[cfg(windows)]
+    use super::build_backend_for_write_with_path;
+    use super::{
+        LocalFileAccess, build_backend, build_backend_for_write, build_backend_with_path,
+        handle_windows_path,
+    };
     use crate::error::Error;
 
     #[test]
@@ -522,14 +568,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_file_url_returns_decoded_backend_relative_path() {
+        let temp_dir = create_temp_dir("file_url_backend_relative_path");
+        let copy_root = temp_dir.path().join("copy root");
+        let file = copy_root.join("nested dir/data file.txt");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "data").unwrap();
+
+        let location = Url::from_file_path(&file).unwrap().to_string();
+        assert!(location.contains("%20"));
+        let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
+        let backend = build_backend_with_path(&location, &HashMap::new(), &access)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.object_path.as_deref(), Some("data file.txt"));
+        assert_eq!(
+            backend
+                .object_store
+                .read(backend.object_path.as_deref().unwrap())
+                .await
+                .unwrap()
+                .to_vec(),
+            b"data"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_windows_backslash_path_returns_backend_relative_path() {
+        let temp_dir = create_temp_dir("windows_backend_relative_path");
+        let copy_root = temp_dir.path().join("copy");
+        let directory = copy_root.join("nested");
+        let file = directory.join("data.txt");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&file, "data").unwrap();
+
+        let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
+        let connection = HashMap::new();
+        let file_location = file.to_str().unwrap();
+        assert!(file_location.contains('\\'));
+        let backend = build_backend_with_path(file_location, &connection, &access)
+            .await
+            .unwrap();
+        assert_eq!(backend.object_path.as_deref(), Some("data.txt"));
+        assert_eq!(
+            backend
+                .object_store
+                .read(backend.object_path.as_deref().unwrap())
+                .await
+                .unwrap()
+                .to_vec(),
+            b"data"
+        );
+
+        let directory_location = format!("{}\\", directory.display());
+        let backend = build_backend_for_write_with_path(&directory_location, &connection, &access)
+            .await
+            .unwrap();
+        assert_eq!(backend.object_path, None);
+    }
+
+    #[tokio::test]
     async fn test_object_storage_ignores_local_file_policy() {
         let cases = [
             (
-                "s3://bucket/path/file.parquet",
+                "s3://bucket/path/data%20file.parquet",
                 HashMap::from([
                     ("region".to_string(), "us-east-1".to_string()),
                     ("disable_ec2_metadata".to_string(), "true".to_string()),
                 ]),
+                "data%20file.parquet",
             ),
             (
                 "oss://bucket/path/file.parquet",
@@ -537,6 +646,7 @@ mod tests {
                     ("endpoint".to_string(), "http://oss.example.com".to_string()),
                     ("allow_anonymous".to_string(), "true".to_string()),
                 ]),
+                "file.parquet",
             ),
             (
                 "gcs://bucket/path/file.parquet",
@@ -544,6 +654,7 @@ mod tests {
                     "endpoint".to_string(),
                     "http://storage.example.com".to_string(),
                 )]),
+                "file.parquet",
             ),
             (
                 "azblob://container/path/file.parquet",
@@ -554,12 +665,15 @@ mod tests {
                     ),
                     ("account_name".to_string(), "test".to_string()),
                 ]),
+                "file.parquet",
             ),
         ];
-        for (location, connection) in cases {
-            build_backend(location, &connection, &LocalFileAccess::Disabled)
-                .await
-                .unwrap();
+        for (location, connection, expected_path) in cases {
+            let backend =
+                build_backend_with_path(location, &connection, &LocalFileAccess::Disabled)
+                    .await
+                    .unwrap();
+            assert_eq!(backend.object_path.as_deref(), Some(expected_path));
         }
     }
 
