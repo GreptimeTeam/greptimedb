@@ -20,7 +20,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context, LockKey, Procedure, Status};
+use common_procedure::{Context, EventContext, EventTrigger, LockKey, Procedure, Status};
 use common_telemetry::{debug, error, info, warn};
 pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,9 @@ use crate::ddl::DdlContext;
 use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::validator::{
     AlterLogicalTableValidator, ValidatorResult, retain_unskipped,
+};
+use crate::ddl::event::table::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
 };
 use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
 use crate::error::Result;
@@ -315,6 +318,37 @@ impl Procedure for AlterLogicalTablesProcedure {
         );
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::AlterLogicalTables.as_str())
+        {
+            return None;
+        }
+        if ctx.trigger != EventTrigger::Submitted {
+            return Some(Box::new(TableDdlEvent::lifecycle(
+                TableDdlEventType::AlterLogicalTables,
+            )));
+        }
+
+        let locators = self.data.tasks.iter().map(|task| {
+            let table_ref = task.table_ref();
+            TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+                .with_physical_table_id(self.data.physical_table_id)
+        });
+        let kinds = self
+            .data
+            .tasks
+            .iter()
+            .filter_map(|task| task.alter_table.kind.as_ref())
+            .filter_map(alter_table_kind_name);
+        Some(Box::new(TableDdlEvent::alter_logical_tables_submitted(
+            locators,
+            self.data.tasks.len(),
+            kinds,
+        )))
     }
 }
 

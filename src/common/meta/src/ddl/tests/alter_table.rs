@@ -133,7 +133,7 @@ async fn test_on_prepare_table_not_exists_err() {
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
 
-fn test_alter_table_task(table_name: &str) -> AlterTableTask {
+pub(crate) fn test_alter_table_task(table_name: &str) -> AlterTableTask {
     AlterTableTask {
         alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
-    PoisonKeys, Procedure, ProcedureId, Status, StringKey,
+    Context as ProcedureContext, ContextProvider, Error as ProcedureError, EventContext,
+    EventTrigger, LockKey, PoisonKey, PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,9 @@ use table::table_reference::TableReference;
 
 use crate::ddl::DdlContext;
 use crate::ddl::alter_table::executor::AlterTableExecutor;
+use crate::ddl::event::table::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, alter_table_kind_name,
+};
 use crate::ddl::utils::{
     MultipleResults, extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
     sync_follower_regions,
@@ -393,6 +396,34 @@ impl Procedure for AlterTableProcedure {
 
     fn poison_keys(&self) -> PoisonKeys {
         PoisonKeys::new(vec![self.table_poison_key()])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::AlterTable.as_str())
+        {
+            return None;
+        }
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let table_ref = self.data.table_ref();
+                let locator =
+                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+                        .with_table_id(self.data.table_id());
+                let kind = self
+                    .data
+                    .task
+                    .alter_table
+                    .kind
+                    .as_ref()
+                    .and_then(alter_table_kind_name);
+                TableDdlEvent::alter_table_submitted(locator, kind)
+            }
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable),
+        };
+
+        Some(Box::new(event))
     }
 }
 

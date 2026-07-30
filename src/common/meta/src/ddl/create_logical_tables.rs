@@ -21,8 +21,12 @@ use api::region::RegionResponse;
 use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_catalog::consts::METRIC_ENGINE;
+use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Status,
+};
 use common_telemetry::{debug, error, warn};
 use futures::future;
 pub use region_request::create_region_request_builder;
@@ -35,6 +39,7 @@ use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 
 use crate::ddl::DdlContext;
+use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{
     add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
     sync_follower_regions,
@@ -251,6 +256,59 @@ impl Procedure for CreateLogicalTablesProcedure {
             );
         }
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        if !ctx
+            .event_type_filter
+            .allows(TableDdlEventType::CreateLogicalTables.as_str())
+        {
+            return None;
+        }
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let locators = self.data.tasks.iter().map(|task| {
+                    TableDdlLocator::new(
+                        &task.create_table.catalog_name,
+                        &task.create_table.schema_name,
+                        &task.create_table.table_name,
+                    )
+                    .with_physical_table_id(self.data.physical_table_id)
+                });
+                TableDdlEvent::create_logical_tables_submitted(locators, self.data.tasks.len())
+            }
+            EventTrigger::Succeeded => match ctx.lifecycle_state {
+                ProcedureState::Done {
+                    output: Some(output),
+                } => output
+                    .downcast_ref::<Vec<TableId>>()
+                    .map(|table_ids| {
+                        debug_assert_eq!(self.data.tasks.len(), table_ids.len());
+                        let locators =
+                            self.data
+                                .tasks
+                                .iter()
+                                .zip(table_ids)
+                                .map(|(task, table_id)| {
+                                    TableDdlLocator::new(
+                                        &task.create_table.catalog_name,
+                                        &task.create_table.schema_name,
+                                        &task.create_table.table_name,
+                                    )
+                                    .with_table_id(*table_id)
+                                    .with_physical_table_id(self.data.physical_table_id)
+                                });
+                        TableDdlEvent::create_logical_tables_succeeded(locators)
+                    })
+                    .unwrap_or_else(|| {
+                        TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables)
+                    }),
+                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+            },
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+        };
+
+        Some(Box::new(event))
     }
 }
 
