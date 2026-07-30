@@ -1227,6 +1227,10 @@ impl IndexBuildScheduler {
     pub(crate) fn on_task_stopped(&mut self, region_id: RegionId, file_id: FileId) {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             if !status.building_files.remove(&file_id) {
+                debug!(
+                    "Index build task is not tracked as building, region: {}, file: {}",
+                    region_id, file_id
+                );
                 return;
             }
             if status.building_files.is_empty() && status.pending_tasks.is_empty() {
