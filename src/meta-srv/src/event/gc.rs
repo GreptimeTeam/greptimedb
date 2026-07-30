@@ -88,7 +88,7 @@ impl BatchGcEvent {
     }
 
     /// Returns None when the GC report contains no deleted files, indexes, or retries.
-    pub(crate) fn succeeded(report: &GcReport) -> Option<Self> {
+    pub(crate) fn with_report(report: &GcReport) -> Option<Self> {
         let mut region_ids = report
             .deleted_files
             .keys()
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_gc_succeeded_event_contract() {
+    fn test_batch_gc_report_event_contract() {
         let first = RegionId::new(1024, 1);
         let second = RegionId::new(1024, 2);
         let third = RegionId::new(1024, 3);
@@ -264,7 +264,7 @@ mod tests {
             need_retry_regions: HashSet::from([third]),
         };
 
-        let event = BatchGcEvent::succeeded(&report).unwrap();
+        let event = BatchGcEvent::with_report(&report).unwrap();
 
         assert_event_contract(
             &event,
@@ -303,10 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_gc_succeeded_event_skips_noop_regions() {
+    fn test_batch_gc_report_event_skips_noop_regions() {
         let noop = RegionId::new(1024, 1);
         let retry = RegionId::new(1024, 2);
-        let event = BatchGcEvent::succeeded(&GcReport {
+        let event = BatchGcEvent::with_report(&GcReport {
             processed_regions: HashSet::from([noop]),
             need_retry_regions: HashSet::from([retry]),
             ..Default::default()
@@ -439,11 +439,77 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_gc_terminal_event_with_report() {
+        let mut procedure = batch_gc_procedure();
+        let running = ProcedureState::Running;
+        let event_context = |trigger| EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &running,
+            trigger,
+            event_type_filter: Arc::new(EventTypeFilter::All),
+        };
+        let report = GcReport {
+            need_retry_regions: HashSet::from([RegionId::new(1024, 2)]),
+            ..Default::default()
+        };
+        procedure.set_gc_report_for_test(report);
+
+        let retrying = procedure
+            .event(&event_context(EventTrigger::Retrying {
+                phase: RetryPhase::Execute,
+                attempt: 2,
+            }))
+            .unwrap();
+        assert_eq!(
+            retrying.json_payload().unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "regions": [RegionId::new(1024, 1).as_u64()],
+                "full_file_listing": true,
+                "timeout": "10s",
+            })
+        );
+        assert_eq!(retrying.extra_rows().unwrap(), vec![null_row()]);
+
+        for trigger in [EventTrigger::Failed, EventTrigger::Poisoned] {
+            let event = procedure.event(&event_context(trigger)).unwrap();
+            assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+            assert_eq!(
+                event.extra_rows().unwrap(),
+                vec![region_row(
+                    RegionId::new(1024, 2),
+                    Some(serde_json::json!({
+                        "need_retry": true,
+                    })),
+                )],
+            );
+        }
+
+        let procedure = batch_gc_procedure();
+        let failed_without_report = procedure
+            .event(&event_context(EventTrigger::Failed))
+            .unwrap();
+        assert_eq!(
+            failed_without_report.json_payload().unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "regions": [RegionId::new(1024, 1).as_u64()],
+                "full_file_listing": true,
+                "timeout": "10s",
+            })
+        );
+        assert_eq!(
+            failed_without_report.extra_rows().unwrap(),
+            vec![null_row()]
+        );
+    }
+
+    #[test]
     fn test_batch_gc_procedure_event_contract() {
         let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let region_id = RegionId::new(1024, 1);
         let file_id = FileId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let internal = BatchGcEvent::succeeded(&GcReport {
+        let internal = BatchGcEvent::with_report(&GcReport {
             deleted_files: HashMap::from([(region_id, vec![file_id])]),
             ..Default::default()
         })

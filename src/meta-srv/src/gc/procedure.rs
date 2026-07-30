@@ -285,6 +285,11 @@ impl BatchGcProcedure {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_gc_report_for_test(&mut self, report: GcReport) {
+        self.data.gc_report = Some(report);
+    }
+
     async fn get_table_route(
         &self,
         table_id: TableId,
@@ -1032,7 +1037,7 @@ impl Procedure for BatchGcProcedure {
         }
 
         let event = match &ctx.trigger {
-            // Keep normal GC low-noise; only Succeeded events with meaningful reports are recorded.
+            // Keep normal GC low-noise; only terminal events with meaningful reports are recorded.
             EventTrigger::Submitted
             | EventTrigger::Recovered
             | EventTrigger::ChildSubmitted { .. } => return None,
@@ -1044,16 +1049,25 @@ impl Procedure for BatchGcProcedure {
                     return None;
                 };
                 let report = output.downcast_ref::<GcReport>()?;
-                BatchGcEvent::succeeded(report)?
+                BatchGcEvent::with_report(report)?
             }
-            EventTrigger::Retrying { .. }
-            | EventTrigger::RollingBack
-            | EventTrigger::Failed
-            | EventTrigger::Poisoned => BatchGcEvent::with_config(
+            EventTrigger::Retrying { .. } | EventTrigger::RollingBack => BatchGcEvent::with_config(
                 &self.data.regions,
                 self.data.full_file_listing,
                 self.data.timeout,
             ),
+            EventTrigger::Failed | EventTrigger::Poisoned => self
+                .data
+                .gc_report
+                .as_ref()
+                .and_then(BatchGcEvent::with_report)
+                .unwrap_or_else(|| {
+                    BatchGcEvent::with_config(
+                        &self.data.regions,
+                        self.data.full_file_listing,
+                        self.data.timeout,
+                    )
+                }),
         };
         Some(Box::new(event))
     }
