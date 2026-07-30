@@ -1,0 +1,36 @@
+tests-integration/tests/event_recorder_test_util.rs
+  s_bab36d2c764e36::t_8089304fd44805 125
+src/meta-srv/src/event/gc.rs
+  s_bab36d2c764e36::t_5fa23d80f1b223 92-96,103-104,240,320-325,358-363
+  s_bab36d2c764e36::t_c3e71a5e30f3eb 256
+  s_bab36d2c764e36::t_8089304fd44805 74,91,102,108,111,130,135,159-168,170
+  s_bab36d2c764e36::t_3c8290230340d1 238,267,272,306,309,319,396,445-450,465-474
+  s_bab36d2c764e36::t_c094d8f10b0d8c 63,141,147
+  s_bab36d2c764e36::t_cd966c334f6f9c 90
+  s_bab36d2c764e36::t_c6e2b615e9233c 100
+  s_bab36d2c764e36::t_702e276b4ba5fe 310-314,457-458,476-481
+  s_bab36d2c764e36::t_84f618d456b1f4 263-264,291-296
+config/standalone.example.toml
+  s_bab36d2c764e36::t_8089304fd44805 910
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_8089304fd44805 1047,1052
+  s_bab36d2c764e36::t_059cbd2a864600 1035
+config/config.md
+  s_bab36d2c764e36::t_5fa23d80f1b223 234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "1c07412c203714ce36918b408e8953a0e6f7be04",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
