@@ -24,8 +24,8 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
-    PermissionTableTargets,
+    PROM_STORE_READ, PROM_STORE_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq,
+    PermissionTableTarget, PermissionTableTargets,
 };
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
@@ -412,13 +412,13 @@ impl PromStoreProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_WRITE))
             .context(AuthSnafu)?;
         let interceptor_ref = self
             .plugins
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_write(request, ctx.clone())?;
-        self.check_row_insert_permission(request, &ctx, PermissionReq::PromStoreWrite)
+        self.check_row_insert_permission(request, &ctx, PermissionReq::Action(PROM_STORE_WRITE))
             .context(AuthSnafu)?;
         Ok(())
     }
@@ -474,7 +474,7 @@ impl PromStoreProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreRead)
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_READ))
             .context(AuthSnafu)?;
 
         let interceptor_ref = self
@@ -512,7 +512,7 @@ impl PromStoreProtocolHandler for Instance {
                 &ctx,
             )
             .await?;
-        self.check_table_permission(&ctx, PermissionReq::PromStoreRead, targets)
+        self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
             .context(AuthSnafu)?;
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use auth::{PermissionReq, PermissionTableTarget, PermissionTableTargets};
+use auth::{JAEGER_QUERY, PermissionReq, PermissionTableTarget, PermissionTableTargets};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     TRACE_TABLE_NAME, trace_operations_table_name, trace_services_table_name,
@@ -70,7 +70,7 @@ impl Instance {
             table,
         )]);
         let targets = self.resolve_query_permission_targets(targets, ctx).await?;
-        self.check_table_permission(ctx, PermissionReq::JaegerQuery, targets)
+        self.check_table_permission(ctx, PermissionReq::Action(JAEGER_QUERY), targets)
             .context(AuthSnafu)?;
         Ok(())
     }
