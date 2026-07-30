@@ -1157,6 +1157,9 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
+    #[snafu(display("Manual compaction is already running for region {region_id}."))]
+    ManualCompactionAlreadyRunning { region_id: RegionId },
+
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
@@ -1550,6 +1553,11 @@ impl ErrorExt for Error {
             ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
                 StatusCode::Cancelled
             }
+
+            // A concurrent manual compaction fails fast instead of being queued;
+            // the conflict is reported to the caller, which decides whether to
+            // issue a new request after the running one finishes.
+            ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 

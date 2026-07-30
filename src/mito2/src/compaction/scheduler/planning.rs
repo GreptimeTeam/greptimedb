@@ -34,7 +34,7 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultC
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::scheduler::CompactionScheduler;
 use crate::compaction::scheduler::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus,
+    CompactingFiles, CompactionExecution, CompactionPhase,
 };
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
@@ -280,7 +280,17 @@ impl CompactionScheduler {
         })
     }
 
-    pub(crate) async fn handle_compaction_pick_finished(
+    /// Applies a background planning result to the current compaction lifecycle.
+    ///
+    /// # Returns
+    ///
+    /// DDL requests released when Picking terminates without creating an
+    /// execution, such as after cancellation, `NoPlan`, or a planning error.
+    /// The owning worker must dispatch returned DDLs immediately because no
+    /// execution callback will follow. Returns an empty vector for stale
+    /// notifications, scheduled follow-ups, and successfully submitted
+    /// executions whose terminal callback still owns the DDL fence.
+    pub(super) async fn handle_compaction_pick_finished_inner(
         &mut self,
         finished: CompactionPickFinished,
         manifest_ctx: &ManifestContextRef,
@@ -291,11 +301,12 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get(&region_id) else {
             return Vec::new();
         };
-        // Picking runs detached from the worker. Its result may arrive after
-        // close/reopen or replanning installed another Picking phase for this region.
+
         if !status.is_picking(finished.plan_id) {
             return Vec::new();
         }
+        // Cancellation during Picking is completed by this notification. No
+        // execution callback will follow, so return DDLs released by the fence.
         if !status.accept_plan(finished.plan_id) {
             return self.remove_region_on_cancel(region_id);
         }
@@ -338,6 +349,8 @@ impl CompactionScheduler {
                         if let Some(status) = self.region_status.get_mut(&region_id) {
                             status.set_phase(phase);
                         }
+                        // The execution now owns the terminal transition. Any
+                        // fenced DDLs remain queued until its callback arrives.
                         Vec::new()
                     }
                     Ok(None) => {
@@ -355,6 +368,8 @@ impl CompactionScheduler {
                     }
                 }
             }
+            // These paths never create an execution. Finish the Picking
+            // lifecycle here and release DDLs if no follow-up was scheduled.
             CompactionPlanningResult::NoPlan => {
                 self.finish_compaction_planning(
                     region_id,
@@ -386,10 +401,7 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return Vec::new();
         };
-        let Some(mut active) = status.take_active() else {
-            return Vec::new();
-        };
-        for waiter in std::mem::take(&mut active.waiters) {
+        for waiter in status.take_waiters() {
             if let Some(err) = &err {
                 waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
             } else {
@@ -397,7 +409,6 @@ impl CompactionScheduler {
             }
         }
 
-        status.active = Some(active);
         if self.handle_pending_compaction_request(
             region_id,
             manifest_ctx,
@@ -406,21 +417,11 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
-        let Some(active) = self
-            .region_status
-            .get_mut(&region_id)
-            .and_then(CompactionStatus::take_active)
-        else {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return Vec::new();
         };
-        if active.regular_followup_waiters.is_some() {
-            self.schedule_next_compaction_with_active(
-                region_id,
-                manifest_ctx,
-                schema_metadata_manager,
-                Some(active),
-                None,
-            );
+        if status.active.reset_automatic_followup() {
+            self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
         }
 
