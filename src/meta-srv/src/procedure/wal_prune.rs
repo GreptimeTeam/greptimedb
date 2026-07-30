@@ -120,6 +120,9 @@ impl WalPruneProcedure {
     /// Retry:
     /// - Kafka client errors that have exhausted rskafka's internal retry.
     /// - Failed to update the pruned entry id in the table metadata manager.
+    ///
+    /// WAL prune event delivery is best effort. A physical prune that completes before a process
+    /// restart can recover as a no-op and emit no `Succeeded` event.
     pub async fn on_prune(&mut self) -> Result<Status> {
         self.observed_latest_offset = None;
         let partition_client = get_partition_client(&self.context.client, &self.data.topic).await?;
@@ -223,6 +226,9 @@ impl Procedure for WalPruneProcedure {
                 return None;
             };
             output.downcast_ref::<WalPruneOutcome>()?;
+        // `Submitted` and `Recovered` are intentionally omitted. `RollingBack` and
+        // `ChildSubmitted` cannot occur because WAL pruning neither supports rollback nor submits
+        // child procedures.
         } else if !matches!(
             &ctx.trigger,
             EventTrigger::Retrying { .. } | EventTrigger::Failed | EventTrigger::Poisoned

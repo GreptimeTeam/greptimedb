@@ -127,7 +127,8 @@ pub const VIEW_ID_COLUMN: EventTableColumn =
 /// The canonical Kafka topic name dimension.
 pub const TOPIC_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("topic_name", ColumnDataType::String, SemanticType::Field);
-/// The canonical WAL prune boundary.
+/// The requested WAL prune boundary. It is only an attempted boundary on non-`Succeeded`
+/// procedure events.
 pub const PRUNABLE_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
     "prunable_entry_id",
     ColumnDataType::Uint64,
