@@ -13,11 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::region::compact_request;
-use common_base::cancellation::CancellationHandle;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
@@ -37,6 +36,7 @@ use crate::error::{
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
 use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::schedule::{CancellableTaskState, RequestCancelResult};
 use crate::sst::file::FileHandle;
 use crate::worker::WorkerListener;
 
@@ -66,12 +66,6 @@ impl CompactionExecution {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct LocalCompactionState {
-    cancel_handle: Arc<CancellationHandle>,
-    commit_started: Arc<Mutex<bool>>,
-}
-
 #[derive(Debug)]
 pub(super) enum CompactionPhase {
     Picking {
@@ -79,7 +73,7 @@ pub(super) enum CompactionPhase {
         cancelled: bool,
     },
     Local {
-        state: LocalCompactionState,
+        state: CancellableTaskState,
         execution: CompactionExecution,
     },
     Remote {
@@ -239,57 +233,6 @@ impl Drop for CompactingFilesInner {
     }
 }
 
-impl LocalCompactionState {
-    pub(super) fn new(cancel_handle: Arc<CancellationHandle>) -> Self {
-        Self {
-            cancel_handle,
-            commit_started: Arc::new(Mutex::new(false)),
-        }
-    }
-
-    #[cfg(test)]
-    fn cancel_handle(&self) -> Arc<CancellationHandle> {
-        self.cancel_handle.clone()
-    }
-
-    /// Marks the compaction task as started to commit,
-    /// which means the compaction task is in the final stage and is about to update region version and manifest.
-    /// It will reject cancellation request after this method is called.
-    ///
-    /// Returns true if this is the first time to mark commit started, false otherwise.
-    pub(crate) fn mark_commit_started(&self) -> bool {
-        let mut commit_started = self.commit_started.lock().unwrap();
-        if self.cancel_handle.is_cancelled() {
-            return false;
-        }
-        *commit_started = true;
-        true
-    }
-
-    /// Request cancellation for this compaction task.
-    pub(crate) fn request_cancel(&self) -> RequestCancelResult {
-        // The cancel handle must under the lock of `commit_started` to avoid racing between cancellation and commit.
-        let commit_started = self.commit_started.lock().unwrap();
-        if *commit_started {
-            return RequestCancelResult::TooLateToCancel;
-        }
-        if self.cancel_handle.is_cancelled() {
-            return RequestCancelResult::AlreadyCancelling;
-        }
-
-        self.cancel_handle.cancel();
-        RequestCancelResult::CancelIssued
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestCancelResult {
-    CancelIssued,
-    AlreadyCancelling,
-    TooLateToCancel,
-    NotRunning,
-}
-
 /// Status of running and pending region compaction tasks.
 pub(super) struct CompactionStatus {
     /// Id of the region.
@@ -391,8 +334,8 @@ impl CompactionStatus {
     }
 
     #[cfg(test)]
-    pub(super) fn start_local_task(&mut self) -> LocalCompactionState {
-        let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
+    pub(super) fn start_local_task(&mut self) -> CancellableTaskState {
+        let state = CancellableTaskState::new();
         let execution = CompactionExecution::new(0, CompactingFiles::empty());
         let phase = CompactionPhase::Local {
             state: state.clone(),

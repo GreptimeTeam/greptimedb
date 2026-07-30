@@ -19,7 +19,6 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
-use common_base::cancellation::CancellationHandle;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::TimeToLive;
@@ -35,7 +34,7 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultC
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::scheduler::CompactionScheduler;
 use crate::compaction::scheduler::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus, LocalCompactionState,
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus,
 };
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
@@ -51,6 +50,7 @@ use crate::region::options::RegionOptions;
 use crate::request::{
     BackgroundNotify, OutputTx, SenderDdlRequest, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
@@ -526,8 +526,8 @@ impl CompactionScheduler {
             return Ok(None);
         }
 
-        let cancel_handle = Arc::new(CancellationHandle::default());
-        let state = LocalCompactionState::new(cancel_handle.clone());
+        let state = CancellableTaskState::new();
+        let cancel_handle = state.cancel_handle();
         let execution = CompactionExecution::new(plan_id, files);
         let uncommitted = UncommittedSsts::new(
             region_id,

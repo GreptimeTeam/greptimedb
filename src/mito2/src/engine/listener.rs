@@ -166,43 +166,32 @@ impl EventListener for StallListener {
     }
 }
 
-/// Listener to watch begin flush events.
+/// Blocks a flush at its begin event until the worker requests flush cancellation.
 ///
-/// Creates a background thread to execute flush region, and the main thread calls `wait_truncate()`
-/// to block and wait for `on_flush_region()`.
-/// When the background thread calls `on_flush_begin()`, the main thread is notified to truncate
-/// region, and background thread thread blocks and waits for `notify_flush()` to continue flushing.
+/// Tests use this gate to ensure a flush is active before submitting a lifecycle DDL.
 #[derive(Default)]
-pub struct FlushTruncateListener {
-    /// Notify flush operation.
-    notify_flush: Notify,
-    /// Notify truncate operation.
-    notify_truncate: Notify,
+pub struct FlushCancellationListener {
+    flush_started: Notify,
+    resume_flush: Notify,
 }
 
-impl FlushTruncateListener {
-    /// Notify flush region to proceed.
-    pub fn notify_flush(&self) {
-        self.notify_flush.notify_one();
-    }
-
-    /// Wait for a truncate event.
-    pub async fn wait_truncate(&self) {
-        self.notify_truncate.notified().await;
+impl FlushCancellationListener {
+    /// Waits until the flush reaches the cancellation gate.
+    pub async fn wait_flush_started(&self) {
+        self.flush_started.notified().await;
     }
 }
 
 #[async_trait]
-impl EventListener for FlushTruncateListener {
-    /// Calling this function will block the thread!
-    /// Notify the listener to perform a truncate region and block the flush region job.
+impl EventListener for FlushCancellationListener {
     async fn on_flush_begin(&self, region_id: RegionId) {
-        info!(
-            "Region {} begin do flush, notify region to truncate",
-            region_id
-        );
-        self.notify_truncate.notify_one();
-        self.notify_flush.notified().await;
+        info!("Region {} reached the flush cancellation gate", region_id);
+        self.flush_started.notify_one();
+        self.resume_flush.notified().await;
+    }
+
+    fn on_flush_cancel_requested(&self, _region_id: RegionId) {
+        self.resume_flush.notify_one();
     }
 }
 

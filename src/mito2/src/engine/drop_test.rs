@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
@@ -28,7 +30,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockRegionHook;
-use crate::engine::listener::{DropListener, FlushTruncateListener};
+use crate::engine::listener::{DropListener, FlushCancellationListener};
 use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
     CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows_for_key, flush_region,
@@ -40,7 +42,7 @@ use crate::worker::DROPPING_MARKER_FILE;
 async fn test_drop_cancels_running_flush() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("drop-during-flush").await;
-    let listener = Arc::new(FlushTruncateListener::default());
+    let listener = Arc::new(FlushCancellationListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
@@ -75,21 +77,31 @@ async fn test_drop_cancels_running_flush() {
             )
             .await
     });
-    listener.wait_truncate().await;
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_started())
+        .await
+        .expect("flush did not reach the cancellation gate");
 
-    engine
-        .handle_request(
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
             region_id,
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
                 force: false,
                 partial_drop: false,
             }),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("drop did not finish after cancelling flush")
+    .unwrap();
 
-    assert!(flush_task.await.unwrap().is_err());
+    let flush_err = tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("cancelled flush did not finish")
+        .expect("flush task panicked")
+        .unwrap_err();
+    assert_eq!(flush_err.status_code(), StatusCode::Cancelled);
     assert!(engine.get_region(region_id).is_none());
 }
 

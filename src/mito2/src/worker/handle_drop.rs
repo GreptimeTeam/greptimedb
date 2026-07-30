@@ -24,7 +24,7 @@ use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::{AffectedRows, PathType};
+use store_api::region_request::{AffectedRows, PathType, RegionDropRequest};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -32,6 +32,7 @@ use crate::cache::CacheManagerRef;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
+use crate::request::{DdlRequest, OptionOutputTx};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
@@ -43,6 +44,29 @@ where
     S: LogStore,
 {
     pub(crate) async fn handle_drop_request(
+        &mut self,
+        region_id: RegionId,
+        req: RegionDropRequest,
+        sender: OptionOutputTx,
+    ) {
+        let (sender, req) = match self.flush_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            req,
+            DdlRequest::Drop,
+        ) {
+            Ok(()) => {
+                self.listener.on_flush_cancel_requested(region_id);
+                return;
+            }
+            Err(request) => request,
+        };
+
+        let result = self.drop_region(region_id, req.partial_drop).await;
+        sender.send(result);
+    }
+
+    async fn drop_region(
         &mut self,
         region_id: RegionId,
         partial_drop: bool,

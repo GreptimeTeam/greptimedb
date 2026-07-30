@@ -1148,22 +1148,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    let (sender, req) = match self.flush_scheduler.try_cancel_and_add_ddl(
-                        ddl.region_id,
-                        ddl.sender,
-                        req,
-                        DdlRequest::Drop,
-                    ) {
-                        Ok(()) => {
-                            self.listener.on_flush_cancel_requested(ddl.region_id);
-                            continue;
-                        }
-                        Err(request) => request,
-                    };
-                    let res = self
-                        .handle_drop_request(ddl.region_id, req.partial_drop)
+                    self.handle_drop_request(ddl.region_id, req, ddl.sender)
                         .await;
-                    sender.send(res);
                     continue;
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {

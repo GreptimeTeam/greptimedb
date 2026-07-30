@@ -23,10 +23,10 @@ use snafu::ResultExt;
 use store_api::ManifestVersion;
 use tokio::sync::mpsc;
 
+use crate::compaction::CompactionExecution;
 use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::compaction::{CompactionExecution, LocalCompactionState};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
@@ -35,6 +35,7 @@ use crate::request::{
     BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
     RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::schedule::CancellableTaskState;
 use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::worker::WorkerListener;
 use crate::{error, metrics};
@@ -44,7 +45,7 @@ pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 pub(crate) struct CompactionTaskImpl {
     /// Shared local-compaction state for cooperative cancellation.
-    pub(crate) state: LocalCompactionState,
+    pub(crate) state: CancellableTaskState,
     /// Identity and reservation lease of this accepted execution.
     pub(crate) execution: CompactionExecution,
     pub compaction_region: CompactionRegion,
