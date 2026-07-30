@@ -15,6 +15,7 @@
 pub mod json_get;
 mod json_get_rewriter;
 mod json_is;
+mod json_object_keys;
 mod json_path_exists;
 mod json_path_match;
 mod json_to_string;
@@ -25,6 +26,7 @@ use json_get_rewriter::JsonGetRewriter;
 use json_is::{
     JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
 };
+use json_object_keys::JsonObjectKeysFunction;
 use json_to_string::JsonToStringFunction;
 use parse_json::ParseJsonFunction;
 
@@ -53,6 +55,7 @@ impl JsonFunction {
         registry.register_scalar(JsonIsArray::default());
         registry.register_scalar(JsonIsObject::default());
 
+        registry.register_scalar(JsonObjectKeysFunction::default());
         registry.register_scalar(json_path_exists::JsonPathExistsFunction::default());
         registry.register_scalar(json_path_match::JsonPathMatchFunction::default());
 
