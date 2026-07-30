@@ -1065,8 +1065,17 @@ pub(crate) enum IndexPublication {
         manifest_version: ManifestVersion,
         file_meta: FileMeta,
     },
+    /// The build no longer matches the current manifest.
+    Stale(IndexPublicationStale),
+}
+
+/// Why an index publication became stale.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IndexPublicationStale {
     /// The source SST or region incarnation is no longer publishable.
-    Stale,
+    SourceChanged,
+    /// The SST still matches, but the schema generation changed.
+    SchemaChanged,
 }
 
 /// Manifest state an index build is based on.
@@ -1086,11 +1095,6 @@ impl IndexBuildSource {
             file_meta,
             schema_version,
         }
-    }
-
-    fn matches(&self, manifest: &RegionManifest) -> bool {
-        manifest.metadata.schema_version == self.schema_version
-            && manifest.files.get(&self.file_meta.file_id) == Some(&self.file_meta)
     }
 }
 
@@ -1301,11 +1305,21 @@ impl ManifestContext {
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
         ) || manager.is_stopped()
         {
-            return Ok(IndexPublication::Stale);
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
         }
 
-        if !source.matches(&manifest) {
-            return Ok(IndexPublication::Stale);
+        if manifest.files.get(&source.file_meta.file_id) != Some(&source.file_meta) {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
+        }
+
+        if manifest.metadata.schema_version != source.schema_version {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SchemaChanged,
+            ));
         }
 
         // Only index metadata is allowed to change in this publication.
@@ -1939,8 +1953,8 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        IndexBuildSource, IndexPublication, ManifestContext, ManifestStats, MitoRegion,
-        RegionLeaderState, RegionRoleState, RegionStats,
+        IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
+        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -2101,7 +2115,7 @@ mod tests {
             .unwrap()
         {
             IndexPublication::Committed { file_meta, .. } => file_meta,
-            IndexPublication::Stale => panic!("first index publication should commit"),
+            IndexPublication::Stale(_) => panic!("first index publication should commit"),
         };
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -2131,13 +2145,13 @@ mod tests {
             .unwrap()
         {
             IndexPublication::Committed { file_meta, .. } => file_meta,
-            IndexPublication::Stale => panic!("newer index publication should commit"),
+            IndexPublication::Stale(_) => panic!("newer index publication should commit"),
         };
 
         release_tx.send(()).unwrap();
         assert!(matches!(
             delayed_publication.await.unwrap().unwrap(),
-            IndexPublication::Stale
+            IndexPublication::Stale(IndexPublicationStale::SourceChanged)
         ));
         assert_eq!(
             region
@@ -2201,7 +2215,7 @@ mod tests {
                 .update_manifest_for_index(&source, updated)
                 .await
                 .unwrap(),
-            IndexPublication::Stale
+            IndexPublication::Stale(IndexPublicationStale::SchemaChanged)
         ));
 
         let manifest = region.manifest_ctx.manifest().await;

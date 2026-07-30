@@ -325,7 +325,7 @@ impl RegionManifestBuilder {
                 self.files.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
-                // TODO: With GC disabled, VersionControl may still hold an older
+                // With GC disabled, VersionControl may still hold an older
                 // FileMeta and LocalFilePurger can miss a just-committed newer
                 // index generation. We accept this narrow local-mode orphan
                 // window; object-store deployments enable GC and collect the

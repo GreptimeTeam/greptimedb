@@ -24,7 +24,7 @@ pub(crate) mod store;
 pub(crate) mod vector_index;
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -63,10 +63,12 @@ use crate::metrics::{
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
-use crate::region::{IndexBuildSource, IndexPublication, ManifestContextRef};
+use crate::region::{
+    IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContextRef,
+};
 use crate::request::{
-    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
-    WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped,
+    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
@@ -926,16 +928,14 @@ impl IndexBuildTask {
                         notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
                     }
                 }
-                Ok(IndexPublication::Stale) => {
+                Ok(IndexPublication::Stale(stale)) => {
                     INDEX_PUBLICATION_STALE_TOTAL
                         .with_label_values(&["manifest_commit"])
                         .inc();
                     let index_id = RegionIndexId::new(region_file_id, new_index_version);
-                    // TODO: If no successor publishes the same version, remove the
-                    // remote artifact when GC is disabled. Repartition requires GC,
-                    // so a GC-disabled region cannot share this physical index path.
-                    // With GC enabled, remote cleanup must remain in GC because
-                    // repartitioned regions may reference the same artifact.
+                    // If no successor publishes the same version, GC collects the
+                    // remote artifact. Repartition requires GC, while local mode
+                    // accepts this narrow orphan window when GC is disabled.
                     cleanup_stale_index_caches(
                         index_id,
                         &self.access_layer,
@@ -944,8 +944,27 @@ impl IndexBuildTask {
                     )
                     .await;
                     self.listener.on_index_build_abort(region_file_id).await;
+                    if stale == IndexPublicationStale::SchemaChanged {
+                        // An index-unrelated schema change also invalidates the
+                        // generation fence. Retry to avoid leaving the SST
+                        // unindexed; per-SST coalescing limits this to one active
+                        // and one pending task, so repeated changes cannot storm.
+                        let retry = BuildIndexRequest {
+                            region_id: self.region_id,
+                            build_type: IndexBuildType::SchemaChange,
+                            file_metas: vec![self.source.file_meta.clone()],
+                        };
+                        let worker_request = WorkerRequest::Background {
+                            region_id: self.region_id,
+                            notify: BackgroundNotify::IndexBuildRetry(retry),
+                        };
+                        let _ = self
+                            .request_sender
+                            .send(WorkerRequestWithTime::new(worker_request))
+                            .await;
+                    }
                     return Ok(IndexBuildOutcome::Aborted(format!(
-                        "Source SST or region incarnation changed before index publication, region: {}, file_id: {}",
+                        "Index build source changed before publication, region: {}, file_id: {}",
                         self.region_id, self.source.file_meta.file_id
                     )));
                 }
@@ -1101,70 +1120,66 @@ impl PendingIndexBuild {
         {
             Ordering::Greater => true,
             Ordering::Less => false,
-            Ordering::Equal if self.task.source.file_meta != other.task.source.file_meta => true,
-            Ordering::Equal => self.task.reason.priority() >= other.task.reason.priority(),
+            Ordering::Equal => match self
+                .task
+                .source
+                .file_meta
+                .index_version()
+                .cmp(&other.task.source.file_meta.index_version())
+            {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => self.task.reason.priority() > other.task.reason.priority(),
+            },
         }
     }
 }
 
 #[derive(Default)]
 struct PendingIndexBuilds {
-    heap: BinaryHeap<PendingIndexBuild>,
+    tasks: HashMap<FileId, PendingIndexBuild>,
 }
 
 impl PendingIndexBuilds {
     fn insert(&mut self, pending: PendingIndexBuild) -> Option<IndexBuildTask> {
         let file_id = pending.task.source.file_meta.file_id;
-        let Some(existing) = self
-            .heap
-            .iter()
-            .find(|queued| queued.task.source.file_meta.file_id == file_id)
-            .cloned()
-        else {
-            self.heap.push(pending);
-            return None;
-        };
-
-        if pending.supersedes(&existing) {
-            self.heap
-                .retain(|queued| queued.task.source.file_meta.file_id != file_id);
-            self.heap.push(pending);
-            Some(existing.task)
-        } else {
-            Some(pending.task)
+        match self.tasks.entry(file_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(pending);
+                None
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if pending.supersedes(entry.get()) =>
+            {
+                Some(entry.insert(pending).task)
+            }
+            std::collections::hash_map::Entry::Occupied(_) => Some(pending.task),
         }
     }
 
     fn highest_ready(&self, building_files: &HashSet<FileId>) -> Option<PendingIndexBuild> {
-        if let Some(pending) = self.heap.peek()
-            && !building_files.contains(&pending.task.source.file_meta.file_id)
-        {
-            return Some(pending.clone());
-        }
-
-        self.heap
-            .iter()
+        self.tasks
+            .values()
             .filter(|pending| !building_files.contains(&pending.task.source.file_meta.file_id))
             .max()
             .cloned()
     }
 
     fn remove(&mut self, file_id: FileId) {
-        self.heap
-            .retain(|queued| queued.task.source.file_meta.file_id != file_id);
+        self.tasks.remove(&file_id);
     }
 
     fn drain(&mut self) -> impl Iterator<Item = PendingIndexBuild> {
-        std::mem::take(&mut self.heap).into_iter()
+        std::mem::take(&mut self.tasks).into_values()
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.heap.len()
+        self.tasks.len()
     }
 
     fn is_empty(&self) -> bool {
-        self.heap.is_empty()
+        self.tasks.is_empty()
     }
 }
 
@@ -1234,29 +1249,47 @@ impl IndexBuildScheduler {
             task.source.file_meta.file_id,
         );
         let can_wait_for_active = status.retiring || task.reason == IndexBuildType::SchemaChange;
-        let rejected = if status.building_files.contains(&file_id) && !can_wait_for_active {
-            Some(task)
-        } else {
-            let pending = PendingIndexBuild {
-                task,
-                version_control: version_control.clone(),
+        let (rejected, coalesced) =
+            if status.building_files.contains(&file_id) && !can_wait_for_active {
+                (Some(task), None)
+            } else {
+                let pending = PendingIndexBuild {
+                    task,
+                    version_control: version_control.clone(),
+                };
+                (None, status.pending_tasks.insert(pending))
             };
-            status.pending_tasks.insert(pending)
-        };
         let should_schedule = !status.retiring;
 
         if let Some(rejected) = rejected {
             debug!(
-                "Coalescing redundant index build task for region file {:?}",
+                "Rejecting index build because region file {:?} is already being built",
                 region_file_id
             );
             rejected
+                .on_success(IndexBuildOutcome::Aborted(format!(
+                    "Index is already being built for region file {:?}",
+                    region_file_id
+                )))
+                .await;
+            rejected.listener.on_index_build_abort(region_file_id).await;
+        }
+
+        if let Some(coalesced) = coalesced {
+            debug!(
+                "Coalescing redundant index build task for region file {:?}",
+                region_file_id
+            );
+            coalesced
                 .on_success(IndexBuildOutcome::Aborted(format!(
                     "Index build was coalesced for region file {:?}",
                     region_file_id
                 )))
                 .await;
-            rejected.listener.on_index_build_abort(region_file_id).await;
+            coalesced
+                .listener
+                .on_index_build_abort(region_file_id)
+                .await;
         }
 
         if should_schedule {
@@ -1475,6 +1508,7 @@ mod tests {
     use crate::memtable::time_partition::TimePartitions;
     use crate::region::RegionLeaderState;
     use crate::region::version::{VersionBuilder, VersionControl};
+    use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::location;
@@ -2584,6 +2618,47 @@ mod tests {
         assert_eq!(status.building_files.len(), 1);
         assert!(status.pending_tasks.is_empty());
         assert_eq!(job_scheduler.num_jobs(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_completes_sender_when_job_is_rejected() {
+        let job_scheduler = Arc::new(LocalScheduler::new(1));
+        job_scheduler.stop(false).await.unwrap();
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler);
+        let mut scheduler = env.mock_index_build_scheduler(1);
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let file_purger = Arc::new(NoopFilePurger {});
+        let files = HashMap::from([(
+            file_id,
+            FileMeta {
+                region_id,
+                file_id,
+                file_size: 100,
+                ..Default::default()
+            },
+        )]);
+        let version_control = mock_version_control(metadata, file_purger, files).await;
+        let (task, mut result_rx) = create_mock_task_for_schedule_with_result(
+            &env,
+            file_id,
+            region_id,
+            IndexBuildType::Flush,
+        )
+        .await;
+
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx.recv())
+            .await
+            .expect("scheduler rejection did not complete the result sender")
+            .expect("result channel closed without a result");
+        assert!(result.is_err());
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
     #[tokio::test]

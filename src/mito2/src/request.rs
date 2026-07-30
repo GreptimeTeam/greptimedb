@@ -908,6 +908,8 @@ pub(crate) enum BackgroundNotify {
     IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
     IndexBuildFailed(IndexBuildFailed),
+    /// An index build must be retried against the latest schema generation.
+    IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has been cancelled cooperatively.

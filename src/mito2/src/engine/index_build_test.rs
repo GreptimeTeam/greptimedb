@@ -19,17 +19,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use api::v1::Rows;
 use api::v1::region::{StrictWindow, compact_request};
+use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
-use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions, SkippingIndexType};
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
+    AddColumn, AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
     RegionCompactRequest, RegionRequest, SetIndexOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
@@ -149,6 +151,12 @@ impl IndexPublicationGate {
         while self.finish_count.load(Ordering::Relaxed) + self.abort_count.load(Ordering::Relaxed)
             < count
         {
+            self.stopped_notify.notified().await;
+        }
+    }
+
+    async fn wait_finished(&self, count: usize) {
+        while self.finish_count.load(Ordering::Relaxed) < count {
             self.stopped_notify.notified().await;
         }
     }
@@ -915,12 +923,10 @@ async fn test_consecutive_schema_changes_publish_latest_index_generation() {
         .await
         .expect("latest schema generation was not scheduled");
     gate.release(1);
-    tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(3))
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_finished(1))
         .await
-        .expect("coalesced schema-change builds did not stop");
+        .expect("latest schema generation was not published");
 
-    assert_eq!(gate.entered.load(Ordering::Relaxed), 2);
-    assert_eq!(gate.abort_count.load(Ordering::Relaxed), 2);
     assert_eq!(gate.finish_count.load(Ordering::Relaxed), 1);
 
     let region = engine.get_region(region_id).unwrap();
@@ -951,6 +957,92 @@ async fn test_consecutive_schema_changes_publish_latest_index_generation() {
         reopened_files[0]
             .is_index_consistent_with_region(&reopened.version().metadata.column_metadatas)
     );
+}
+
+#[tokio::test]
+async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
+    let mut env =
+        TestEnv::with_prefix("test_unrelated_schema_change_retries_stale_index_build_").await;
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::BeforeManifestCommit,
+    ));
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(true),
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("flush index build did not reach manifest publication");
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "field_1",
+                                ConcreteDataType::float64_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Field,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(2))
+        .await
+        .expect("stale flush index build was not retried");
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_stopped(2))
+        .await
+        .expect("retried index build did not stop");
+
+    assert_eq!(gate.abort_count.load(Ordering::Relaxed), 1);
+    assert_eq!(gate.finish_count.load(Ordering::Relaxed), 1);
+
+    let region = engine.get_region(region_id).unwrap();
+    let files = current_file_metas(&engine, region_id).await;
+    assert_eq!(files.len(), 1);
+    assert!(files[0].is_index_consistent_with_region(&region.version().metadata.column_metadatas));
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
 
 #[tokio::test]
