@@ -357,6 +357,7 @@ async fn run_index_publication_compaction_race(phase: IndexPublicationPhase, gc_
                     window_seconds: 60,
                 }),
                 parallelism: None,
+                time_range: None,
             }),
         )
         .await
