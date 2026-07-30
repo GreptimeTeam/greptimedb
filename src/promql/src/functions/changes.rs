@@ -182,10 +182,12 @@ mod test {
         value_ranges: Vec<(u32, u32)>,
     ) -> Vec<Option<f64>> {
         assert_eq!(timestamp_ranges.len(), value_ranges.len());
-        assert!(timestamp_ranges
-            .iter()
-            .zip(&value_ranges)
-            .all(|((_, timestamp_length), (_, value_length))| timestamp_length == value_length));
+        assert!(
+            timestamp_ranges
+                .iter()
+                .zip(&value_ranges)
+                .all(|((_, timestamp_length), (_, value_length))| timestamp_length == value_length)
+        );
         assert_eq!(values.len(), raw_values.len());
         let nulls = values.iter().map(Option::is_none).collect::<Vec<_>>();
 
