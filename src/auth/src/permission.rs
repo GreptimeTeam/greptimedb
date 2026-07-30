@@ -100,7 +100,7 @@ pub enum AccessMode {
     Write,
 }
 
-/// A server-defined permission action.
+/// A named permission action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PermissionAction {
     name: &'static str,
@@ -108,14 +108,16 @@ pub struct PermissionAction {
 }
 
 impl PermissionAction {
-    const fn read(name: &'static str) -> Self {
+    /// Creates a read action with a stable name.
+    pub const fn read(name: &'static str) -> Self {
         Self {
             name,
             access_mode: AccessMode::Read,
         }
     }
 
-    const fn write(name: &'static str) -> Self {
+    /// Creates a write action with a stable name.
+    pub const fn write(name: &'static str) -> Self {
         Self {
             name,
             access_mode: AccessMode::Write,
@@ -149,7 +151,10 @@ pub const DASHBOARD_QUERY: PermissionAction = PermissionAction::read("dashboard.
 pub const DASHBOARD_SAVE: PermissionAction = PermissionAction::write("dashboard.save");
 pub const DASHBOARD_DELETE: PermissionAction = PermissionAction::write("dashboard.delete");
 
-/// All named permission actions and their access modes.
+/// All permission actions built into GreptimeDB.
+///
+/// Downstream crates may define additional actions with [`PermissionAction::read`] and
+/// [`PermissionAction::write`].
 pub const ALL_ACTIONS: &[PermissionAction] = &[
     PROMQL_QUERY,
     LOG_QUERY,
