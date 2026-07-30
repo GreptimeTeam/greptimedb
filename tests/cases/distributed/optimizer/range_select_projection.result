@@ -1,0 +1,85 @@
+CREATE TABLE range_select_projection (
+    ts TIMESTAMP TIME INDEX,
+    station STRING,
+    "channel" STRING,
+    unused_tag STRING,
+    value_a DOUBLE,
+    value_b DOUBLE,
+    unused_value DOUBLE,
+    PRIMARY KEY (station, "channel", unused_tag),
+);
+
+Affected Rows: 0
+
+INSERT INTO range_select_projection VALUES
+    (0, 'station-a', 'channel-a', 'unused-a', 1.0, 10.0, 100.0),
+    (5000, 'station-a', 'channel-a', 'unused-a', 2.0, 20.0, 200.0),
+    (10000, 'station-a', 'channel-a', 'unused-a', 3.0, 30.0, 300.0),
+    (0, 'station-a', 'channel-b', 'unused-b', 4.0, 40.0, 400.0),
+    (5000, 'station-a', 'channel-b', 'unused-b', 5.0, 50.0, 500.0);
+
+Affected Rows: 5
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE Dictionary\(UInt32,\s*Utf8\(([^)]*)\)\) Utf8($1)
+EXPLAIN ANALYZE VERBOSE SELECT
+    ts,
+    station,
+    "channel",
+    avg(value_a + value_b) RANGE '10s' AS avg_value
+FROM range_select_projection
+WHERE station = 'station-a'
+    AND unused_tag = 'unused-a'
+    AND ts >= '1970-01-01 00:00:00'
+    AND ts < '1970-01-01 00:00:15'
+ALIGN '5s' BY (station, "channel")
+ORDER BY station, "channel", ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortExec: expr=[station@1 ASC NULLS LAST, channel@2 ASC NULLS LAST, ts@0 ASC NULLS LAST], preserve_REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, station@2 as station, channel@3 as channel, avg(range_select_projection.value_a + range_select_projection.value_b) RANGE 10s@0 as avg_value] REDACTED
+|_|_|_RangeSelectExec: range_expr=[avg(range_select_projection.value_a + range_select_projection.value_b) RANGE 10s], align=5000ms, align_to=0ms, align_by=[station@1, channel@2], time_index=ts REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "station", "channel", "value_a", "value_b"], "filters": ["station = Utf8(\"station-a\")", "unused_tag = Utf8(\"unused-a\")", "ts >= TimestampMillisecond(0, None)", "ts < TimestampMillisecond(15000, None)"], "flat_format": true, "REDACTED
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+SELECT
+    ts,
+    station,
+    "channel",
+    avg(value_a + value_b) RANGE '10s' AS avg_value
+FROM range_select_projection
+WHERE station = 'station-a'
+    AND unused_tag = 'unused-a'
+    AND ts >= '1970-01-01 00:00:00'
+    AND ts < '1970-01-01 00:00:15'
+ALIGN '5s' BY (station, "channel")
+ORDER BY station, "channel", ts;
+
++---------------------+-----------+-----------+-----------+
+| ts                  | station   | channel   | avg_value |
++---------------------+-----------+-----------+-----------+
+| 1969-12-31T23:59:55 | station-a | channel-a | 11.0      |
+| 1970-01-01T00:00:00 | station-a | channel-a | 16.5      |
+| 1970-01-01T00:00:05 | station-a | channel-a | 27.5      |
+| 1970-01-01T00:00:10 | station-a | channel-a | 33.0      |
++---------------------+-----------+-----------+-----------+
+
+DROP TABLE range_select_projection;
+
+Affected Rows: 0
+
