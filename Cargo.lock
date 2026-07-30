@@ -11544,6 +11544,7 @@ dependencies = [
  "log-query",
  "meter-core",
  "meter-macros",
+ "moka",
  "nalgebra",
  "num",
  "num-traits",
