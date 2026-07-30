@@ -155,7 +155,6 @@ WHERE type = 'batch_gc'
         serde_json::from_str(&find_eventually_string(instance, &succeeded, "gc_report").await)
             .unwrap();
     assert_eq!(actual_report["need_retry"], false);
-    assert_eq!(actual_report["processed"], true);
 
     let mut actual_file_ids = actual_report["deleted_files"]
         .as_array()

@@ -122,7 +122,7 @@ async fn query_first_string(instance: &Arc<Instance>, query: &str, column: &str)
             .next()
             .flatten()
             .map(ToString::to_string),
-        _ => None,
+        data_type => panic!("expected a string column, got {data_type:?}"),
     }
 }
 

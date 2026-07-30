@@ -1032,6 +1032,7 @@ impl Procedure for BatchGcProcedure {
         }
 
         let event = match &ctx.trigger {
+            // Keep normal GC low-noise; only Succeeded events with meaningful reports are recorded.
             EventTrigger::Submitted
             | EventTrigger::Recovered
             | EventTrigger::ChildSubmitted { .. } => return None,
@@ -1043,12 +1044,12 @@ impl Procedure for BatchGcProcedure {
                     return None;
                 };
                 let report = output.downcast_ref::<GcReport>()?;
-                BatchGcEvent::succeeded(&self.data.regions, report)
+                BatchGcEvent::succeeded(report)?
             }
             EventTrigger::Retrying { .. }
             | EventTrigger::RollingBack
             | EventTrigger::Failed
-            | EventTrigger::Poisoned => BatchGcEvent::lifecycle(
+            | EventTrigger::Poisoned => BatchGcEvent::with_config(
                 &self.data.regions,
                 self.data.full_file_listing,
                 self.data.timeout,
