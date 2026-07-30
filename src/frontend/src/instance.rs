@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
     PermissionTableTargets,
 };
 use catalog::CatalogManagerRef;
@@ -1067,7 +1067,10 @@ impl Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .check_permission(
+                query_ctx.current_user(),
+                PermissionReq::Action(PROMQL_QUERY),
+            )
             .context(AuthSnafu)?;
         Ok(())
     }
@@ -1319,7 +1322,7 @@ impl PrometheusHandler for Instance {
         let targets = self
             .resolve_query_permission_targets(targets, query_ctx)
             .await?;
-        self.check_table_permission(query_ctx, PermissionReq::PromQuery, targets)
+        self.check_table_permission(query_ctx, PermissionReq::Action(PROMQL_QUERY), targets)
             .context(AuthSnafu)?;
         Ok(())
     }
@@ -1341,7 +1344,7 @@ impl PrometheusHandler for Instance {
                 .as_ref()
                 .check_permission_with_table_targets(
                     query_ctx.current_user(),
-                    PermissionReq::PromQuery,
+                    PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
                 )
                 .context(AuthSnafu);
@@ -1365,7 +1368,7 @@ impl PrometheusHandler for Instance {
                 .as_ref()
                 .check_permission_with_table_targets(
                     query_ctx.current_user(),
-                    PermissionReq::PromQuery,
+                    PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
                 )
                 .context(AuthSnafu)
@@ -1668,8 +1671,8 @@ mod tests {
     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     use auth::{
-        AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY,
-        PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PermissionResp, UserInfoRef,
+        DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY, PIPELINE_DELETE,
+        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfoRef,
     };
     use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
@@ -1958,8 +1961,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct CheckedAction {
-        access_mode: AccessMode,
-        action: &'static str,
+        action: PermissionAction,
         targets: Option<PermissionTableTargets>,
     }
 
@@ -1971,15 +1973,13 @@ mod tests {
     impl RejectEndpointPermissionChecker {
         fn reject(
             &self,
-            access_mode: AccessMode,
-            action: &'static str,
+            action: PermissionAction,
             targets: Option<PermissionTableTargets>,
         ) -> PermissionResp {
-            self.checks.lock().unwrap().push(CheckedAction {
-                access_mode,
-                action,
-                targets,
-            });
+            self.checks
+                .lock()
+                .unwrap()
+                .push(CheckedAction { action, targets });
             PermissionResp::Reject
         }
 
@@ -1997,8 +1997,7 @@ mod tests {
             req: PermissionReq,
         ) -> auth::error::Result<PermissionResp> {
             Ok(match req {
-                PermissionReq::ReadAction(action) => self.reject(AccessMode::Read, action, None),
-                PermissionReq::WriteAction(action) => self.reject(AccessMode::Write, action, None),
+                PermissionReq::Action(action) => self.reject(action, None),
                 _ => PermissionResp::Allow,
             })
         }
@@ -2010,12 +2009,7 @@ mod tests {
             targets: PermissionTableTargets,
         ) -> auth::error::Result<PermissionResp> {
             Ok(match req {
-                PermissionReq::ReadAction(action) => {
-                    self.reject(AccessMode::Read, action, Some(targets))
-                }
-                PermissionReq::WriteAction(action) => {
-                    self.reject(AccessMode::Write, action, Some(targets))
-                }
+                PermissionReq::Action(action) => self.reject(action, Some(targets)),
                 _ => PermissionResp::Allow,
             })
         }
@@ -2565,18 +2559,10 @@ mod tests {
 
     fn assert_action_checked(
         checker: &RejectEndpointPermissionChecker,
-        access_mode: AccessMode,
-        action: &'static str,
+        action: PermissionAction,
         targets: Option<PermissionTableTargets>,
     ) {
-        assert_eq!(
-            CheckedAction {
-                access_mode,
-                action,
-                targets,
-            },
-            checker.take_check()
-        );
+        assert_eq!(CheckedAction { action, targets }, checker.take_check());
     }
 
     #[tokio::test]
@@ -2611,30 +2597,15 @@ mod tests {
         ]));
 
         assert_permission_denied(JaegerQueryHandler::get_services(&instance, ctx.clone()).await);
-        assert_action_checked(
-            &checker,
-            AccessMode::Read,
-            JAEGER_QUERY,
-            jaeger_targets.clone(),
-        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
         assert_permission_denied(
             JaegerQueryHandler::get_operations(&instance, ctx.clone(), "service", None).await,
         );
-        assert_action_checked(
-            &checker,
-            AccessMode::Read,
-            JAEGER_QUERY,
-            jaeger_targets.clone(),
-        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
         assert_permission_denied(
             JaegerQueryHandler::get_trace(&instance, ctx.clone(), "trace", None, None, None).await,
         );
-        assert_action_checked(
-            &checker,
-            AccessMode::Read,
-            JAEGER_QUERY,
-            jaeger_targets.clone(),
-        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
         assert_permission_denied(
             JaegerQueryHandler::find_traces(
                 &instance,
@@ -2646,12 +2617,12 @@ mod tests {
             )
             .await,
         );
-        assert_action_checked(&checker, AccessMode::Read, JAEGER_QUERY, jaeger_targets);
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets);
 
         assert_permission_denied(
             PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
         );
-        assert_action_checked(&checker, AccessMode::Read, PIPELINE_QUERY, None);
+        assert_action_checked(&checker, PIPELINE_QUERY, None);
         assert_permission_denied(
             PipelineHandler::insert_pipeline(
                 &instance,
@@ -2662,11 +2633,11 @@ mod tests {
             )
             .await,
         );
-        assert_action_checked(&checker, AccessMode::Write, PIPELINE_INSERT, None);
+        assert_action_checked(&checker, PIPELINE_INSERT, None);
         assert_permission_denied(
             PipelineHandler::delete_pipeline(&instance, "pipeline", None, ctx.clone()).await,
         );
-        assert_action_checked(&checker, AccessMode::Write, PIPELINE_DELETE, None);
+        assert_action_checked(&checker, PIPELINE_DELETE, None);
         let app = axum::Router::new()
             .route(
                 "/pipelines/_dryrun",
@@ -2688,18 +2659,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
-        assert_action_checked(&checker, AccessMode::Read, PIPELINE_QUERY, None);
+        assert_action_checked(&checker, PIPELINE_QUERY, None);
 
         assert_permission_denied(
             DashboardHandler::save(&instance, "dashboard", "{}", ctx.clone()).await,
         );
-        assert_action_checked(&checker, AccessMode::Write, DASHBOARD_SAVE, None);
+        assert_action_checked(&checker, DASHBOARD_SAVE, None);
         assert_permission_denied(DashboardHandler::list(&instance, ctx.clone()).await);
-        assert_action_checked(&checker, AccessMode::Read, DASHBOARD_QUERY, None);
+        assert_action_checked(&checker, DASHBOARD_QUERY, None);
         assert_permission_denied(
             DashboardHandler::delete(&instance, "dashboard", ctx.clone()).await,
         );
-        assert_action_checked(&checker, AccessMode::Write, DASHBOARD_DELETE, None);
+        assert_action_checked(&checker, DASHBOARD_DELETE, None);
 
         Ok(())
     }

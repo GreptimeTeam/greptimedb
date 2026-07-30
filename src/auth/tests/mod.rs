@@ -19,8 +19,8 @@ use api::v1::greptime_request::Request;
 use auth::error::Error::InternalState;
 use auth::error::InternalStateSnafu;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
-    UserInfoRef,
+    OPENTSDB_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp,
+    PermissionTableTargets, UserInfoRef,
 };
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
@@ -72,7 +72,9 @@ fn test_permission_checker() {
     );
     assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
-    let err_result =
-        checker.check_permission(auth::userinfo_by_name(None), PermissionReq::Opentsdb);
+    let err_result = checker.check_permission(
+        auth::userinfo_by_name(None),
+        PermissionReq::Action(OPENTSDB_WRITE),
+    );
     assert_matches!(err_result, Err(InternalState { msg }) if msg == "testing");
 }

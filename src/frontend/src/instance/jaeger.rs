@@ -70,7 +70,7 @@ impl Instance {
             table,
         )]);
         let targets = self.resolve_query_permission_targets(targets, ctx).await?;
-        self.check_table_permission(ctx, PermissionReq::ReadAction(JAEGER_QUERY), targets)
+        self.check_table_permission(ctx, PermissionReq::Action(JAEGER_QUERY), targets)
             .context(AuthSnafu)?;
         Ok(())
     }

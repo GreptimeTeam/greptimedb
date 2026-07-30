@@ -393,17 +393,17 @@ impl servers::query_handler::DashboardHandler for Instance {
         definition: &str,
         ctx: QueryContextRef,
     ) -> servers::error::Result<()> {
-        self.check_permission(&ctx, PermissionReq::WriteAction(DASHBOARD_SAVE))?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_SAVE))?;
         self.insert_dashboard(name, definition, ctx).await
     }
 
     async fn list(&self, ctx: QueryContextRef) -> servers::error::Result<Vec<DashboardDefinition>> {
-        self.check_permission(&ctx, PermissionReq::ReadAction(DASHBOARD_QUERY))?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_QUERY))?;
         self.list_dashboards(ctx).await
     }
 
     async fn delete(&self, name: &str, ctx: QueryContextRef) -> servers::error::Result<()> {
-        self.check_permission(&ctx, PermissionReq::WriteAction(DASHBOARD_DELETE))?;
+        self.check_permission(&ctx, PermissionReq::Action(DASHBOARD_DELETE))?;
         self.delete_dashboard(name, ctx).await
     }
 }

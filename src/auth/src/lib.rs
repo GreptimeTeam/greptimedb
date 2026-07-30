@@ -31,9 +31,10 @@ pub use common::{
 };
 pub use permission::{
     ALL_ACTIONS, AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,
-    DefaultPermissionChecker, JAEGER_QUERY, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY,
-    PermissionChecker, PermissionReq, PermissionResp, PermissionTableTarget,
-    PermissionTableTargets,
+    DefaultPermissionChecker, INFLUXDB_WRITE, JAEGER_QUERY, LOG_QUERY, LOG_WRITE, OPENTSDB_WRITE,
+    OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
+    PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
+    PermissionResp, PermissionTableTarget, PermissionTableTargets,
 };
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;
