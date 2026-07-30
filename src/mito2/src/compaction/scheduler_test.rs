@@ -23,11 +23,11 @@ use common_time::{DatabaseTimeToLive, Timestamp};
 use store_api::storage::FileId;
 use tokio::sync::{Barrier, mpsc, oneshot};
 
-use super::planning::CompactionPlanningResult;
-use super::state::{CompactingFiles, CompactionPhase};
-use super::*;
 use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::planning::CompactionPlanningResult;
+use crate::compaction::scheduler::state::{CompactingFiles, CompactionPhase};
+use crate::compaction::scheduler::*;
 use crate::compaction::test_util::new_file_handle;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::error::InvalidSchedulerStateSnafu;

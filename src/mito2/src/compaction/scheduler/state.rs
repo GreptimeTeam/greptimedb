@@ -25,11 +25,11 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
-use super::planning::CompactionRequest;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::CompactionVersion;
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, Error, ManualCompactionOverrideSnafu,

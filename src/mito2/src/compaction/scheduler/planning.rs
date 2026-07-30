@@ -29,14 +29,14 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
-use super::CompactionScheduler;
-use super::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus, LocalCompactionState,
-};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
+use crate::compaction::scheduler::CompactionScheduler;
+use crate::compaction::scheduler::state::{
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus, LocalCompactionState,
+};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
