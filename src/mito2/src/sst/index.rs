@@ -821,13 +821,10 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
-        // Determine the new index version
-        let new_index_version = if self.file_meta.index_file_size > 0 {
-            // Increment version if index file exists to avoid overwrite.
-            self.file_meta.index_version + 1
-        } else {
-            0 // Default version for new index files
-        };
+        let new_index_version = self
+            .file_meta
+            .index_version()
+            .map_or(0, |version| version + 1);
 
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
@@ -1980,7 +1977,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_index_build_task_sst_exist() {
+    async fn test_index_build_task_increments_legacy_index_version() {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
@@ -1993,7 +1990,10 @@ mod tests {
             file_id: sst_info.file_id,
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
-            index_file_size: sst_info.index_metadata.file_size,
+            available_indexes: smallvec![IndexType::InvertedIndex],
+            // Old manifests may publish an index without recording its size.
+            index_file_size: 0,
+            index_version: 0,
             num_rows: sst_info.num_rows as u64,
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
@@ -2052,6 +2052,7 @@ mod tests {
                 assert!(!updated_meta.available_indexes.is_empty());
                 assert!(updated_meta.index_file_size > 0);
                 assert_eq!(updated_meta.file_id, file_meta.file_id);
+                assert_eq!(updated_meta.index_version, 1);
             }
             _ => panic!("Unexpected worker request: {:?}", worker_req),
         }

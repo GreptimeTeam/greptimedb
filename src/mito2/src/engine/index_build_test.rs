@@ -239,11 +239,9 @@ async fn assert_stale_artifact_caches_removed(engine: &MitoEngine, source_files:
         .write_cache()
         .expect("race tests enable write cache");
     for source in source_files {
-        let index_version = if source.index_file_size > 0 {
-            source.index_version + 1
-        } else {
-            0
-        };
+        let index_version = source
+            .index_version()
+            .map_or(0, |index_version| index_version + 1);
         assert!(
             !write_cache.file_cache().contains_key(&IndexKey::new(
                 source.region_id,
@@ -262,11 +260,9 @@ async fn assert_index_artifacts_exist(
 ) {
     let region = engine.get_region(region_id).unwrap();
     for source in source_files {
-        let index_version = if source.index_file_size > 0 {
-            source.index_version + 1
-        } else {
-            0
-        };
+        let index_version = source
+            .index_version()
+            .map_or(0, |index_version| index_version + 1);
         let index_id = RegionIndexId::new(
             RegionFileId::new(source.region_id, source.file_id),
             index_version,
