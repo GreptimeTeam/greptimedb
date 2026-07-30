@@ -30,6 +30,8 @@ src/meta-srv/src/event.rs
   s_2a9e18b5bc423a::t_5ae9ba2c88da3a 25
 config/standalone.example.toml
   s_2a9e18b5bc423a::t_5ae9ba2c88da3a 910
+config/config.md
+  s_2a9e18b5bc423a::t_fe07a3d25bf8bc 234,447
 ---
 {
   "schema_version": "authorship/3.0.0",
