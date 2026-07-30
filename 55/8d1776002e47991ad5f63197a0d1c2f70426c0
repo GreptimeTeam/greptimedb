@@ -10,6 +10,12 @@ src/meta-srv/src/event/gc.rs
   s_bab36d2c764e36::t_b0179d2e27e248 1-539
 tests-integration/tests/gc_event.rs
   s_bab36d2c764e36::t_b0179d2e27e248 1-213
+config/metasrv.example.toml
+  s_bab36d2c764e36::t_cba74eb18a4a79 320
+config/standalone.example.toml
+  s_bab36d2c764e36::t_cba74eb18a4a79 910
+config/config.md
+  s_bab36d2c764e36::t_cba74eb18a4a79 234
 ---
 {
   "schema_version": "authorship/3.0.0",
