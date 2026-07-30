@@ -28,7 +28,6 @@ use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
-use common_query::promql_annotations::get_promql_annotation_collector;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
@@ -168,19 +167,16 @@ impl DatafusionQueryEngine {
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(physical_plan, query_ctx.clone())
+            wrapper.wrap(physical_plan, query_ctx)
         } else {
             physical_plan
         };
 
         let stream = self.execute_stream(&ctx, &physical_plan)?;
-        let promql_annotations = query_ctx
-            .remote_query_id()
-            .and_then(get_promql_annotation_collector);
 
         Ok(Output::new(
             OutputData::Stream(stream),
-            OutputMeta::new_with_plan(physical_plan).with_promql_annotations(promql_annotations),
+            OutputMeta::new_with_plan(physical_plan),
         ))
     }
 
@@ -600,17 +596,6 @@ impl QueryEngine for DatafusionQueryEngine {
                 query_ctx: query_ctx.clone(),
                 state: self.engine_state().function_state(),
             });
-
-        if let Some(promql_annotations) = query_ctx
-            .remote_query_id()
-            .and_then(get_promql_annotation_collector)
-        {
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(promql_annotations);
-        }
 
         // Carry scheduled Flow time through ConfigOptions.extensions so that
         // the distributed plan analyzer can read it during expression

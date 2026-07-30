@@ -977,7 +977,6 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error: None,
         error_type: None,
         warnings: None,
-        infos: None,
         resp_metrics: Default::default(),
         status_code: None,
     };

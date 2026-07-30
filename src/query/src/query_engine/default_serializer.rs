@@ -34,14 +34,14 @@ use promql::functions::{
     NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg,
     NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
     NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDivScalar,
-    NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta, NativeHistogramIRate,
-    NativeHistogramIncrease, NativeHistogramLastOverTime, NativeHistogramMulScalar,
-    NativeHistogramNeg, NativeHistogramNotEq, NativeHistogramPresentOverTime,
-    NativeHistogramQuantile, NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul,
-    NativeHistogramStddev, NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum,
-    NativeHistogramSumOverTime, NativeHistogramToString, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
-    quantile_udaf,
+    NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta,
+    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
+    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
+    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
+    StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -177,9 +177,6 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
         let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
 
-        // Drop UDFs embed query-specific messages and stay above MergeScan. Every other native
-        // histogram function has a stable name/signature the decoder can reconstruct; annotating
-        // variants are also kept local by the distribution categorizer.
         for udf in [
             NativeHistogramAbsentOverTime::scalar_udf(),
             NativeHistogramAdd::scalar_udf(),
@@ -190,6 +187,8 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramCountOverTime::scalar_udf(),
             NativeHistogramDelta::scalar_udf(),
             NativeHistogramDivScalar::scalar_udf(),
+            NativeHistogramDrop::bool_false_udf(String::new(), None),
+            NativeHistogramDrop::float_null_udf(String::new(), None),
             NativeHistogramEq::scalar_udf(),
             NativeHistogramFraction::scalar_udf(),
             NativeHistogramIDelta::scalar_udf(),
@@ -330,10 +329,26 @@ mod tests {
             None,
         )
         .unwrap()
-        .project(vec![Expr::ScalarFunction(ScalarFunction {
-            func: Arc::new(NativeHistogramCount::scalar_udf()),
-            args: vec![col("histogram")],
-        })])
+        .project(vec![
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramCount::scalar_udf()),
+                args: vec![col("histogram")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::bool_false_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("histogram")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::float_null_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("histogram")],
+            }),
+        ])
         .unwrap()
         .build()
         .unwrap();
@@ -355,6 +370,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(decoded.to_string().contains("prom_native_histogram_count"));
+        let decoded = decoded.to_string();
+        assert!(decoded.contains("prom_native_histogram_count"));
+        assert!(decoded.contains("prom_native_histogram_drop_bool"));
+        assert!(decoded.contains("prom_native_histogram_drop_float"));
     }
 }

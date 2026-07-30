@@ -27,7 +27,7 @@ use common_error::status_code::StatusCode;
 use common_query::native_histogram::{
     NativeHistogram, is_native_histogram_value_type, read_histogram,
 };
-use common_query::prometheus::is_prometheus_stale_nan;
+use common_query::prometheus::{format_prometheus_float, is_prometheus_stale_nan};
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
@@ -56,12 +56,12 @@ struct PromSeriesSamples {
 
 fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNativeHistogram> {
     Ok(PromNativeHistogram {
-        count: histogram.count.to_string(),
-        sum: histogram.sum.to_string(),
+        count: format_prometheus_float(histogram.count),
+        sum: format_prometheus_float(histogram.sum),
         buckets: histogram
             .to_prometheus_buckets()
             .context(UnexpectedResultSnafu {
-                reason: "native histogram cannot be converted to Prometheus buckets".to_string(),
+                reason: "native histogram cannot be converted to Prometheus buckets",
             })?,
     })
 }
@@ -79,8 +79,6 @@ pub struct PrometheusJsonResponse {
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub infos: Option<Vec<String>>,
 
     #[serde(skip)]
     pub status_code: Option<StatusCode>,
@@ -125,7 +123,6 @@ impl PrometheusJsonResponse {
             error: Some(reason.into()),
             error_type: Some(error_type.to_string()),
             warnings: None,
-            infos: None,
             resp_metrics: Default::default(),
             status_code: Some(error_type),
         }
@@ -138,7 +135,6 @@ impl PrometheusJsonResponse {
             error: None,
             error_type: None,
             warnings: None,
-            infos: None,
             resp_metrics: Default::default(),
             status_code: None,
         }
@@ -152,7 +148,6 @@ impl PrometheusJsonResponse {
     ) -> Self {
         let response: Result<Self> = try {
             let result = result?;
-            let mut meta = result.meta;
             let mut resp =
                 match result.data {
                     OutputData::RecordBatches(batches) => Self::success(
@@ -173,16 +168,8 @@ impl PrometheusJsonResponse {
                         "expected data result, but got affected rows",
                     ),
                 };
-            meta.collect_promql_annotations();
 
-            if !meta.warnings.is_empty() {
-                resp.warnings = Some(meta.warnings);
-            }
-            if !meta.infos.is_empty() {
-                resp.infos = Some(meta.infos);
-            }
-
-            if let Some(physical_plan) = meta.plan {
+            if let Some(physical_plan) = result.meta.plan {
                 let mut result_map = HashMap::new();
                 let mut tmp = vec![&mut result_map];
                 collect_plan_metrics(&physical_plan, &mut tmp);
@@ -318,7 +305,7 @@ impl PrometheusJsonResponse {
                         .as_any()
                         .downcast_ref::<StructArray>()
                         .with_context(|| UnexpectedResultSnafu {
-                            reason: "native histogram column is not a struct array".to_string(),
+                            reason: "native histogram column is not a struct array",
                         })
                 })
                 .transpose()?;
@@ -340,6 +327,7 @@ impl PrometheusJsonResponse {
                             .transpose()
                     })
                     .transpose()?
+                    .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
                     .map(|histogram| {
                         prometheus_native_histogram(&histogram)
                             .map(|histogram| (timestamp_column.value(row_index), histogram))
@@ -452,9 +440,10 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::native_histogram::{
-        CounterResetHint, NativeHistogram, Span, build_histogram_array, native_histogram_value_type,
+        CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, Span, build_histogram_array,
+        native_histogram_value_type,
     };
-    use common_query::{Output, OutputData, OutputMeta};
+    use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -598,20 +587,82 @@ mod tests {
         assert_eq!(histogram.sum, "3");
     }
 
-    #[tokio::test]
-    async fn from_query_result_preserves_warnings_and_infos() {
-        let recordbatches = RecordBatches::empty();
-        let mut meta = OutputMeta::default();
-        meta.warnings.push("warn".to_string());
-        meta.infos.push("info".to_string());
-        let response = PrometheusJsonResponse::from_query_result(
-            Ok(Output::new(OutputData::RecordBatches(recordbatches), meta)),
-            None,
-            ValueType::Vector,
+    #[test]
+    fn matrix_response_preserves_ordinary_histogram_nan_and_filters_stale_marker() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("histogram", native_histogram_value_type().clone(), true),
+        ]));
+        let mut ordinary_nan = sample_histogram();
+        ordinary_nan.sum = f64::NAN;
+        let mut stale = sample_histogram();
+        stale.sum = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000, 2_000])) as _,
+                histogram_vector(&[Some(ordinary_nan), Some(stale)]),
+            ],
         )
-        .await;
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
-        assert_eq!(response.warnings, Some(vec!["warn".to_string()]));
-        assert_eq!(response.infos, Some(vec!["info".to_string()]));
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
+                .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].histograms.len(), 1);
+        assert_eq!(series[0].histograms[0].0, 1.0);
+        assert_eq!(series[0].histograms[0].1.sum, "NaN");
+    }
+
+    #[test]
+    fn native_histogram_json_closes_custom_bucket_zero() {
+        let mut histogram = sample_histogram();
+        histogram.schema = CUSTOM_BUCKETS_SCHEMA;
+        histogram.zero_threshold = 0.0;
+        histogram.custom_values = vec![1.0];
+        histogram.positive_spans = vec![Span {
+            offset: 0,
+            length: 1,
+        }];
+        histogram.count = 1.0;
+        histogram.sum = 0.0;
+        histogram.zero_count = 0.0;
+
+        let json = serde_json::to_value(prometheus_native_histogram(&histogram).unwrap()).unwrap();
+        assert_eq!(json["buckets"], serde_json::json!([[3, "-Inf", "1", "1"]]));
+    }
+
+    #[test]
+    fn native_histogram_json_preserves_terminal_finite_bucket() {
+        let mut histogram = sample_histogram();
+        histogram.positive_spans = vec![Span {
+            offset: 1024,
+            length: 2,
+        }];
+        histogram.positive_buckets = vec![1.0, 1.0];
+        histogram.zero_count = 0.0;
+
+        let json = serde_json::to_value(prometheus_native_histogram(&histogram).unwrap()).unwrap();
+        assert_eq!(
+            json["buckets"],
+            serde_json::json!([
+                [0, 2.0_f64.powi(1023).to_string(), f64::MAX.to_string(), "1"],
+                [0, f64::MAX.to_string(), "+Inf", "1"]
+            ])
+        );
     }
 }
