@@ -116,7 +116,7 @@ async fn assert_database_event(
 FROM greptime_private.events
 WHERE type = '{event_type}'
   AND procedure_state = 'Running'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND catalog_name = 'greptime'
   AND schema_name = '{DATABASE_NAME}'
   AND {submitted_payload_predicate}"#
@@ -128,7 +128,7 @@ WHERE type = '{event_type}'
 FROM greptime_private.events
 WHERE type = '{event_type}'
   AND procedure_state = 'Done'
-  AND procedure_trigger = 'Succeeded'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND catalog_name IS NULL
   AND schema_name IS NULL
   AND json_is_null(payload)"#

@@ -76,7 +76,7 @@ FROM greptime_private.events
 WHERE type = '{CREATE_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND catalog_name = 'greptime'
   AND flow_name = '{flow}'
   AND flow_id IS NULL
@@ -96,7 +96,7 @@ FROM greptime_private.events
 WHERE type = '{CREATE_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
-  AND procedure_trigger = 'Succeeded'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND catalog_name IS NULL
   AND flow_name IS NULL
   AND flow_id IS NOT NULL
@@ -116,7 +116,7 @@ FROM greptime_private.events
 WHERE type = '{DROP_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND catalog_name = 'greptime'
   AND flow_name = '{flow}'
   AND flow_id IS NOT NULL
@@ -133,7 +133,7 @@ FROM greptime_private.events
 WHERE type = '{DROP_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
-  AND procedure_trigger = 'Succeeded'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND catalog_name IS NULL
   AND flow_name IS NULL
   AND flow_id IS NULL
@@ -155,7 +155,7 @@ async fn find_submitted_procedure_id(
 FROM greptime_private.events
 WHERE type = '{event_type}'
   AND flow_name = '{flow_name}'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
 ORDER BY timestamp DESC
 LIMIT 1"#,
         ),

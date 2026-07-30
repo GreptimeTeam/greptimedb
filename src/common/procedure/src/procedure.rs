@@ -255,7 +255,10 @@ pub struct EventContext<'a> {
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It is recorded as a tagged JSON object in the `procedure_trigger` event envelope column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
 pub enum EventTrigger {
     /// The procedure was submitted to the manager.
     Submitted,
@@ -286,7 +289,7 @@ pub enum EventTrigger {
 }
 
 /// Phase of a procedure retry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RetryPhase {
     /// Retrying procedure execution.
     Execute,
@@ -295,7 +298,7 @@ pub enum RetryPhase {
 }
 
 /// Outcome of submitting a child procedure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ChildSubmissionOutcome {
     Accepted,
     AlreadyAccepted,
