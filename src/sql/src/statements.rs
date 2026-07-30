@@ -36,8 +36,10 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::SemanticType;
-use api::v1::column_def::options_from_column_schema;
+use api::v1::{ColumnOptions, SemanticType};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
@@ -199,9 +201,21 @@ pub fn sql_column_def_to_grpc_column_def(
         SemanticType::Field
     };
 
-    let mut column_schema = ColumnSchema::new(name.clone(), data_type.clone(), is_nullable);
-    maybe_set_json2_extension(&mut column_schema, &col.data_type, JsonSettings::default())?;
-    let options = options_from_column_schema(&column_schema);
+    // TODO: Extend the ALTER TABLE ADD/MODIFY COLUMN parser to support JSON2
+    // type hints and pass the parsed JsonSettings through this conversion.
+    let options = json2_extension(&col.data_type, JsonSettings::default()).map(|extension| {
+        let mut options = ColumnOptions::default();
+        options.options.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            JsonExtensionType::NAME.to_string(),
+        );
+        if let Some(metadata) = extension.serialize_metadata() {
+            options
+                .options
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+        }
+        options
+    });
 
     Ok(api::v1::ColumnDef {
         name,
@@ -220,25 +234,32 @@ fn maybe_set_json2_extension(
     data_type: &SqlDataType,
     settings: JsonSettings,
 ) -> Result<()> {
-    let SqlDataType::Custom(name, _) = data_type else {
+    let settings_debug = format!("{settings:?}");
+    let Some(extension) = json2_extension(data_type, settings) else {
         return Ok(());
     };
-    if !name.0.first().is_some_and(|name| {
-        name.to_string_unquoted()
-            .eq_ignore_ascii_case(JSON2_TYPE_NAME)
-    }) {
-        return Ok(());
-    }
 
-    let settings_debug = format!("{settings:?}");
-    let extension = JsonExtensionType::new(Arc::new(JsonMetadata {
-        json_settings: Some(settings),
-    }));
     column_schema
         .with_extension_type(&extension)
         .with_context(|_| SetJsonSettingsSnafu {
             value: settings_debug,
         })
+}
+
+fn json2_extension(data_type: &SqlDataType, settings: JsonSettings) -> Option<JsonExtensionType> {
+    let SqlDataType::Custom(name, _) = data_type else {
+        return None;
+    };
+    if !name.0.first().is_some_and(|name| {
+        name.to_string_unquoted()
+            .eq_ignore_ascii_case(JSON2_TYPE_NAME)
+    }) {
+        return None;
+    }
+
+    Some(JsonExtensionType::new(Arc::new(JsonMetadata {
+        json_settings: Some(settings),
+    })))
 }
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
