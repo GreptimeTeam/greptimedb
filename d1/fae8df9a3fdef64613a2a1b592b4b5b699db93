@@ -1,0 +1,21 @@
+tests-integration/tests/event_recorder_test_util.rs
+  s_bab36d2c764e36::t_742fc7e94d2c18 21
+src/meta-srv/src/gc/procedure.rs
+  s_bab36d2c764e36::t_433758f4d50edf 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "d1fae8df9a3fdef64613a2a1b592b4b5b699db93",
+  "prompts": {},
+  "sessions": {
+    "s_bab36d2c764e36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa8b5-aa96-72a0-b7fd-65f77a728723",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
