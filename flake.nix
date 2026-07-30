@@ -15,7 +15,9 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         buildInputs = with pkgs; [
+          libgit2
           zlib
+          stdenv.cc.cc.lib
         ];
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
@@ -52,10 +54,7 @@
 
           buildInputs = buildInputs;
           NIX_HARDENING_ENABLE = "";
-          LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
-            stdenv.cc.cc.lib
-            zlib
-          ];
+          LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
         };
       });
 }
