@@ -15,23 +15,9 @@
 //! Implementation of [`reset`](https://prometheus.io/docs/prometheus/latest/querying/functions/#resets) in PromQL. Refer to the [original
 //! implementation](https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L1004-L1021).
 
-#[cfg(test)]
-use std::sync::Arc;
-
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
-#[cfg(test)]
-use datafusion::common::DataFusionError;
 use datafusion::logical_expr::ScalarUDF;
-#[cfg(test)]
-use datafusion::physical_plan::ColumnarValue;
-#[cfg(test)]
-use datatypes::arrow::array::Array;
-#[cfg(test)]
-use datatypes::arrow::datatypes::DataType;
 
 use crate::functions::edge_count::{self, EdgeKind};
-#[cfg(test)]
-use crate::range_array::RangeArray;
 
 /// used to count the number of times the time series starts over.
 #[derive(Debug)]
@@ -47,33 +33,21 @@ impl Resets {
     }
 }
 
-#[allow(dead_code)]
-fn resets(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        let (first, rest) = values.values().split_first().unwrap();
-        let mut num_resets = 0;
-        let mut prev_element = first;
-        for cur_element in rest {
-            if cur_element < prev_element {
-                num_resets += 1;
-            }
-            prev_element = cur_element;
-        }
-        Some(num_resets as f64)
-    }
-}
-
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray};
     use datafusion::arrow::buffer::NullBuffer;
+    use datafusion::common::DataFusionError;
+    use datafusion::physical_plan::ColumnarValue;
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::ScalarFunctionArgs;
-    use datatypes::arrow::datatypes::Field;
+    use datatypes::arrow::datatypes::{DataType, Field};
 
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
+    use crate::range_array::RangeArray;
 
     // build timestamp range and value range arrays for test
     fn build_test_range_arrays(
@@ -208,12 +182,10 @@ mod test {
         value_ranges: Vec<(u32, u32)>,
     ) -> Vec<Option<f64>> {
         assert_eq!(timestamp_ranges.len(), value_ranges.len());
-        assert!(
-            timestamp_ranges
-                .iter()
-                .zip(&value_ranges)
-                .all(|((_, timestamp_length), (_, value_length))| timestamp_length == value_length)
-        );
+        assert!(timestamp_ranges
+            .iter()
+            .zip(&value_ranges)
+            .all(|((_, timestamp_length), (_, value_length))| timestamp_length == value_length));
         assert_eq!(values.len(), raw_values.len());
         let nulls = values.iter().map(Option::is_none).collect::<Vec<_>>();
 
