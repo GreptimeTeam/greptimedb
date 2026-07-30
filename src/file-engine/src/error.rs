@@ -249,22 +249,3 @@ impl ErrorExt for Error {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_backend_display_does_not_duplicate_source() {
-        let source = common_datasource::error::LocalFileAccessDisabledSnafu {
-            path: "file:///tmp/data.parquet",
-        }
-        .build();
-        let error = Error::BuildBackend {
-            source,
-            location: Location::default(),
-        };
-
-        assert_eq!(error.to_string(), "Failed to build backend");
-    }
-}

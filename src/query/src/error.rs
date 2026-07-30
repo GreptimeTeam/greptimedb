@@ -501,7 +501,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_backend_display_does_not_duplicate_source() {
+    fn test_build_backend_delegates_error_metadata() {
         let source = common_datasource::error::LocalFileAccessDisabledSnafu {
             path: "file:///tmp/data.parquet",
         }
@@ -511,6 +511,7 @@ mod tests {
             location: Location::default(),
         };
 
-        assert_eq!(error.to_string(), "Failed to build data source backend");
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
     }
 }

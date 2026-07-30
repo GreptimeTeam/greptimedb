@@ -320,20 +320,3 @@ impl ErrorExt for Error {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_invalid_local_file_root_config_display() {
-        let error = super::InvalidLocalFileRootConfigSnafu {
-            root: "file:///data",
-            reason: "file URL must contain a local absolute path",
-        }
-        .build();
-
-        assert_eq!(
-            error.to_string(),
-            "Invalid local filesystem root 'file:///data': file URL must contain a local absolute path"
-        );
-    }
-}

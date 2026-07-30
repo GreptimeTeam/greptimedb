@@ -108,6 +108,8 @@ mod tests {
     use std::assert_matches;
 
     use common_datasource::object_store::LocalFileAccess;
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
     use store_api::region_request::PathType;
     use store_api::storage::ScanRequest;
 
@@ -181,8 +183,15 @@ mod tests {
             Ok(_) => panic!("local file query must be rejected"),
             Err(error) => error,
         };
-        assert_matches!(&error, Error::BuildBackend { .. });
-        assert!(error.to_string().contains("local filesystem is disabled"));
+        assert_matches!(
+            &error,
+            Error::BuildBackend {
+                source: common_datasource::error::Error::LocalFileAccessDisabled { .. },
+                ..
+            }
+        );
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[tokio::test]
