@@ -33,6 +33,7 @@ opendal = { version = "0.57", features = [
     "services-azblob",
     "services-fs",
     "services-gcs",
+    "services-hdfs-native",
     "services-http",
     "services-oss",
     "services-s3",

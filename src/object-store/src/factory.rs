@@ -18,12 +18,14 @@ use common_telemetry::info;
 use opendal::layers::HttpClientLayer;
 #[cfg(feature = "mysql-object-store")]
 use opendal::services::Mysql;
-use opendal::services::{Fs, Gcs, Oss, S3};
+use opendal::services::{Fs, Gcs, HdfsNative, Oss, S3};
 use snafu::prelude::*;
 
 #[cfg(feature = "mysql-object-store")]
 use crate::config::MysqlConfig;
-use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config};
+use crate::config::{
+    AzblobConfig, FileConfig, GcsConfig, HdfsConfig, ObjectStoreConfig, OssConfig, S3Config,
+};
 use crate::error::{self, Result};
 use crate::services::Azblob;
 use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
@@ -40,9 +42,26 @@ pub async fn new_raw_object_store(
         ObjectStoreConfig::Oss(oss_config) => new_oss_object_store(oss_config).await,
         ObjectStoreConfig::Azblob(azblob_config) => new_azblob_object_store(azblob_config).await,
         ObjectStoreConfig::Gcs(gcs_config) => new_gcs_object_store(gcs_config).await,
+        ObjectStoreConfig::Hdfs(hdfs_config) => new_hdfs_object_store(hdfs_config).await,
         #[cfg(feature = "mysql-object-store")]
         ObjectStoreConfig::Mysql(mysql_config) => new_mysql_object_store(mysql_config).await,
     }
+}
+
+/// Creates an object store backed by a native HDFS client.
+pub async fn new_hdfs_object_store(hdfs_config: &HdfsConfig) -> Result<ObjectStore> {
+    let root = util::normalize_dir(&hdfs_config.connection.root);
+    info!(
+        "The HDFS NameNode is: {}, root is: {}",
+        hdfs_config.connection.name_node, root
+    );
+
+    let builder = HdfsNative::from(&hdfs_config.connection);
+    let operator = ObjectStore::new(builder)
+        .context(error::InitBackendSnafu)?
+        .finish();
+
+    Ok(operator)
 }
 
 #[cfg(feature = "mysql-object-store")]
@@ -152,4 +171,34 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
         .finish();
 
     Ok(operator)
+}
+
+#[cfg(test)]
+mod tests {
+    use opendal::services::HDFS_NATIVE_SCHEME;
+
+    use super::*;
+    use crate::config::HdfsConnection;
+
+    #[tokio::test]
+    async fn test_new_hdfs_object_store() {
+        let config = HdfsConfig {
+            connection: HdfsConnection {
+                root: "/greptimedb".to_string(),
+                name_node: "hdfs://127.0.0.1:9000".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let store = new_hdfs_object_store(&config).await.unwrap();
+        assert_eq!(HDFS_NATIVE_SCHEME, store.info().scheme());
+        assert_eq!("/greptimedb/", store.info().root());
+    }
+
+    #[tokio::test]
+    async fn test_new_hdfs_object_store_requires_name_node() {
+        let result = new_hdfs_object_store(&HdfsConfig::default()).await;
+        assert!(result.is_err());
+    }
 }
