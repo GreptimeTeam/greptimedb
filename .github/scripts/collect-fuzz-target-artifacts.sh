@@ -34,6 +34,60 @@ collect() {
   failed=true
 }
 
+write_setup_failure_manifest() {
+  local artifact_root
+  local result_path="${target_dir}/result.json"
+  local manifest_path
+  local summary_path
+  local collection_status
+  local completed_at
+
+  artifact_root="$(dirname "$(dirname "${target_dir}")")"
+  manifest_path="${artifact_root}/manifest.json"
+  summary_path="${artifact_root}/summary.md"
+  completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "${failed}" == true ]]; then
+    collection_status="failed"
+  else
+    collection_status="success"
+  fi
+
+  jq -n \
+    --arg target "${target}" \
+    --arg group "${FUZZ_GROUP:-setup-failure}" \
+    --arg git_sha "${GITHUB_SHA:-}" \
+    --arg completed_at "${completed_at}" \
+    --arg artifact_collection "${collection_status}" \
+    '{
+      target: $target,
+      group: $group,
+      git_sha: $git_sha,
+      status: "failure",
+      phase: "setup",
+      started_at: null,
+      completed_at: $completed_at,
+      duration_secs: null,
+      exit_code: null,
+      max_total_time_secs: null,
+      after_prior_failure: false,
+      artifact_collection: $artifact_collection
+    }' >"${result_path}"
+  jq -s '.' "${result_path}" >"${manifest_path}"
+
+  {
+    printf '## Fuzz target results: `%s`\n\n' "${FUZZ_GROUP:-setup-failure}"
+    printf -- '- Failure phase: `setup`\n'
+    printf -- '- Artifact collection: `%s`\n\n' "${collection_status}"
+    printf '| Target | Status | Exit code | Artifacts |\n'
+    printf '| --- | --- | ---: | --- |\n'
+    printf '| `%s` | failure | - | %s |\n' "${target}" "${collection_status}"
+  } >"${summary_path}"
+
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    cat "${summary_path}" >>"${GITHUB_STEP_SUMMARY}"
+  fi
+}
+
 log "collect artifacts for target ${target} under ${target_dir}"
 
 if [[ -n "${FUZZ_SERVICE_LOG:-}" && -f "${FUZZ_SERVICE_LOG}" ]]; then
@@ -70,6 +124,10 @@ case "${FUZZ_COLLECT_CLUSTER_ARTIFACTS:-false}" in
     exit 2
     ;;
 esac
+
+if [[ "${target}" == setup ]]; then
+  write_setup_failure_manifest
+fi
 
 if [[ "${failed}" == true ]]; then
   exit 1

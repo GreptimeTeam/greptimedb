@@ -241,6 +241,7 @@ jobs:
         env:
           FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
           FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
+          FUZZ_GROUP: ${{ matrix.group.id }}
         run: |
           if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
             .github/scripts/collect-fuzz-target-artifacts.sh \
@@ -298,7 +299,7 @@ jobs:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_FUZZ_BINARY_PATH: ./bin/greptime
-          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance/
         with:
           targets: unstable_fuzz_create_table_standalone
           group: unstable-fuzz-create-table
@@ -310,6 +311,7 @@ jobs:
         shell: bash
         env:
           FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
+          FUZZ_GROUP: unstable-fuzz-create-table
         run: |
           if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
             .github/scripts/collect-fuzz-target-artifacts.sh \
@@ -563,6 +565,7 @@ jobs:
           GT_FUZZ_NS: my-greptimedb
           GT_FUZZ_CLUSTER: my-greptimedb
           GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          FUZZ_GROUP: ${{ matrix.group.id }}
         run: |
           if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
             timeout --signal=TERM --kill-after=10s 180s \
@@ -744,6 +747,7 @@ jobs:
           GT_FUZZ_NS: my-greptimedb
           GT_FUZZ_CLUSTER: my-greptimedb
           GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          FUZZ_GROUP: ${{ matrix.group.id }}
         run: |
           if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
             timeout --signal=TERM --kill-after=10s 180s \

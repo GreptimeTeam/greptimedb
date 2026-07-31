@@ -245,6 +245,68 @@ EOF
   cleanup_fixture
 }
 
+test_setup_failure_writes_artifact_contract() {
+  new_fixture
+  artifact_root="${fixture}/artifacts"
+  setup_summary="${fixture}/setup-step-summary.md"
+
+  FUZZ_COLLECT_CLUSTER_ARTIFACTS=false \
+    FUZZ_GROUP=setup-group \
+    GITHUB_SHA=deadbeef \
+    GITHUB_STEP_SUMMARY="${setup_summary}" \
+    "${COLLECTOR}" setup "${artifact_root}/targets/setup"
+
+  assert_file "${artifact_root}/targets/setup/result.json"
+  assert_file "${artifact_root}/manifest.json"
+  assert_file "${artifact_root}/summary.md"
+  assert_file "${setup_summary}"
+  assert_eq setup-group "$(jq -r '.[0].group' "${artifact_root}/manifest.json")" \
+    "setup manifest group"
+  assert_eq setup "$(jq -r '.[0].target' "${artifact_root}/manifest.json")" \
+    "setup manifest target"
+  assert_eq failure "$(jq -r '.[0].status' "${artifact_root}/manifest.json")" \
+    "setup manifest status"
+  assert_eq setup "$(jq -r '.[0].phase' "${artifact_root}/manifest.json")" \
+    "setup manifest phase"
+  grep -q 'Failure phase: `setup`' "${artifact_root}/summary.md" || \
+    fail "setup failure phase missing from summary"
+  cmp -s "${artifact_root}/summary.md" "${setup_summary}" || \
+    fail "setup summary was not appended to the job summary"
+  cleanup_fixture
+}
+
+test_setup_failure_keeps_manifest_when_collection_fails() {
+  new_fixture
+  artifact_root="${fixture}/artifacts"
+
+  cat >"${fixture}/bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  cat >"${fixture}/bin/kind" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "${fixture}/bin/kubectl" "${fixture}/bin/kind"
+
+  set +e
+  PATH="${fixture}/bin:${PATH}" \
+    FUZZ_COLLECT_CLUSTER_ARTIFACTS=true \
+    FUZZ_GROUP=setup-group \
+    FUZZ_MONITOR_COLLECTOR="${fixture}/missing-monitor-collector" \
+    GITHUB_STEP_SUMMARY="${fixture}/setup-step-summary.md" \
+    "${COLLECTOR}" setup "${artifact_root}/targets/setup" \
+    >"${fixture}/collector-stdout.log" 2>&1
+  collector_status=$?
+  set -e
+
+  assert_eq 1 "${collector_status}" "failed setup collection status"
+  assert_file "${artifact_root}/manifest.json"
+  assert_eq failed "$(jq -r '.[0].artifact_collection' "${artifact_root}/manifest.json")" \
+    "failed setup collection marker"
+  cleanup_fixture
+}
+
 test_successful_targets_run_in_order
 test_fail_fast_stops_after_first_failure
 test_fail_fast_defaults_to_true
@@ -252,6 +314,8 @@ test_non_fail_fast_marks_later_targets
 test_invalid_configuration_fails_before_cargo
 test_collector_keeps_target_scopes_separate
 test_cluster_collector_honors_target_scope_and_namespace
+test_setup_failure_writes_artifact_contract
+test_setup_failure_keeps_manifest_when_collection_fails
 
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   cat >>"${GITHUB_STEP_SUMMARY}" <<'EOF'
@@ -265,6 +329,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 - invalid configuration rejection;
 - standalone service-log isolation;
 - Kubernetes, Kind, and monitor artifact isolation;
+- setup-failure manifest and summary contract, including collection failure;
 - target and group annotations, summaries, and reproduction commands.
 EOF
 fi
