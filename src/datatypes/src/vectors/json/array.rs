@@ -99,6 +99,7 @@ impl JsonArray<'_> {
     /// - fields missing from the source are filled with typed null arrays;
     /// - fields present in the source must also exist in `expect`;
     /// - fields present in both are widened recursively when their types differ.
+    /// - when `expect` is binary, Struct values are encoded as JSONB.
     ///
     /// Narrowing conversions and any other conversions that may lose information
     /// are rejected.
@@ -114,20 +115,21 @@ impl JsonArray<'_> {
             data_type, expect
         );
 
-        let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
-            reason: "expect struct array",
-        })?;
-        let array_fields = struct_array.fields();
-        let array_columns = struct_array.columns();
+        if expect.is_binary() {
+            return self.widen_scalar_to(expect);
+        }
+
         let DataType::Struct(expect_fields) = expect else {
-            if expect.is_binary() {
-                return self.widen_scalar_to(expect);
-            }
             return AlignJsonArraySnafu {
                 reason: "expect struct or binary datatype",
             }
             .fail();
         };
+        let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
+            reason: "expect struct array",
+        })?;
+        let array_fields = struct_array.fields();
+        let array_columns = struct_array.columns();
         let mut aligned = Vec::with_capacity(expect_fields.len());
 
         // Compare the fields in the JSON array and the to-be-aligned schema, amending with null

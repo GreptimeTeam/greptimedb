@@ -407,6 +407,9 @@ impl Function for JsonGetWithType {
                 let jsons = arg0.as_binary_view();
 
                 if args.arg_fields.first().is_some_and(is_json2_extension_type) {
+                    // Query concretization projects nested JSON2 paths as Struct arrays. A binary
+                    // JSON2 argument is therefore an already-selected scalar or root value that
+                    // only needs conversion from its JSONB representation to the requested type.
                     JsonArray::from(&arg0)
                         .project_to(&with_type)
                         .map_err(|e| exec_datafusion_err!("{e:?}"))?
