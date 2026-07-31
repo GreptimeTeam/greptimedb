@@ -220,8 +220,8 @@ impl CompactionScheduler {
     /// # Effects
     ///
     /// Rejects stale plans, submits a prepared local or remote execution, or
-    /// completes the cycle when planning produced no executable plan. Returned
-    /// The returned transition reports a dispatched automatic follow-up or DDL
+    /// completes the cycle when planning produced no executable plan. The
+    /// returned transition reports a dispatched automatic follow-up or DDL
     /// requests released by the resulting terminal transition.
     ///
     /// # Constraints
