@@ -1004,4 +1004,81 @@ mod tests {
             err
         );
     }
+
+    /// Validates the persisted-format foundation for the JSON2 v2 remainder.
+    ///
+    /// JSON2 will store `!__remainder__!` as a nested Variant child of its root
+    /// Struct. Before enabling that layout in production, this test ensures the
+    /// SST schema wrapper and Arrow writer preserve the Variant extension,
+    /// encode the Parquet Variant logical type, and round-trip the values
+    /// without changing the surrounding Struct.
+    #[cfg(feature = "experimental-json2-variant")]
+    #[tokio::test]
+    async fn test_nested_variant_survives_sst_writer_schema_roundtrip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ::parquet::arrow::AsyncArrowWriter;
+        use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use ::parquet::basic::LogicalType;
+        use ::parquet::variant::{VariantArray, VariantType, json_to_variant};
+        use datatypes::arrow::array::{ArrayRef, StringArray, StructArray};
+
+        let json: ArrayRef = Arc::new(StringArray::from(vec![
+            Some(r#"{}"#),
+            Some(r#"{"name":"Alice","active":true}"#),
+            Some(r#"{"nested":{"count":42},"items":[1,"two",null]}"#),
+            Some(r#"{"\u5b57\u6bb5":"\u503c"}"#),
+            None,
+        ]));
+        let remainder = json_to_variant(&json)?;
+        let remainder_field = remainder.field("!__remainder__!");
+        let remainder_array = ArrayRef::from(remainder);
+        let data_array = Arc::new(StructArray::new(
+            vec![remainder_field.clone()].into(),
+            vec![remainder_array],
+            None,
+        ));
+        let data_field = Field::new(
+            "data",
+            ArrowDataType::Struct(vec![remainder_field].into()),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![data_field]));
+        let source = RecordBatch::try_new(schema.clone(), vec![data_array])?;
+
+        let wrapped = maybe_wrap_schema(&schema)?;
+        let mut buffer = Vec::new();
+        let mut writer = AsyncArrowWriter::try_new(&mut buffer, wrapped, None)?;
+        writer.write(&source).await?;
+        writer.close().await?;
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buffer))?;
+        let parquet_remainder =
+            &builder.parquet_schema().root_schema().get_fields()[0].get_fields()[0];
+        assert_eq!(
+            parquet_remainder.get_basic_info().logical_type_ref(),
+            Some(&LogicalType::Variant {
+                specification_version: None,
+            })
+        );
+
+        let ArrowDataType::Struct(children) = builder.schema().field_with_name("data")?.data_type()
+        else {
+            panic!("expected JSON2 root to remain a struct");
+        };
+        assert!(
+            children[0].has_valid_extension_type::<VariantType>(),
+            "nested remainder must retain the Arrow Variant extension"
+        );
+
+        let mut reader = builder.build()?;
+        let result = reader.next().unwrap()?;
+        assert_eq!(source, result);
+        let result = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        VariantArray::try_new(result.column(0))?;
+        Ok(())
+    }
 }

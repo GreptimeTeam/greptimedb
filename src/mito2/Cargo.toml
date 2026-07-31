@@ -11,6 +11,7 @@ testing = ["test"]
 test-shared-fs-region-migration = []
 enterprise = []
 vector_index = ["dep:roaring", "index/vector_index"]
+experimental-json2-variant = ["parquet/variant_experimental"]
 
 [lints]
 workspace = true
