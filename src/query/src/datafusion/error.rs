@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
 /// Inner error of datafusion based query engine.
@@ -25,14 +24,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum InnerError {
-    #[snafu(transparent)]
-    Datafusion {
-        #[snafu(source)]
-        error: DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
         #[snafu(implicit)]
@@ -46,8 +37,6 @@ impl ErrorExt for InnerError {
         use InnerError::*;
 
         match self {
-            // TODO(yingwen): Further categorize datafusion error.
-            Datafusion { .. } => StatusCode::EngineExecuteQuery,
             ConvertDfRecordBatchStream { source, .. } => source.status_code(),
         }
     }

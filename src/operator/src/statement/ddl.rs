@@ -2419,11 +2419,7 @@ fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOpti
         .is_some_and(|value| value == "true");
 
     for column in schema.column_schemas() {
-        if column
-            .data_type
-            .as_json()
-            .is_some_and(|json_type| json_type.is_json2())
-        {
+        if column.data_type.is_json2() {
             ensure!(
                 append_mode,
                 InvalidSqlSnafu {
