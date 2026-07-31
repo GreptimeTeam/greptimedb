@@ -35,47 +35,28 @@ use store_api::storage::RegionId;
 use crate::error::{DataFusionSnafu, ListStorageSstsSnafu, Result, UnexpectedSnafu};
 use crate::region_server::RegionServer;
 
-/// Reserved internal table kinds used.
-/// These are recognized by reserved table names and mapped to providers.
-#[allow(clippy::enum_variant_names)]
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-enum InternalTableKind {
-    InspectSstManifest,
-    InspectSstStorage,
-    InspectSstIndexMeta,
-    InspectRegionInfo,
-}
-
-impl InternalTableKind {
-    /// Determine if the name is a reserved internal table (case-insensitive).
-    pub fn from_table_name(name: &str) -> Option<Self> {
-        if !is_reserved_internal_table_name(name) {
-            return None;
-        }
-        if name.eq_ignore_ascii_case(ManifestSstEntry::reserved_table_name_for_inspection()) {
-            return Some(Self::InspectSstManifest);
-        }
-        if name.eq_ignore_ascii_case(StorageSstEntry::reserved_table_name_for_inspection()) {
-            return Some(Self::InspectSstStorage);
-        }
-        if name.eq_ignore_ascii_case(PuffinIndexMetaEntry::reserved_table_name_for_inspection()) {
-            return Some(Self::InspectSstIndexMeta);
-        }
-        if name.eq_ignore_ascii_case(RegionInfoEntry::reserved_table_name_for_inspection()) {
-            return Some(Self::InspectRegionInfo);
-        }
-        unreachable!("shared reserved inspection-name predicate must match an internal table kind")
+/// Builds the inspection `TableProvider` for a reserved internal table name.
+///
+/// Returns `None` for any name that is not one of the four reserved inspection
+/// tables; reserved-name classification itself is the shared
+/// [`is_reserved_internal_table_name`] predicate.
+async fn reserved_inspection_provider(
+    name: &str,
+    server: &RegionServer,
+) -> Result<Option<Arc<dyn TableProvider>>> {
+    if name.eq_ignore_ascii_case(ManifestSstEntry::reserved_table_name_for_inspection()) {
+        return server.inspect_sst_manifest_provider().await.map(Some);
     }
-
-    /// Return the `TableProvider` for the internal table.
-    pub async fn table_provider(&self, server: &RegionServer) -> Result<Arc<dyn TableProvider>> {
-        match self {
-            Self::InspectSstManifest => server.inspect_sst_manifest_provider().await,
-            Self::InspectSstStorage => server.inspect_sst_storage_provider().await,
-            Self::InspectSstIndexMeta => server.inspect_sst_index_meta_provider().await,
-            Self::InspectRegionInfo => server.inspect_region_info_provider().await,
-        }
+    if name.eq_ignore_ascii_case(StorageSstEntry::reserved_table_name_for_inspection()) {
+        return server.inspect_sst_storage_provider().await.map(Some);
     }
+    if name.eq_ignore_ascii_case(PuffinIndexMetaEntry::reserved_table_name_for_inspection()) {
+        return server.inspect_sst_index_meta_provider().await.map(Some);
+    }
+    if name.eq_ignore_ascii_case(RegionInfoEntry::reserved_table_name_for_inspection()) {
+        return server.inspect_region_info_provider().await.map(Some);
+    }
+    Ok(None)
 }
 
 impl RegionServer {
@@ -241,13 +222,13 @@ impl SchemaProvider for NameAwareSchemaProvider {
     }
 
     async fn table(&self, name: &str) -> DfResult<Option<Arc<dyn TableProvider>>> {
-        // Resolve inspect providers by reserved names.
-        if let Some(kind) = InternalTableKind::from_table_name(name) {
-            return kind
-                .table_provider(&self.server)
-                .await
-                .map(Some)
-                .map_err(|e| df_error::DataFusionError::External(Box::new(e)));
+        // Resolve reserved inspection tables by name; everything else falls back
+        // to the Region provider.
+        if let Some(provider) = reserved_inspection_provider(name, &self.server)
+            .await
+            .map_err(|e| df_error::DataFusionError::External(Box::new(e)))?
+        {
+            return Ok(Some(provider));
         }
 
         // Fallback to region provider for any other table name.
@@ -267,26 +248,26 @@ impl SchemaProvider for NameAwareSchemaProvider {
 ///
 /// It scans the plan to determine:
 /// - whether a Region `TableSource` is required, and
-/// - which internal inspection sources are referenced.
+/// - which reserved internal inspection sources are referenced.
 pub(crate) struct NameAwareDataSourceInjectorBuilder {
     /// Whether the plan requires a Region `TableSource`.
     need_region_provider: bool,
-    /// Internal table kinds referenced by the plan.
-    reserved_table_needed: Vec<InternalTableKind>,
+    /// Names of reserved internal inspection tables referenced by the plan.
+    reserved_table_needed: Vec<String>,
 }
 
 impl NameAwareDataSourceInjectorBuilder {
     /// Walk the `LogicalPlan` to determine whether a Region source is needed,
-    /// and collect the kinds of internal sources required.
+    /// and collect the names of internal inspection sources required.
     pub fn from_plan(plan: &LogicalPlan) -> DfResult<Self> {
         let mut need_region_provider = false;
         let mut reserved_table_needed = Vec::new();
         plan.apply(|node| {
             if let LogicalPlan::TableScan(ts) = node {
                 let name = ts.table_name.to_string();
-                if let Some(kind) = InternalTableKind::from_table_name(&name) {
-                    if !reserved_table_needed.contains(&kind) {
-                        reserved_table_needed.push(kind);
+                if is_reserved_internal_table_name(&name) {
+                    if !reserved_table_needed.contains(&name) {
+                        reserved_table_needed.push(name);
                     }
                 } else {
                     // Any normal table scan implies a Region source is needed.
@@ -316,9 +297,10 @@ impl NameAwareDataSourceInjectorBuilder {
         };
 
         let mut reserved_sources = HashMap::new();
-        for kind in &self.reserved_table_needed {
-            let provider = kind.table_provider(server).await?;
-            reserved_sources.insert(*kind, provider_as_source(provider));
+        for name in &self.reserved_table_needed {
+            if let Some(provider) = reserved_inspection_provider(name, server).await? {
+                reserved_sources.insert(name.clone(), provider_as_source(provider));
+            }
         }
 
         Ok(NameAwareDataSourceInjector {
@@ -331,8 +313,8 @@ impl NameAwareDataSourceInjectorBuilder {
 /// Rewrites `LogicalPlan` to inject proper data sources for `TableScan`.
 /// Uses internal sources for reserved tables; otherwise uses the Region source.
 pub(crate) struct NameAwareDataSourceInjector {
-    /// Sources for reserved internal tables, keyed by kind.
-    reserved_sources: HashMap<InternalTableKind, Arc<dyn TableSource>>,
+    /// Sources for reserved internal tables, keyed by table name.
+    reserved_sources: HashMap<String, Arc<dyn TableSource>>,
     /// Optional Region-level source used for normal tables.
     region_source: Option<Arc<dyn TableSource>>,
 }
@@ -344,9 +326,7 @@ impl TreeNodeRewriter for NameAwareDataSourceInjector {
         Ok(match node {
             LogicalPlan::TableScan(mut scan) => {
                 let name = scan.table_name.to_string();
-                if let Some(kind) = InternalTableKind::from_table_name(&name)
-                    && let Some(source) = self.reserved_sources.get(&kind)
-                {
+                if let Some(source) = self.reserved_sources.get(&name) {
                     // Matched a reserved internal table: rewrite to its dedicated source.
                     scan.source = source.clone();
                 } else {
@@ -405,10 +385,7 @@ mod tests {
             .unwrap();
         let b1 = NameAwareDataSourceInjectorBuilder::from_plan(&plan1).unwrap();
         assert!(!b1.need_region_provider);
-        assert_eq!(
-            b1.reserved_table_needed,
-            vec![InternalTableKind::InspectSstManifest]
-        );
+        assert_eq!(b1.reserved_table_needed, vec![reserved.to_string()]);
 
         // plan2: normal table scan only
         let plan2 = table_scan(Some("normal_table"), &schema, None)
@@ -435,10 +412,7 @@ mod tests {
             .unwrap();
         let b3 = NameAwareDataSourceInjectorBuilder::from_plan(&plan3).unwrap();
         assert!(b3.need_region_provider);
-        assert_eq!(
-            b3.reserved_table_needed,
-            vec![InternalTableKind::InspectSstManifest]
-        );
+        assert_eq!(b3.reserved_table_needed, vec![reserved.to_string()]);
 
         let region_info = RegionInfoEntry::reserved_table_name_for_inspection();
         let plan4 = table_scan(Some(region_info), &schema, None)
@@ -447,10 +421,7 @@ mod tests {
             .unwrap();
         let b4 = NameAwareDataSourceInjectorBuilder::from_plan(&plan4).unwrap();
         assert!(!b4.need_region_provider);
-        assert_eq!(
-            b4.reserved_table_needed,
-            vec![InternalTableKind::InspectRegionInfo]
-        );
+        assert_eq!(b4.reserved_table_needed, vec![region_info.to_string()]);
     }
 
     #[test]
@@ -468,7 +439,7 @@ mod tests {
         let mut injector = NameAwareDataSourceInjector {
             reserved_sources: {
                 let mut m = HashMap::new();
-                m.insert(InternalTableKind::InspectSstManifest, source.clone());
+                m.insert(table_name.to_string(), source.clone());
                 m
             },
             region_source: None,
@@ -502,7 +473,7 @@ mod tests {
         let mut injector = NameAwareDataSourceInjector {
             reserved_sources: {
                 let mut m = HashMap::new();
-                m.insert(InternalTableKind::InspectRegionInfo, source.clone());
+                m.insert(table_name.to_string(), source.clone());
                 m
             },
             region_source: None,

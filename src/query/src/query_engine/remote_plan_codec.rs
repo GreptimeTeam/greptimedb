@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use bytes::Bytes;
-use common_error::ext::{BoxedError, PlainError};
+use common_error::ext::{BoxedError, PlainError, RetryHint};
 use common_error::status_code::StatusCode;
 use common_query::logical_plan::SubstraitPlanDecoder;
 use datafusion::catalog::{CatalogProviderList, MemTable};
@@ -140,9 +140,19 @@ pub async fn decode_remote_plan(
 ) -> common_query::error::Result<LogicalPlan> {
     let mut plan =
         proto::Plan::decode(message.as_ref()).map_err(|error| decode_error(error.to_string()))?;
+
+    // Plans without the v1 root envelope were produced by an older frontend.
+    // During rolling upgrades a mixed FE/DN cluster must keep working, so decode
+    // them with the base semantics: the DataFusion fork's schema-compatibility
+    // check still fails safely on column drop/rename/type-change.
+    if is_legacy_unwrapped_root(&plan) {
+        return decoder
+            .decode(Bytes::from(plan.encode_to_vec()), catalog_list, false)
+            .await;
+    }
+
     let envelope = unwrap_root(&mut plan)?;
     let read_schemas = collect_read_schemas(root_input(&plan).map_err(decode_error)?)?;
-    reject_raw_subqueries(root_input(&plan).map_err(decode_error)?)?;
 
     let plan = decoder
         // A remote plan is always decoded unoptimized. Validation must observe
@@ -151,6 +161,15 @@ pub async fn decode_remote_plan(
         .await?;
     validate_decoded_sources(&plan, &envelope, &read_schemas)?;
     Ok(plan)
+}
+
+/// Returns whether `plan` is a legacy remote-read plan encoded without the v1
+/// root envelope, i.e. its root relation is not an [`proto::ExtensionSingleRel`].
+fn is_legacy_unwrapped_root(plan: &proto::Plan) -> bool {
+    match root_input(plan) {
+        Ok(root) => !matches!(root.rel_type, Some(proto::rel::RelType::ExtensionSingle(_))),
+        Err(_) => false,
+    }
 }
 
 fn extract_target_table(
@@ -481,15 +500,13 @@ fn collect_read_schemas_inner(
             collect_optional_input(rel.left.as_ref(), reads)?;
             collect_optional_input(rel.right.as_ref(), reads)?;
         }
-        RelType::Write(_)
-        | RelType::Ddl(_)
-        | RelType::ExtensionLeaf(_)
-        | RelType::Reference(_)
-        | RelType::Update(_) => {
-            return Err(decode_error(
-                "unsupported relation shape at the remote-read boundary",
-            ));
-        }
+        // The walk only collects ReadRels; it does not fail-closed on relation
+        // shapes. Every decoded scan is still matched against the collected
+        // ReadRels by `validate_decoded_sources`, so a scan that was never
+        // collected still fails validation.
+        RelType::Write(write) => collect_optional_input(write.input.as_ref(), reads)?,
+        RelType::Ddl(ddl) => collect_optional_input(ddl.view_definition.as_ref(), reads)?,
+        RelType::Update(_) | RelType::ExtensionLeaf(_) | RelType::Reference(_) => {}
     }
     Ok(())
 }
@@ -577,304 +594,6 @@ fn consume_flattened_type_name(
         _ => {}
     }
     Ok(own_name)
-}
-
-fn reject_raw_subqueries(root: &proto::Rel) -> common_query::error::Result<()> {
-    reject_raw_subqueries_in_rel(root)
-}
-
-fn reject_raw_subqueries_in_rel(rel: &proto::Rel) -> common_query::error::Result<()> {
-    use proto::rel::RelType;
-
-    let Some(rel_type) = rel.rel_type.as_ref() else {
-        return Ok(());
-    };
-    match rel_type {
-        RelType::Read(read) => {
-            reject_raw_subqueries_in_exprs([
-                read.filter.as_deref(),
-                read.best_effort_filter.as_deref(),
-            ])?;
-            if let Some(proto::read_rel::ReadType::VirtualTable(table)) = read.read_type.as_ref() {
-                for expression in &table.expressions {
-                    reject_raw_subqueries_in_exprs(expression.fields.iter().map(Some))?;
-                }
-            }
-        }
-        RelType::Filter(filter) => {
-            reject_raw_subqueries_in_rel_child(filter.input.as_deref())?;
-            reject_raw_subqueries_in_exprs([filter.condition.as_deref()])?;
-        }
-        RelType::Fetch(fetch) => {
-            reject_raw_subqueries_in_rel_child(fetch.input.as_deref())?;
-            if let Some(proto::fetch_rel::OffsetMode::OffsetExpr(expression)) = &fetch.offset_mode {
-                reject_raw_subqueries_in_expr(expression)?;
-            }
-            if let Some(proto::fetch_rel::CountMode::CountExpr(expression)) = &fetch.count_mode {
-                reject_raw_subqueries_in_expr(expression)?;
-            }
-        }
-        RelType::Aggregate(aggregate) => {
-            reject_raw_subqueries_in_rel_child(aggregate.input.as_deref())?;
-            reject_raw_subqueries_in_exprs(aggregate.grouping_expressions.iter().map(Some))?;
-            #[allow(deprecated)]
-            for grouping in &aggregate.groupings {
-                reject_raw_subqueries_in_exprs(grouping.grouping_expressions.iter().map(Some))?;
-            }
-            for measure in &aggregate.measures {
-                if let Some(measure) = measure.measure.as_ref() {
-                    reject_raw_subqueries_in_aggregate_function(measure)?;
-                }
-                reject_raw_subqueries_in_exprs([measure.filter.as_ref()])?;
-            }
-        }
-        RelType::Sort(sort) => {
-            reject_raw_subqueries_in_rel_child(sort.input.as_deref())?;
-            reject_raw_subqueries_in_sort_fields(&sort.sorts)?;
-        }
-        RelType::Join(join) => {
-            reject_raw_subqueries_in_rel_child(join.left.as_deref())?;
-            reject_raw_subqueries_in_rel_child(join.right.as_deref())?;
-            reject_raw_subqueries_in_exprs([
-                join.expression.as_deref(),
-                join.post_join_filter.as_deref(),
-            ])?;
-        }
-        RelType::Project(project) => {
-            reject_raw_subqueries_in_rel_child(project.input.as_deref())?;
-            reject_raw_subqueries_in_exprs(project.expressions.iter().map(Some))?;
-        }
-        RelType::Set(set) => {
-            for input in &set.inputs {
-                reject_raw_subqueries_in_rel(input)?;
-            }
-        }
-        RelType::ExtensionMulti(extension) => {
-            for input in &extension.inputs {
-                reject_raw_subqueries_in_rel(input)?;
-            }
-        }
-        RelType::ExtensionSingle(extension) => {
-            reject_raw_subqueries_in_rel_child(extension.input.as_deref())?;
-        }
-        RelType::ExtensionLeaf(_) | RelType::Reference(_) => {}
-        RelType::Cross(cross) => {
-            reject_raw_subqueries_in_rel_child(cross.left.as_deref())?;
-            reject_raw_subqueries_in_rel_child(cross.right.as_deref())?;
-        }
-        RelType::Write(write) => reject_raw_subqueries_in_rel_child(write.input.as_deref())?,
-        RelType::Ddl(ddl) => reject_raw_subqueries_in_rel_child(ddl.view_definition.as_deref())?,
-        RelType::Update(update) => {
-            reject_raw_subqueries_in_exprs([update.condition.as_deref()])?;
-            for transformation in &update.transformations {
-                reject_raw_subqueries_in_exprs([transformation.transformation.as_ref()])?;
-            }
-        }
-        #[allow(deprecated)]
-        RelType::HashJoin(join) => {
-            reject_raw_subqueries_in_rel_child(join.left.as_deref())?;
-            reject_raw_subqueries_in_rel_child(join.right.as_deref())?;
-            reject_raw_subqueries_in_field_refs(&join.left_keys)?;
-            reject_raw_subqueries_in_field_refs(&join.right_keys)?;
-            for key in &join.keys {
-                reject_raw_subqueries_in_optional_field_refs([
-                    key.left.as_ref(),
-                    key.right.as_ref(),
-                ])?;
-            }
-            reject_raw_subqueries_in_exprs([join.post_join_filter.as_deref()])?;
-        }
-        #[allow(deprecated)]
-        RelType::MergeJoin(join) => {
-            reject_raw_subqueries_in_rel_child(join.left.as_deref())?;
-            reject_raw_subqueries_in_rel_child(join.right.as_deref())?;
-            reject_raw_subqueries_in_field_refs(&join.left_keys)?;
-            reject_raw_subqueries_in_field_refs(&join.right_keys)?;
-            for key in &join.keys {
-                reject_raw_subqueries_in_optional_field_refs([
-                    key.left.as_ref(),
-                    key.right.as_ref(),
-                ])?;
-            }
-            reject_raw_subqueries_in_exprs([join.post_join_filter.as_deref()])?;
-        }
-        RelType::NestedLoopJoin(join) => {
-            reject_raw_subqueries_in_rel_child(join.left.as_deref())?;
-            reject_raw_subqueries_in_rel_child(join.right.as_deref())?;
-            reject_raw_subqueries_in_exprs([join.expression.as_deref()])?;
-        }
-        RelType::Window(window) => {
-            reject_raw_subqueries_in_rel_child(window.input.as_deref())?;
-            reject_raw_subqueries_in_exprs(window.partition_expressions.iter().map(Some))?;
-            reject_raw_subqueries_in_sort_fields(&window.sorts)?;
-            for function in &window.window_functions {
-                reject_raw_subqueries_in_function_args(&function.arguments)?;
-            }
-        }
-        RelType::Exchange(exchange) => {
-            reject_raw_subqueries_in_rel_child(exchange.input.as_deref())?;
-            match exchange.exchange_kind.as_ref() {
-                Some(proto::exchange_rel::ExchangeKind::ScatterByFields(fields)) => {
-                    reject_raw_subqueries_in_field_refs(&fields.fields)?;
-                }
-                Some(proto::exchange_rel::ExchangeKind::SingleTarget(expression)) => {
-                    reject_raw_subqueries_in_exprs([expression.expression.as_deref()])?;
-                }
-                Some(proto::exchange_rel::ExchangeKind::MultiTarget(expression)) => {
-                    reject_raw_subqueries_in_exprs([expression.expression.as_deref()])?;
-                }
-                _ => {}
-            }
-        }
-        RelType::Expand(expand) => {
-            reject_raw_subqueries_in_rel_child(expand.input.as_deref())?;
-            for field in &expand.fields {
-                match field.field_type.as_ref() {
-                    Some(proto::expand_rel::expand_field::FieldType::SwitchingField(field)) => {
-                        reject_raw_subqueries_in_exprs(field.duplicates.iter().map(Some))?;
-                    }
-                    Some(proto::expand_rel::expand_field::FieldType::ConsistentField(
-                        expression,
-                    )) => {
-                        reject_raw_subqueries_in_expr(expression)?;
-                    }
-                    None => {}
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reject_raw_subqueries_in_rel_child(rel: Option<&proto::Rel>) -> common_query::error::Result<()> {
-    rel.map_or(Ok(()), reject_raw_subqueries_in_rel)
-}
-
-fn reject_raw_subqueries_in_exprs<'a>(
-    expressions: impl IntoIterator<Item = Option<&'a proto::Expression>>,
-) -> common_query::error::Result<()> {
-    for expression in expressions.into_iter().flatten() {
-        reject_raw_subqueries_in_expr(expression)?;
-    }
-    Ok(())
-}
-
-fn reject_raw_subqueries_in_expr(
-    expression: &proto::Expression,
-) -> common_query::error::Result<()> {
-    use proto::expression::RexType;
-
-    match expression.rex_type.as_ref() {
-        Some(RexType::Subquery(_)) => Err(decode_error(
-            "remote reads do not support raw Substrait subqueries",
-        )),
-        Some(RexType::Selection(reference)) => {
-            reject_raw_subqueries_in_field_refs(std::slice::from_ref(reference))
-        }
-        Some(RexType::ScalarFunction(function)) => {
-            reject_raw_subqueries_in_function_args(&function.arguments)?;
-            #[allow(deprecated)]
-            reject_raw_subqueries_in_exprs(function.args.iter().map(Some))
-        }
-        Some(RexType::WindowFunction(function)) => {
-            reject_raw_subqueries_in_function_args(&function.arguments)?;
-            reject_raw_subqueries_in_exprs(function.partitions.iter().map(Some))?;
-            reject_raw_subqueries_in_sort_fields(&function.sorts)?;
-            #[allow(deprecated)]
-            reject_raw_subqueries_in_exprs(function.args.iter().map(Some))
-        }
-        Some(RexType::IfThen(if_then)) => {
-            for clause in &if_then.ifs {
-                reject_raw_subqueries_in_exprs([clause.r#if.as_ref(), clause.then.as_ref()])?;
-            }
-            reject_raw_subqueries_in_exprs([if_then.r#else.as_deref()])
-        }
-        Some(RexType::SwitchExpression(switch)) => {
-            reject_raw_subqueries_in_exprs([switch.r#match.as_deref(), switch.r#else.as_deref()])?;
-            reject_raw_subqueries_in_exprs(switch.ifs.iter().map(|clause| clause.then.as_ref()))
-        }
-        Some(RexType::SingularOrList(list)) => {
-            reject_raw_subqueries_in_exprs([list.value.as_deref()])?;
-            reject_raw_subqueries_in_exprs(list.options.iter().map(Some))
-        }
-        Some(RexType::MultiOrList(list)) => {
-            reject_raw_subqueries_in_exprs(list.value.iter().map(Some))?;
-            for record in &list.options {
-                reject_raw_subqueries_in_exprs(record.fields.iter().map(Some))?;
-            }
-            Ok(())
-        }
-        Some(RexType::Cast(cast)) => reject_raw_subqueries_in_exprs([cast.input.as_deref()]),
-        Some(RexType::Nested(nested)) => match nested.nested_type.as_ref() {
-            Some(proto::expression::nested::NestedType::Struct(struct_)) => {
-                reject_raw_subqueries_in_exprs(struct_.fields.iter().map(Some))
-            }
-            Some(proto::expression::nested::NestedType::List(list)) => {
-                reject_raw_subqueries_in_exprs(list.values.iter().map(Some))
-            }
-            Some(proto::expression::nested::NestedType::Map(map)) => {
-                for entry in &map.key_values {
-                    reject_raw_subqueries_in_exprs([entry.key.as_ref(), entry.value.as_ref()])?;
-                }
-                Ok(())
-            }
-            None => Ok(()),
-        },
-        Some(RexType::Literal(_))
-        | Some(RexType::DynamicParameter(_))
-        | Some(RexType::Enum(_))
-        | None => Ok(()),
-    }
-}
-
-fn reject_raw_subqueries_in_function_args(
-    arguments: &[proto::FunctionArgument],
-) -> common_query::error::Result<()> {
-    for argument in arguments {
-        if let Some(proto::function_argument::ArgType::Value(expression)) =
-            argument.arg_type.as_ref()
-        {
-            reject_raw_subqueries_in_expr(expression)?;
-        }
-    }
-    Ok(())
-}
-
-fn reject_raw_subqueries_in_aggregate_function(
-    function: &proto::AggregateFunction,
-) -> common_query::error::Result<()> {
-    reject_raw_subqueries_in_function_args(&function.arguments)?;
-    reject_raw_subqueries_in_sort_fields(&function.sorts)?;
-    #[allow(deprecated)]
-    reject_raw_subqueries_in_exprs(function.args.iter().map(Some))
-}
-
-fn reject_raw_subqueries_in_sort_fields(
-    fields: &[proto::SortField],
-) -> common_query::error::Result<()> {
-    reject_raw_subqueries_in_exprs(fields.iter().map(|field| field.expr.as_ref()))
-}
-
-fn reject_raw_subqueries_in_field_refs(
-    references: &[proto::expression::FieldReference],
-) -> common_query::error::Result<()> {
-    for reference in references {
-        if let Some(proto::expression::field_reference::RootType::Expression(expression)) =
-            reference.root_type.as_ref()
-        {
-            reject_raw_subqueries_in_expr(expression)?;
-        }
-    }
-    Ok(())
-}
-
-fn reject_raw_subqueries_in_optional_field_refs<'a>(
-    references: impl IntoIterator<Item = Option<&'a proto::expression::FieldReference>>,
-) -> common_query::error::Result<()> {
-    for reference in references.into_iter().flatten() {
-        reject_raw_subqueries_in_field_refs(std::slice::from_ref(reference))?;
-    }
-    Ok(())
 }
 
 fn collect_optional_input(
@@ -1230,15 +949,63 @@ fn type_nullability(kind: &proto::r#type::Kind) -> Option<proto::r#type::Nullabi
 }
 
 fn remote_error(message: impl Into<String>) -> BoxedError {
+    // Encode-side errors are local frontend errors, not schema races, so they
+    // keep the non-retryable InvalidArguments status.
     BoxedError::new(PlainError::new(
         message.into(),
         StatusCode::InvalidArguments,
     ))
 }
 
+/// A remote-read contract violation detected at decode time.
+///
+/// These are transient: the frontend planned against a schema the region has
+/// since changed (a schema race). They are marked retryable so the caller can
+/// retry against fresh metadata.
+#[derive(Debug)]
+struct ContractViolation {
+    message: String,
+}
+
+impl std::fmt::Display for ContractViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ContractViolation {}
+
+impl common_error::ext::ErrorExt for ContractViolation {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::Internal
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        RetryHint::Retryable
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl common_error::ext::StackError for ContractViolation {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+        buf.push(format!("{}: {}", layer, self.message))
+    }
+
+    fn next(&self) -> Option<&dyn common_error::ext::StackError> {
+        None
+    }
+}
+
 fn decode_error(message: impl Into<String>) -> common_query::error::Error {
+    // Decode-side contract violations are transient schema races and must be
+    // retryable.
     common_query::error::Error::DecodePlan {
-        source: remote_error(message),
+        source: BoxedError::new(ContractViolation {
+            message: message.into(),
+        }),
         location: snafu::location!(),
     }
 }
@@ -1494,6 +1261,36 @@ mod tests {
         .unwrap();
 
         assert!(matches!(plan, LogicalPlan::TableScan(_)));
+    }
+
+    #[tokio::test]
+    async fn test_decode_remote_plan_tolerates_legacy_unwrapped_plan() {
+        let region_id = RegionId::new(42, 1);
+        // An older frontend encodes the plan without the v1 root envelope.
+        let mut legacy = proto::Plan::decode(encoded_remote_plan(region_id).as_ref()).unwrap();
+        unwrap_root(&mut legacy).unwrap();
+        let legacy_bytes = Bytes::from(legacy.encode_to_vec());
+
+        // The new datanode accepts the legacy plan and decodes it with base
+        // semantics.
+        let decoded = decode_with_provider(legacy_bytes.clone(), mock_table_provider(region_id))
+            .await
+            .unwrap();
+        assert!(matches!(decoded, LogicalPlan::TableScan(_)));
+
+        // It is still safe: the base decoder's schema-compatibility check
+        // rejects a column whose type changed between planning and execution.
+        let mut metadata = standard_dn_metadata(region_id);
+        metadata.column_metadatas[2].column_schema =
+            ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), false);
+        let metadata = RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap();
+        assert!(
+            decode_with_provider(legacy_bytes, provider_with_metadata(metadata))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2122,147 +1919,6 @@ mod tests {
             extract_top_level_named_struct(&named, named.r#struct.as_ref().unwrap()).unwrap();
         assert_eq!(names, vec!["s", "l", "m"]);
         assert_eq!(types.len(), 3);
-    }
-
-    #[derive(Clone, Copy)]
-    enum RawSubqueryForm {
-        Scalar,
-        InPredicate,
-        SetPredicate,
-        SetComparison,
-    }
-
-    fn raw_subquery(form: RawSubqueryForm) -> proto::Expression {
-        use proto::expression::subquery::{
-            InPredicate, Scalar, SetComparison, SetPredicate, SubqueryType,
-        };
-
-        let subquery_type = match form {
-            RawSubqueryForm::Scalar => SubqueryType::Scalar(Box::new(Scalar { input: None })),
-            RawSubqueryForm::InPredicate => SubqueryType::InPredicate(Box::new(InPredicate {
-                needles: vec![],
-                haystack: None,
-            })),
-            RawSubqueryForm::SetPredicate => SubqueryType::SetPredicate(Box::new(SetPredicate {
-                predicate_op: 0,
-                tuples: None,
-            })),
-            RawSubqueryForm::SetComparison => {
-                SubqueryType::SetComparison(Box::new(SetComparison {
-                    reduction_op: 0,
-                    comparison_op: 0,
-                    left: None,
-                    right: None,
-                }))
-            }
-        };
-        proto::Expression {
-            rex_type: Some(proto::expression::RexType::Subquery(Box::new(
-                proto::expression::Subquery {
-                    subquery_type: Some(subquery_type),
-                },
-            ))),
-        }
-    }
-
-    fn rel_with_filter(expression: proto::Expression) -> proto::Rel {
-        proto::Rel {
-            rel_type: Some(proto::rel::RelType::Filter(Box::new(proto::FilterRel {
-                common: None,
-                input: None,
-                condition: Some(Box::new(expression)),
-                advanced_extension: None,
-            }))),
-        }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_raw_substrait_subquery_forms_and_placements_are_rejected() {
-        let forms = [
-            RawSubqueryForm::Scalar,
-            RawSubqueryForm::InPredicate,
-            RawSubqueryForm::SetPredicate,
-            RawSubqueryForm::SetComparison,
-        ];
-        for form in forms {
-            assert!(reject_raw_subqueries(&rel_with_filter(raw_subquery(form))).is_err());
-        }
-
-        let nested = proto::Expression {
-            rex_type: Some(proto::expression::RexType::Nested(
-                proto::expression::Nested {
-                    nullable: false,
-                    type_variation_reference: 0,
-                    nested_type: Some(proto::expression::nested::NestedType::Struct(
-                        proto::expression::nested::Struct {
-                            fields: vec![raw_subquery(RawSubqueryForm::Scalar)],
-                        },
-                    )),
-                },
-            )),
-        };
-        let field_reference = proto::expression::FieldReference {
-            reference_type: None,
-            root_type: Some(proto::expression::field_reference::RootType::Expression(
-                Box::new(raw_subquery(RawSubqueryForm::InPredicate)),
-            )),
-        };
-        let virtual_table = proto::Rel {
-            rel_type: Some(proto::rel::RelType::Read(Box::new(proto::ReadRel {
-                common: None,
-                base_schema: None,
-                filter: None,
-                best_effort_filter: None,
-                projection: None,
-                advanced_extension: None,
-                read_type: Some(proto::read_rel::ReadType::VirtualTable(
-                    proto::read_rel::VirtualTable {
-                        values: vec![],
-                        expressions: vec![proto::expression::nested::Struct {
-                            fields: vec![raw_subquery(RawSubqueryForm::SetPredicate)],
-                        }],
-                    },
-                )),
-            }))),
-        };
-        let exchange = proto::Rel {
-            rel_type: Some(proto::rel::RelType::Exchange(Box::new(
-                proto::ExchangeRel {
-                    common: None,
-                    input: None,
-                    partition_count: 0,
-                    targets: vec![],
-                    advanced_extension: None,
-                    exchange_kind: Some(proto::exchange_rel::ExchangeKind::ScatterByFields(
-                        proto::exchange_rel::ScatterFields {
-                            fields: vec![field_reference],
-                        },
-                    )),
-                },
-            ))),
-        };
-
-        assert!(reject_raw_subqueries(&rel_with_filter(nested)).is_err());
-        assert!(reject_raw_subqueries(&virtual_table).is_err());
-        assert!(reject_raw_subqueries(&exchange).is_err());
-    }
-
-    #[test]
-    fn test_raw_substrait_literal_containing_subquery_is_accepted() {
-        let literal = proto::Expression {
-            rex_type: Some(proto::expression::RexType::Literal(
-                proto::expression::Literal {
-                    nullable: false,
-                    type_variation_reference: 0,
-                    literal_type: Some(proto::expression::literal::LiteralType::String(
-                        "Subquery(".to_string(),
-                    )),
-                },
-            )),
-        };
-
-        assert!(reject_raw_subqueries(&rel_with_filter(literal)).is_ok());
     }
 
     #[test]

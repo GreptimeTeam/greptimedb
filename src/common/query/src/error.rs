@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use arrow::error::ArrowError;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::DataFusionError;
@@ -256,6 +256,16 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::DecodePlan { source, .. }
+            | Error::Execute { source, .. }
+            | Error::ProcedureService { source, .. }
+            | Error::TableMutation { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 
