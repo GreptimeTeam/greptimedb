@@ -66,6 +66,40 @@ pub(crate) struct CompactionScheduler {
     next_plan_id: u64,
 }
 
+/// Describes the immediate action produced by a compaction terminal transition.
+#[derive(Debug)]
+pub(crate) enum CompactionTransition {
+    /// No follow-up work was dispatched and no DDL became ready.
+    NoAction,
+    /// An automatic follow-up planning cycle was dispatched.
+    AutomaticFollowupScheduled,
+    /// DDL requests became ready after the compaction lifecycle terminated.
+    DdlReady(Vec<SenderDdlRequest>),
+}
+
+impl CompactionTransition {
+    fn from_pending_ddls(pending_ddls: Vec<SenderDdlRequest>) -> Self {
+        if pending_ddls.is_empty() {
+            Self::NoAction
+        } else {
+            Self::DdlReady(pending_ddls)
+        }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        !matches!(self, Self::DdlReady(pending_ddls) if !pending_ddls.is_empty())
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        match self {
+            Self::DdlReady(pending_ddls) => pending_ddls.len(),
+            Self::NoAction | Self::AutomaticFollowupScheduled => 0,
+        }
+    }
+}
+
 // API used by callers outside the compaction scheduler module.
 impl CompactionScheduler {
     /// Creates an empty scheduler bound to one region worker.
@@ -187,7 +221,8 @@ impl CompactionScheduler {
     ///
     /// Rejects stale plans, submits a prepared local or remote execution, or
     /// completes the cycle when planning produced no executable plan. Returned
-    /// DDL requests are released by the resulting terminal transition.
+    /// The returned transition reports a dispatched automatic follow-up or DDL
+    /// requests released by the resulting terminal transition.
     ///
     /// # Constraints
     ///
@@ -199,7 +234,7 @@ impl CompactionScheduler {
         finished: CompactionPickFinished,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
-    ) -> Vec<SenderDdlRequest> {
+    ) -> CompactionTransition {
         self.handle_compaction_pick_finished_inner(finished, manifest_ctx, schema_metadata_manager)
             .await
     }
@@ -229,8 +264,8 @@ impl CompactionScheduler {
     /// # Effects
     ///
     /// Notifies waiters, schedules a pending manual or explicit automatic
-    /// follow-up, or removes the region status. Returns DDLs that are now safe
-    /// to execute.
+    /// follow-up, or removes the region status. The returned transition reports
+    /// a dispatched automatic follow-up or DDLs that are now safe to execute.
     ///
     /// # Constraints
     ///
@@ -243,9 +278,9 @@ impl CompactionScheduler {
         execution: &CompactionExecution,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
-    ) -> Vec<SenderDdlRequest> {
+    ) -> CompactionTransition {
         if !self.is_current_execution(region_id, execution) {
-            return Vec::new();
+            return CompactionTransition::NoAction;
         }
         self.on_compaction_finished(region_id, manifest_ctx, schema_metadata_manager)
             .await
@@ -535,9 +570,9 @@ impl CompactionScheduler {
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
-    ) -> Vec<SenderDdlRequest> {
+    ) -> CompactionTransition {
         if !self.region_status.contains_key(&region_id) {
-            return Vec::new();
+            return CompactionTransition::NoAction;
         }
 
         if self.handle_pending_compaction_request(
@@ -545,13 +580,13 @@ impl CompactionScheduler {
             manifest_ctx,
             schema_metadata_manager.clone(),
         ) {
-            return Vec::new();
+            return CompactionTransition::NoAction;
         }
 
         // The region status might be removed by the previous steps.
         // So we return empty DDL requests.
         let Some(status) = self.region_status.get_mut(&region_id) else {
-            return Vec::new();
+            return CompactionTransition::NoAction;
         };
         for waiter in status.take_waiters() {
             waiter.send(Ok(0));
@@ -566,15 +601,16 @@ impl CompactionScheduler {
             self.region_status.remove(&region_id);
             // If there are pending DDL requests, we should return them to the caller.
             // And skip try to schedule next compaction task.
-            return pending_ddl_requests;
+            return CompactionTransition::DdlReady(pending_ddl_requests);
         }
 
-        if status.active.reset_automatic_followup() {
-            self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager);
-            return Vec::new();
+        if status.active.reset_automatic_followup()
+            && self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager)
+        {
+            return CompactionTransition::AutomaticFollowupScheduled;
         }
         self.region_status.remove(&region_id);
-        Vec::new()
+        CompactionTransition::NoAction
     }
 
     fn schedule_automatic_followup(

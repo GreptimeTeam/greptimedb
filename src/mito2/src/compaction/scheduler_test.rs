@@ -436,6 +436,39 @@ async fn test_schedule_compaction_returns_true_when_task_scheduled() {
 }
 
 #[tokio::test]
+async fn test_planning_followup_reports_automatic_schedule() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let builder = VersionControlBuilder::new();
+    let region_id = builder.region_id();
+    let version_control = Arc::new(builder.build());
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
+    let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+    let mut status =
+        CompactionStatus::for_test(region_id, version_control, env.access_layer.clone());
+    status.start_picking(7);
+    status.mark_automatic_trigger();
+    scheduler.region_status.insert(region_id, status);
+
+    let transition = scheduler
+        .handle_compaction_pick_finished(
+            CompactionPickFinished {
+                region_id,
+                plan_id: 7,
+                result: CompactionPlanningResult::NoPlan,
+            },
+            &manifest_ctx,
+            schema_metadata_manager,
+        )
+        .await;
+
+    assert_matches!(transition, CompactionTransition::AutomaticFollowupScheduled);
+}
+
+#[tokio::test]
 async fn test_planning_panic_notifies_and_clears_status() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);

@@ -18,7 +18,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
-use crate::compaction::CompactionPickFinished;
+use crate::compaction::{CompactionPickFinished, CompactionTransition};
 use crate::config::IndexBuildMode;
 use crate::error::{RegionNotFoundSnafu, StaleCompactionExecutionSnafu};
 use crate::metrics::COMPACTION_REQUEST_COUNT;
@@ -45,7 +45,7 @@ impl<S> RegionWorkerLoop<S> {
         // compaction status and release DDLs fenced behind its picking phase.
         // Such a pick never produces an execution callback, so the worker must
         // execute the returned DDLs from this notification.
-        let mut pending_ddls = self
+        let transition = self
             .compaction_scheduler
             .handle_compaction_pick_finished(
                 request,
@@ -53,12 +53,22 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
-        if !pending_ddls.is_empty() {
-            // Preserve the lifecycle order observed by listeners: compaction
-            // termination is visible before its dependent DDLs are dispatched.
-            self.listener.on_compaction_result_notified(region_id).await;
+        match transition {
+            CompactionTransition::AutomaticFollowupScheduled => {
+                // There will be a followup compaction so we need to update the
+                // last schedule time to avoid frequent compactions.
+                region.update_schedule_compaction_millis();
+            }
+            CompactionTransition::NoAction => {}
+            CompactionTransition::DdlReady(mut pending_ddls) => {
+                if !pending_ddls.is_empty() {
+                    // Preserve the lifecycle order observed by listeners: compaction
+                    // termination is visible before its dependent DDLs are dispatched.
+                    self.listener.on_compaction_result_notified(region_id).await;
+                    self.handle_ddl_requests(&mut pending_ddls).await;
+                }
+            }
         }
-        self.handle_ddl_requests(&mut pending_ddls).await;
     }
 
     /// Handles compaction request submitted to region worker.
@@ -150,7 +160,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Schedule next compaction if necessary.
-        let mut pending_ddls = self
+        let transition = self
             .compaction_scheduler
             .on_execution_finished(
                 region_id,
@@ -159,7 +169,15 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
-        self.handle_ddl_requests(&mut pending_ddls).await;
+        match transition {
+            CompactionTransition::AutomaticFollowupScheduled => {
+                region.update_schedule_compaction_millis();
+            }
+            CompactionTransition::NoAction => {}
+            CompactionTransition::DdlReady(mut pending_ddls) => {
+                self.handle_ddl_requests(&mut pending_ddls).await;
+            }
+        }
     }
 
     pub(crate) async fn handle_compaction_cancelled(
