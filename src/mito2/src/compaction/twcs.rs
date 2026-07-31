@@ -63,18 +63,6 @@ pub struct TwcsPicker {
 }
 
 impl TwcsPicker {
-    /// Builds compaction output from files.
-    #[cfg(test)]
-    async fn build_output(
-        &self,
-        region_id: RegionId,
-        time_windows: BTreeMap<i64, Window>,
-        active_window: Option<i64>,
-    ) -> Result<Vec<CompactionOutput>> {
-        self.build_output_with_time_range(region_id, time_windows, active_window, None)
-            .await
-    }
-
     async fn build_output_with_time_range(
         &self,
         region_id: RegionId,
@@ -984,7 +972,7 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
             }
-            .build_output(RegionId::from_u64(0), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1131,7 +1119,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
         }
-        .build_output(RegionId::from_u64(0), windows, active_window)
+        .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
         .await
         .unwrap();
 
@@ -1207,7 +1195,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(123), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1252,7 +1240,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(456), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(456), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1298,7 +1286,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(123), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1322,7 +1310,12 @@ mod tests {
 
         let windows_no_limit = assign_to_windows(files.iter(), 3);
         let output_no_limit = picker_no_limit
-            .build_output(RegionId::from_u64(123), windows_no_limit, active_window)
+            .build_output_with_time_range(
+                RegionId::from_u64(123),
+                windows_no_limit,
+                active_window,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1361,7 +1354,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(123), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1410,7 +1403,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(123), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
             .await
             .unwrap();
 
@@ -1454,7 +1447,7 @@ mod tests {
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = picker
-            .build_output(RegionId::from_u64(123), windows, active_window)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
             .await
             .unwrap();
 
