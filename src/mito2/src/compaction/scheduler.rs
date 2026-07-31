@@ -43,6 +43,7 @@ use crate::error::{
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
+#[cfg(test)]
 use crate::schedule::RequestCancelResult;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
