@@ -32,9 +32,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
-use crate::compaction::scheduler::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase,
-};
+use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
@@ -418,18 +416,23 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return CompactionTransition::NoAction;
         };
+
+        // A queued DDL supersedes a retained automatic follow-up, matching the
+        // execution terminal path in `on_compaction_finished`.
+        let pending_ddls = std::mem::take(&mut status.pending_ddl_requests);
+        if !pending_ddls.is_empty() {
+            self.region_status.remove(&region_id);
+            return CompactionTransition::DdlReady(pending_ddls);
+        }
+
         if status.active.reset_automatic_followup()
             && self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager)
         {
             return CompactionTransition::AutomaticFollowupScheduled;
         }
 
-        let pending_ddls = self
-            .region_status
-            .remove(&region_id)
-            .map(|mut status| std::mem::take(&mut status.pending_ddl_requests))
-            .unwrap_or_default();
-        CompactionTransition::from_pending_ddls(pending_ddls)
+        self.region_status.remove(&region_id);
+        CompactionTransition::NoAction
     }
 
     async fn submit_prepared_compaction(

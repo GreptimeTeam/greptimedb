@@ -1946,7 +1946,7 @@ async fn test_on_compaction_finished_returns_pending_ddl_requests() {
 }
 
 #[tokio::test]
-async fn test_on_compaction_finished_replays_pending_ddl_after_manual_noop() {
+async fn test_planning_terminal_prioritizes_pending_ddl_over_automatic_followup() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
@@ -1961,7 +1961,9 @@ async fn test_on_compaction_finished_replays_pending_ddl_after_manual_noop() {
     let (manual_tx, manual_rx) = oneshot::channel();
     let mut status =
         CompactionStatus::for_test(region_id, version_control.clone(), env.access_layer.clone());
-    status.start_local_task();
+    let state = status.start_local_task();
+    assert!(state.mark_commit_started());
+    status.mark_automatic_trigger();
     status.set_pending_request(PendingCompaction {
         options: compact_request::Options::Regular(Default::default()),
         waiter: OptionOutputTx::from(manual_tx),
@@ -1971,16 +1973,16 @@ async fn test_on_compaction_finished_replays_pending_ddl_after_manual_noop() {
     scheduler.region_status.insert(region_id, status);
 
     let (ddl_tx, _ddl_rx) = oneshot::channel();
-    scheduler.add_ddl_request_to_pending(SenderDdlRequest {
-        region_id,
-        sender: OptionOutputTx::from(ddl_tx),
-        request: crate::request::DdlRequest::EnterStaging(
-            store_api::region_request::EnterStagingRequest {
-                partition_directive:
-                    store_api::region_request::StagingPartitionDirective::RejectAllWrites,
-            },
-        ),
-    });
+    let result =
+        scheduler.try_cancel_and_add_ddl(region_id, OptionOutputTx::from(ddl_tx), (), |_| {
+            crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            )
+        });
+    assert!(result.is_ok());
 
     let pending_ddls = scheduler
         .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
