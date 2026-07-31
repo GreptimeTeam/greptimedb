@@ -85,6 +85,36 @@ run_fixture() {
   set -e
 }
 
+run_prebuilt_fixture() {
+  new_fixture
+  mkdir -p "${fixture}/prebuilt"
+  cat >"${fixture}/prebuilt/fuzz_create_table" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\t%s\t%s\n' "${GT_FUZZ_DUMP_DIR}" "$*" "${MOCK_BINARY_MARKER:-}" >>"${MOCK_BINARY_LOG}"
+EOF
+  chmod +x "${fixture}/prebuilt/fuzz_create_table"
+
+  set +e
+  env \
+    "MOCK_BINARY_LOG=${fixture}/binary.log" \
+    "MOCK_BINARY_MARKER=fixture" \
+    "FUZZ_TARGETS=fuzz_create_table" \
+    "FUZZ_GROUP=test-group" \
+    "FUZZ_MAX_TOTAL_TIME=120" \
+    "FUZZ_UNSTABLE=false" \
+    "FUZZ_FAIL_FAST=true" \
+    "FUZZ_COLLECT_CLUSTER_ARTIFACTS=false" \
+    "FUZZ_ARTIFACT_ROOT=${fixture}/artifacts" \
+    "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector" \
+    "FUZZ_BIN_DIR=${fixture}/prebuilt" \
+    "GITHUB_SHA=deadbeef" \
+    "GITHUB_STEP_SUMMARY=${fixture}/github-step-summary.md" \
+    "${RUNNER}" >"${fixture}/stdout.log" 2>&1
+  fixture_status=$?
+  set -e
+}
+
 test_successful_targets_run_in_order() {
   new_fixture
   run_fixture $'fuzz_create_table\nfuzz_insert' false true ""
@@ -111,6 +141,18 @@ test_successful_targets_run_in_order() {
   grep -q 'title=Fuzz group completed' "${fixture}/stdout.log" || \
     fail "group completion notice missing"
   assert_file "${fixture}/github-step-summary.md"
+  cleanup_fixture
+}
+
+test_prebuilt_binary_runs_without_cargo() {
+  run_prebuilt_fixture
+
+  assert_eq 0 "${fixture_status}" "prebuilt run status"
+  [[ ! -e "${fixture}/cargo.log" ]] || fail "cargo ran for prebuilt binary"
+  assert_eq 1 "$(wc -l <"${fixture}/binary.log" | tr -d ' ')" "prebuilt invocation count"
+  grep -q -- '-max_total_time=120' "${fixture}/binary.log" || fail "prebuilt fuzz time missing"
+  grep -q -- '-artifact_prefix=.*/targets/fuzz_create_table/libfuzzer/' "${fixture}/binary.log" || \
+    fail "prebuilt target-scoped libFuzzer prefix missing"
   cleanup_fixture
 }
 
@@ -308,6 +350,7 @@ EOF
 }
 
 test_successful_targets_run_in_order
+test_prebuilt_binary_runs_without_cargo
 test_fail_fast_stops_after_first_failure
 test_fail_fast_defaults_to_true
 test_non_fail_fast_marks_later_targets

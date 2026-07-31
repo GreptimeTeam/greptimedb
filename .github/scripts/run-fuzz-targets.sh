@@ -132,6 +132,11 @@ parse_bool fuzz_unstable "${FUZZ_UNSTABLE:-false}"
 parse_bool fuzz_fail_fast "${FUZZ_FAIL_FAST:-true}"
 parse_bool fuzz_collect_cluster_artifacts "${FUZZ_COLLECT_CLUSTER_ARTIFACTS:-false}"
 
+if [[ -n "${FUZZ_BIN_DIR:-}" && ! -d "${FUZZ_BIN_DIR}" ]]; then
+  log "FUZZ_BIN_DIR does not exist: ${FUZZ_BIN_DIR}"
+  exit 2
+fi
+
 targets=()
 while IFS= read -r target; do
   target="${target%$'\r'}"
@@ -171,16 +176,24 @@ for ((index = 0; index < ${#targets[@]}; index++)); do
 
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   started_epoch="$(date +%s)"
-  cargo_args=(fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
-  if [[ "${fuzz_unstable}" == true ]]; then
-    cargo_args+=(--features=unstable)
-  fi
-  cargo_args+=(-- "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
-
   echo "::group::Fuzz target: ${target}"
   log "run target ${target}"
+  if [[ -n "${FUZZ_BIN_DIR:-}" ]]; then
+    fuzz_binary="${FUZZ_BIN_DIR}/${target}"
+    if [[ ! -x "${fuzz_binary}" ]]; then
+      log "prebuilt fuzz binary does not exist or is not executable: ${fuzz_binary}"
+      exit 2
+    fi
+    run_args=("${fuzz_binary}" "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
+  else
+    run_args=(cargo fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
+    if [[ "${fuzz_unstable}" == true ]]; then
+      run_args+=(--features=unstable)
+    fi
+    run_args+=(-- "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
+  fi
   if GT_FUZZ_DUMP_DIR="${target_dir}/csv" \
-    cargo "${cargo_args[@]}" 2>&1 | tee "${target_dir}/fuzz.log"; then
+    "${run_args[@]}" 2>&1 | tee "${target_dir}/fuzz.log"; then
     exit_code=0
     status="success"
     artifact_collection="not_requested"

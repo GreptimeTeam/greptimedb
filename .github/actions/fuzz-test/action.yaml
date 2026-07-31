@@ -22,6 +22,9 @@ inputs:
   artifact-root:
     default: '/tmp/greptime-fuzz-artifacts'
     description: "Directory that stores target-scoped diagnostic artifacts"
+  prebuilt-binaries-dir:
+    default: ''
+    description: "Directory containing prebuilt fuzz target executables"
 runs:
   using: composite
   steps:
@@ -35,4 +38,5 @@ runs:
         FUZZ_FAIL_FAST: ${{ inputs.fail-fast }}
         FUZZ_COLLECT_CLUSTER_ARTIFACTS: ${{ inputs.collect-cluster-artifacts }}
         FUZZ_ARTIFACT_ROOT: ${{ inputs.artifact-root }}
+        FUZZ_BIN_DIR: ${{ inputs.prebuilt-binaries-dir }}
       run: .github/scripts/run-fuzz-targets.sh

@@ -18,7 +18,9 @@ on:
 name: CI
 
 env:
-  CARGO_FUZZ_VERSION: "0.12.0"
+  CARGO_FUZZ_VERSION: "0.13.2"
+  CARGO_UDEPS_VERSION: "0.1.61"
+  TAPLO_VERSION: "0.9.3"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -117,7 +119,10 @@ jobs:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install taplo
-        run: cargo +stable install taplo-cli --version ^0.9 --locked --force
+        uses: taiki-e/install-action@v2
+        with:
+          tool: taplo@${{ env.TAPLO_VERSION }}
+          fallback: none
       - name: Run taplo
         run: taplo format --check
 
@@ -142,6 +147,7 @@ jobs:
           # Shares across multiple jobs
           shared-key: "build-binaries"
           cache-all-crates: "true"
+          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
@@ -164,10 +170,133 @@ jobs:
           artifacts-dir: bins
           version: current
 
+  prepare-fuzz-targets:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Prepare Fuzz Targets (${{ matrix.group.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        group:
+          - name: "Database and regular table"
+            id: "database-and-regular-table"
+            targets: |
+              fuzz_create_database
+              fuzz_create_table
+              fuzz_alter_table
+              fuzz_insert
+          - name: "Logical table"
+            id: "logical-table"
+            targets: |
+              fuzz_create_logical_table
+              fuzz_alter_logical_table
+              fuzz_insert_logical_table
+          - name: "Repartition"
+            id: "repartition"
+            targets: |
+              fuzz_repartition_table
+              fuzz_repartition_metric_table
+              fuzz_repartition_table_chaos
+          - name: "Logical pruning"
+            id: "logical-pruning"
+            targets: fuzz_remote_wal_logical_prune
+          - name: "Migration"
+            id: "migration"
+            targets: |
+              fuzz_migrate_mito_regions
+              fuzz_migrate_metric_regions
+          - name: "Failover"
+            id: "failover"
+            targets: |
+              fuzz_failover_mito_regions
+              fuzz_failover_metric_regions
+          - name: "Unstable create table"
+            id: "unstable-fuzz-create-table"
+            targets: unstable_fuzz_create_table_standalone
+            unstable: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz-dependencies"
+          workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Look up prebuilt fuzz binaries
+        id: fuzz-binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.group.id }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          lookup-only: true
+      - name: Remove unused software
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
+      - name: Set Rust Fuzz
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+      - name: Build fuzz target binaries
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          FUZZ_TARGETS: ${{ matrix.group.targets }}
+          FUZZ_UNSTABLE: ${{ matrix.group.unstable || false }}
+          FUZZ_BIN_DIR: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+        run: |
+          set -euo pipefail
+          target_dir="$(cargo metadata --manifest-path tests-fuzz/Cargo.toml --no-deps --format-version 1 | jq -r '.target_directory')"
+          mkdir -p "${FUZZ_BIN_DIR}"
+          while IFS= read -r target; do
+            [[ -z "${target}" ]] && continue
+            args=(fuzz build "${target}" --fuzz-dir tests-fuzz -D -s none)
+            if [[ "${FUZZ_UNSTABLE}" == true ]]; then
+              args+=(--features unstable)
+            fi
+            cargo "${args[@]}"
+            binary="$(find "${target_dir}" -type f -path "*/debug/${target}" -perm -u+x -print -quit)"
+            if [[ -z "${binary}" ]]; then
+              echo "Unable to locate built fuzz target: ${target}" >&2
+              exit 1
+            fi
+            cp "${binary}" "${FUZZ_BIN_DIR}/${target}"
+          done <<<"${FUZZ_TARGETS}"
+      - name: Save prebuilt fuzz binaries
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.group.id }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+
   fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test (Standalone, ${{ matrix.group.name }})
-    needs: build
+    needs: [build, prepare-fuzz-targets]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -214,18 +343,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
-          shared-key: "fuzz"
+          shared-key: "fuzz-tools"
           workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-targets: "false"
           cache-all-crates: "true"
-          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set Rust Fuzz
-        shell: bash
-        run: |
-          sudo apt-get install -y libfuzzer-14-dev
-          if ! command -v cargo-fuzz >/dev/null; then
-            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-          fi
+      - name: Restore prebuilt fuzz binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.group.id }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -242,7 +369,6 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
           FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
         with:
@@ -250,6 +376,7 @@ jobs:
           group: ${{ matrix.group.id }}
           max-total-time: 120
           fail-fast: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
       - name: Collect setup failure artifacts
         if: ${{ failure() && !cancelled() }}
         shell: bash
@@ -271,7 +398,7 @@ jobs:
   unstable-fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Unstable Fuzz Test
-    needs: build-greptime-ci
+    needs: [build-greptime-ci, prepare-fuzz-targets]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -300,18 +427,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
-          shared-key: "fuzz"
+          shared-key: "fuzz-tools"
           workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-targets: "false"
           cache-all-crates: "true"
-          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set Rust Fuzz
-        shell: bash
-        run: |
-          sudo apt update && sudo apt install -y libfuzzer-14-dev
-          if ! command -v cargo-fuzz >/dev/null; then
-            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-          fi
+      - name: Restore prebuilt fuzz binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/unstable-fuzz-create-table
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-unstable-fuzz-create-table-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Download pre-built binary
         uses: actions/download-artifact@v4
         with:
@@ -324,7 +449,6 @@ jobs:
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_FUZZ_BINARY_PATH: ./bin/greptime
           GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance/
@@ -334,6 +458,7 @@ jobs:
           max-total-time: 120
           unstable: 'true'
           fail-fast: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries/unstable-fuzz-create-table
       - name: Collect setup failure artifacts
         if: ${{ failure() && !cancelled() }}
         shell: bash
@@ -372,6 +497,7 @@ jobs:
           # Shares across multiple jobs
           shared-key: "build-greptime-ci"
           cache-all-crates: "true"
+          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
@@ -397,7 +523,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs:  build-greptime-ci
+    needs: [build-greptime-ci, prepare-fuzz-targets]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -484,18 +610,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
-          shared-key: "fuzz"
+          shared-key: "fuzz-tools"
           workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-targets: "false"
           cache-all-crates: "true"
-          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set Rust Fuzz
-        shell: bash
-        run: |
-          sudo apt-get install -y libfuzzer-14-dev
-          if ! command -v cargo-fuzz >/dev/null; then
-            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-          fi
+      - name: Restore prebuilt fuzz binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.group.id }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -584,7 +708,6 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_KAFKA_WAL_HELPER_URL: http://127.0.0.1:8080
           GT_KAFKA_ADDR: kafka.kafka-cluster.svc.cluster.local:9092
@@ -597,6 +720,7 @@ jobs:
           max-total-time: ${{ matrix.mode.kafkaWalHelper && 600 || 120 }}
           fail-fast: 'true'
           collect-cluster-artifacts: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
       - name: Collect setup failure artifacts
         if: ${{ failure() && !cancelled() }}
         shell: bash
@@ -630,7 +754,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs:  build-greptime-ci
+    needs: [build-greptime-ci, prepare-fuzz-targets]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -715,18 +839,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
-          shared-key: "fuzz"
+          shared-key: "fuzz-tools"
           workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-targets: "false"
           cache-all-crates: "true"
-          cache-workspace-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set Rust Fuzz
-        shell: bash
-        run: |
-          sudo apt-get install -y libfuzzer-14-dev
-          if ! command -v cargo-fuzz >/dev/null; then
-            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-          fi
+      - name: Restore prebuilt fuzz binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.group.id }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -783,7 +905,6 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
           targets: ${{ matrix.group.targets }}
@@ -791,6 +912,7 @@ jobs:
           max-total-time: 120
           fail-fast: 'true'
           collect-cluster-artifacts: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries/${{ matrix.group.id }}
       - name: Collect setup failure artifacts
         if: ${{ failure() && !cancelled() }}
         shell: bash
@@ -1033,7 +1155,10 @@ jobs:
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-udeps
-        run: cargo install cargo-udeps --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps@${{ env.CARGO_UDEPS_VERSION }}
+          fallback: none
       - name: Check unused dependencies
         run: make check-udeps
 
