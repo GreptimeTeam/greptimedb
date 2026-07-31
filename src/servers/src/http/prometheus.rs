@@ -78,17 +78,39 @@ use crate::prometheus_handler::{
 
 /// For [ValueType::Vector] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PromSeriesVector {
     pub metric: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<(f64, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub histogram: Option<(f64, PromNativeHistogram)>,
 }
 
 /// For [ValueType::Matrix] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PromSeriesMatrix {
     pub metric: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub values: Vec<(f64, String)>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub histograms: Vec<(f64, PromNativeHistogram)>,
+}
+
+/// A native histogram sample in the Prometheus HTTP API JSON format.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PromNativeHistogram {
+    /// Total number of observations, encoded as a string.
+    pub count: String,
+    /// Sum of all observations, encoded as a string.
+    pub sum: String,
+    /// Populated buckets as `(boundary rule, lower bound, upper bound, count)`.
+    ///
+    /// Boundary rules are `0` for lower-open/upper-closed, `1` for
+    /// lower-closed/upper-open, `2` for both bounds open, and `3` for both
+    /// bounds closed. Bounds and counts are encoded as strings.
+    pub buckets: Vec<(u8, String, String, String)>,
 }
 
 /// Variants corresponding to [ValueType]

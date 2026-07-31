@@ -15,6 +15,17 @@
 /// Canonical Prometheus stale-marker NaN bit pattern.
 pub const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
 
+/// Formats a floating-point value for the Prometheus HTTP API.
+pub fn format_prometheus_float(value: f64) -> String {
+    if value == f64::INFINITY {
+        "+Inf".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Inf".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// Returns whether `value` is the canonical Prometheus stale-marker NaN.
 #[inline]
 pub fn is_prometheus_stale_nan(value: f64) -> bool {
@@ -33,5 +44,13 @@ mod tests {
         assert!(!is_prometheus_stale_nan(f64::from_bits(
             0x7ff8_0000_0000_0000
         )));
+    }
+
+    #[test]
+    fn formats_prometheus_float_values() {
+        assert_eq!(format_prometheus_float(f64::INFINITY), "+Inf");
+        assert_eq!(format_prometheus_float(f64::NEG_INFINITY), "-Inf");
+        assert_eq!(format_prometheus_float(f64::NAN), "NaN");
+        assert_eq!(format_prometheus_float(1.5), "1.5");
     }
 }
