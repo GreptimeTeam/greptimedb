@@ -341,11 +341,17 @@ jobs:
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
           key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+      - name: Pack prebuilt fuzz binaries
+        shell: bash
+        run: |
+          tar -C "${{ runner.temp }}" -cf "${{ runner.temp }}/fuzz-target-binaries.tar" \
+            greptime-fuzz-binaries
       - name: Upload prebuilt fuzz binaries
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-target-binaries
-          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          path: ${{ runner.temp }}/fuzz-target-binaries.tar
+          compression-level: 0
           retention-days: 1
           if-no-files-found: error
 
@@ -396,7 +402,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: fuzz-target-binaries
-          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -468,7 +479,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: fuzz-target-binaries
-          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: unstable_fuzz_create_table_standalone
       - name: Download pre-built binary
         uses: actions/download-artifact@v4
         with:
@@ -639,7 +655,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: fuzz-target-binaries
-          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -856,7 +877,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: fuzz-target-binaries
-          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
