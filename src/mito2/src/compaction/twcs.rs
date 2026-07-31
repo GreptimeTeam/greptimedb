@@ -78,96 +78,6 @@ impl TwcsPicker {
         active_window: Option<i64>,
         time_window_size: Option<i64>,
     ) -> Vec<CompactionOutput> {
-        let find_inputs = |files: &Window,
-                           windows: &BTreeMap<i64, Window>|
-         -> (Vec<FileGroup>, bool) {
-            let window = &files.time_window;
-            let mut files_to_merge: Vec<_> = files.files().cloned().collect();
-
-            // Filter out large files in append mode - they won't benefit from compaction
-            if self.append_mode
-                && let Some(max_size) = self.max_output_file_size
-            {
-                let (kept_files, ignored_files) = files_to_merge
-                    .into_iter()
-                    .partition(|fg| fg.size() <= max_size as usize);
-                files_to_merge = kept_files;
-                if !ignored_files.is_empty() {
-                    info!(
-                        "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
-                        ignored_files.len(),
-                        region_id,
-                        window,
-                        max_size
-                    );
-                }
-            }
-
-            let sorted_runs = if files_to_merge.len() < 1024 {
-                find_sorted_runs(&mut files_to_merge)
-            } else {
-                find_sorted_runs_by_time_range(&mut files_to_merge)
-            };
-            let found_runs = sorted_runs.len();
-            // We only remove deletion markers if we found less than 2 runs and not in append mode.
-            // because after compaction there will be no overlapping files.
-            let filter_deleted =
-                found_runs <= 2 && !self.append_mode && !window_has_overlap(files, windows);
-            if found_runs == 0 {
-                return (vec![], filter_deleted);
-            }
-
-            let mut inputs = if found_runs > 1 {
-                reduce_runs(sorted_runs)
-            } else {
-                let run = sorted_runs.last().unwrap();
-                if run.items().len() < self.trigger_file_num {
-                    return (vec![], filter_deleted);
-                }
-                // no overlapping files, try merge small files
-                merge_seq_files(run.items(), self.max_output_file_size)
-            };
-
-            // Limits the number of input files.
-            let total_input_files: usize = inputs.iter().map(|fg| fg.num_files()).sum();
-            if total_input_files > DEFAULT_MAX_INPUT_FILE_NUM {
-                // Sorts file groups by size first.
-                inputs.sort_unstable_by_key(|fg| fg.size());
-                let mut num_picked_files = 0;
-                inputs = inputs
-                    .into_iter()
-                    .take_while(|fg| {
-                        let current_group_file_num = fg.num_files();
-                        if current_group_file_num + num_picked_files <= DEFAULT_MAX_INPUT_FILE_NUM {
-                            num_picked_files += current_group_file_num;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                info!(
-                    "Compaction for region {} enforces max input file num limit: {}, current total: {}, input: {:?}",
-                    region_id, DEFAULT_MAX_INPUT_FILE_NUM, total_input_files, inputs
-                );
-            }
-
-            if inputs.len() > 1 {
-                // If we have more than one group to compact.
-                log_pick_result(
-                    region_id,
-                    *window,
-                    active_window,
-                    found_runs,
-                    files.files.len(),
-                    self.max_output_file_size,
-                    filter_deleted,
-                    &inputs,
-                );
-            }
-            (inputs, filter_deleted)
-        };
-
         let mut output = vec![];
         let windows = time_windows
             .values()
@@ -188,7 +98,7 @@ impl TwcsPicker {
         'chunks: for chunk in windows.chunks(chunk_size) {
             for (inputs, filter_deleted) in chunk
                 .iter()
-                .map(|window| find_inputs(window, time_windows))
+                .map(|window| self.find_inputs(region_id, active_window, window, time_windows))
                 .collect::<Vec<_>>()
             {
                 if inputs.is_empty() {
@@ -214,6 +124,100 @@ impl TwcsPicker {
             }
         }
         output
+    }
+
+    fn find_inputs(
+        &self,
+        region_id: RegionId,
+        active_window: Option<i64>,
+        files: &Window,
+        windows: &BTreeMap<i64, Window>,
+    ) -> (Vec<FileGroup>, bool) {
+        let window = &files.time_window;
+        let mut files_to_merge: Vec<_> = files.files().cloned().collect();
+
+        // Filter out large files in append mode - they won't benefit from compaction
+        if self.append_mode
+            && let Some(max_size) = self.max_output_file_size
+        {
+            let (kept_files, ignored_files) = files_to_merge
+                .into_iter()
+                .partition(|fg| fg.size() <= max_size as usize);
+            files_to_merge = kept_files;
+            if !ignored_files.is_empty() {
+                info!(
+                    "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
+                    ignored_files.len(),
+                    region_id,
+                    window,
+                    max_size
+                );
+            }
+        }
+
+        let sorted_runs = if files_to_merge.len() < 1024 {
+            find_sorted_runs(&mut files_to_merge)
+        } else {
+            find_sorted_runs_by_time_range(&mut files_to_merge)
+        };
+        let found_runs = sorted_runs.len();
+        // We only remove deletion markers if we found less than 2 runs and not in append mode.
+        // because after compaction there will be no overlapping files.
+        let filter_deleted =
+            found_runs <= 2 && !self.append_mode && !window_has_overlap(files, windows);
+        if found_runs == 0 {
+            return (vec![], filter_deleted);
+        }
+
+        let mut inputs = if found_runs > 1 {
+            reduce_runs(sorted_runs)
+        } else {
+            let run = sorted_runs.last().unwrap();
+            if run.items().len() < self.trigger_file_num {
+                return (vec![], filter_deleted);
+            }
+            // no overlapping files, try merge small files
+            merge_seq_files(run.items(), self.max_output_file_size)
+        };
+
+        // Limits the number of input files.
+        let total_input_files: usize = inputs.iter().map(|fg| fg.num_files()).sum();
+        if total_input_files > DEFAULT_MAX_INPUT_FILE_NUM {
+            // Sorts file groups by size first.
+            inputs.sort_unstable_by_key(|fg| fg.size());
+            let mut num_picked_files = 0;
+            inputs = inputs
+                .into_iter()
+                .take_while(|fg| {
+                    let current_group_file_num = fg.num_files();
+                    if current_group_file_num + num_picked_files <= DEFAULT_MAX_INPUT_FILE_NUM {
+                        num_picked_files += current_group_file_num;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .collect::<Vec<_>>();
+            info!(
+                "Compaction for region {} enforces max input file num limit: {}, current total: {}, input: {:?}",
+                region_id, DEFAULT_MAX_INPUT_FILE_NUM, total_input_files, inputs
+            );
+        }
+
+        if inputs.len() > 1 {
+            // If we have more than one group to compact.
+            log_pick_result(
+                region_id,
+                *window,
+                active_window,
+                found_runs,
+                files.files.len(),
+                self.max_output_file_size,
+                filter_deleted,
+                &inputs,
+            );
+        }
+        (inputs, filter_deleted)
     }
 }
 
