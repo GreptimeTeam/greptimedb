@@ -180,6 +180,11 @@ impl FlushCancellationListener {
     pub async fn wait_flush_started(&self) {
         self.flush_started.notified().await;
     }
+
+    /// Allows the blocked flush to continue.
+    pub fn resume_flush(&self) {
+        self.resume_flush.notify_one();
+    }
 }
 
 #[async_trait]
@@ -191,7 +196,7 @@ impl EventListener for FlushCancellationListener {
     }
 
     fn on_flush_cancel_requested(&self, _region_id: RegionId) {
-        self.resume_flush.notify_one();
+        self.resume_flush();
     }
 }
 

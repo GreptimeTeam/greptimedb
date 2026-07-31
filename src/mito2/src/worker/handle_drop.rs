@@ -31,7 +31,7 @@ use tokio::time::sleep;
 use crate::cache::CacheManagerRef;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error::{OpenDalSnafu, Result};
-use crate::region::{RegionLeaderState, RegionMapRef};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef};
 use crate::request::{DdlRequest, OptionOutputTx};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
@@ -49,6 +49,14 @@ where
         req: RegionDropRequest,
         sender: OptionOutputTx,
     ) {
+        let region = match self.regions.writable_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+
         let (sender, req) = match self.flush_scheduler.try_cancel_and_add_ddl(
             region_id,
             sender,
@@ -62,16 +70,16 @@ where
             Err(request) => request,
         };
 
-        let result = self.drop_region(region_id, req.partial_drop).await;
+        let result = self.drop_region(region, req.partial_drop).await;
         sender.send(result);
     }
 
     async fn drop_region(
         &mut self,
-        region_id: RegionId,
+        region: MitoRegionRef,
         partial_drop: bool,
     ) -> Result<AffectedRows> {
-        let region = self.regions.writable_region(region_id)?;
+        let region_id = region.region_id;
 
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
