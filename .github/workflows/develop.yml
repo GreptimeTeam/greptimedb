@@ -71,6 +71,8 @@ jobs:
           version: "latest"
       - name: Run check-version script tests
         run: uv run --no-project python .github/scripts/check-version-test.py
+      - name: Run fuzz orchestration script tests
+        run: .github/scripts/run-fuzz-targets-test.sh
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -161,15 +163,28 @@ jobs:
 
   fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    name: Fuzz Test
+    name: Fuzz Test (Standalone, ${{ matrix.group.name }})
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
-        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+        group:
+          - name: "Database and regular table"
+            id: "database-and-regular-table"
+            targets: |
+              fuzz_create_database
+              fuzz_create_table
+              fuzz_alter_table
+              fuzz_insert
+          - name: "Logical table"
+            id: "logical-table"
+            targets: |
+              fuzz_create_logical_table
+              fuzz_alter_logical_table
+              fuzz_insert_logical_table
     steps:
       - name: Remove unused software
         run: |
@@ -207,15 +222,38 @@ jobs:
           rm ./bins.tar.gz
       - name: Run GreptimeDB
         run: |
-          ./bins/greptime standalone start&
+          mkdir -p /tmp/greptime-fuzz-runtime
+          ./bins/greptime standalone start >/tmp/greptime-fuzz-runtime/greptime.log 2>&1 &
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
+          FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
         with:
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
           max-total-time: 120
+          fail-fast: 'true'
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
+          FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-standalone-${{ matrix.group.id }}
+          path: /tmp/greptime-fuzz-artifacts
+          if-no-files-found: warn
+          retention-days: 3
 
   unstable-fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -223,11 +261,6 @@ jobs:
     needs: build-greptime-ci
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        target: [ "unstable_fuzz_create_table_standalone" ]
     steps:
       - name: Remove unused software
         run: |
@@ -268,23 +301,31 @@ jobs:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_FUZZ_BINARY_PATH: ./bin/greptime
-          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance
         with:
-          target: ${{ matrix.target }}
+          targets: unstable_fuzz_create_table_standalone
+          group: unstable-fuzz-create-table
           max-total-time: 120
           unstable: 'true'
-      - name: Upload unstable fuzz test logs
-        if: failure()
+          fail-fast: 'true'
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: unstable-fuzz-logs
-          path: /tmp/unstable-greptime/
+          name: fuzz-unstable-standalone
+          path: /tmp/greptime-fuzz-artifacts
+          if-no-files-found: warn
           retention-days: 3
-      - name: Describe pods
-        if: failure()
-        shell: bash
-        run: |
-          kubectl describe pod -n my-greptimedb
 
   build-greptime-ci:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -330,36 +371,54 @@ jobs:
 
   distributed-fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
+    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 4
       matrix:
-        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+        group:
+          - name: "Database and regular table"
+            id: "database-and-regular-table"
+            targets: |
+              fuzz_create_database
+              fuzz_create_table
+              fuzz_alter_table
+              fuzz_insert
+          - name: "Logical table"
+            id: "logical-table"
+            targets: |
+              fuzz_create_logical_table
+              fuzz_alter_logical_table
+              fuzz_insert_logical_table
         mode:
           - name: "Remote WAL"
+            id: "remote-wal"
             minio: true
             kafka: true
             values: "with-remote-wal.yaml"
         include:
-          - target: "fuzz_repartition_table"
+          - group:
+              name: "Repartition"
+              id: "repartition"
+              targets: |
+                fuzz_repartition_table
+                fuzz_repartition_metric_table
             mode:
-              name: "Local WAL mito table repartition"
+              name: "Local WAL"
+              id: "local-wal"
               minio: true
               kafka: false
               values: "with-minio-repartition-gc.yaml"
-          - target: "fuzz_repartition_metric_table"
-            mode:
-              name: "Local WAL metric table repartition"
-              minio: true
-              kafka: false
-              values: "with-minio-repartition-gc.yaml"
-          - target: "fuzz_remote_wal_logical_prune"
+          - group:
+              name: "Logical pruning"
+              id: "logical-pruning"
+              targets: "fuzz_remote_wal_logical_prune"
             mode:
               name: "Remote WAL logical pruning"
+              id: "remote-wal-logical-pruning"
               minio: true
               kafka: true
               values: "with-remote-wal-logical-prune.yaml"
@@ -497,54 +556,31 @@ jobs:
           GT_WAL_NUM_TOPICS: 3
           GT_FUZZ_OVERRIDE_DELETE_AFTER_SECS: 300
         with:
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
           max-total-time: ${{ matrix.mode.kafkaWalHelper && 600 || 120 }}
-      - name: Describe Nodes
-        if: failure()
-        shell: bash
-        run: |
-          kubectl describe nodes
-      - name: Describe pod
-        if: failure()
-        shell: bash
-        run: |
-          kubectl describe pod -n my-greptimedb
-      - name: Export kind logs
-        if: failure()
-        shell: bash
-        run: |
-          kind export logs /tmp/kind
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/kind
-          retention-days: 3
-      - name: Collect monitor dumps
-        if: failure()
+          fail-fast: 'true'
+          collect-cluster-artifacts: 'true'
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
         shell: bash
         env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'true'
           GT_FUZZ_NS: my-greptimedb
           GT_FUZZ_CLUSTER: my-greptimedb
           GT_MONITOR_HTTP_LOCAL_PORT: 14000
-          GT_MONITOR_ARTIFACT_DIR: /tmp/fuzz-monitor-dumps
         run: |
-          bash .github/scripts/collect-fuzz-monitor-artifacts.sh
-      - name: Upload monitor dumps
-        if: failure()
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            timeout --signal=TERM --kill-after=10s 180s \
+              .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/fuzz-monitor-dumps
-          if-no-files-found: warn
-          retention-days: 3
-      - name: Upload CSV dumps
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-tests-csv-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/greptime-fuzz-dumps
+          name: fuzz-distributed-${{ matrix.mode.id }}-${{ matrix.group.id }}
+          path: /tmp/greptime-fuzz-artifacts
           if-no-files-found: warn
           retention-days: 3
       - name: Delete cluster
@@ -558,7 +594,7 @@ jobs:
 
   distributed-fuzztest-with-chaos:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
+    name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
     timeout-minutes: 60
@@ -566,28 +602,43 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
+        group:
+          - name: "Migration"
+            id: "migration"
+            targets: |
+              fuzz_migrate_mito_regions
+              fuzz_migrate_metric_regions
+          - name: "Failover"
+            id: "failover"
+            targets: |
+              fuzz_failover_mito_regions
+              fuzz_failover_metric_regions
         mode:
           - name: "Remote WAL"
+            id: "remote-wal"
             minio: true
             kafka: true
             values: "with-remote-wal.yaml"
         include:
-          - target: "fuzz_migrate_mito_regions"
+          - group:
+              name: "Migration"
+              id: "migration"
+              targets: |
+                fuzz_migrate_mito_regions
+                fuzz_migrate_metric_regions
             mode:
               name: "Local WAL"
+              id: "local-wal"
               minio: true
               kafka: false
               values: "with-minio.yaml"
-          - target: "fuzz_migrate_metric_regions"
-            mode:
-              name: "Local WAL"
-              minio: true
-              kafka: false
-              values: "with-minio.yaml"
-          - target: "fuzz_repartition_table_chaos"
+          - group:
+              name: "Repartition"
+              id: "repartition"
+              targets: "fuzz_repartition_table_chaos"
             mode:
               name: "Local WAL repartition chaos"
+              id: "local-wal-repartition-chaos"
               minio: true
               kafka: false
               values: "with-minio-repartition-gc.yaml"
@@ -689,46 +740,31 @@ jobs:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
           max-total-time: 120
-      - name: Describe Nodes
-        if: failure()
-        shell: bash
-        run: |
-          kubectl describe nodes
-      - name: Describe pods
-        if: failure()
-        shell: bash
-        run: |
-          kubectl describe pod -n my-greptimedb
-      - name: Export kind logs
-        if: failure()
-        shell: bash
-        run: |
-          kind export logs /tmp/kind
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/kind
-          retention-days: 3
-      - name: Collect monitor dumps
-        if: failure()
+          fail-fast: 'true'
+          collect-cluster-artifacts: 'true'
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
         shell: bash
         env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'true'
           GT_FUZZ_NS: my-greptimedb
           GT_FUZZ_CLUSTER: my-greptimedb
           GT_MONITOR_HTTP_LOCAL_PORT: 14000
-          GT_MONITOR_ARTIFACT_DIR: /tmp/fuzz-monitor-dumps
         run: |
-          bash .github/scripts/collect-fuzz-monitor-artifacts.sh          
-      - name: Upload monitor dumps
-        if: failure()
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            timeout --signal=TERM --kill-after=10s 180s \
+              .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/fuzz-monitor-dumps
+          name: fuzz-distributed-chaos-${{ matrix.mode.id }}-${{ matrix.group.id }}
+          path: /tmp/greptime-fuzz-artifacts
           if-no-files-found: warn
           retention-days: 3
       - name: Delete cluster

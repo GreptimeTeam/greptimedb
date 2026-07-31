@@ -1,19 +1,38 @@
 name: Fuzz Test
-description: 'Fuzz test given setup and service'
+description: 'Run one or more fuzz targets against the prepared service'
 inputs:
-  target:
-    description: "The fuzz target to test"
+  targets:
+    description: "Newline-separated fuzz targets to test"
+    required: true
+  group:
+    description: "Stable identifier for this group of fuzz targets"
     required: true
   max-total-time:
-    description: "Max total time(secs)"
+    description: "Maximum libFuzzer runtime per target in seconds"
     required: true
   unstable:
     default: 'false'
-    description: "Enable unstable feature"
+    description: "Enable the unstable feature"
+  fail-fast:
+    default: 'true'
+    description: "Stop this group after the first failed target"
+  collect-cluster-artifacts:
+    default: 'false'
+    description: "Collect Kind, Kubernetes, and monitor artifacts on target failure"
+  artifact-root:
+    default: '/tmp/greptime-fuzz-artifacts'
+    description: "Directory that stores target-scoped diagnostic artifacts"
 runs:
   using: composite
   steps:
-  - name: Run Fuzz Test
-    shell: bash
-    run: cargo fuzz run ${{ inputs.target }} --fuzz-dir tests-fuzz -D -s none ${{ inputs.unstable == 'true' && '--features=unstable' || '' }} -- -max_total_time=${{ inputs.max-total-time }}
-
+    - name: Run Fuzz Tests
+      shell: bash
+      env:
+        FUZZ_TARGETS: ${{ inputs.targets }}
+        FUZZ_GROUP: ${{ inputs.group }}
+        FUZZ_MAX_TOTAL_TIME: ${{ inputs.max-total-time }}
+        FUZZ_UNSTABLE: ${{ inputs.unstable }}
+        FUZZ_FAIL_FAST: ${{ inputs.fail-fast }}
+        FUZZ_COLLECT_CLUSTER_ARTIFACTS: ${{ inputs.collect-cluster-artifacts }}
+        FUZZ_ARTIFACT_ROOT: ${{ inputs.artifact-root }}
+      run: .github/scripts/run-fuzz-targets.sh

@@ -23,34 +23,30 @@ are the CI jobs that use `.github/actions/fuzz-test`:
 - `distributed-fuzztest` — distributed cluster fuzz targets.
 - `distributed-fuzztest-with-chaos` — distributed fuzz targets with Chaos Mesh.
 
-Standalone fuzz jobs usually only provide the GitHub Actions job log, except
-`unstable-fuzztest`, which uploads the `unstable-fuzz-logs` artifact from
-`/tmp/unstable-greptime/` on failure. Distributed fuzz jobs additionally export
-cluster artifacts on failure.
+Each matrix job runs a semantic group of targets on one prepared environment.
+The group defaults to fail-fast: after the first target failure it captures that
+target's diagnostics and marks the remaining targets as skipped. The workflow
+strategy still uses `fail-fast: false`, so failures do not cancel other groups.
 
-The reusable action `.github/actions/fuzz-test/action.yaml` runs:
+The reusable action `.github/actions/fuzz-test/action.yaml` delegates each target
+to `.github/scripts/run-fuzz-targets.sh`, which runs:
 
 ```bash
-cargo fuzz run <target> --fuzz-dir tests-fuzz -D -s none ... -- -max_total_time=<seconds>
+cargo fuzz run <target> --fuzz-dir tests-fuzz -D -s none ... -- \
+  -max_total_time=<seconds> -artifact_prefix=<target-dir>/libfuzzer/
 ```
 
-Distributed fuzz jobs are the ones that export cluster artifacts. In the current
-workflow they upload these names on failure:
-
-- `fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}` from
-  `/tmp/kind` after `kind export logs /tmp/kind`.
-- `fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}` from
-  `/tmp/fuzz-monitor-dumps`, collected by
-  `.github/scripts/collect-fuzz-monitor-artifacts.sh`.
-- `fuzz-tests-csv-dumps-${{ matrix.mode.name }}-${{ matrix.target }}` from
-  `/tmp/greptime-fuzz-dumps` for the non-chaos distributed fuzz job.
-
-Example: for run `29000666156`, job `86062894741`, target `fuzz_alter_table`, and
-mode `Remote WAL`, the kind logs artifact is:
+Failed jobs upload one group artifact. Its stable name identifies the job kind,
+mode, and group, for example:
 
 ```text
-fuzz-tests-kind-logs-Remote WAL-fuzz_alter_table
+fuzz-distributed-remote-wal-database-and-regular-table
 ```
+
+The artifact contains `manifest.json`, `summary.md`, and one directory per target
+under `targets/<target>/`. A failed distributed target can include `fuzz.log`,
+libFuzzer reproducers, CSV/SQL traces, Kind logs, monitor dumps, and Kubernetes
+state. Setup failures use `targets/setup/`.
 
 ## Inputs
 
@@ -76,16 +72,16 @@ JOB_ID=86062894741
 ```
 
 When the input is a job URL, do not ask for the target name first. Use the job id
-to fetch metadata, then derive the target and mode from the job name. A distributed
-fuzz job name usually contains the CI target tuple:
+to fetch metadata, then derive the group and mode from the job name. A distributed
+fuzz job name usually contains the CI group tuple:
 
 ```text
-Fuzz Test (Distributed, <mode>, <target>)
-Fuzz Test with Chaos (Distributed, <mode>, <target>)
+Fuzz Test (Distributed, <mode>, <group>)
+Fuzz Test with Chaos (Distributed, <mode>, <group>)
 ```
 
 If only a run URL is provided, list failed jobs and choose the fuzz job matching the
-target/mode. Ask only when multiple fuzz jobs are plausible and there is no target,
+group/mode. Ask only when multiple fuzz jobs are plausible and there is no group,
 mode, artifact, or job-url clue.
 
 ## Prerequisites
@@ -143,12 +139,10 @@ jq -r --arg id "$JOB_ID" '
 ' jobs.json > job-summary.txt
 ```
 
-Record the fuzz job kind, matrix mode, target, failed step, event type, branch, and
-head SHA. Do not assume `main` for PR or merge-queue runs.
-
-For the common job-link input, parse `mode` and `target` from the captured job name
-and use them to construct artifact names. If parsing is inconvenient, keep the raw
-job name and match artifacts by the target substring first, then by mode substring.
+Record the fuzz job kind, matrix mode, group, failed step, event type, branch, and
+head SHA. Do not assume `main` for PR or merge-queue runs. The failed target is
+authoritative in the downloaded artifact's `manifest.json`; do not guess it from
+the group name.
 
 ## 2. Download CI output for the failed job
 
@@ -193,22 +187,15 @@ gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
 jq -r '.artifacts[] | [.id, .name, .expired, .size_in_bytes] | @tsv' artifacts.json
 ```
 
-Derive the expected artifact names from the failed job name:
-
-- Job name shape: `Fuzz Test (Distributed, <mode>, <target>)` or
-  `Fuzz Test with Chaos (Distributed, <mode>, <target>)`.
-- Expected kind artifact: `fuzz-tests-kind-logs-<mode>-<target>`.
-- Expected monitor artifact: `fuzz-tests-monitor-dumps-<mode>-<target>`.
-- Expected CSV artifact: `fuzz-tests-csv-dumps-<mode>-<target>` when present.
-
-For a CI target/job link, this derivation is mandatory: the job URL gives `JOB_ID`,
-`jobs.json` gives the full matrix job name, and the matrix job name gives
-`<mode>`/`<target>`. Do not rely on the user to provide the artifact name.
+Match the one group artifact by job kind, mode slug, and group slug. If the display
+name does not make the slug obvious, list the run artifacts and choose the unique
+`fuzz-*` artifact whose suffix matches the group. Do not search for separate Kind,
+monitor, or CSV artifacts; these are target subdirectories in the group artifact.
 
 Download exact artifacts when possible:
 
 ```bash
-ARTIFACT='fuzz-tests-kind-logs-Remote WAL-fuzz_alter_table'
+ARTIFACT='fuzz-distributed-remote-wal-database-and-regular-table'
 gh run download "$RUN_ID" --repo "$REPO" --name "$ARTIFACT" --dir artifacts/"$ARTIFACT"
 ```
 
@@ -225,30 +212,45 @@ mkdir -p artifacts/"$ARTIFACT"
 unzip -oq artifact-$ARTIFACT_ID.zip -d artifacts/"$ARTIFACT"
 ```
 
-For distributed fuzz failures, download at least the matching kind logs. Also
-download matching monitor dumps and CSV dumps when available. Note expired or
-missing artifacts explicitly; retention is currently short (`retention-days: 3`).
+After download, read the manifest before the bulk logs:
+
+```bash
+jq -r '.[] | [.target, .status, .exit_code, .after_prior_failure, .artifact_collection] | @tsv' \
+  artifacts/"$ARTIFACT"/manifest.json
+```
+
+Select the first `failure` entry as the primary target. Entries with
+`skipped_after_failure` did not run; entries with `after_prior_failure=true` ran
+against a potentially contaminated shared environment. Note expired or missing
+artifacts explicitly; retention is currently short (`retention-days: 3`).
 
 ## 4. Understand artifact contents
 
-Kind logs come from `kind export logs /tmp/kind` and usually include Kubernetes
-state plus container logs. Prioritize:
+Evidence for target `<target>` is rooted at
+`artifacts/$ARTIFACT/targets/<target>/`. `result.json` records timestamps, status,
+exit code, fuzz budget, prior-failure provenance, and artifact collection status.
+`fuzz.log` is the complete output of that target's `cargo fuzz run` invocation.
+
+Kind logs under `targets/<target>/kind/` come from an immediate failure snapshot
+and usually include Kubernetes state plus container logs. Prioritize:
 
 - GreptimeDB component logs: frontend, datanode, metasrv, flownode, monitor.
 - Kubernetes pod descriptions/events: restarts, OOMKilled, scheduling, image pull,
   volume, DNS, and network issues.
 - External service logs: etcd, Kafka, Minio, Chaos Mesh, Kafka WAL helper.
 
-Monitor dumps are collected by `.github/scripts/collect-fuzz-monitor-artifacts.sh`.
-They may include:
+Monitor dumps under `targets/<target>/monitor/` are collected by
+`.github/scripts/collect-fuzz-monitor-artifacts.sh`. They may include:
 
 - `state.log`, `sql.log`, `copy.log`, `port-forward.log`;
 - `*.show_create_table.sql` for `_gt_logs` and OpenTelemetry trace tables;
 - parquet dumps for `_gt_logs`, `opentelemetry_traces`,
   `opentelemetry_traces_operations`, and `opentelemetry_traces_services`.
 
-CSV dumps come from fuzz targets under `/tmp/greptime-fuzz-dumps` and can contain
-target-specific generated operations or state snapshots.
+CSV and SQL traces are under `targets/<target>/csv/`. LibFuzzer crash or timeout
+reproducers are under `targets/<target>/libfuzzer/`. Kubernetes descriptions and
+events are under `targets/<target>/kubernetes/`. Standalone service logs are under
+`targets/<target>/service/` when available.
 
 ## 5. Build a layered diagnosis model
 
