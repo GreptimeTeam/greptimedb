@@ -339,7 +339,7 @@ mod tests {
         let second = runtime.spawn_blocking(move || second_started_tx.send(()).unwrap());
         assert!(
             second_started_rx
-                .recv_timeout(Duration::from_millis(100))
+                .recv_timeout(Duration::from_secs(1))
                 .is_err()
         );
 
