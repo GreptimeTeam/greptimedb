@@ -14,7 +14,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use api::v1::helper::row;
@@ -42,7 +42,9 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{
+    OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 
 use crate::error::{
     CacheGetSnafu, CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu,
@@ -74,7 +76,12 @@ pub struct MetadataRegion {
     /// values are deleted from the metadata region.
     cache: Cache<RegionId, RegionMetadataCacheEntry>,
     /// Serializes cache fills with metadata writes and invalidation per metadata region.
-    cache_access_locks: RwLock<HashMap<RegionId, Arc<RwLock<()>>>>,
+    ///
+    /// Holds weak references only; strong references live in [`CacheAccessLockLease`]s
+    /// returned by [`Self::cache_access_lock`]. The last lease dropped for a region
+    /// removes its entry, so the map self-cleans on success, error, or cancellation
+    /// without coupling cleanup to region drop.
+    cache_access_locks: CacheAccessLockRegistry,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
@@ -86,6 +93,63 @@ pub struct MetadataRegion {
 struct RegionMetadataCacheEntry {
     key_values: Arc<BTreeMap<String, String>>,
     size: usize,
+}
+
+/// Weak index of per-region cache access locks.
+///
+/// The mutex is never held across `.await`.
+type CacheAccessLockRegistry = Arc<Mutex<HashMap<RegionId, Weak<RwLock<()>>>>>;
+
+/// Lease that keeps a per-region cache access lock alive.
+///
+/// Dropping the last lease for a region removes the matching registry entry.
+struct CacheAccessLockLease {
+    registry: CacheAccessLockRegistry,
+    region_id: RegionId,
+    /// Always `Some` while the lease is alive.
+    ///
+    /// `Option` lets `Drop` release the strong `Arc` before pruning the weak entry.
+    lock: Option<Arc<RwLock<()>>>,
+}
+
+impl CacheAccessLockLease {
+    async fn read(&self) -> RwLockReadGuard<'_, ()> {
+        self.lock().read().await
+    }
+
+    async fn write(&self) -> RwLockWriteGuard<'_, ()> {
+        self.lock().write().await
+    }
+
+    fn lock(&self) -> &RwLock<()> {
+        self.lock
+            .as_deref()
+            .expect("cache access lock lease must hold a lock")
+    }
+}
+
+impl Drop for CacheAccessLockLease {
+    fn drop(&mut self) {
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
+        let weak = Arc::downgrade(&lock);
+        // Release this lease before pruning; concurrent drops must not observe
+        // each other's strong refs.
+        drop(lock);
+
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = registry.get(&self.region_id) else {
+            return;
+        };
+        // `ptr_eq` protects a newer lock for the same region; `upgrade` ensures it is dead.
+        if current.ptr_eq(&weak) && current.upgrade().is_none() {
+            registry.remove(&self.region_id);
+        }
+    }
 }
 
 /// The max size of the region metadata cache.
@@ -106,7 +170,7 @@ impl MetadataRegion {
         Self {
             mito,
             cache,
-            cache_access_locks: RwLock::new(HashMap::new()),
+            cache_access_locks: CacheAccessLockRegistry::default(),
             logical_region_lock: RwLock::new(HashMap::new()),
         }
     }
@@ -393,13 +457,28 @@ impl MetadataRegion {
         })
     }
 
-    async fn cache_access_lock(&self, metadata_region_id: RegionId) -> Arc<RwLock<()>> {
-        self.cache_access_locks
-            .write()
-            .await
-            .entry(metadata_region_id)
-            .or_default()
-            .clone()
+    /// Acquires the cache access lock lease for `metadata_region_id`.
+    ///
+    /// The lease must be kept alive for as long as any guard taken from it.
+    fn cache_access_lock(&self, metadata_region_id: RegionId) -> CacheAccessLockLease {
+        let mut registry = self
+            .cache_access_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = match registry.get(&metadata_region_id).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(RwLock::new(()));
+                registry.insert(metadata_region_id, Arc::downgrade(&lock));
+                lock
+            }
+        };
+
+        CacheAccessLockLease {
+            registry: Arc::clone(&self.cache_access_locks),
+            region_id: metadata_region_id,
+            lock: Some(lock),
+        }
     }
 
     async fn get_all_with_prefix(
@@ -407,7 +486,7 @@ impl MetadataRegion {
         metadata_region_id: RegionId,
         prefix: &str,
     ) -> Result<HashMap<String, String>> {
-        let cache_access_lock = self.cache_access_lock(metadata_region_id).await;
+        let cache_access_lock = self.cache_access_lock(metadata_region_id);
         let _cache_guard = cache_access_lock.read().await;
         let region_metadata = self
             .cache
@@ -454,7 +533,7 @@ impl MetadataRegion {
         metadata_region_id: RegionId,
         request: RegionRequest,
     ) -> Result<()> {
-        let cache_access_lock = self.cache_access_lock(metadata_region_id).await;
+        let cache_access_lock = self.cache_access_lock(metadata_region_id);
         let _cache_guard = cache_access_lock.write().await;
         self.mito
             .handle_request(metadata_region_id, request)
@@ -924,7 +1003,7 @@ mod test {
         let cache_fill = {
             let metadata_region = Arc::clone(&metadata_region);
             tokio::spawn(async move {
-                let cache_access_lock = metadata_region.cache_access_lock(metadata_region_id).await;
+                let cache_access_lock = metadata_region.cache_access_lock(metadata_region_id);
                 let _cache_guard = cache_access_lock.read().await;
                 metadata_region
                     .cache
@@ -977,5 +1056,51 @@ mod test {
             .await
             .unwrap();
         assert_eq!(logical_columns.len(), 2);
+        assert!(
+            metadata_region
+                .cache_access_locks
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_access_locks_self_clean() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
+        let registry_len = || metadata_region.cache_access_locks.lock().unwrap().len();
+
+        // Metadata reads and writes leave no lock entries behind.
+        let logical_region_id = RegionId::new(1024, 1);
+        add_test_logical_region(&metadata_region, physical_region_id, logical_region_id)
+            .await
+            .unwrap();
+        metadata_region
+            .logical_columns(physical_region_id, logical_region_id)
+            .await
+            .unwrap();
+        assert_eq!(registry_len(), 0);
+
+        // Concurrent leases share one lock; the entry lives until the last lease drops.
+        let first = metadata_region.cache_access_lock(metadata_region_id);
+        let second = metadata_region.cache_access_lock(metadata_region_id);
+        assert!(Arc::ptr_eq(
+            first.lock.as_ref().unwrap(),
+            second.lock.as_ref().unwrap()
+        ));
+        drop(first);
+        assert_eq!(registry_len(), 1);
+        drop(second);
+        assert_eq!(registry_len(), 0);
+
+        // A new acquisition after cleanup mints a fresh lock and entry.
+        let third = metadata_region.cache_access_lock(metadata_region_id);
+        assert_eq!(registry_len(), 1);
+        drop(third);
+        assert_eq!(registry_len(), 0);
     }
 }
