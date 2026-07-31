@@ -22,10 +22,10 @@ use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use store_api::storage::RegionId;
 
+use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
-use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::{CompactionOutput, get_expired_ssts};
+use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges

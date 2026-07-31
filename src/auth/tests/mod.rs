@@ -19,11 +19,14 @@ use api::v1::greptime_request::Request;
 use auth::error::Error::InternalState;
 use auth::error::InternalStateSnafu;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
-    UserInfoRef,
+    AccessMode, OPENTSDB_WRITE, PermissionAction, PermissionChecker, PermissionCheckerRef,
+    PermissionReq, PermissionResp, PermissionTableTargets, UserInfoRef,
 };
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
+
+const DOWNSTREAM_QUERY: PermissionAction = PermissionAction::read("downstream.query");
+const DOWNSTREAM_WRITE: PermissionAction = PermissionAction::write("downstream.write");
 
 struct DummyPermissionChecker;
 
@@ -72,7 +75,20 @@ fn test_permission_checker() {
     );
     assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
-    let err_result =
-        checker.check_permission(auth::userinfo_by_name(None), PermissionReq::Opentsdb);
+    let err_result = checker.check_permission(
+        auth::userinfo_by_name(None),
+        PermissionReq::Action(OPENTSDB_WRITE),
+    );
     assert_matches!(err_result, Err(InternalState { msg }) if msg == "testing");
+}
+
+#[test]
+fn test_downstream_can_define_permission_actions() {
+    assert_eq!("downstream.query", DOWNSTREAM_QUERY.name());
+    assert_eq!(AccessMode::Read, DOWNSTREAM_QUERY.access_mode());
+    assert!(PermissionReq::Action(DOWNSTREAM_QUERY).is_readonly());
+
+    assert_eq!("downstream.write", DOWNSTREAM_WRITE.name());
+    assert_eq!(AccessMode::Write, DOWNSTREAM_WRITE.access_mode());
+    assert!(PermissionReq::Action(DOWNSTREAM_WRITE).is_write());
 }

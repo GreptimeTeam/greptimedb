@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
     PermissionTableTargets,
 };
 use client::Output;
@@ -94,7 +94,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .check_permission(ctx.current_user(), PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
 
         let interceptor_ref = self
@@ -122,7 +122,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let (requests, rows, semantic_index) =
             otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
-        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Otlp)
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
@@ -173,7 +173,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .check_permission(ctx.current_user(), PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
 
         let interceptor_ref = self
@@ -186,7 +186,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         let conventions = trace_conventions(&request);
         let spans = otlp::trace::span::parse(request);
         let targets = trace_permission_targets(&table_name, &spans, &ctx);
-        self.check_table_permission(&ctx, PermissionReq::Otlp, targets)
+        self.check_table_permission(&ctx, PermissionReq::Action(OTLP_WRITE), targets)
             .context(AuthSnafu)?;
         self.ingest_trace_spans(
             pipeline_handler,
@@ -213,7 +213,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .check_permission(ctx.current_user(), PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
 
         let interceptor_ref = self
@@ -243,7 +243,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let batches = opt_req.as_req_iter(ctx).collect::<Vec<_>>();
         for (temp_ctx, requests) in &batches {
-            self.check_row_insert_permission(requests, temp_ctx, PermissionReq::Otlp)
+            self.check_row_insert_permission(requests, temp_ctx, PermissionReq::Action(OTLP_WRITE))
                 .context(AuthSnafu)?;
         }
 
