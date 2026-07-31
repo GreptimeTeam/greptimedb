@@ -71,7 +71,7 @@ pub struct CompatCommand {
     #[clap(long)]
     to_bins_dir: Option<PathBuf>,
 
-    /// Version of the "to" GreptimeDB binary (e.g. "v0.9.5") or "current".
+    /// Version of the "to" GreptimeDB binary (e.g. "v1.1.4") or "current".
     /// Downloads the release binary when needed. Cannot be used with
     /// `--to-bins-dir`.
     #[clap(long)]
@@ -85,6 +85,10 @@ pub struct CompatCommand {
     /// Name of test cases to run. Accepts a regexp.
     #[clap(long, default_value = ".*")]
     test_filter: String,
+
+    /// Require exactly this many cases after all filters are applied.
+    #[clap(long)]
+    expect_cases: Option<usize>,
 
     /// Topology to start for the compatibility test.
     #[clap(long, value_enum, default_value_t = CompatTopology::Distributed)]
@@ -154,6 +158,11 @@ impl CompatCommand {
         });
 
         if cases.is_empty() {
+            if let Some(expected_cases) = self.expect_cases {
+                panic!(
+                    "Expected {expected_cases} compatibility cases after name and topology filtering, found 0"
+                );
+            }
             if dry_run {
                 println!(
                     "DRY-RUN: no compat cases found matching filter '{}' and topology '{}'",
@@ -313,6 +322,15 @@ impl CompatCommand {
             println!(
                 "Version-range filtering: {} → {} cases",
                 pre_filter_count,
+                cases.len()
+            );
+        }
+
+        if let Some(expected_cases) = self.expect_cases {
+            assert_eq!(
+                cases.len(),
+                expected_cases,
+                "Expected {expected_cases} compatibility cases after all filtering, found {}",
                 cases.len()
             );
         }

@@ -132,6 +132,26 @@ def run_command(command: list[str], *, env: dict[str, str] | None = None) -> Non
     subprocess.run(command, check=True, env=env)
 
 
+def run_compat(
+    *,
+    base_command: list[str],
+    preview_title: str,
+    compatibility_title: str,
+    preserve_state: bool,
+) -> None:
+    with github_group(preview_title):
+        run_command([*base_command, "--dry-run"])
+
+    real_command = [*base_command]
+    if preserve_state:
+        real_command.append("--preserve-state")
+
+    env = os.environ.copy()
+    env.setdefault("RUST_BACKTRACE", "1")
+    with github_group(compatibility_title):
+        run_command(real_command, env=env)
+
+
 def run_for_version(
     *,
     runner: Path,
@@ -148,17 +168,12 @@ def run_for_version(
         str(to_bins_dir),
     ]
 
-    with github_group(f"Preview {from_version} -> current"):
-        run_command([*base_command, "--dry-run"])
-
-    real_command = [*base_command]
-    if preserve_state:
-        real_command.append("--preserve-state")
-
-    env = os.environ.copy()
-    env.setdefault("RUST_BACKTRACE", "1")
-    with github_group(f"Compatibility {from_version} -> current"):
-        run_command(real_command, env=env)
+    run_compat(
+        base_command=base_command,
+        preview_title=f"Preview {from_version} -> current",
+        compatibility_title=f"Compatibility {from_version} -> current",
+        preserve_state=preserve_state,
+    )
 
 
 def run_downgrade_for_version(
@@ -180,19 +195,16 @@ def run_downgrade_for_version(
             topology,
             "--test-filter",
             "^downgrade_compatibility$",
+            "--expect-cases",
+            "1",
         ]
 
-        with github_group(f"Preview current -> {to_version} ({topology})"):
-            run_command([*base_command, "--dry-run"])
-
-        real_command = [*base_command]
-        if preserve_state:
-            real_command.append("--preserve-state")
-
-        env = os.environ.copy()
-        env.setdefault("RUST_BACKTRACE", "1")
-        with github_group(f"Compatibility current -> {to_version} ({topology})"):
-            run_command(real_command, env=env)
+        run_compat(
+            base_command=base_command,
+            preview_title=f"Preview current -> {to_version} ({topology})",
+            compatibility_title=f"Compatibility current -> {to_version} ({topology})",
+            preserve_state=preserve_state,
+        )
 
 
 def main() -> int:
