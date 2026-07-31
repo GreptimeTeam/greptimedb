@@ -1379,16 +1379,15 @@ impl FlushScheduler {
         None
     }
 
-    /// Notifies the scheduler that the flush job is failed.
+    /// Notifies the scheduler that the flush job failed.
+    ///
+    /// Returns pending drop and truncate requests in their original order. All other pending
+    /// requests are failed with `err`.
     pub(crate) fn on_flush_failed(
         &mut self,
         region_id: RegionId,
         err: Arc<Error>,
-    ) -> Option<(
-        Vec<SenderDdlRequest>,
-        Vec<SenderWriteRequest>,
-        Vec<SenderBulkRequest>,
-    )> {
+    ) -> Vec<SenderDdlRequest> {
         if matches!(err.as_ref(), Error::FlushCancelled { .. }) {
             info!("Region {} flush was cancelled", region_id);
         } else {
@@ -1397,7 +1396,9 @@ impl FlushScheduler {
         }
 
         // Remove this region.
-        let flush_status = self.region_status.remove(&region_id)?;
+        let Some(flush_status) = self.region_status.remove(&region_id) else {
+            return Vec::new();
+        };
 
         flush_status.on_failure(err)
     }
@@ -1567,14 +1568,8 @@ impl FlushStatus {
             .any(|ddl| matches!(ddl.request, DdlRequest::Drop(_) | DdlRequest::Truncate(_)))
     }
 
-    fn on_failure(
-        self,
-        err: Arc<Error>,
-    ) -> Option<(
-        Vec<SenderDdlRequest>,
-        Vec<SenderWriteRequest>,
-        Vec<SenderBulkRequest>,
-    )> {
+    /// Fails pending requests except drop and truncate, which the worker must revalidate.
+    fn on_failure(self, err: Arc<Error>) -> Vec<SenderDdlRequest> {
         if let Some(mut task) = self.pending_task {
             task.on_failure(err.clone());
         }
@@ -1587,13 +1582,6 @@ impl FlushStatus {
                     region_id: self.region_id,
                 }));
             }
-        }
-        if !lifecycle_ddls.is_empty() {
-            return Some((
-                lifecycle_ddls,
-                self.pending_writes,
-                self.pending_bulk_writes,
-            ));
         }
         for write_req in self.pending_writes {
             write_req
@@ -1609,26 +1597,14 @@ impl FlushStatus {
                     region_id: self.region_id,
                 }));
         }
-        None
+        lifecycle_ddls
     }
 
     fn fail_all(self, err: Arc<Error>) {
         let region_id = self.region_id;
-        let Some((ddls, writes, bulk_writes)) = self.on_failure(err.clone()) else {
-            return;
-        };
+        let ddls = self.on_failure(err.clone());
         for ddl in ddls {
             ddl.sender
-                .send(Err(err.clone()).context(FlushRegionSnafu { region_id }));
-        }
-        for write in writes {
-            write
-                .sender
-                .send(Err(err.clone()).context(FlushRegionSnafu { region_id }));
-        }
-        for bulk_write in bulk_writes {
-            bulk_write
-                .sender
                 .send(Err(err.clone()).context(FlushRegionSnafu { region_id }));
         }
     }
@@ -1667,6 +1643,7 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::{OpType, Rows};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use mito_codec::row_converter::build_primary_key_codec;
@@ -1678,6 +1655,7 @@ mod tests {
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
     use crate::memtable::{Memtable, RangesOptions};
+    use crate::request::WriteRequest;
     use crate::schedule::scheduler::Scheduler;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
@@ -1753,6 +1731,23 @@ mod tests {
                 request: converter.convert().unwrap(),
                 region_metadata: Some(metadata),
                 partition_expr_version: None,
+            },
+            receiver,
+        )
+    }
+
+    fn new_test_write_request(
+        region_id: RegionId,
+    ) -> (
+        SenderWriteRequest,
+        oneshot::Receiver<Result<store_api::region_request::AffectedRows>>,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        let request = WriteRequest::new(region_id, OpType::Put, Rows::default(), None).unwrap();
+        (
+            SenderWriteRequest {
+                sender: OptionOutputTx::from(sender),
+                request,
             },
             receiver,
         )
@@ -1975,7 +1970,8 @@ mod tests {
             pending_bulk_writes: vec![bulk_req],
         };
 
-        status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        let pending_ddls = status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        assert!(pending_ddls.is_empty());
 
         let err = output_rx
             .await
@@ -1985,39 +1981,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_failure_retains_truncate_ddl_and_pending_writes() {
+    async fn test_flush_failure_retains_lifecycle_ddls_and_fails_pending_writes() {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
-        let (bulk_req, mut bulk_rx) = new_test_bulk_request(region_id);
-        let (ddl_tx, ddl_rx) = oneshot::channel();
+        let (write_req, write_rx) = new_test_write_request(region_id);
+        let (bulk_req, bulk_rx) = new_test_bulk_request(region_id);
+        let (truncate_tx, mut truncate_rx) = oneshot::channel();
+        let (drop_tx, mut drop_rx) = oneshot::channel();
         let status = FlushStatus {
             region_id,
             version_control,
             state: CancellableTaskState::new(),
             pending_task: None,
             closing: false,
-            pending_ddls: vec![SenderDdlRequest {
-                region_id,
-                sender: OptionOutputTx::from(ddl_tx),
-                request: DdlRequest::Truncate(
-                    store_api::region_request::RegionTruncateRequest::All,
-                ),
-            }],
-            pending_writes: Vec::new(),
+            pending_ddls: vec![
+                SenderDdlRequest {
+                    region_id,
+                    sender: OptionOutputTx::from(truncate_tx),
+                    request: DdlRequest::Truncate(
+                        store_api::region_request::RegionTruncateRequest::All,
+                    ),
+                },
+                SenderDdlRequest {
+                    region_id,
+                    sender: OptionOutputTx::from(drop_tx),
+                    request: DdlRequest::Drop(store_api::region_request::RegionDropRequest {
+                        fast_path: false,
+                        force: false,
+                        partial_drop: false,
+                    }),
+                },
+            ],
+            pending_writes: vec![write_req],
             pending_bulk_writes: vec![bulk_req],
         };
 
-        let (mut ddls, writes, bulk_writes) = status
-            .on_failure(Arc::new(RegionBusySnafu { region_id }.build()))
-            .expect("truncate should survive flush failure");
-        assert_eq!(1, ddls.len());
-        assert!(writes.is_empty());
-        assert_eq!(1, bulk_writes.len());
+        let ddls = status.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
+        assert_eq!(2, ddls.len());
         assert!(matches!(ddls[0].request, DdlRequest::Truncate(_)));
+        assert!(matches!(ddls[1].request, DdlRequest::Drop(_)));
 
-        ddls.pop().unwrap().sender.send(Ok(0));
-        assert_eq!(0, ddl_rx.await.unwrap().unwrap());
-        assert!(bulk_rx.try_recv().is_err());
+        let write_err = write_rx
+            .await
+            .expect("pending write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(write_err.status_code(), StatusCode::RegionBusy);
+        let bulk_err = bulk_rx
+            .await
+            .expect("pending bulk write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(bulk_err.status_code(), StatusCode::RegionBusy);
+
+        assert!(truncate_rx.try_recv().is_err());
+        assert!(drop_rx.try_recv().is_err());
+        for ddl in ddls {
+            ddl.sender.send(Ok(0));
+        }
+        assert_eq!(0, truncate_rx.await.unwrap().unwrap());
+        assert_eq!(0, drop_rx.await.unwrap().unwrap());
     }
 
     #[tokio::test]

@@ -60,16 +60,14 @@ fn resolve_flush_reason(
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
-        let cancelled = request.is_cancelled();
-        let pending = self.flush_scheduler.on_flush_failed(region_id, request.err);
-        debug!(
-            "Flush terminated for region {}, cancelled: {}, handling pending requests",
-            region_id, cancelled
-        );
-        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) = pending {
-            self.handle_ddl_requests(&mut ddl_requests).await;
-            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
-                .await;
+        let mut pending_ddls = self.flush_scheduler.on_flush_failed(region_id, request.err);
+        if !pending_ddls.is_empty() {
+            info!(
+                "Flush terminated for region {}, handling {} pending lifecycle DDL requests",
+                region_id,
+                pending_ddls.len()
+            );
+            self.handle_ddl_requests(&mut pending_ddls).await;
         }
         // Maybe flush worker again.
         self.maybe_flush_worker();
