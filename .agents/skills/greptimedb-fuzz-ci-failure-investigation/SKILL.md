@@ -15,7 +15,7 @@ comment on PRs, or delete artifacts unless the user explicitly asks.
 
 ## Scope
 
-Use this skill for fuzz CI only. In `.github/workflows/develop.yml`, fuzz failures
+Use this skill for fuzz CI only. In `.github/workflows/integration.yml`, fuzz failures
 are the CI jobs that use `.github/actions/fuzz-test`:
 
 - `fuzztest` — standalone fuzz targets.
@@ -29,12 +29,17 @@ target's diagnostics and marks the remaining targets as skipped. The workflow
 strategy still uses `fail-fast: false`, so failures do not cancel other groups.
 
 The reusable action `.github/actions/fuzz-test/action.yaml` delegates each target
-to `.github/scripts/run-fuzz-targets.sh`, which runs:
+to `.github/scripts/run-fuzz-targets.sh`. CI passes `FUZZ_BIN_DIR`, so the script
+runs the prebuilt target executable:
 
 ```bash
-cargo fuzz run <target> --fuzz-dir tests-fuzz -D -s none ... -- \
-  -max_total_time=<seconds> -artifact_prefix=<target-dir>/libfuzzer/
+<prebuilt-fuzz-binary> -max_total_time=<seconds> \
+  -artifact_prefix=<target-dir>/libfuzzer/
 ```
+
+Without `FUZZ_BIN_DIR`, such as during local reproduction, the script falls back
+to `cargo fuzz run <target> --fuzz-dir tests-fuzz -D -s none` with the same
+libFuzzer arguments.
 
 Failed jobs upload one group artifact. Its stable name identifies the job kind,
 mode, and group, for example:

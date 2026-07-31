@@ -41,20 +41,37 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - name: Build Binaries Cache
+        id: build-binaries-cache
+        uses: Swatinem/rust-cache@v2
         with:
           # Shares across multiple jobs
           shared-key: "build-binaries"
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - name: Report build binaries cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Build binaries cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.build-binaries-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin --force
+        run: |
+          started_epoch="$(date +%s)"
+          cargo install cargo-gc-bin --force
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- cargo-gc-bin install: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index"
+        run: |
+          started_epoch="$(date +%s)"
+          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index"
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -268,20 +285,30 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
-      - name: Rust Cache
+      - name: Fuzz Dependency Cache
+        id: fuzz-dependencies-cache
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
           shared-key: "fuzz-dependencies"
-          workspaces: "tests-fuzz -> tests-fuzz/target"
+          workspaces: ". -> target"
+          cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'pull_request' }}
       - name: Look up prebuilt fuzz binaries
         id: fuzz-binaries
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
           key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+      - name: Report fuzz cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Fuzz cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.fuzz-dependencies-cache.outputs.cache-hit }}"
+            printf -- '- Prebuilt binary cache: `%s`\n' "${{ steps.fuzz-binaries.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
       - name: Set Rust Fuzz
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
@@ -510,20 +537,37 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - name: Build Profile-CI Cache
+        id: build-greptime-ci-cache
+        uses: Swatinem/rust-cache@v2
         with:
           # Shares across multiple jobs
           shared-key: "build-greptime-ci"
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - name: Report profile-CI cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Build profile-CI cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.build-greptime-ci-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin --force
+        run: |
+          started_epoch="$(date +%s)"
+          cargo install cargo-gc-bin --force
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- cargo-gc-bin install: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Build greptime binary
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
+        run: |
+          started_epoch="$(date +%s)"
+          cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Profile-CI binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -615,15 +659,24 @@ jobs:
         with:
           cache: false
       - if: matrix.mode.kafkaWalHelper
-        name: Rust Cache
+        name: Kafka WAL Helper Cache
+        id: kafka-wal-helper-cache
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
-          shared-key: "fuzz-tools"
-          workspaces: "tests-fuzz -> tests-fuzz/target"
-          cache-targets: "false"
+          prefix-key: "v1-kafka-wal-helper"
+          shared-key: "kafka-wal-helper"
+          workspaces: ". -> target"
+          cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - if: matrix.mode.kafkaWalHelper
+        name: Report Kafka WAL helper cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Kafka WAL helper cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.kafka-wal-helper-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
       - name: Download prebuilt fuzz binaries
         uses: actions/download-artifact@v4
         with:
@@ -650,7 +703,10 @@ jobs:
         name: Build Kafka WAL helper binary
         shell: bash
         run: |
+          started_epoch="$(date +%s)"
           cargo build --bin kafka_wal_helper
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Kafka WAL helper build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
           mkdir -p amd64
           cp target/debug/kafka_wal_helper amd64/kafka_wal_helper
       - if: matrix.mode.kafkaWalHelper
