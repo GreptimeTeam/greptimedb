@@ -25,7 +25,7 @@ use common_event_recorder::event_table::{
     PROCEDURE_ID_COLUMN as EVENT_TABLE_PROCEDURE_ID_COLUMN,
     PROCEDURE_STATE_COLUMN as EVENT_TABLE_PROCEDURE_STATE_COLUMN,
     PROCEDURE_TRIGGER_COLUMN as EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN,
-    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -314,9 +314,7 @@ fn assert_procedure_event_contract(
                 Value {
                     value_data: Some(ValueData::StringValue(String::new())),
                 },
-                Value {
-                    value_data: Some(ValueData::StringValue(procedure_trigger.to_string())),
-                },
+                jsonb_value(&serde_json::json!({"type": procedure_trigger})),
                 Value {
                     value_data: catalog_name.map(|value| ValueData::StringValue(value.to_string())),
                 },

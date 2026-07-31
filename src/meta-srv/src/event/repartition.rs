@@ -365,7 +365,7 @@ mod tests {
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
         PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN,
+        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
     use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -669,7 +669,7 @@ mod tests {
                     ValueData::StringValue(procedure_id.to_string()).into(),
                     ValueData::StringValue("Running".to_string()).into(),
                     ValueData::StringValue(String::new()).into(),
-                    ValueData::StringValue("Submitted".to_string()).into(),
+                    jsonb_value(&serde_json::json!({"type": "Submitted"})),
                     ValueData::StringValue("greptime".to_string()).into(),
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),

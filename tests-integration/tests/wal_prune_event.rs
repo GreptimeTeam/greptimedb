@@ -99,7 +99,7 @@ FROM greptime_private.events
 WHERE type = 'wal_prune'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
-  AND procedure_trigger = 'Succeeded'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND topic_name = '{topic_name}'
   AND prunable_entry_id = {pruned_entry_id}
   AND latest_offset = 3
