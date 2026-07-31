@@ -1907,7 +1907,6 @@ impl RowGroupReaderBuilder {
     ///
     /// The series reader uses this after computing its own primary-key-only row
     /// selection.
-    #[allow(dead_code)]
     pub(crate) async fn build_without_prefilter(
         &self,
         build_ctx: RowGroupBuildContext<'_>,

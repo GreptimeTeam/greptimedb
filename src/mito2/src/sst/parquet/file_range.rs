@@ -106,7 +106,6 @@ impl FileRange {
     }
 
     /// Returns encoded primary-key min/max statistics for this row group.
-    #[allow(dead_code)]
     pub(crate) fn primary_key_range(&self) -> Option<(&[u8], &[u8])> {
         let metadata = self.context.reader_builder.parquet_metadata();
         let num_columns = metadata.file_metadata().schema_descr().num_columns();
@@ -303,7 +302,6 @@ impl FileRange {
     /// This deliberately bypasses generic predicate prefiltering. The series
     /// pruner selected the row group independently, and non-tag simple predicates
     /// are applied after merge and dedup by the series reader.
-    #[allow(dead_code)]
     pub(crate) async fn reader_by_primary_key(
         &self,
         primary_key_filter: &mut dyn mito_codec::row_converter::PrimaryKeyFilter,
@@ -354,7 +352,6 @@ impl FileRange {
     }
 }
 
-#[allow(dead_code)]
 fn refine_primary_key_selection(
     masks: &[BooleanArray],
     original: &Option<RowSelection>,
