@@ -317,21 +317,4 @@ test_cluster_collector_honors_target_scope_and_namespace
 test_setup_failure_writes_artifact_contract
 test_setup_failure_keeps_manifest_when_collection_fails
 
-if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-  cat >>"${GITHUB_STEP_SUMMARY}" <<'EOF'
-## Fuzz orchestration script tests
-
-✅ All orchestration scenarios passed.
-
-- ordered execution and unstable arguments;
-- explicit and default fail-fast behavior;
-- continue-after-failure provenance;
-- invalid configuration rejection;
-- standalone service-log isolation;
-- Kubernetes, Kind, and monitor artifact isolation;
-- setup-failure manifest and summary contract, including collection failure;
-- target and group annotations, summaries, and reproduction commands.
-EOF
-fi
-
 printf 'All fuzz orchestration script tests passed.\n'
