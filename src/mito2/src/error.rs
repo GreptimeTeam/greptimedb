@@ -1600,6 +1600,7 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
+            | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
