@@ -73,10 +73,8 @@ pub struct MetadataRegion {
     /// The cache should be invalidated when any new values are put into the metadata region or any
     /// values are deleted from the metadata region.
     cache: Cache<RegionId, RegionMetadataCacheEntry>,
-    /// Serializes cache fills with metadata writes and invalidation.
-    ///
-    /// ponytail: This is global; shard it by metadata region if DDL contention becomes measurable.
-    cache_access_lock: RwLock<()>,
+    /// Serializes cache fills with metadata writes and invalidation per metadata region.
+    cache_access_locks: RwLock<HashMap<RegionId, Arc<RwLock<()>>>>,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
@@ -108,7 +106,7 @@ impl MetadataRegion {
         Self {
             mito,
             cache,
-            cache_access_lock: RwLock::new(()),
+            cache_access_locks: RwLock::new(HashMap::new()),
             logical_region_lock: RwLock::new(HashMap::new()),
         }
     }
@@ -395,12 +393,22 @@ impl MetadataRegion {
         })
     }
 
+    async fn cache_access_lock(&self, metadata_region_id: RegionId) -> Arc<RwLock<()>> {
+        self.cache_access_locks
+            .write()
+            .await
+            .entry(metadata_region_id)
+            .or_default()
+            .clone()
+    }
+
     async fn get_all_with_prefix(
         &self,
         metadata_region_id: RegionId,
         prefix: &str,
     ) -> Result<HashMap<String, String>> {
-        let _cache_guard = self.cache_access_lock.read().await;
+        let cache_access_lock = self.cache_access_lock(metadata_region_id).await;
+        let _cache_guard = cache_access_lock.read().await;
         let region_metadata = self
             .cache
             .try_get_with(metadata_region_id, self.load_all(metadata_region_id))
@@ -440,12 +448,14 @@ impl MetadataRegion {
             .await
     }
 
+    /// Writes metadata and invalidates the corresponding cache entry.
     async fn write_metadata(
         &self,
         metadata_region_id: RegionId,
         request: RegionRequest,
     ) -> Result<()> {
-        let _cache_guard = self.cache_access_lock.write().await;
+        let cache_access_lock = self.cache_access_lock(metadata_region_id).await;
+        let _cache_guard = cache_access_lock.write().await;
         self.mito
             .handle_request(metadata_region_id, request)
             .await
@@ -829,6 +839,24 @@ mod test {
         ])
     }
 
+    async fn add_test_logical_region(
+        metadata_region: &MetadataRegion,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+    ) -> Result<()> {
+        let column_metadatas = test_column_metadatas();
+        let logical_regions = std::iter::once((
+            logical_region_id,
+            column_metadatas
+                .iter()
+                .map(|(name, metadata)| (name.as_str(), metadata))
+                .collect::<HashMap<_, _>>(),
+        ));
+        metadata_region
+            .add_logical_regions(physical_region_id, true, logical_regions)
+            .await
+    }
+
     #[tokio::test]
     async fn add_logical_regions_to_meta_region() {
         let env = TestEnv::new().await;
@@ -881,9 +909,12 @@ mod test {
     }
 
     #[tokio::test]
-    async fn metadata_write_waits_for_cache_fill() {
+    async fn metadata_writes_are_synchronized_per_region() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
+        let other_physical_region_id = RegionId::new(2, 2);
+        env.create_physical_region(other_physical_region_id, "/test_dir2", vec![])
+            .await;
         let metadata_region = Arc::new(env.metadata_region());
         let physical_region_id = env.default_physical_region_id();
         let metadata_region_id = to_metadata_region_id(physical_region_id);
@@ -893,7 +924,8 @@ mod test {
         let cache_fill = {
             let metadata_region = Arc::clone(&metadata_region);
             tokio::spawn(async move {
-                let _cache_guard = metadata_region.cache_access_lock.read().await;
+                let cache_access_lock = metadata_region.cache_access_lock(metadata_region_id).await;
+                let _cache_guard = cache_access_lock.read().await;
                 metadata_region
                     .cache
                     .try_get_with(metadata_region_id, async {
@@ -909,19 +941,10 @@ mod test {
         snapshot_loaded_rx.await.unwrap();
 
         let logical_region_id = RegionId::new(1024, 1);
-        let column_metadatas = test_column_metadatas();
         let metadata_write = {
             let metadata_region = Arc::clone(&metadata_region);
             tokio::spawn(async move {
-                let logical_regions = vec![(
-                    logical_region_id,
-                    column_metadatas
-                        .iter()
-                        .map(|(name, metadata)| (name.as_str(), metadata))
-                        .collect::<HashMap<_, _>>(),
-                )];
-                metadata_region
-                    .add_logical_regions(physical_region_id, true, logical_regions.into_iter())
+                add_test_logical_region(&metadata_region, physical_region_id, logical_region_id)
                     .await
             })
         };
@@ -931,6 +954,19 @@ mod test {
                 .await
                 .is_err()
         );
+
+        let other_logical_region_id = RegionId::new(2048, 2);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            add_test_logical_region(
+                &metadata_region,
+                other_physical_region_id,
+                other_logical_region_id,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         release_snapshot_tx.send(()).unwrap();
         cache_fill.await.unwrap();
