@@ -1065,8 +1065,37 @@ pub(crate) enum IndexPublication {
         manifest_version: ManifestVersion,
         file_meta: FileMeta,
     },
+    /// The build no longer matches the current manifest.
+    Stale(IndexPublicationStale),
+}
+
+/// Why an index publication became stale.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IndexPublicationStale {
     /// The source SST or region incarnation is no longer publishable.
-    Stale,
+    SourceChanged,
+    /// The SST still matches, but the schema generation changed.
+    SchemaChanged,
+}
+
+/// Manifest state an index build is based on.
+///
+/// Both fields must still match when the rebuilt index is published. The file
+/// metadata identifies the exact SST generation, while the schema version
+/// identifies the exact index definition used by the builder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexBuildSource {
+    pub(crate) file_meta: FileMeta,
+    pub(crate) schema_version: u64,
+}
+
+impl IndexBuildSource {
+    pub(crate) fn new(file_meta: FileMeta, schema_version: u64) -> Self {
+        Self {
+            file_meta,
+            schema_version,
+        }
+    }
 }
 
 /// Context to update the region manifest.
@@ -1259,12 +1288,12 @@ impl ManifestContext {
 
     /// Conditionally publishes rebuilt index metadata for `source`.
     ///
-    /// The source-generation check and manifest update share the manifest write
-    /// lock, so a concurrent compaction or another index build cannot commit
-    /// between them.
+    /// The source SST and schema-generation checks share the manifest write lock
+    /// with the update, so a concurrent compaction, schema change, or another
+    /// index build cannot commit between them.
     pub(crate) async fn update_manifest_for_index(
         &self,
-        source: &FileMeta,
+        source: &IndexBuildSource,
         updated: FileMeta,
     ) -> Result<IndexPublication> {
         let manager = self.manifest_manager.write().await;
@@ -1276,15 +1305,25 @@ impl ManifestContext {
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
         ) || manager.is_stopped()
         {
-            return Ok(IndexPublication::Stale);
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
         }
 
-        if manifest.files.get(&source.file_id) != Some(source) {
-            return Ok(IndexPublication::Stale);
+        if manifest.files.get(&source.file_meta.file_id) != Some(&source.file_meta) {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
+        }
+
+        if manifest.metadata.schema_version != source.schema_version {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SchemaChanged,
+            ));
         }
 
         // Only index metadata is allowed to change in this publication.
-        let mut committed = source.clone();
+        let mut committed = source.file_meta.clone();
         committed.available_indexes = updated.available_indexes;
         committed.indexes = updated.indexes;
         committed.index_file_size = updated.index_file_size;
@@ -1914,8 +1953,8 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        IndexPublication, ManifestContext, ManifestStats, MitoRegion, RegionLeaderState,
-        RegionRoleState, RegionStats,
+        IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
+        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -2067,22 +2106,24 @@ mod tests {
         let mut first_update = source.clone();
         first_update.index_version = 1;
         first_update.index_file_size = 128;
+        let schema_version = region.version().metadata.schema_version;
+        let initial_source = IndexBuildSource::new(source.clone(), schema_version);
         let first_committed = match region
             .manifest_ctx
-            .update_manifest_for_index(&source, first_update)
+            .update_manifest_for_index(&initial_source, first_update)
             .await
             .unwrap()
         {
             IndexPublication::Committed { file_meta, .. } => file_meta,
-            IndexPublication::Stale => panic!("first index publication should commit"),
+            IndexPublication::Stale(_) => panic!("first index publication should commit"),
         };
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let delayed_manifest_ctx = region.manifest_ctx.clone();
-        let delayed_source = first_committed.clone();
+        let delayed_source = IndexBuildSource::new(first_committed.clone(), schema_version);
         let delayed_publication = tokio::spawn(async move {
-            let mut delayed_update = delayed_source.clone();
+            let mut delayed_update = delayed_source.file_meta.clone();
             delayed_update.index_version = 2;
             delayed_update.index_file_size = 128;
             ready_tx.send(()).unwrap();
@@ -2096,20 +2137,21 @@ mod tests {
         let mut newer_update = first_committed.clone();
         newer_update.index_version = 3;
         newer_update.index_file_size = 256;
+        let newer_source = IndexBuildSource::new(first_committed, schema_version);
         let newer_committed = match region
             .manifest_ctx
-            .update_manifest_for_index(&first_committed, newer_update)
+            .update_manifest_for_index(&newer_source, newer_update)
             .await
             .unwrap()
         {
             IndexPublication::Committed { file_meta, .. } => file_meta,
-            IndexPublication::Stale => panic!("newer index publication should commit"),
+            IndexPublication::Stale(_) => panic!("newer index publication should commit"),
         };
 
         release_tx.send(()).unwrap();
         assert!(matches!(
             delayed_publication.await.unwrap().unwrap(),
-            IndexPublication::Stale
+            IndexPublication::Stale(IndexPublicationStale::SourceChanged)
         ));
         assert_eq!(
             region
@@ -2120,6 +2162,65 @@ mod tests {
                 .get(&source.file_id),
             Some(&newer_committed)
         );
+    }
+
+    #[tokio::test]
+    async fn test_index_publication_rejects_older_schema_generation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let source_meta = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            ..Default::default()
+        };
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![source_meta.clone()],
+                    ..empty_edit()
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let old_schema_version = region.version().metadata.schema_version;
+        let source = IndexBuildSource::new(source_meta.clone(), old_schema_version);
+        let mut new_metadata = region.version().metadata.as_ref().clone();
+        new_metadata.schema_version += 1;
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(new_metadata),
+                    sst_format: FormatType::PrimaryKey,
+                    append_mode: None,
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut updated = source_meta.clone();
+        updated.index_version = 1;
+        updated.index_file_size = 128;
+        assert!(matches!(
+            region
+                .manifest_ctx
+                .update_manifest_for_index(&source, updated)
+                .await
+                .unwrap(),
+            IndexPublication::Stale(IndexPublicationStale::SchemaChanged)
+        ));
+
+        let manifest = region.manifest_ctx.manifest().await;
+        assert_eq!(manifest.metadata.schema_version, old_schema_version + 1);
+        assert_eq!(manifest.files.get(&source_meta.file_id), Some(&source_meta));
     }
 
     #[tokio::test]

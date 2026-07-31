@@ -73,8 +73,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, SenderBulkRequest, SenderDdlRequest,
-    SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
+    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -1250,6 +1250,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::IndexBuildFailed(req) => {
                 self.handle_index_build_failed(region_id, req).await
+            }
+            BackgroundNotify::IndexBuildRetry(req) => {
+                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                    .await
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
