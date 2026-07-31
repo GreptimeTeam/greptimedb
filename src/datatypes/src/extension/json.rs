@@ -18,29 +18,152 @@ use std::sync::Arc;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
-use arrow_schema::{ArrowError, DataType, Field};
+use arrow_schema::{ArrowError, DataType, Field, FieldRef};
+use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
+use crate::error::{InvalidJson2LayoutSnafu, Result as DatatypesResult};
 use crate::json::JsonSettings;
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Legacy JSON2 storage layout with unlimited path expansion.
+const JSON2_LAYOUT_V1: u8 = 1;
+/// JSON2 storage layout with bounded path expansion and a Variant remainder.
+const JSON2_LAYOUT_V2: u8 = 2;
+/// Reserved physical field containing unexpanded JSON2 paths.
+pub const JSON2_REMAINDER_FIELD_NAME: &str = "!__remainder__!";
+
+/// Parsed physical layout of a JSON2 Arrow root field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Json2PhysicalLayout {
+    version: u8,
+}
+
+impl Json2PhysicalLayout {
+    /// Parses the JSON2 layout version from a root field.
+    pub fn try_from_root(field: &Field) -> DatatypesResult<Self> {
+        // A physical Struct alone cannot identify JSON2 because ordinary Struct columns use the
+        // same Arrow shape. Require the extension marker so callers cannot accidentally route
+        // unrelated Binary children through the legacy JSON2 Variant path.
+        if !is_json2_extension_type(field) {
+            return InvalidJson2LayoutSnafu {
+                reason: format!("field '{}' is not a JSON2 extension", field.name()),
+            }
+            .fail();
+        }
+
+        let version = match field.extension_type_name() {
+            Some(Json2ExtensionType::NAME) => field
+                .metadata()
+                .get(EXTENSION_TYPE_METADATA_KEY)
+                .map(|x| parse_version(x))
+                .transpose()?
+                .flatten()
+                .unwrap_or(JSON2_LAYOUT_V1),
+            _ => JSON2_LAYOUT_V1,
+        };
+        Ok(Self { version })
+    }
+
+    /// Returns whether this is the bounded JSON2 layout.
+    pub fn is_version_2(&self) -> bool {
+        self.version == JSON2_LAYOUT_V2
+    }
+}
+
+fn parse_version(metadata: &str) -> DatatypesResult<Option<u8>> {
+    serde_json::from_str::<JsonMetadata>(metadata)
+        .map(|x| x.layout_version)
+        .map_err(|e| {
+            InvalidJson2LayoutSnafu {
+                reason: format!(
+                    r#"invalid extension metadata: "{}", error: {}"#,
+                    metadata, e,
+                ),
+            }
+            .build()
+        })
+}
+
+/// Returns the "remainder" field of a JSON2 v2 root.
+pub fn json2_remainder_field(field: &Field) -> DatatypesResult<&FieldRef> {
+    // The reserved name existed in some legacy shapes, so the child name alone cannot prove that
+    // it has v2 Variant semantics. Validate the root before exposing it as a v2 remainder.
+    if !Json2PhysicalLayout::try_from_root(field)?.is_version_2() {
+        return InvalidJson2LayoutSnafu {
+            reason: format!("JSON2 root '{}' is not layout v2", field.name()),
+        }
+        .fail();
+    }
+
+    let DataType::Struct(fields) = field.data_type() else {
+        return InvalidJson2LayoutSnafu {
+            reason: format!(
+                "expecting the Struct datatype, actual: '{}'",
+                field.data_type(),
+            ),
+        }
+        .fail();
+    };
+    let remainder = fields
+        .iter()
+        .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
+        .context(InvalidJson2LayoutSnafu {
+            reason: "missing the 'remainder' field",
+        })?;
+    remainder.try_extension_type::<VariantType>().map_err(|e| {
+        InvalidJson2LayoutSnafu {
+            reason: e.to_string(),
+        }
+        .build()
+    })?;
+    Ok(remainder)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonMetadata {
     /// JSON2 settings stored in Arrow extension metadata.
     json_settings: JsonSettings,
+    /// Physical JSON2 layout used by this Arrow field.
+    ///
+    /// Missing metadata denotes the legacy v1 layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout_version: Option<u8>,
 }
 
 impl JsonMetadata {
-    /// Creates JSON2 extension metadata.
+    /// Creates metadata for the bounded JSON2 layout.
     pub fn new(json_settings: JsonSettings) -> Self {
-        Self { json_settings }
+        Self {
+            json_settings,
+            layout_version: Some(JSON2_LAYOUT_V2),
+        }
+    }
+
+    /// Creates metadata for the legacy JSON2 layout.
+    pub fn new_v1(json_settings: JsonSettings) -> Self {
+        Self {
+            json_settings,
+            layout_version: None,
+        }
     }
 
     /// Returns the JSON2 settings.
     pub fn json_settings(&self) -> &JsonSettings {
         &self.json_settings
+    }
+
+    /// Returns whether this metadata describes the JSON2 layout version 2.
+    pub fn is_version_2(&self) -> bool {
+        self.layout_version == Some(JSON2_LAYOUT_V2)
+    }
+}
+
+impl Default for JsonMetadata {
+    fn default() -> Self {
+        Self::new(JsonSettings::default())
     }
 }
 
@@ -226,6 +349,7 @@ mod tests {
     use arrow_schema::{Field, Fields};
 
     use super::*;
+    use crate::vectors::json::variant::variant_field;
 
     #[test]
     fn test_json2_extension_type_detection() {
@@ -280,5 +404,139 @@ mod tests {
         assert!(JsonExtensionType::try_new(&DataType::Binary, ()).is_ok());
         assert!(JsonExtensionType::try_new(&DataType::Null, ()).is_ok());
         assert!(JsonExtensionType::try_new(&DataType::Struct(Fields::empty()), ()).is_err());
+    }
+
+    #[test]
+    fn test_json_metadata_layout_version_compatibility() -> serde_json::Result<()> {
+        let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":{}}"#)?;
+        assert_eq!(legacy.layout_version, None);
+        assert!(!legacy.is_version_2());
+
+        let metadata = JsonMetadata::new(JsonSettings::default());
+        assert!(metadata.is_version_2());
+        let serialized = serde_json::to_string(&metadata)?;
+        let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
+        assert_eq!(deserialized.layout_version, Some(JSON2_LAYOUT_V2));
+        assert!(deserialized.is_version_2());
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_non_json2_physical_layout() {
+        let field = Field::new(
+            "data",
+            DataType::Struct(vec![Arc::new(Field::new("value", DataType::Binary, true))].into()),
+            true,
+        );
+
+        assert!(matches!(
+            Json2PhysicalLayout::try_from_root(&field),
+            Err(crate::error::Error::InvalidJson2Layout { .. })
+        ));
+    }
+
+    #[test]
+    fn test_parse_json2_physical_layout() -> DatatypesResult<()> {
+        let legacy = Field::new(
+            "data",
+            DataType::Struct(
+                vec![Arc::new(Field::new(
+                    JSON2_REMAINDER_FIELD_NAME,
+                    DataType::Binary,
+                    true,
+                ))]
+                .into(),
+            ),
+            true,
+        )
+        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata {
+            json_settings: JsonSettings::default(),
+            layout_version: None,
+        })));
+        let layout = Json2PhysicalLayout::try_from_root(&legacy)?;
+        assert!(!layout.is_version_2());
+
+        let v2 = Field::new(
+            "data",
+            DataType::Struct(
+                vec![
+                    Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
+                    Arc::new(Field::new("count", DataType::Int64, true)),
+                ]
+                .into(),
+            ),
+            true,
+        )
+        .with_extension_type(Json2ExtensionType::default());
+        let layout = Json2PhysicalLayout::try_from_root(&v2)?;
+        assert!(layout.is_version_2());
+        assert_eq!(
+            JSON2_REMAINDER_FIELD_NAME,
+            json2_remainder_field(&v2)?.name()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_json2_v2_remainder() -> DatatypesResult<()> {
+        let metadata = Json2ExtensionType::default();
+        let missing = Field::new("data", DataType::Struct([].into()), true)
+            .with_extension_type(metadata.clone());
+        assert!(Json2PhysicalLayout::try_from_root(&missing)?.is_version_2());
+        assert!(matches!(
+            json2_remainder_field(&missing),
+            Err(crate::error::Error::InvalidJson2Layout { .. })
+        ));
+
+        let invalid = Field::new(
+            "data",
+            DataType::Struct(
+                vec![Arc::new(Field::new(
+                    JSON2_REMAINDER_FIELD_NAME,
+                    DataType::Binary,
+                    true,
+                ))]
+                .into(),
+            ),
+            true,
+        )
+        .with_extension_type(metadata);
+        assert!(Json2PhysicalLayout::try_from_root(&invalid)?.is_version_2());
+        assert!(matches!(
+            json2_remainder_field(&invalid),
+            Err(crate::error::Error::InvalidJson2Layout { .. })
+        ));
+
+        let future = Field::new("data", DataType::Struct([].into()), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata {
+                json_settings: JsonSettings::default(),
+                layout_version: Some(JSON2_LAYOUT_V2 + 1),
+            })),
+        );
+        assert!(matches!(
+            Json2PhysicalLayout::try_from_root(&future),
+            Err(crate::error::Error::InvalidJson2Layout { .. })
+        ));
+
+        let legacy = Field::new(
+            "data",
+            DataType::Struct(
+                vec![Arc::new(Field::new(
+                    JSON2_REMAINDER_FIELD_NAME,
+                    DataType::Binary,
+                    true,
+                ))]
+                .into(),
+            ),
+            true,
+        )
+        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new_v1(
+            JsonSettings::default(),
+        ))));
+        assert!(matches!(
+            json2_remainder_field(&legacy),
+            Err(crate::error::Error::InvalidJson2Layout { .. })
+        ));
+        Ok(())
     }
 }

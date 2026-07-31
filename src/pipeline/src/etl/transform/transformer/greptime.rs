@@ -285,6 +285,7 @@ impl GreptimeTransformer {
 pub struct ColumnMetadata {
     column_schema: datatypes::schema::ColumnSchema,
     semantic_type: SemanticType,
+    json_settings: OnceCell<JsonSettings>,
 }
 
 impl From<ColumnSchema> for ColumnMetadata {
@@ -311,7 +312,20 @@ impl From<ColumnSchema> for ColumnMetadata {
         Self {
             column_schema,
             semantic_type,
+            json_settings: OnceCell::new(),
         }
+    }
+}
+
+impl ColumnMetadata {
+    fn json_settings(&self) -> Result<&JsonSettings> {
+        self.json_settings.get_or_try_init(|| {
+            if let Some(extension) = self.column_schema.extension_type::<Json2ExtensionType>()? {
+                Ok(extension.metadata().json_settings().clone())
+            } else {
+                Ok(parse_legacy_json2_settings(self.column_schema.metadata())?.unwrap_or_default())
+            }
+        })
     }
 }
 
@@ -322,6 +336,7 @@ impl TryFrom<ColumnMetadata> for ColumnSchema {
         let ColumnMetadata {
             column_schema,
             semantic_type,
+            ..
         } = value;
 
         let options = options_from_column_schema(&column_schema);
@@ -394,6 +409,7 @@ impl SchemaInfo {
             Some(ColumnMetadata {
                 column_schema,
                 semantic_type,
+                json_settings: OnceCell::new(),
             })
         } else {
             None
@@ -444,6 +460,7 @@ fn resolve_schema(
                 ColumnMetadata {
                     column_schema,
                     semantic_type,
+                    json_settings: OnceCell::new(),
                 }
             });
         let key = column.to_string();
@@ -691,38 +708,31 @@ fn resolve_value(
         }
 
         VrlValue::Array(_) | VrlValue::Object(_) => {
-            let is_json2 = schema_info
-                .find_column_schema_in_table(&column_name)
-                // TODO(LFC): Default to JSON2 for auto-created tables.
-                .is_some_and(|x| {
-                    matches!(
-                        &x.column_schema.data_type,
-                        ConcreteDataType::Json(column_type) if column_type.is_json2()
-                    )
-                });
+            let schema_index = index.or_else(|| {
+                let column = schema_info.find_column_schema_in_table(&column_name)?;
+                let index = schema_info.schema.len();
+                schema_info.schema.push(column);
+                schema_info.index.insert(column_name.clone(), index);
+                Some(index)
+            });
+            // TODO(LFC): Default to JSON2 for auto-created tables.
+            let is_json2 = schema_index.is_some_and(|x| {
+                matches!(
+                    &schema_info.schema[x].column_schema.data_type,
+                    ConcreteDataType::Json(column_type) if column_type.is_json2()
+                )
+            });
 
             let value = if is_json2 {
                 let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
                     CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
                 })?;
-                let value =
-                    if let Some(column) = schema_info.find_column_schema_in_table(&column_name) {
-                        if let Some(extension) = column
-                            .column_schema
-                            .extension_type::<Json2ExtensionType>()?
-                        {
-                            extension.metadata().json_settings().encode(value)?
-                        } else {
-                            parse_legacy_json2_settings(column.column_schema.metadata())?
-                                .unwrap_or_default()
-                                .encode(value)?
-                        }
-                    } else {
-                        JsonSettings::default().encode(value)?
-                    };
+                let value = schema_info.schema[schema_index.unwrap()]
+                    .json_settings()?
+                    .encode(value)?;
 
                 resolve_schema(
-                    index,
+                    schema_index,
                     p_ctx,
                     &column_name,
                     &ConcreteDataType::json2(Default::default()),
@@ -735,7 +745,7 @@ fn resolve_value(
                 ValueData::JsonValue(encode_json_value(*value))
             } else {
                 resolve_schema(
-                    index,
+                    schema_index,
                     p_ctx,
                     &column_name,
                     &ConcreteDataType::binary_datatype(),
@@ -810,6 +820,7 @@ fn identity_pipeline_inner(
     schema_info.schema.push(ColumnMetadata {
         column_schema,
         semantic_type: SemanticType::Timestamp,
+        json_settings: OnceCell::new(),
     });
 
     let mut opt_map = HashMap::new();
@@ -983,6 +994,23 @@ mod tests {
 
     use super::*;
     use crate::{PipelineDefinition, identity_pipeline};
+
+    #[test]
+    fn test_column_metadata_caches_json_settings() {
+        let column = ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "data",
+                ConcreteDataType::json2(Default::default()),
+                true,
+            ),
+            semantic_type: SemanticType::Field,
+            json_settings: OnceCell::new(),
+        };
+
+        let first = column.json_settings().unwrap();
+        let second = column.json_settings().unwrap();
+        assert!(std::ptr::eq(first, second));
+    }
 
     #[test]
     fn test_identify_pipeline() {

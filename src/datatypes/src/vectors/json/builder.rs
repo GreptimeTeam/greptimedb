@@ -13,72 +13,625 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use arrow_array::{Array, ArrayRef, StructArray};
 use arrow_schema::DataType;
+use parquet_variant_compute::VariantArrayBuilder;
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu};
-use crate::json::value::{JsonNumber, JsonVariant, encode_json_variant};
+use crate::error::{
+    ArrowComputeSnafu, Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu,
+};
+use crate::extension::json::JSON2_REMAINDER_FIELD_NAME;
+use crate::json::value::{
+    JsonNumber, JsonObjectVariant, JsonVariant, JsonVariantRef, encode_json_variant,
+};
+use crate::json::{
+    JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JSON2_MAX_STRUCTURED_DEPTH, JsonSettings,
+};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
-use crate::types::json_type::{JsonNativeType, is_include};
+use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, StructValueRef, Value};
-use crate::vectors::{MutableVector, StructVectorBuilder};
+use crate::vectors::json::variant::{append_json_variant, json_variants_to_variant, variant_field};
+use crate::vectors::{Helper, MutableVector, StructVectorBuilder};
 
-#[derive(Clone)]
+/// Builds JSON2 vectors with a bounded number of automatically expanded paths.
 pub(crate) struct JsonVectorBuilder {
-    merged_type: JsonNativeType,
-    values: Vec<JsonVariant>,
+    state: JsonVectorBuilderState,
+}
+
+enum JsonVectorBuilderState {
+    // Dynamic expansion needs all rows before it can determine the output schema.
+    Buffered {
+        explicit_type: JsonNativeType,
+        max_auto_expanded_paths: u32,
+        values: Vec<JsonVariant>,
+    },
+    // A fixed schema can populate typed columns immediately.
+    Fixed {
+        explicit_type: JsonNativeType,
+        struct_type: StructType,
+        explicit: StructVectorBuilder,
+        remainder: VariantArrayBuilder,
+    },
+}
+
+impl JsonVectorBuilderState {
+    fn native_type(&self) -> JsonNativeType {
+        match self {
+            Self::Buffered {
+                explicit_type,
+                max_auto_expanded_paths,
+                values,
+            } => Self::expanded_type(explicit_type, *max_auto_expanded_paths, values),
+            Self::Fixed { explicit_type, .. } => explicit_type.clone(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Buffered { values, .. } => values.len(),
+            Self::Fixed { explicit, .. } => explicit.len(),
+        }
+    }
+
+    fn try_build(&mut self) -> Result<VectorRef> {
+        match self {
+            Self::Buffered {
+                explicit_type,
+                max_auto_expanded_paths,
+                values,
+            } => {
+                let expanded_type =
+                    Self::expanded_type(explicit_type, *max_auto_expanded_paths, values);
+                Self::build_buffered(values, &expanded_type)
+            }
+            Self::Fixed {
+                explicit,
+                remainder,
+                ..
+            } => {
+                let remainder = std::mem::replace(remainder, VariantArrayBuilder::new(0)).build();
+                Self::finish_vector(explicit.to_vector(), ArrayRef::from(remainder))
+            }
+        }
+    }
+
+    fn expanded_type(
+        explicit_type: &JsonNativeType,
+        max_auto_expanded_paths: u32,
+        values: &[JsonVariant],
+    ) -> JsonNativeType {
+        let mut stats = HashMap::new();
+        let mut path = Vec::new();
+        init_explicit_path_stats(explicit_type, &mut path, &mut stats);
+        for value in values {
+            count_dynamic_paths(value, &mut path, &mut stats);
+        }
+        let mut candidates = stats
+            .iter()
+            // Explicit paths are already in the output schema and do not consume the dynamic
+            // expansion budget.
+            .filter(|(_, stat)| !stat.is_explicit && stat.is_leaf)
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by(|(x_path, x), (y_path, y)| {
+            y.seen_count
+                .cmp(&x.seen_count)
+                .then_with(|| x_path.cmp(y_path))
+        });
+
+        let mut expanded_type = explicit_type.clone();
+        let mut selected = 0;
+        for (path, candidate) in candidates {
+            // A leaf is eligible only when both itself and every object prefix have one stable
+            // role and type across all observed values.
+            let conflicts = (1..=path.len())
+                .any(|len| stats.get(&path[..len]).is_some_and(|stats| stats.conflicts));
+            if conflicts {
+                continue;
+            }
+
+            if !insert_dynamic_type(
+                &mut expanded_type,
+                path,
+                candidate.expected_leaf_type.clone(),
+            ) {
+                continue;
+            }
+            selected += 1;
+            if selected == max_auto_expanded_paths {
+                break;
+            }
+        }
+        expanded_type
+    }
+
+    fn build_buffered(
+        values: &mut Vec<JsonVariant>,
+        expanded_type: &JsonNativeType,
+    ) -> Result<VectorRef> {
+        let DataType::Struct(fields) = expanded_type.as_arrow_type() else {
+            return UnexpectedSnafu {
+                reason: "JSON2 explicit type must map to Arrow Struct in JsonVectorBuilder",
+            }
+            .fail();
+        };
+        let struct_type = StructType::from(&fields);
+        let mut explicit =
+            StructVectorBuilder::with_type_and_capacity(struct_type.clone(), values.len());
+        let mut remainders = Vec::with_capacity(values.len());
+
+        for value in std::mem::take(values) {
+            if matches!(value, JsonVariant::Null) {
+                explicit.push_null();
+                remainders.push(None);
+                continue;
+            }
+
+            let (value, remainder) = split_to_explicit(value, expanded_type)?;
+            let value = json_variant_into_struct_value(value, struct_type.clone())?;
+            explicit.push_struct_value_ref(StructValueRef::Ref(&value))?;
+            remainders.push(Some(JsonVariant::Object(remainder)));
+        }
+
+        Self::finish_vector(explicit.to_vector(), json_variants_to_variant(&remainders)?)
+    }
+
+    fn finish_vector(explicit: VectorRef, remainder: ArrayRef) -> Result<VectorRef> {
+        let explicit = explicit.to_arrow_array();
+        let explicit =
+            explicit
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .context(UnexpectedSnafu {
+                    reason: "StructVectorBuilder does not produce StructArray",
+                })?;
+        let mut children = explicit
+            .fields()
+            .iter()
+            .cloned()
+            .zip(explicit.columns().iter().cloned())
+            .collect::<Vec<_>>();
+        children.push((
+            Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
+            remainder,
+        ));
+        children.sort_unstable_by(|(x, _), (y, _)| x.name().cmp(y.name()));
+        let (fields, columns): (Vec<_>, Vec<ArrayRef>) = children.into_iter().unzip();
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields.into(),
+            columns,
+            explicit.nulls().cloned(),
+        ));
+        Helper::try_into_vector(array)
+    }
+
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        let ValueRef::Json(value) = value else {
+            return TryFromValueSnafu {
+                reason: format!("expected json value, got {value:?}"),
+            }
+            .fail();
+        };
+        ensure!(
+            value.is_object() || value.is_null(),
+            TryFromValueSnafu {
+                reason: format!("expected json object value, got {value:?}"),
+            }
+        );
+        match self {
+            Self::Buffered { values, .. } => values.push(JsonVariant::from(value.variant())),
+            Self::Fixed {
+                explicit_type,
+                struct_type,
+                explicit,
+                remainder,
+            } => {
+                if value.is_null() {
+                    explicit.push_null();
+                    remainder.append_null();
+                } else {
+                    let (value, rest) =
+                        split_to_explicit_ref(value.variant(), explicit_type, struct_type.clone())?;
+                    explicit.push_struct_value_ref(value)?;
+                    append_json_variant(remainder, &JsonVariant::Object(rest))
+                        .context(ArrowComputeSnafu)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn push_null(&mut self) {
+        match self {
+            Self::Buffered { values, .. } => values.push(JsonVariant::Null),
+            Self::Fixed {
+                explicit,
+                remainder,
+                ..
+            } => {
+                explicit.push_null();
+                remainder.append_null();
+            }
+        }
+    }
 }
 
 impl JsonVectorBuilder {
+    /// Creates a builder using the default maximum number of automatically expanded paths.
     pub(crate) fn new(initial_native_type: JsonNativeType, capacity: usize) -> Self {
         debug_assert!(matches!(
             initial_native_type,
             JsonNativeType::Object(_) | JsonNativeType::Null
         ));
+        let explicit_type = match initial_native_type {
+            JsonNativeType::Null => JsonNativeType::object(),
+            data_type => data_type,
+        };
         Self {
-            merged_type: initial_native_type,
-            values: Vec::with_capacity(capacity),
+            state: JsonVectorBuilderState::Buffered {
+                explicit_type,
+                max_auto_expanded_paths: JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS,
+                values: Vec::with_capacity(capacity),
+            },
         }
+    }
+
+    /// Creates a builder bounded by the JSON settings and their type hints.
+    pub(crate) fn with_settings(settings: &JsonSettings, capacity: usize) -> Self {
+        let explicit_type = settings.type_hint_native_type().clone();
+        let max_auto_expanded_paths = settings.max_auto_expanded_paths();
+        let state = if max_auto_expanded_paths == 0 {
+            let DataType::Struct(fields) = explicit_type.as_arrow_type() else {
+                unreachable!("JSON2 explicit type must map to Arrow Struct")
+            };
+            let struct_type = StructType::from(&fields);
+            JsonVectorBuilderState::Fixed {
+                explicit_type,
+                explicit: StructVectorBuilder::with_type_and_capacity(
+                    struct_type.clone(),
+                    capacity,
+                ),
+                struct_type,
+                remainder: VariantArrayBuilder::new(capacity),
+            }
+        } else {
+            JsonVectorBuilderState::Buffered {
+                explicit_type,
+                max_auto_expanded_paths,
+                values: Vec::with_capacity(capacity),
+            }
+        };
+        Self { state }
     }
 
     fn try_build(&mut self) -> Result<VectorRef> {
-        let DataType::Struct(fields) = self.merged_type.as_arrow_type() else {
-            return UnexpectedSnafu {
-                reason: "merged JSON2 type must map to Arrow Struct in JsonVectorBuilder",
-            }
-            .fail();
-        };
-        // TODO(LFC): Direct use Arrow's Struct datatype here.
-        let struct_type = StructType::from(&fields);
-
-        let mut builder =
-            StructVectorBuilder::with_type_and_capacity(struct_type.clone(), self.values.len());
-        for value in std::mem::take(&mut self.values) {
-            if matches!(&value, JsonVariant::Null) {
-                builder.push_null();
-                continue;
-            }
-            let value = json_variant_into_struct_value(value, struct_type.clone())?;
-            builder.push_struct_value_ref(StructValueRef::Ref(&value))?;
-        }
-        Ok(builder.to_vector())
+        self.state.try_build()
     }
 }
 
-fn json_variant_into_struct_value(
-    value: JsonVariant,
+/// Aggregated observations for one JSON path.
+///
+/// Schema inference first seeds the map with explicit paths, then walks all input values once.
+/// Objects, including empty objects, are non-leaf paths; every other non-null value is a leaf.
+/// The first dynamic observation fixes the path role and exact leaf type. A later role or type
+/// mismatch sets [`PathStats::conflicts`] permanently. Missing paths and null values do not affect
+/// the statistics.
+///
+/// After collection, dynamic leaves are ranked by [`PathStats::seen_count`]. A candidate is
+/// rejected when it or any parent path conflicts, so candidate selection never rescans the input
+/// values.
+struct PathStats {
+    /// Whether the path came from a type hint and is already part of the output schema.
+    is_explicit: bool,
+    /// Whether the path is a non-object value rather than an object prefix.
+    is_leaf: bool,
+    /// Exact type required for a leaf; unused non-leaf paths keep [`JsonNativeType::Null`].
+    expected_leaf_type: JsonNativeType,
+    /// Number of compatible observations used to rank dynamic leaves.
+    seen_count: usize,
+    /// Whether the path has ever had inconsistent roles or leaf types.
+    conflicts: bool,
+}
+
+/// Seeds path statistics from the configured explicit JSON shape.
+fn init_explicit_path_stats<'a>(
+    explicit_type: &'a JsonNativeType,
+    path: &mut Vec<&'a str>,
+    stats: &mut HashMap<Vec<&'a str>, PathStats>,
+) {
+    let JsonNativeType::Object(fields) = explicit_type else {
+        return;
+    };
+    for (name, data_type) in fields {
+        path.push(name);
+        let is_leaf = !matches!(data_type, JsonNativeType::Object(_));
+        stats.insert(
+            path.clone(),
+            PathStats {
+                is_explicit: true,
+                is_leaf,
+                expected_leaf_type: if is_leaf {
+                    data_type.clone()
+                } else {
+                    JsonNativeType::default()
+                },
+                seen_count: 0,
+                conflicts: false,
+            },
+        );
+        init_explicit_path_stats(data_type, path, stats);
+        path.pop();
+    }
+}
+
+/// Collects dynamic path statistics while traversing each input value once.
+fn count_dynamic_paths<'a>(
+    value: &'a JsonVariant,
+    path: &mut Vec<&'a str>,
+    stats: &mut HashMap<Vec<&'a str>, PathStats>,
+) {
+    if matches!(value, JsonVariant::Null) || path.len() > JSON2_MAX_STRUCTURED_DEPTH {
+        return;
+    }
+
+    if !path.is_empty() {
+        let is_leaf = !matches!(value, JsonVariant::Object(_));
+        if let Some(stats) = stats.get_mut(path.as_slice()) {
+            let is_path_type_conflict = stats.is_leaf != is_leaf;
+            let is_leaf_type_conflict = || {
+                if is_leaf {
+                    let actual_leaf_type = value.native_type();
+                    stats.expected_leaf_type != actual_leaf_type
+                } else {
+                    false
+                }
+            };
+            stats.conflicts |= is_path_type_conflict || is_leaf_type_conflict();
+            if !stats.conflicts {
+                stats.seen_count += 1;
+            }
+        } else {
+            stats.insert(
+                path.clone(),
+                PathStats {
+                    is_explicit: false,
+                    is_leaf,
+                    expected_leaf_type: if is_leaf {
+                        value.native_type()
+                    } else {
+                        JsonNativeType::default()
+                    },
+                    seen_count: 1,
+                    conflicts: false,
+                },
+            );
+        }
+    }
+
+    if let JsonVariant::Object(object) = value
+        && !object.is_empty()
+    {
+        for (name, value) in object {
+            path.push(name);
+            count_dynamic_paths(value, path, stats);
+            path.pop();
+        }
+    }
+}
+
+fn insert_dynamic_type(
+    explicit_type: &mut JsonNativeType,
+    path: &[&str],
+    data_type: JsonNativeType,
+) -> bool {
+    let JsonNativeType::Object(fields) = explicit_type else {
+        return false;
+    };
+    let Some((name, path)) = path.split_first() else {
+        return false;
+    };
+    if path.is_empty() {
+        fields.insert((*name).to_string(), data_type);
+        return true;
+    }
+    insert_dynamic_type(
+        fields
+            .entry((*name).to_string())
+            .or_insert_with(JsonNativeType::object),
+        path,
+        data_type,
+    )
+}
+
+fn split_to_explicit_ref<'a>(
+    value: &JsonVariantRef<'a>,
+    explicit_type: &JsonNativeType,
     struct_type: StructType,
-) -> Result<StructValue> {
-    let JsonVariant::Object(object) = value else {
+) -> Result<(StructValueRef<'a>, JsonObjectVariant)> {
+    let JsonVariantRef::Object(object) = value else {
         return TryFromValueSnafu {
-            reason: format!("expected json object value, got {value:?}"),
+            reason: "expected json object value".to_string(),
         }
         .fail();
     };
+    let (explicit, _) = json_object_ref_into_struct_value_ref(object, struct_type)?;
+    let remainder = clone_remainder(object, explicit_type)?;
+    Ok((explicit, remainder))
+}
 
+fn json_object_ref_into_struct_value_ref<'a>(
+    object: &BTreeMap<&'a str, JsonVariantRef<'a>>,
+    struct_type: StructType,
+) -> Result<(StructValueRef<'a>, bool)> {
+    let mut values = Vec::with_capacity(struct_type.fields().len());
+    let mut has_explicit_value = false;
+    for field in struct_type.fields().iter() {
+        let Some(value) = object.get(field.name()) else {
+            values.push(ValueRef::Null);
+            continue;
+        };
+        let (value, present) = json_variant_ref_into_value_ref(value, field.data_type())?;
+        values.push(value);
+        has_explicit_value |= present;
+    }
+    Ok((
+        StructValueRef::RefList {
+            val: values,
+            fields: struct_type,
+        },
+        has_explicit_value,
+    ))
+}
+
+fn json_variant_ref_into_value_ref<'a>(
+    value: &JsonVariantRef<'a>,
+    expected_type: &ConcreteDataType,
+) -> Result<(ValueRef<'a>, bool)> {
+    let value = match (value, expected_type) {
+        (JsonVariantRef::Null, _) | (_, ConcreteDataType::Null(_)) => ValueRef::Null,
+        (JsonVariantRef::Object(object), _) if object.is_empty() => {
+            return Ok((ValueRef::Null, false));
+        }
+        (JsonVariantRef::Bool(x), ConcreteDataType::Boolean(_)) => ValueRef::Boolean(*x),
+        (JsonVariantRef::Number(x), ConcreteDataType::UInt64(_)) => {
+            let Some(x) = x.as_u64() else {
+                return TryFromValueSnafu {
+                    reason: format!("unable to convert {x:?} to UInt64"),
+                }
+                .fail();
+            };
+            ValueRef::UInt64(x)
+        }
+        (JsonVariantRef::Number(x), ConcreteDataType::Int64(_)) => {
+            let x = match x {
+                JsonNumber::PosInt(x) => i64::try_from(*x).ok(),
+                JsonNumber::NegInt(x) => Some(*x),
+                JsonNumber::Float(_) => None,
+            };
+            let Some(x) = x else {
+                return TryFromValueSnafu {
+                    reason: format!("unable to convert {x:?} to Int64"),
+                }
+                .fail();
+            };
+            ValueRef::Int64(x)
+        }
+        (JsonVariantRef::Number(JsonNumber::PosInt(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64((*x as f64).into())
+        }
+        (JsonVariantRef::Number(JsonNumber::NegInt(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64((*x as f64).into())
+        }
+        (JsonVariantRef::Number(JsonNumber::Float(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64(*x)
+        }
+        (JsonVariantRef::String(x), ConcreteDataType::String(_)) => ValueRef::String(x),
+        (JsonVariantRef::Object(object), ConcreteDataType::Struct(struct_type)) => {
+            let (value, present) =
+                json_object_ref_into_struct_value_ref(object, struct_type.clone())?;
+            if !present {
+                return Ok((ValueRef::Null, false));
+            }
+            ValueRef::Struct(value)
+        }
+        (value, expected_type) => {
+            return TryFromValueSnafu {
+                reason: format!("unable to convert json value {value:?} to {expected_type}"),
+            }
+            .fail();
+        }
+    };
+    Ok((value, true))
+}
+
+fn clone_remainder(
+    object: &BTreeMap<&str, JsonVariantRef<'_>>,
+    explicit_type: &JsonNativeType,
+) -> Result<JsonObjectVariant> {
+    let JsonNativeType::Object(fields) = explicit_type else {
+        return UnexpectedSnafu {
+            reason: "JSON2 explicit type must be an object",
+        }
+        .fail();
+    };
+    let mut remainder = JsonObjectVariant::new();
+    for (name, value) in object {
+        match fields.get(*name) {
+            Some(data_type @ JsonNativeType::Object(_)) => match value {
+                JsonVariantRef::Null => {}
+                JsonVariantRef::Object(object) => {
+                    let child = clone_remainder(object, data_type)?;
+                    if !child.is_empty() {
+                        remainder.insert((*name).to_string(), JsonVariant::Object(child));
+                    }
+                }
+                _ => {
+                    return TryFromValueSnafu {
+                        reason: "expected json object value".to_string(),
+                    }
+                    .fail();
+                }
+            },
+            Some(_) => {}
+            None => {
+                remainder.insert((*name).to_string(), JsonVariant::from(value));
+            }
+        }
+    }
+    Ok(remainder)
+}
+
+fn split_to_explicit(
+    value: JsonVariant,
+    explicit_type: &JsonNativeType,
+) -> Result<(JsonObjectVariant, JsonObjectVariant)> {
+    let JsonVariant::Object(mut remainder) = value else {
+        return TryFromValueSnafu {
+            reason: "expected json object value".to_string(),
+        }
+        .fail();
+    };
+    let JsonNativeType::Object(fields) = explicit_type else {
+        return UnexpectedSnafu {
+            reason: "JSON2 explicit type must be an object",
+        }
+        .fail();
+    };
+    let mut explicit = JsonObjectVariant::new();
+
+    for (name, data_type) in fields {
+        let Some(value) = remainder.remove(name) else {
+            continue;
+        };
+        if matches!(data_type, JsonNativeType::Object(_)) {
+            if matches!(value, JsonVariant::Null) {
+                explicit.insert(name.clone(), value);
+                continue;
+            }
+            let (value, child_remainder) = split_to_explicit(value, data_type)?;
+            if !value.is_empty() {
+                explicit.insert(name.clone(), JsonVariant::Object(value));
+            }
+            if !child_remainder.is_empty() {
+                remainder.insert(name.clone(), JsonVariant::Object(child_remainder));
+            }
+        } else {
+            explicit.insert(name.clone(), value);
+        }
+    }
+
+    Ok((explicit, remainder))
+}
+
+fn json_variant_into_struct_value(
+    object: JsonObjectVariant,
+    struct_type: StructType,
+) -> Result<StructValue> {
     let mut entries = object.into_iter();
     let mut entry = entries.next();
     let mut values = Vec::with_capacity(struct_type.fields().len());
@@ -157,7 +710,7 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
                 .collect::<Result<Vec<_>>>()?;
             Value::List(ListValue::new(values, Arc::new(item_type)))
         }
-        (value @ JsonVariant::Object(_), ConcreteDataType::Struct(struct_type)) => {
+        (JsonVariant::Object(value), ConcreteDataType::Struct(struct_type)) => {
             Value::Struct(json_variant_into_struct_value(value, struct_type.clone())?)
         }
         (value, ConcreteDataType::Binary(_)) => Value::from(encode_json_variant(value)?),
@@ -173,11 +726,11 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
 
 impl MutableVector for JsonVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::json2(self.merged_type.clone())
+        ConcreteDataType::json2(self.state.native_type())
     }
 
     fn len(&self) -> usize {
-        self.values.len()
+        self.state.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -193,34 +746,16 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
-        self.clone().to_vector()
+        // VariantArrayBuilder only supports consuming builds; JSON2 write paths do not snapshot.
+        unimplemented!("JsonVectorBuilder does not support non-consuming snapshots")
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        let ValueRef::Json(value) = value else {
-            return TryFromValueSnafu {
-                reason: format!("expected json value, got {value:?}"),
-            }
-            .fail();
-        };
-        let json_type = value.json_type();
-        let json_type = json_type.as_ref();
-        if !matches!(json_type, JsonNativeType::Object(_) | JsonNativeType::Null) {
-            return TryFromValueSnafu {
-                reason: format!("expected json object value, got {value:?}"),
-            }
-            .fail();
-        }
-        if !is_include(&self.merged_type, json_type) {
-            self.merged_type.merge(json_type);
-        }
-
-        self.values.push(JsonVariant::from(value.variant()));
-        Ok(())
+        self.state.try_push_value_ref(value)
     }
 
     fn push_null(&mut self) {
-        self.values.push(JsonVariant::Null)
+        self.state.push_null()
     }
 
     fn extend_slice_of(&mut self, _: &dyn Vector, _: usize, _: usize) -> Result<()> {
@@ -236,13 +771,19 @@ impl MutableVector for JsonVectorBuilder {
 mod tests {
     use std::sync::Arc;
 
-    use common_base::bytes::Bytes;
+    use arrow_array::cast::AsArray;
+    use arrow_schema::Field;
+    use serde_json::json;
 
     use super::*;
     use crate::data_type::ConcreteDataType;
+    use crate::extension::json::{Json2ExtensionType, JsonMetadata};
+    use crate::json::JsonTypeHint;
+    use crate::json::value::decode_json_variant;
     use crate::types::StructField;
-    use crate::types::json_type::JsonObjectType;
     use crate::value::{ListValue, StructValue, Value, ValueRef};
+    use crate::vectors::json::array::JsonArray;
+    use crate::vectors::json::variant::variant_to_json_values;
 
     #[test]
     fn test_json_vector_builder() -> Result<()> {
@@ -251,87 +792,59 @@ mod tests {
             Value::Json(Box::new(value.into()))
         }
 
-        fn jsonb_bytes(json: &str) -> Bytes {
-            Bytes::from(jsonb::parse_value(json.as_bytes()).unwrap().to_vec())
-        }
-
-        // Object inputs should merge into a superset schema, preserve null rows,
-        // and project conflicting nested values into Variant payloads.
+        // The default constructor should use the same bounded layout as settings.
         let mut builder = JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 3);
+        let JsonVectorBuilderState::Buffered {
+            max_auto_expanded_paths,
+            ..
+        } = &builder.state
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS,
+            *max_auto_expanded_paths
+        );
         let first = parse_json_value(r#"{"id":1,"payload":{"name":"foo"}}"#);
         let second = parse_json_value(r#"{"id":2,"extra":true,"payload":"raw"}"#);
         builder.try_push_value_ref(&first.as_value_ref())?;
         builder.push_null();
         builder.try_push_value_ref(&second.as_value_ref())?;
 
-        let merged_type = JsonNativeType::Object(JsonObjectType::from([
-            ("extra".to_string(), JsonNativeType::Bool),
-            ("id".to_string(), JsonNativeType::i64()),
-            ("payload".to_string(), JsonNativeType::Variant),
-        ]));
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
         assert_eq!(
-            builder.data_type(),
-            ConcreteDataType::json2(merged_type.clone())
+            vec![JSON2_REMAINDER_FIELD_NAME, "extra", "id"],
+            structs
+                .fields()
+                .iter()
+                .map(|x| x.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                Some(json!({"payload": {"name": "foo"}})),
+                None,
+                Some(json!({"payload": "raw"})),
+            ],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
         );
 
-        let DataType::Struct(fields) = merged_type.as_arrow_type() else {
-            unreachable!()
-        };
-        let merged_struct_type = StructType::from(&fields);
-        let vector = builder.to_vector();
-        assert_eq!(vector.len(), 3);
-        assert_eq!(
-            vector.get(0),
-            Value::Struct(StructValue::new(
-                vec![
-                    Value::Null,
-                    Value::Int64(1),
-                    Value::Binary(jsonb_bytes(r#"{"name":"foo"}"#)),
-                ],
-                merged_struct_type.clone(),
-            ))
-        );
-        assert_eq!(vector.get(1), Value::Null);
-        assert_eq!(
-            vector.get(2),
-            Value::Struct(StructValue::new(
-                vec![
-                    Value::Boolean(true),
-                    Value::Int64(2),
-                    Value::Binary(jsonb_bytes(r#""raw""#)),
-                ],
-                merged_struct_type,
-            ))
-        );
-
-        // A Null initial type represents an unknown JSON2 runtime type. The first
-        // non-null value should set the concrete type instead of aligning all rows to Null.
+        // A Null initial type represents an empty explicit schema.
         let mut inferred_builder = JsonVectorBuilder::new(JsonNativeType::Null, 2);
         let inferred_value = parse_json_value(r#"{"id":3}"#);
         inferred_builder.push_null();
         inferred_builder.try_push_value_ref(&inferred_value.as_value_ref())?;
 
-        let inferred_type = JsonNativeType::Object(JsonObjectType::from([(
-            "id".to_string(),
-            JsonNativeType::i64(),
-        )]));
+        let array = inferred_builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
         assert_eq!(
-            inferred_builder.data_type(),
-            ConcreteDataType::json2(inferred_type.clone())
-        );
-
-        let DataType::Struct(fields) = inferred_type.as_arrow_type() else {
-            unreachable!()
-        };
-        let inferred_struct_type = StructType::from(&fields);
-        let vector = inferred_builder.to_vector();
-        assert_eq!(vector.get(0), Value::Null);
-        assert_eq!(
-            vector.get(1),
-            Value::Struct(StructValue::new(
-                vec![Value::Int64(3)],
-                inferred_struct_type,
-            ))
+            vec![JSON2_REMAINDER_FIELD_NAME, "id"],
+            structs
+                .fields()
+                .iter()
+                .map(|x| x.name().as_str())
+                .collect::<Vec<_>>()
         );
 
         // Non-object initial types are rejected by the builder invariant.
@@ -356,6 +869,248 @@ mod tests {
             .try_push_value_ref(&ValueRef::Boolean(true))
             .unwrap_err();
         assert!(err.to_string().contains("expected json value"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_zero_budget_builder_uses_fixed_schema_and_remainder() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![
+            JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            },
+            JsonTypeHint {
+                path: vec!["commit".to_string(), "operation".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            },
+            JsonTypeHint {
+                path: vec!["time_us".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            },
+        ])?
+        .with_max_auto_expanded_paths(0);
+        let mut builder = JsonVectorBuilder::with_settings(&settings, 2);
+        let values = [
+            json!({
+                "kind": "record",
+                "commit": {"operation": "create", "collection": "post"},
+                "extra": 1,
+                "time_us": 1
+            }),
+            json!({"kind": "other", "dynamic": true, "time_us": 2}),
+        ];
+        for value in values.clone() {
+            let value = settings.encode(value)?;
+            builder.try_push_value_ref(&value.as_value_ref())?;
+        }
+        assert!(matches!(
+            &builder.state,
+            JsonVectorBuilderState::Fixed { .. }
+        ));
+
+        let array = builder.to_vector().to_arrow_array();
+        assert_eq!(0, builder.len());
+        let structs = array.as_struct();
+        assert_eq!(
+            vec![JSON2_REMAINDER_FIELD_NAME, "commit", "kind", "time_us"],
+            structs
+                .fields()
+                .iter()
+                .map(|x| x.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                Some(json!({"commit": {"collection": "post"}, "extra": 1})),
+                Some(json!({"dynamic": true})),
+            ],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
+        );
+
+        let field = Field::new("data", array.data_type().clone(), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings))),
+        );
+        let reconstructed = JsonArray::from(&array).project_json2(&field, &DataType::Binary)?;
+        let reconstructed = reconstructed.as_binary::<i32>();
+        assert_eq!(
+            values[0],
+            decode_json_variant(reconstructed.value(0)).unwrap()
+        );
+        assert_eq!(
+            json!({
+                "kind": "other",
+                "commit": {"operation": null},
+                "dynamic": true,
+                "time_us": 2
+            }),
+            decode_json_variant(reconstructed.value(1)).unwrap()
+        );
+
+        let settings = JsonSettings::default().with_max_auto_expanded_paths(0);
+        let mut builder = JsonVectorBuilder::with_settings(&settings, 3);
+        for value in [json!({}), json!({"x": 1})] {
+            let value = settings.encode(value)?;
+            builder.try_push_value_ref(&value.as_value_ref())?;
+        }
+        builder.push_null();
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
+        assert_eq!(1, structs.num_columns());
+        assert_eq!(
+            vec![Some(json!({})), Some(json!({"x": 1})), None],
+            variant_to_json_values(structs.column(0))?
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_finite_budget_selects_dynamic_paths() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
+            path: vec!["hint".to_string()],
+            data_type: ConcreteDataType::string_datatype(),
+            nullable: true,
+            default_constraint: None,
+            inverted_index: false,
+        }])?
+        .with_max_auto_expanded_paths(2);
+        let values = [
+            json!({
+                "hint": "first",
+                "conflict": 1,
+                "popular": {"nested": 1},
+                "tie_a": "a",
+                "tie_b": true,
+                "rare": 1
+            }),
+            json!({
+                "hint": "second",
+                "conflict": "string",
+                "popular": {"nested": 2},
+                "tie_a": "b",
+                "tie_b": false
+            }),
+            json!({"hint": "third", "popular": "scalar"}),
+        ];
+        let mut builder = JsonVectorBuilder::with_settings(&settings, values.len());
+        for value in values.clone() {
+            let value = settings.encode(value)?;
+            builder.try_push_value_ref(&value.as_value_ref())?;
+        }
+
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
+        assert_eq!(
+            vec![JSON2_REMAINDER_FIELD_NAME, "hint", "tie_a", "tie_b"],
+            structs
+                .fields()
+                .iter()
+                .map(|x| x.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(structs.column_by_name("popular").is_none());
+        assert_eq!(
+            vec![
+                Some(json!({"conflict": 1, "popular": {"nested": 1}, "rare": 1})),
+                Some(json!({"conflict": "string", "popular": {"nested": 2}})),
+                Some(json!({"popular": "scalar"})),
+            ],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
+        );
+
+        let field = Field::new("data", array.data_type().clone(), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings))),
+        );
+        let reconstructed = JsonArray::from(&array).project_json2(&field, &DataType::Binary)?;
+        let reconstructed = reconstructed.as_binary::<i32>();
+        assert_eq!(
+            values[0],
+            decode_json_variant(reconstructed.value(0)).unwrap()
+        );
+        assert_eq!(
+            values[1],
+            decode_json_variant(reconstructed.value(1)).unwrap()
+        );
+        assert_eq!(
+            json!({
+                "hint": "third",
+                "popular": "scalar",
+                "tie_a": null,
+                "tie_b": null
+            }),
+            decode_json_variant(reconstructed.value(2)).unwrap()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamic_paths_require_the_same_leaf_type() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
+            path: vec!["nested".to_string(), "hinted".to_string()],
+            data_type: ConcreteDataType::string_datatype(),
+            nullable: true,
+            default_constraint: None,
+            inverted_index: false,
+        }])?
+        .with_max_auto_expanded_paths(8);
+        let values = [
+            json!({
+                "branch": {},
+                "different": [1],
+                "empty": {},
+                "nested": {},
+                "reverse": "scalar",
+                "same": [1]
+            }),
+            json!({
+                "branch": {"leaf": 1},
+                "different": ["x"],
+                "empty": {},
+                "nested": {"hinted": "x", "leaf": 1},
+                "same": [2]
+            }),
+            json!({
+                "branch": {},
+                "different": [2],
+                "empty": {},
+                "nested": {},
+                "reverse": {"leaf": 1},
+                "same": [3]
+            }),
+        ];
+        let mut builder = JsonVectorBuilder::with_settings(&settings, values.len());
+        for value in values {
+            let value = settings.encode(value)?;
+            builder.try_push_value_ref(&value.as_value_ref())?;
+        }
+
+        let JsonNativeType::Object(fields) = builder.state.native_type() else {
+            unreachable!();
+        };
+        assert!(!fields.contains_key("different"));
+        assert!(!fields.contains_key("empty"));
+        assert!(!fields.contains_key("reverse"));
+        assert!(matches!(fields.get("same"), Some(JsonNativeType::Array(_))));
+        assert!(matches!(
+            fields.get("branch"),
+            Some(JsonNativeType::Object(fields)) if fields.contains_key("leaf")
+        ));
+        assert!(matches!(
+            fields.get("nested"),
+            Some(JsonNativeType::Object(fields))
+                if fields.contains_key("hinted") && fields.contains_key("leaf")
+        ));
 
         Ok(())
     }
@@ -394,16 +1149,16 @@ mod tests {
                 true,
             ),
         ]));
-        let variant = JsonVariant::from([
+        let variant = JsonObjectVariant::from([
             (
-                "items",
+                "items".to_string(),
                 JsonVariant::Array(vec![
                     JsonVariant::from([("id", JsonVariant::from(1i64))]),
                     JsonVariant::from([("id", JsonVariant::from(2i64))]),
                 ]),
             ),
             (
-                "meta",
+                "meta".to_string(),
                 JsonVariant::from([("name", JsonVariant::from("foo"))]),
             ),
         ]);

@@ -29,21 +29,72 @@ use serde_json::{Map, Value as Json};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result, UnsupportedJsonTypeSnafu};
+use crate::error::{self, InvalidJson2LayoutSnafu, Result, UnsupportedJsonTypeSnafu};
 use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
 use crate::schema::ColumnDefaultConstraint;
-use crate::types::json_type::JsonNativeType;
+use crate::types::json_type::{JsonNativeType, JsonObjectType};
 use crate::value::{ListValue, StructValue, Value};
 
 /// Maximum number of JSON container levels represented as nested Arrow types.
 pub const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
+/// Default maximum number of unhinted JSON leaf paths expanded into Arrow fields.
+pub const JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS: u32 = 100;
 
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JsonSettings {
     #[serde(default)]
-    pub type_hints: Vec<JsonTypeHint>,
+    type_hints: Vec<JsonTypeHint>,
+    /// Maximum number of unhinted JSON leaf paths expanded into Arrow fields.
+    #[serde(default)]
+    max_auto_expanded_paths: u32,
+    #[serde(skip)]
+    type_hint_native_type: JsonNativeType,
+}
+
+#[derive(Deserialize)]
+struct JsonSettingsSerde {
+    #[serde(default)]
+    type_hints: Vec<JsonTypeHint>,
+    #[serde(
+        default = "default_max_auto_expanded_paths",
+        deserialize_with = "deserialize_auto_expanded_paths"
+    )]
+    max_auto_expanded_paths: u32,
+}
+
+impl<'de> Deserialize<'de> for JsonSettings {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let settings = JsonSettingsSerde::deserialize(deserializer)?;
+        Self::try_new(settings.type_hints)
+            .map(|x| x.with_max_auto_expanded_paths(settings.max_auto_expanded_paths))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Default for JsonSettings {
+    fn default() -> Self {
+        Self {
+            type_hints: Vec::new(),
+            max_auto_expanded_paths: JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS,
+            type_hint_native_type: JsonNativeType::Object(JsonObjectType::new()),
+        }
+    }
+}
+
+fn default_max_auto_expanded_paths() -> u32 {
+    JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS
+}
+
+fn deserialize_auto_expanded_paths<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS))
 }
 
 /// Declares selected JSON2 subpaths as typed fields.
@@ -79,8 +130,40 @@ pub struct JsonContext<'a> {
 }
 
 impl JsonSettings {
-    pub fn new(type_hints: Vec<JsonTypeHint>) -> Self {
-        Self { type_hints }
+    /// Creates settings and validates the type-hint layout.
+    pub fn try_new(type_hints: Vec<JsonTypeHint>) -> Result<Self> {
+        let type_hint_native_type = type_hint_native_type(&type_hints)?;
+        Ok(Self {
+            type_hints,
+            max_auto_expanded_paths: JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS,
+            type_hint_native_type,
+        })
+    }
+
+    /// Sets the maximum number of automatically expanded paths.
+    pub fn with_max_auto_expanded_paths(mut self, max_auto_expanded_paths: u32) -> Self {
+        self.max_auto_expanded_paths = max_auto_expanded_paths;
+        self
+    }
+
+    /// Returns the configured type hints.
+    pub fn type_hints(&self) -> &[JsonTypeHint] {
+        &self.type_hints
+    }
+
+    /// Returns the maximum number of automatically expanded paths.
+    pub fn max_auto_expanded_paths(&self) -> u32 {
+        self.max_auto_expanded_paths
+    }
+
+    /// Consumes the settings and returns its persisted fields.
+    pub fn into_parts(self) -> (Vec<JsonTypeHint>, u32) {
+        (self.type_hints, self.max_auto_expanded_paths)
+    }
+
+    /// Returns the native type derived from the configured type hints.
+    pub(crate) fn type_hint_native_type(&self) -> &JsonNativeType {
+        &self.type_hint_native_type
     }
 
     /// Decode an encoded StructValue back into a serde_json::Value.
@@ -100,6 +183,48 @@ impl JsonSettings {
         };
         encode_json_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
     }
+}
+
+fn type_hint_native_type(type_hints: &[JsonTypeHint]) -> Result<JsonNativeType> {
+    let mut object = JsonObjectType::new();
+    for hint in type_hints {
+        insert_type_hint(&mut object, &hint.path, (&hint.data_type).into())?;
+    }
+    Ok(JsonNativeType::Object(object))
+}
+
+fn insert_type_hint(
+    object: &mut JsonObjectType,
+    path: &[String],
+    data_type: JsonNativeType,
+) -> Result<()> {
+    let Some((name, path)) = path.split_first() else {
+        return InvalidJson2LayoutSnafu {
+            reason: "JSON2 type hint path must not be empty".to_string(),
+        }
+        .fail();
+    };
+
+    if path.is_empty() {
+        if object.insert(name.clone(), data_type).is_some() {
+            return InvalidJson2LayoutSnafu {
+                reason: format!("duplicate JSON2 type hint path '{name}'"),
+            }
+            .fail();
+        }
+        return Ok(());
+    }
+
+    let child = object
+        .entry(name.clone())
+        .or_insert_with(|| JsonNativeType::Object(JsonObjectType::new()));
+    let JsonNativeType::Object(child) = child else {
+        return InvalidJson2LayoutSnafu {
+            reason: format!("conflicting JSON2 type hint path at '{name}'"),
+        }
+        .fail();
+    };
+    insert_type_hint(child, path, data_type)
 }
 
 impl<'a> JsonContext<'a> {
@@ -483,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_settings_forward_compatibility() {
+    fn test_json_settings_forward_compatibility() -> Result<()> {
         let json_str = r#"{
             "type_hints": [
                 {
@@ -516,7 +641,7 @@ mod tests {
 
         assert_eq!(
             deserialized,
-            JsonSettings::new(vec![
+            JsonSettings::try_new(vec![
                 JsonTypeHint {
                     path: vec!["user".to_string(), "age".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
@@ -531,13 +656,14 @@ mod tests {
                     default_constraint: None,
                     inverted_index: false,
                 },
-            ])
+            ])?
         );
+        Ok(())
     }
 
     #[test]
-    fn test_json_settings_ser_de() {
-        let settings = JsonSettings::new(vec![
+    fn test_json_settings_ser_de() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
@@ -552,12 +678,27 @@ mod tests {
                 default_constraint: None,
                 inverted_index: false,
             },
-        ]);
+        ])?
+        .with_max_auto_expanded_paths(1);
 
         let serialized = serde_json::to_string(&settings).unwrap();
         let deserialized = serde_json::from_str::<JsonSettings>(&serialized).unwrap();
 
         assert_eq!(settings, deserialized);
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_settings_rejects_conflicting_type_hints() {
+        let hint = |path: Vec<&str>| JsonTypeHint {
+            path: path.into_iter().map(str::to_string).collect(),
+            data_type: ConcreteDataType::int64_datatype(),
+            nullable: true,
+            default_constraint: None,
+            inverted_index: false,
+        };
+        let err = JsonSettings::try_new(vec![hint(vec!["a"]), hint(vec!["a", "b"])]).unwrap_err();
+        assert!(err.to_string().contains("conflicting JSON2 type hint path"));
     }
 
     #[test]
@@ -702,14 +843,14 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_respects_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_respects_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
             path: vec!["age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }])?;
 
         let result = settings
             .encode(json!({
@@ -731,17 +872,18 @@ mod tests {
             }))
             .unwrap_err();
         assert!(err.to_string().contains("does not match JSON2 type hint"));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_respects_unsigned_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_respects_unsigned_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
             path: vec!["count".to_string()],
             data_type: ConcreteDataType::uint64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }])?;
 
         let result = settings
             .encode(json!({
@@ -765,17 +907,18 @@ mod tests {
             }))
             .unwrap_err();
         assert!(err.to_string().contains("does not match JSON2 type hint"));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_fills_missing_type_hint_with_default() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_fills_missing_type_hint_with_default() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
             inverted_index: false,
-        }]);
+        }])?;
 
         let result = settings
             .encode(json!({}))
@@ -790,17 +933,18 @@ mod tests {
             panic!("Expected user Struct value");
         };
         assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_fills_missing_nullable_type_hint_with_null() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_fills_missing_nullable_type_hint_with_null() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
             path: vec!["user".to_string(), "name".to_string()],
             data_type: ConcreteDataType::string_datatype(),
             nullable: true,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }])?;
 
         let result = settings
             .encode(json!({ "user": {} }))
@@ -815,28 +959,30 @@ mod tests {
             panic!("Expected user Struct value");
         };
         assert_eq!(struct_field_value(user, "name"), &Value::Null);
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_rejects_missing_non_null_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_rejects_missing_non_null_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }])?;
 
         let err = settings.encode(json!({})).unwrap_err();
         assert!(
             err.to_string()
                 .contains("missing non-null JSON2 type hint path user.age")
         );
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_merges_missing_type_hint_prefix() {
-        let settings = JsonSettings::new(vec![
+    fn test_encode_json_merges_missing_type_hint_prefix() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
@@ -853,7 +999,7 @@ mod tests {
                 ))),
                 inverted_index: false,
             },
-        ]);
+        ])?;
 
         let result = settings
             .encode(json!({}))
@@ -872,6 +1018,7 @@ mod tests {
             struct_field_value(user, "name"),
             &Value::String("unknown".into())
         );
+        Ok(())
     }
 
     #[test]

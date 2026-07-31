@@ -348,9 +348,10 @@ impl FlatProjectionMapper {
             }
 
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_json2_extension_type(field) {
+            // FlatCompatBatch may have already projected physical JSON2 to this logical type.
+            if is_json2_extension_type(field) && array.data_type() != field.data_type() {
                 array = JsonArray::from(&array)
-                    .project_to(field.data_type())
+                    .project_json2(batch.schema_ref().field(*index), field.data_type())
                     .context(DataTypesSnafu)?;
             }
 

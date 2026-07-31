@@ -29,6 +29,7 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow_array::StringArray;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ScalarVector, Vector, VectorRef};
+use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
@@ -46,7 +47,7 @@ use crate::error::{
     self, ComputeArrowSnafu, ConvertVectorSnafu, EncodeSnafu, PrimaryKeyLengthMismatchSnafu, Result,
 };
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::builder::{FieldBuilder, StringBuilder};
+use crate::memtable::builder::FieldBuilder;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
@@ -918,7 +919,7 @@ pub(crate) struct ValueBuilder {
     sequence: Vec<u64>,
     op_type: Vec<u8>,
     fields: Vec<Option<FieldBuilder>>,
-    field_types: Vec<ConcreteDataType>,
+    field_schemas: Vec<ColumnSchema>,
 }
 
 impl ValueBuilder {
@@ -931,18 +932,18 @@ impl ValueBuilder {
         let sequence = Vec::with_capacity(capacity);
         let op_type = Vec::with_capacity(capacity);
 
-        let field_types = region_metadata
+        let field_schemas = region_metadata
             .field_columns()
-            .map(|c| c.column_schema.data_type.clone())
+            .map(|c| c.column_schema.clone())
             .collect::<Vec<_>>();
-        let fields = (0..field_types.len()).map(|_| None).collect();
+        let fields = (0..field_schemas.len()).map(|_| None).collect();
         Self {
             timestamp: Vec::with_capacity(capacity),
             timestamp_type,
             sequence,
             op_type,
             fields,
-            field_types,
+            field_schemas,
         }
     }
 
@@ -984,15 +985,10 @@ impl ValueBuilder {
                         .push(field_value)
                         .unwrap_or_else(|e| panic!("Failed to push field value: {e:?}"));
                 } else {
-                    let mut mutable_vector =
-                        if let ConcreteDataType::String(_) = &self.field_types[idx] {
-                            FieldBuilder::String(StringBuilder::with_capacity(4, 8))
-                        } else {
-                            FieldBuilder::Other(
-                                self.field_types[idx]
-                                    .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY)),
-                            )
-                        };
+                    let mut mutable_vector = FieldBuilder::create(
+                        &self.field_schemas[idx],
+                        num_rows.max(INITIAL_BUILDER_CAPACITY),
+                    );
                     mutable_vector.push_nulls(num_rows - 1);
                     mutable_vector
                         .push(field_value)
@@ -1017,7 +1013,12 @@ impl ValueBuilder {
     /// the Arrow string array offset limit and thus can never be accommodated, not even by an
     /// empty builder.
     pub(crate) fn can_accommodate(&self, fields: &[VectorRef]) -> Result<bool> {
-        scan_string_capacity(fields, &self.fields, &self.field_types, i32::MAX)
+        let data_types = self
+            .field_schemas
+            .iter()
+            .map(|x| x.data_type.clone())
+            .collect::<Vec<_>>();
+        scan_string_capacity(fields, &self.fields, &data_types, i32::MAX)
     }
 
     pub(crate) fn extend(
@@ -1082,7 +1083,7 @@ impl ValueBuilder {
         {
             let builder = field_dest.get_or_insert_with(|| {
                 let mut field_builder =
-                    FieldBuilder::create(&self.field_types[field_idx], INITIAL_BUILDER_CAPACITY);
+                    FieldBuilder::create(&self.field_schemas[field_idx], INITIAL_BUILDER_CAPACITY);
                 field_builder.push_nulls(num_rows_before);
                 field_builder
             });
@@ -1140,9 +1141,9 @@ impl ValueBuilder {
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
                     v.finish_cloned()
                 } else {
-                    let mut single_null = self.field_types[i].create_mutable_vector(num_rows);
-                    single_null.push_nulls(num_rows);
-                    single_null.to_vector()
+                    let mut builder = FieldBuilder::create(&self.field_schemas[i], num_rows);
+                    builder.push_nulls(num_rows);
+                    builder.finish()
                 }
             })
             .collect::<Vec<_>>();
@@ -1282,9 +1283,9 @@ impl From<ValueBuilder> for Values {
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
                     v.finish()
                 } else {
-                    let mut single_null = value.field_types[i].create_mutable_vector(num_rows);
-                    single_null.push_nulls(num_rows);
-                    single_null.to_vector()
+                    let mut builder = FieldBuilder::create(&value.field_schemas[i], num_rows);
+                    builder.push_nulls(num_rows);
+                    builder.finish()
                 }
             })
             .collect::<Vec<_>>();
@@ -1390,6 +1391,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::memtable::builder::StringBuilder;
     use crate::test_util::column_metadata_to_column_schema;
 
     fn schema_for_test() -> RegionMetadataRef {

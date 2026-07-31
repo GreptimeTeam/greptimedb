@@ -16,7 +16,6 @@
 
 pub(crate) mod chunk_reader;
 pub mod context;
-pub(crate) mod json_align;
 pub mod part;
 pub mod part_reader;
 mod row_group_reader;
@@ -44,10 +43,12 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
 
+use crate::compaction::{
+    Json2Targets, json2_targets_from_schemas, rewrite_json2_batch, rewrite_json2_schema,
+};
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
     should_prune_bulk_part,
@@ -1116,8 +1117,9 @@ impl PartToMerge {
     fn create_iterator(
         self,
         context: Arc<BulkIterContext>,
+        targets: Arc<Json2Targets>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
-        match self {
+        let iter = match self {
             PartToMerge::Bulk { part, .. } => {
                 let series_count = part.estimated_series_count();
                 let iter = BulkPartBatchIter::from_single(
@@ -1127,11 +1129,21 @@ impl PartToMerge {
                     series_count,
                     None, // No metrics for merging
                 );
-                Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
+                Some(Box::new(iter) as BoxedRecordBatchIterator)
             }
-            PartToMerge::Multi { part, .. } => part.read(context, None, None),
-            PartToMerge::Encoded { part, .. } => part.read(context, None, None),
+            PartToMerge::Multi { part, .. } => part.read(context, None, None)?,
+            PartToMerge::Encoded { part, .. } => part.read(context, None, None)?,
+        };
+        let Some(iter) = iter else {
+            return Ok(None);
+        };
+        if targets.is_empty() {
+            return Ok(Some(iter));
         }
+
+        Ok(Some(Box::new(iter.map(move |batch| {
+            batch.and_then(|batch| rewrite_json2_batch(batch, &targets))
+        }))))
     }
 }
 
@@ -1289,19 +1301,26 @@ impl MemtableCompactor {
             batch_size,
         )?);
 
-        let aligner = Json2Aligner::try_new(parts_to_merge.iter().map(PartToMerge::arrow_schema))?;
+        let source_schemas = parts_to_merge
+            .iter()
+            .map(|part| ((*part.arrow_schema()).clone(), part.num_rows() as u64))
+            .collect::<Vec<_>>();
+        let targets = Arc::new(json2_targets_from_schemas(metadata, &source_schemas)?);
+        let schema = rewrite_json2_schema(&parts_to_merge[0].arrow_schema(), &targets);
 
         let iterators: Vec<BoxedRecordBatchIterator> = parts_to_merge
             .into_iter()
-            .filter_map(|part| part.create_iterator(context.clone()).ok().flatten())
-            .map(|iter| aligner.wrap_iter(iter))
+            .map(|part| part.create_iterator(context.clone(), targets.clone()))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect();
 
         if iterators.is_empty() {
             return Ok(None);
         }
 
-        let merged_iter = FlatMergeIterator::new(aligner.schema().clone(), iterators, batch_size)?;
+        let merged_iter = FlatMergeIterator::new(schema.clone(), iterators, batch_size)?;
 
         let boxed_iter: BoxedRecordBatchIterator = if dedup {
             match merge_mode {
@@ -1310,8 +1329,7 @@ impl MemtableCompactor {
                     Box::new(dedup_iter)
                 }
                 MergeMode::LastNonNull => {
-                    let field_column_start =
-                        field_column_start(metadata, aligner.schema().fields().len());
+                    let field_column_start = field_column_start(metadata, schema.fields().len());
 
                     let dedup_iter = FlatDedupIterator::new(
                         merged_iter,
@@ -1332,7 +1350,7 @@ impl MemtableCompactor {
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
-                aligner.schema().clone(),
+                schema,
                 min_timestamp,
                 max_timestamp,
                 max_sequence,
@@ -1532,9 +1550,14 @@ mod tests {
     use api::helper::encode_json_value;
     use api::v1::value::ValueData;
     use api::v1::{Mutation, Row, Rows, SemanticType};
+    use common_error::ext::WhateverResult;
+    use datatypes::arrow::datatypes::DataType as ArrowDataType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{
+        JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, Json2PhysicalLayout, JsonMetadata,
+    };
     use datatypes::json::value::JsonValue;
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
@@ -1678,7 +1701,7 @@ mod tests {
 
     #[test]
     fn test_bulk_memtable_compact_parts_with_json2() {
-        let metadata = mock_metadata_with_json2();
+        let metadata = mock_metadata_with_json2(JsonSettings::default());
 
         let config = BulkMemtableConfig {
             merge_threshold: 2,
@@ -1717,7 +1740,84 @@ mod tests {
         assert_eq!(4, total_rows);
     }
 
-    fn mock_metadata_with_json2() -> RegionMetadataRef {
+    #[test]
+    fn test_bulk_memtable_merge_bounds_json2_paths() -> WhateverResult<()> {
+        let metadata =
+            mock_metadata_with_json2(JsonSettings::default().with_max_auto_expanded_paths(1));
+        let first = mock_bulk_part_with_json2_values(
+            &metadata,
+            vec![1000, 2000],
+            vec![json!({"a": 1}), json!({"a": 2})],
+            100,
+        )?;
+        let second = mock_bulk_part_with_json2_values(
+            &metadata,
+            vec![3000, 4000],
+            vec![json!({"b": 3}), json!({"b": 4})],
+            200,
+        )?;
+        let parts = vec![
+            PartToMerge::Bulk {
+                part: first,
+                file_id: FileId::random(),
+            },
+            PartToMerge::Bulk {
+                part: second,
+                file_id: FileId::random(),
+            },
+        ];
+
+        let merged = MemtableCompactor::merge_parts_group(
+            parts,
+            &metadata,
+            false,
+            MergeMode::LastRow,
+            usize::MAX,
+            usize::MAX,
+            DEFAULT_ROW_GROUP_SIZE,
+        )?
+        .unwrap();
+        let MergedPart::Multi(part) = merged else {
+            unreachable!()
+        };
+        let schema = part.schemas().next().unwrap();
+        let ArrowDataType::Struct(fields) = schema.field(0).data_type() else {
+            unreachable!()
+        };
+        assert_eq!(
+            vec![JSON2_REMAINDER_FIELD_NAME, "a"],
+            fields.iter().map(|x| x.name().as_str()).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_bulk_part_converter_uses_json2_v2_layout() -> WhateverResult<()> {
+        let settings = JsonSettings::try_new(vec![JsonTypeHint {
+            path: vec!["id".to_string()],
+            data_type: ConcreteDataType::int64_datatype(),
+            nullable: true,
+            default_constraint: None,
+            inverted_index: false,
+        }])?;
+        let metadata = mock_metadata_with_json2(settings);
+        let part = mock_bulk_part_with_json2(&metadata, vec![1000, 2000], 100)?;
+        let schema = part.batch.schema();
+        let field = schema.field(0);
+        let layout = Json2PhysicalLayout::try_from_root(field)?;
+
+        assert!(layout.is_version_2());
+        let ArrowDataType::Struct(fields) = field.data_type() else {
+            unreachable!()
+        };
+        assert_eq!(
+            vec![JSON2_REMAINDER_FIELD_NAME, "id"],
+            fields.iter().map(|x| x.name().as_str()).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn mock_metadata_with_json2(settings: JsonSettings) -> RegionMetadataRef {
         let col_meta_1 = ColumnMetadata {
             column_schema: ColumnSchema::new(
                 "ts",
@@ -1730,7 +1830,9 @@ mod tests {
 
         let data_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
         let mut col_schema = ColumnSchema::new("data", data_type, true);
-        col_schema.with_extension_type(&Json2ExtensionType::default());
+        col_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            settings,
+        ))));
 
         let col_meta_2 = ColumnMetadata {
             column_schema: col_schema,
@@ -1750,7 +1852,28 @@ mod tests {
         timestamps: Vec<i64>,
         sequence: u64,
     ) -> Result<BulkPart> {
+        let values = timestamps
+            .iter()
+            .map(|ts| {
+                json!({
+                    "id": ts,
+                    "payload": {
+                        "message": format!("row-{ts}"),
+                    },
+                })
+            })
+            .collect();
+        mock_bulk_part_with_json2_values(metadata, timestamps, values, sequence)
+    }
+
+    fn mock_bulk_part_with_json2_values(
+        metadata: &RegionMetadataRef,
+        timestamps: Vec<i64>,
+        values: Vec<serde_json::Value>,
+        sequence: u64,
+    ) -> Result<BulkPart> {
         let capacity = timestamps.len();
+        debug_assert_eq!(capacity, values.len());
         let primary_key_codec = build_primary_key_codec(metadata);
         let json_type = JsonNativeType::Object(JsonObjectType::from([
             ("id".to_string(), JsonNativeType::i64()),
@@ -1773,16 +1896,12 @@ mod tests {
 
         let rows = timestamps
             .into_iter()
-            .map(|ts| {
+            .zip(values)
+            .map(|(ts, value)| {
                 let val1 = api::v1::Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(ts)),
                 };
-                let value_data = ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
-                    "id": ts,
-                    "payload": {
-                        "message": format!("row-{ts}"),
-                    },
-                }))));
+                let value_data = ValueData::JsonValue(encode_json_value(JsonValue::from(value)));
                 let val2 = api::v1::Value {
                     value_data: Some(value_data),
                 };

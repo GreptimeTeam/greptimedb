@@ -195,6 +195,9 @@ otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "5
 ] }
 parking_lot = "0.12"
 parquet = { version = "58.3", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet-variant = "58.3"
+parquet-variant-compute = "58.3"
+parquet-variant-json = "58.3"
 paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"

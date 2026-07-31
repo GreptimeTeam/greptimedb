@@ -90,7 +90,11 @@ use crate::sst::parquet::prefilter::{
 use crate::sst::parquet::push_decoder::{
     SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
 };
-use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
+#[cfg(test)]
+use crate::sst::parquet::read_columns::build_projection_plan;
+use crate::sst::parquet::read_columns::{
+    ProjectionMaskPlan, build_projection_plan_with_arrow_schema,
+};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -478,7 +482,11 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
+        let projection_plan = build_projection_plan_with_arrow_schema(
+            parquet_read_cols,
+            parquet_schema_desc,
+            read_format.arrow_schema(),
+        );
         let has_nested_projection = parquet_read_cols.has_nested();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)

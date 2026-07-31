@@ -80,7 +80,7 @@ impl JsonNativeType {
         Self::Number(JsonNumberType::F64)
     }
 
-    fn object() -> Self {
+    pub fn object() -> Self {
         Self::Object(JsonObjectType::new())
     }
 

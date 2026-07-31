@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BinaryViewArray, new_null_array};
@@ -54,12 +55,17 @@ trait JsonGetResultBuilder {
     fn build(&mut self) -> ArrayRef;
 }
 
-fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetResultBuilder>> {
+fn result_builder(
+    len: usize,
+    with_type: &DataType,
+    serialize_containers: bool,
+) -> Result<Box<dyn JsonGetResultBuilder>> {
     let builder = match with_type {
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-            Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
-                as Box<dyn JsonGetResultBuilder>
-        }
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Box::new(StringResultBuilder {
+            inner: StringViewBuilder::with_capacity(len),
+            serialize_containers,
+        })
+            as Box<dyn JsonGetResultBuilder>,
         DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
         DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
         DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
@@ -71,20 +77,31 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
 }
 
 // TODO: refactor this to StringLikeArrayBuilder from Arrow 57
-struct StringResultBuilder(StringViewBuilder);
+struct StringResultBuilder {
+    inner: StringViewBuilder,
+    serialize_containers: bool,
+}
 
 impl JsonGetResultBuilder for StringResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_str(value).ok());
+        // JSON2 Struct projection serializes containers, so its Binary Variant path must do the
+        // same. Legacy JSON keeps its existing scalar-only conversion semantics.
+        let value =
+            if self.serialize_containers && (jsonb::is_array(value) || jsonb::is_object(value)) {
+                Some(jsonb::to_string(value))
+            } else {
+                jsonb::to_str(value).ok()
+            };
+        self.inner.append_option(value);
         Ok(())
     }
 
     fn append_null(&mut self) {
-        self.0.append_null();
+        self.inner.append_null();
     }
 
     fn build(&mut self) -> ArrayRef {
-        Arc::new(self.0.finish())
+        Arc::new(self.inner.finish())
     }
 }
 
@@ -404,18 +421,25 @@ impl Function for JsonGetWithType {
         let result = match arg0.data_type() {
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                let is_json2 = args.arg_fields.first().is_some_and(is_json2_extension_type);
 
-                if args.arg_fields.first().is_some_and(is_json2_extension_type) {
-                    // Query concretization projects nested JSON2 paths as Struct arrays. A binary
-                    // JSON2 argument is therefore an already-selected scalar or root value that
-                    // only needs conversion from its JSONB representation to the requested type.
+                if is_json2 && path.trim_start_matches('$').split('.').all(str::is_empty) {
+                    // Empty JSON2 paths select the whole root. Non-empty paths must still be
+                    // evaluated when a whole-column request keeps that root in Variant form.
                     JsonArray::from(&arg0)
                         .project_to(&with_type)
                         .map_err(|e| exec_datafusion_err!("{e:?}"))?
                 } else {
                     let jsons = arg0.as_binary_view();
-                    let mut builder = result_builder(len, &with_type)?;
-                    jsonb_get(jsons, path, builder.as_mut())?;
+                    // JSON2 field access uses dot-separated paths without the JSONPath root
+                    // marker, while the Variant remainder is evaluated by the jsonb engine.
+                    let path = if is_json2 && !path.starts_with('$') {
+                        Cow::Owned(format!("$.{path}"))
+                    } else {
+                        Cow::Borrowed(path)
+                    };
+                    let mut builder = result_builder(len, &with_type, is_json2)?;
+                    jsonb_get(jsons, &path, builder.as_mut())?;
                     builder.build()
                 }
             }

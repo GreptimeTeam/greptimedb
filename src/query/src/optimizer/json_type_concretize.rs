@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
@@ -110,19 +110,60 @@ fn apply_json_type_hint(
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
+    // Pass-through plans such as Filter expose a requested full JSON root in their output schema,
+    // while their expressions contain only path accesses from predicates.
+    let mut whole_columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| is_json2_extension_type(field))
+        .map(|field| field.name().clone())
+        .collect::<HashSet<_>>();
 
     plan.apply(|plan| {
         for expr in plan.expressions() {
+            // Optimizer-generated projections may keep the JSON root only so later json_get
+            // expressions can access another path. A same-name pass-through does not require the
+            // complete root by itself; any real whole-column consumer above it is visited
+            // separately, and a whole root in the final output is captured from the plan schema.
+            if matches!(plan, LogicalPlan::Projection(_)) && is_same_name_column_projection(&expr) {
+                continue;
+            }
             expr.apply(|expr| {
                 if let Some((column, json_type)) = deduce_json_type(expr)? {
                     json_types.entry(column).or_default().merge(&json_type);
+                    // The JSON column below json_get is an implementation detail of that path
+                    // access, not a request for the whole root. Skipping its children lets a
+                    // separate direct use of the same column remain distinguishable.
+                    return Ok(TreeNodeRecursion::Jump);
+                }
+                if let Expr::Column(column) = expr {
+                    whole_columns.insert(column.name.clone());
                 }
                 Ok(TreeNodeRecursion::Continue)
             })?;
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
+    for column in whole_columns {
+        // A scan cannot return both a narrowed Struct and the complete root for one column.
+        // Variant keeps the full logical JSON available; json_get above it still evaluates the
+        // requested paths, while path-only queries retain their nested projection.
+        if let Some(json_type) = json_types.get_mut(&column) {
+            *json_type = JsonNativeType::Variant;
+        }
+    }
     Ok(json_types)
+}
+
+fn is_same_name_column_projection(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) => true,
+        Expr::Alias(alias) => {
+            matches!(alias.expr.as_ref(), Expr::Column(column) if column.name == alias.name)
+        }
+        _ => false,
+    }
 }
 
 fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
@@ -360,17 +401,27 @@ mod tests {
                 .rewrite(plan, &OptimizerContext::default())?
                 .transformed
         );
-        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
+            provider.scan_request().json_type_hint.get("j")
+        );
         Ok(())
     }
 
     #[test]
-    fn test_allow_json2_passthrough_for_later_projection() -> Result<()> {
-        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+    fn test_narrow_json2_passthrough_for_later_path_access() -> Result<()> {
+        let common = json_get_expr(col("j"), path_expr("time"), Some(DataType::Int64))?;
         let (provider, plan) = build_json2_scan()?;
         let plan = plan
-            .project(vec![json_get.alias("__common_expr"), col("j")])?
-            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .project(vec![common.alias("__common_expr"), col("j")])?
+            .aggregate(
+                vec![json_get_expr(
+                    col("j"),
+                    path_expr("did"),
+                    Some(DataType::Utf8View),
+                )?],
+                vec![count(col("__common_expr"))],
+            )?
             .build()?;
 
         assert!(
@@ -378,7 +429,13 @@ mod tests {
                 .rewrite(plan, &OptimizerContext::default())?
                 .transformed
         );
-        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        assert_eq!(
+            Some(&JsonNativeType::Object(JsonObjectType::from([
+                ("did".to_string(), JsonNativeType::String),
+                ("time".to_string(), JsonNativeType::i64()),
+            ]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
         Ok(())
     }
 
@@ -397,6 +454,25 @@ mod tests {
                 "a".to_string(),
                 JsonNativeType::i64(),
             )]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_filter_with_root_projection() -> Result<()> {
+        let predicate =
+            json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?.eq(lit(1_i64));
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan.filter(predicate)?.build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
             provider.scan_request().json_type_hint.get("j")
         );
         Ok(())

@@ -644,6 +644,31 @@ mod tests {
     }
 
     #[test]
+    fn test_new_json2_column_uses_v2_layout() {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "data".into(),
+                data_type: SqlDataType::Custom(
+                    sqlparser::ast::ObjectName::from(vec!["JSON2".into()]),
+                    vec![],
+                ),
+                options: vec![],
+            },
+            extensions: ColumnExtensions::default(),
+        };
+
+        let schema = column_to_schema(&column, "ts", None).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(schema.metadata().get("ARROW:extension:metadata").unwrap())
+                .unwrap();
+        assert_eq!(Some(2), metadata["layout_version"].as_u64());
+        assert_eq!(
+            Some(100),
+            metadata["json_settings"]["max_auto_expanded_paths"].as_u64()
+        );
+    }
+
+    #[test]
     pub fn test_column_to_schema_timestamp_with_timezone() {
         let column = Column {
             column_def: ColumnDef {
@@ -721,7 +746,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: None,
             },
         };
@@ -753,7 +778,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: Some(OptionMap::from([
                     ("metric".to_string(), "cosine".to_string()),
                     ("connectivity".to_string(), "32".to_string()),
@@ -794,7 +819,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: Some(OptionMap::default()),
             },
         };

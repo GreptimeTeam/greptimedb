@@ -62,7 +62,6 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
@@ -452,17 +451,10 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
+        // New memtable parts always use the region's fixed physical schema.
         let schema = self.parts[0].batch.schema();
-        let concatenated = if schema.fields().iter().any(is_json2_extension_type) {
-            let aligner = Json2Aligner::try_new(self.parts.iter().map(|part| part.batch.schema()))?;
-            let aligned_batches =
-                aligner.align_batches(self.parts.iter().map(|part| part.batch.clone()))?;
-            concat_batches(aligner.schema(), &aligned_batches).context(ComputeArrowSnafu)?
-        } else {
-            concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
-                .context(ComputeArrowSnafu)?
-        };
+        let concatenated = concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
+            .context(ComputeArrowSnafu)?;
 
         // Sort the concatenated batch
         let sorted_batch = sort_primary_key_record_batch(&concatenated)?;

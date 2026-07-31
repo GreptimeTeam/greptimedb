@@ -50,6 +50,22 @@ INSERT INTO t_legacy_json2_non_append_table (ts, j) VALUES
 
 Affected Rows: 1
 
+ADMIN FLUSH_TABLE('t_legacy_json2_non_append_table');
+
++-------------------------------------------------------+
+| ADMIN flush_table('t_legacy_json2_non_append_table') |
++-------------------------------------------------------+
+| 0                                                     |
++-------------------------------------------------------+
+
+ADMIN compact_table('t_legacy_json2_non_append_table');
+
++---------------------------------------------------------+
+| ADMIN compact_table('t_legacy_json2_non_append_table') |
++---------------------------------------------------------+
+| 0                                                       |
++---------------------------------------------------------+
+
 SELECT ts, j.a AS a, j.nested.s AS nested_s
 FROM t_legacy_json2_non_append_table
 ORDER BY ts;

@@ -87,22 +87,6 @@ impl Helper {
             })
     }
 
-    pub fn check_get_mutable_vector<T: 'static + MutableVector>(
-        vector: &mut dyn MutableVector,
-    ) -> Result<&mut T> {
-        let ty = vector.data_type();
-        vector
-            .as_mut_any()
-            .downcast_mut()
-            .with_context(|| error::UnknownVectorSnafu {
-                msg: format!(
-                    "downcast vector error, vector type: {:?}, expected vector: {:?}",
-                    ty,
-                    std::any::type_name::<T>(),
-                ),
-            })
-    }
-
     pub fn check_get_scalar_vector<T: Scalar>(
         vector: &VectorRef,
     ) -> Result<&<T as Scalar>::VectorType> {

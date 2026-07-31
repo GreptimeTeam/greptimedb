@@ -24,7 +24,6 @@ use bytes::Bytes;
 use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::extension::json::is_json2_extension_type;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -40,12 +39,11 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
-    Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    Error, FlushCancelledSnafu, FlushRegionSnafu, InvalidRecordBatchSnafu, JoinSnafu,
+    RegionBusySnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
@@ -918,6 +916,7 @@ fn memtable_flat_sources(
         if let Some(encoded) = only_range.encoded() {
             flat_sources.encoded.push((encoded, max_sequence));
         } else {
+            let schema = only_range.record_batch_schema_hint().unwrap_or(schema);
             let iter = only_range.build_record_batch_iter(None, None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
@@ -950,13 +949,7 @@ fn memtable_flat_sources(
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
-
-        let has_json2 = schema.fields().iter().any(is_json2_extension_type);
-        let mut json_align_schemas = if has_json2 {
-            Some(Vec::with_capacity(num_ranges))
-        } else {
-            None
-        };
+        let mut input_schema = None;
 
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
@@ -965,13 +958,16 @@ fn memtable_flat_sources(
                 continue;
             }
 
-            // Collect schemas if has json2 field.
-            if let Some(schemas) = json_align_schemas.as_mut() {
-                let schema = range
-                    .record_batch_schema_hint()
-                    .unwrap_or_else(|| schema.clone());
-                schemas.push(schema);
+            let range_schema = range
+                .record_batch_schema_hint()
+                .unwrap_or_else(|| schema.clone());
+            if input_schema.as_ref().is_some_and(|x| x != &range_schema) {
+                return InvalidRecordBatchSnafu {
+                    reason: "memtable ranges yielded different record batch schemas".to_string(),
+                }
+                .fail();
             }
+            input_schema.get_or_insert(range_schema);
 
             let iter = range.build_record_batch_iter(None, None)?;
             input_iters.push(iter);
@@ -1007,14 +1003,10 @@ fn memtable_flat_sources(
 
                 let input_iters =
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
-                let (schema, input_iters) = maybe_align_json2_iters(
-                    schema.clone(),
-                    json_align_schemas.take(),
-                    input_iters,
-                )?;
+                let input_schema = input_schema.take().unwrap_or_else(|| schema.clone());
 
                 let maybe_dedup = merge_and_dedup_with_batch_size(
-                    &schema,
+                    &input_schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
@@ -1022,17 +1014,12 @@ fn memtable_flat_sources(
                     batch_size,
                 )?;
 
-                flat_sources
-                    .sources
-                    .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
+                flat_sources.sources.push((
+                    FlatSource::new_iter(input_schema, maybe_dedup),
+                    max_sequence,
+                ));
                 last_iter_rows = 0;
                 current_ranges.clear();
-
-                json_align_schemas = if has_json2 {
-                    Some(Vec::with_capacity(num_ranges))
-                } else {
-                    None
-                };
             }
         }
 
@@ -1046,8 +1033,7 @@ fn memtable_flat_sources(
                 rows_remaining
             );
 
-            let (schema, input_iters) =
-                maybe_align_json2_iters(schema, json_align_schemas, input_iters)?;
+            let input_schema = input_schema.unwrap_or(schema);
 
             let max_sequence = current_ranges
                 .iter()
@@ -1061,7 +1047,7 @@ fn memtable_flat_sources(
                 }));
 
             let maybe_dedup = merge_and_dedup_with_batch_size(
-                &schema,
+                &input_schema,
                 options.append_mode,
                 options.merge_mode(),
                 field_column_start,
@@ -1069,31 +1055,14 @@ fn memtable_flat_sources(
                 batch_size,
             )?;
 
-            flat_sources
-                .sources
-                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
+            flat_sources.sources.push((
+                FlatSource::new_iter(input_schema, maybe_dedup),
+                max_sequence,
+            ));
         }
     }
 
     Ok(flat_sources)
-}
-
-fn maybe_align_json2_iters(
-    schema: SchemaRef,
-    schemas: Option<Vec<SchemaRef>>,
-    input_iters: Vec<BoxedRecordBatchIterator>,
-) -> Result<(SchemaRef, Vec<BoxedRecordBatchIterator>)> {
-    let Some(schemas) = schemas else {
-        return Ok((schema, input_iters));
-    };
-
-    let aligner = Json2Aligner::try_new(schemas)?;
-    let input_iters = input_iters
-        .into_iter()
-        .map(|input_iter| aligner.wrap_iter(input_iter))
-        .collect();
-
-    Ok((aligner.schema().clone(), input_iters))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.

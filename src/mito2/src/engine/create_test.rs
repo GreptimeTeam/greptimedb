@@ -15,9 +15,13 @@
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -30,6 +34,83 @@ use crate::test_util::{
 async fn test_engine_create_new_region() {
     test_engine_create_new_region_with_format(false).await;
     test_engine_create_new_region_with_format(true).await;
+}
+
+#[tokio::test]
+async fn test_engine_rejects_json2_with_time_series_memtable_on_create_and_open() {
+    let mut env = TestEnv::with_prefix("json2-time-series").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "time_series")
+        .insert_option("sst_format", "primary_key")
+        .build();
+
+    let err = engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert!(
+        err.to_string()
+            .contains("JSON2 columns only support BulkMemtable")
+    );
+
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let options = [
+        ("append_mode".to_string(), "true".to_string()),
+        ("memtable.type".to_string(), "time_series".to_string()),
+        ("sst_format".to_string(), "primary_key".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: "test".to_string(),
+                path_type: PathType::Bare,
+                options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert!(
+        err.output_msg()
+            .contains("JSON2 columns only support BulkMemtable")
+    );
 }
 
 async fn test_engine_create_new_region_with_format(flat_format: bool) {
