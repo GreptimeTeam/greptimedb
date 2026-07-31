@@ -26,16 +26,31 @@ use crate::json::JsonSettings;
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
 
+/// Legacy JSON2 storage layout with unlimited path expansion.
+pub const JSON2_LAYOUT_V1: u8 = 1;
+/// JSON2 storage layout with bounded path expansion and a Variant remainder.
+pub const JSON2_LAYOUT_V2: u8 = 2;
+/// Reserved physical field containing unexpanded JSON2 paths.
+pub const JSON2_REMAINDER_FIELD_NAME: &str = "!__remainder__!";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JsonMetadata {
     /// JSON2 settings stored in Arrow extension metadata.
     json_settings: JsonSettings,
+    /// Physical JSON2 layout used by this Arrow field.
+    ///
+    /// Missing metadata denotes the legacy v1 layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout_version: Option<u8>,
 }
 
 impl JsonMetadata {
     /// Creates JSON2 extension metadata.
     pub fn new(json_settings: JsonSettings) -> Self {
-        Self { json_settings }
+        Self {
+            json_settings,
+            layout_version: Some(JSON2_LAYOUT_V2),
+        }
     }
 
     /// Returns the JSON2 settings.
@@ -280,5 +295,25 @@ mod tests {
         assert!(JsonExtensionType::try_new(&DataType::Binary, ()).is_ok());
         assert!(JsonExtensionType::try_new(&DataType::Null, ()).is_ok());
         assert!(JsonExtensionType::try_new(&DataType::Struct(Fields::empty()), ()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_json_metadata_layout_version_compatibility() -> serde_json::Result<()> {
+        let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":null}"#)?;
+        assert_eq!(legacy.layout_version, None);
+
+        let metadata = JsonMetadata {
+            json_settings: None,
+            layout_version: Some(JSON2_LAYOUT_V2),
+        };
+        let serialized = serde_json::to_string(&metadata)?;
+        let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
+        assert_eq!(deserialized.layout_version, Some(JSON2_LAYOUT_V2));
+        Ok(())
     }
 }

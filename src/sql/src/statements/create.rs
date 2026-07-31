@@ -136,7 +136,30 @@ pub struct ColumnExtensions {
     pub inverted_index_options: Option<OptionMap>,
     /// Vector index options for HNSW-based vector similarity search.
     pub vector_index_options: Option<OptionMap>,
-    pub json_type_hints: Vec<JsonTypeHint>,
+    /// JSON2-specific column options.
+    pub json2_options: Option<Json2Options>,
+}
+
+/// JSON2-specific options represented in the SQL AST.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize)]
+pub struct Json2Options {
+    /// Maximum number of unhinted JSON2 paths expanded into Arrow fields.
+    pub max_auto_expanded_paths: Option<u32>,
+    /// Paths stored as explicitly typed JSON2 fields.
+    pub type_hints: Vec<JsonTypeHint>,
+}
+
+impl Display for Json2Options {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut options = Vec::with_capacity(
+            self.type_hints.len() + usize::from(self.max_auto_expanded_paths.is_some()),
+        );
+        if let Some(value) = self.max_auto_expanded_paths {
+            options.push(format!("max_auto_expanded_paths = {value}"));
+        }
+        options.extend(self.type_hints.iter().map(format_json_type_hint));
+        write!(f, "(\n    {}\n  )", options.iter().join(",\n    "))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
@@ -180,12 +203,8 @@ impl Display for Column {
         }
 
         write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
-        if !self.extensions.json_type_hints.is_empty() {
-            write!(
-                f,
-                "{}",
-                format_json_type_hints(&self.extensions.json_type_hints)
-            )?;
+        if let Some(options) = &self.extensions.json2_options {
+            write!(f, "{options}")?;
         }
         for option in &self.column_def.options {
             write!(f, " {option}")?;
@@ -335,12 +354,13 @@ impl ColumnExtensions {
     }
 
     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {
-        if self.json_type_hints.is_empty() {
+        let Some(options) = &self.json2_options else {
             return Ok(None);
-        }
+        };
 
-        Ok(Some(JsonSettings::new(
-            self.json_type_hints
+        Ok(Some(JsonSettings {
+            type_hints: options
+                .type_hints
                 .iter()
                 .map(|hint| {
                     Ok(datatypes::json::JsonTypeHint {
@@ -352,12 +372,16 @@ impl ColumnExtensions {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
-        )))
+            max_auto_expanded_paths: options.max_auto_expanded_paths,
+        }))
     }
 
     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {
-        self.json_type_hints = settings
-            .type_hints
+        let JsonSettings {
+            max_auto_expanded_paths,
+            type_hints,
+        } = settings;
+        let type_hints = type_hints
             .into_iter()
             .map(|hint| {
                 let data_type = json_type_hint_sql_data_type(&hint.data_type)?;
@@ -374,6 +398,10 @@ impl ColumnExtensions {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        self.json2_options = Some(Json2Options {
+            max_auto_expanded_paths,
+            type_hints,
+        });
         Ok(())
     }
 }
@@ -484,13 +512,6 @@ fn format_json_type_hint(hint: &JsonTypeHint) -> String {
     format!(
         "{} {}{}{}{}",
         path, hint.data_type, nullability, default, inverted_index
-    )
-}
-
-fn format_json_type_hints(hints: &[JsonTypeHint]) -> String {
-    format!(
-        "(\n    {}\n  )",
-        hints.iter().map(format_json_type_hint).join(",\n    ")
     )
 }
 
@@ -786,6 +807,7 @@ mod tests {
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
+    use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
@@ -1001,6 +1023,31 @@ ENGINE=mito
     }
 
     #[test]
+    fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
+        let sql = r#"CREATE TABLE traces (
+            log_json_data JSON2 (
+                status_code INT64 NOT NULL,
+                max_auto_expanded_paths = 1
+            ),
+            ts TIMESTAMP TIME INDEX
+        )"#;
+        let result = ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )?;
+        let Statement::CreateTable(create_table) = &result[0] else {
+            unreachable!()
+        };
+        let settings = create_table.columns[0]
+            .extensions
+            .build_json_settings()?
+            .unwrap();
+        assert_eq!(settings.max_auto_expanded_paths, Some(1));
+        Ok(())
+    }
+
+    #[test]
     fn test_display_json2_type_hints_quotes_numeric_segments() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
@@ -1162,7 +1209,9 @@ ENGINE=mito
 
         assert_eq!(
             extensions
-                .json_type_hints
+                .json2_options
+                .unwrap()
+                .type_hints
                 .iter()
                 .map(|hint| hint.data_type.to_string())
                 .collect::<Vec<_>>(),
@@ -1368,7 +1417,7 @@ AS SELECT number FROM numbers_input where number > 10"#,
             vector_options: None,
             skipping_index_options: None,
             inverted_index_options: None,
-            json_type_hints: vec![],
+            json2_options: Default::default(),
             vector_index_options: Some(OptionMap::from([(
                 "connectivity".to_string(),
                 "0".to_string(),
@@ -1389,7 +1438,7 @@ AS SELECT number FROM numbers_input where number > 10"#,
             vector_options: None,
             skipping_index_options: None,
             inverted_index_options: None,
-            json_type_hints: vec![],
+            json2_options: Default::default(),
             vector_index_options: Some(OptionMap::from([(
                 "expansion_add".to_string(),
                 "0".to_string(),
@@ -1410,7 +1459,7 @@ AS SELECT number FROM numbers_input where number > 10"#,
             vector_options: None,
             skipping_index_options: None,
             inverted_index_options: None,
-            json_type_hints: vec![],
+            json2_options: Default::default(),
             vector_index_options: Some(OptionMap::from([(
                 "expansion_search".to_string(),
                 "0".to_string(),
@@ -1431,7 +1480,7 @@ AS SELECT number FROM numbers_input where number > 10"#,
             vector_options: None,
             skipping_index_options: None,
             inverted_index_options: None,
-            json_type_hints: vec![],
+            json2_options: Default::default(),
             vector_index_options: Some(OptionMap::from([
                 ("connectivity".to_string(), "32".to_string()),
                 ("expansion_add".to_string(), "200".to_string()),

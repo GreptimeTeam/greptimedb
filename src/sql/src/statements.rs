@@ -721,7 +721,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: None,
             },
         };
@@ -753,7 +753,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: Some(OptionMap::from([
                     ("metric".to_string(), "cosine".to_string()),
                     ("connectivity".to_string(), "32".to_string()),
@@ -794,7 +794,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_type_hints: vec![],
+                json2_options: Default::default(),
                 vector_index_options: Some(OptionMap::default()),
             },
         };

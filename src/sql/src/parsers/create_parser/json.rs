@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
 use datatypes::json::JSON2_MAX_STRUCTURED_DEPTH;
 use snafu::{ResultExt, ensure};
 use sqlparser::ast::{DataType, ExactNumberInfo, Expr, ObjectName, UnaryOperator};
@@ -22,14 +23,15 @@ use sqlparser::tokenizer::Token;
 use crate::ast::Ident;
 use crate::error::{InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::create_parser::{INVERTED, SKIPPING};
-use crate::statements::create::JsonTypeHint;
+use crate::statements::create::{Json2Options, JsonTypeHint};
 use crate::statements::transform::type_alias::get_type_by_alias;
 
 const JSON2_TYPE_NAME: &str = "JSON2";
+const MAX_AUTO_EXPANDED_PATHS: &str = "max_auto_expanded_paths";
 
-pub(super) fn parse_json2_type_and_hints(
+pub(super) fn parse_json2_type_and_options(
     parser: &mut Parser<'_>,
-) -> Result<Option<(DataType, Vec<JsonTypeHint>)>> {
+) -> Result<Option<(DataType, Option<Json2Options>)>> {
     let token = parser.peek_token();
     let Token::Word(word) = &token.token else {
         return Ok(None);
@@ -41,26 +43,70 @@ pub(super) fn parse_json2_type_and_hints(
 
     parser.next_token();
     let data_type = DataType::Custom(ObjectName::from(vec![Ident::new(JSON2_TYPE_NAME)]), vec![]);
-    let type_hints = if parser.consume_token(&Token::LParen) {
-        parse_json2_type_hints(parser)?
+    let options = if parser.consume_token(&Token::LParen) {
+        let (max_auto_expanded_paths, type_hints) = parse_json2_options(parser)?;
+        if max_auto_expanded_paths.is_some() || !type_hints.is_empty() {
+            Some(Json2Options {
+                max_auto_expanded_paths,
+                type_hints,
+            })
+        } else {
+            None
+        }
     } else {
-        vec![]
+        None
     };
 
-    Ok(Some((data_type, type_hints)))
+    Ok(Some((data_type, options)))
 }
 
-fn parse_json2_type_hints(parser: &mut Parser<'_>) -> Result<Vec<JsonTypeHint>> {
+fn parse_json2_options(parser: &mut Parser<'_>) -> Result<(Option<u32>, Vec<JsonTypeHint>)> {
+    let mut max_auto_expanded_paths = None;
     let mut hints = Vec::new();
 
     if parser.consume_token(&Token::RParen) {
-        return Ok(hints);
+        return Ok((max_auto_expanded_paths, hints));
     }
 
     loop {
-        let hint = parse_json2_type_hint(parser)?;
-        ensure_no_path_conflict(&hints, &hint.path)?;
-        hints.push(hint);
+        let token = parser.peek_token();
+        let is_max_auto_expanded_paths = matches!(
+            &token.token,
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && word.value.eq_ignore_ascii_case(MAX_AUTO_EXPANDED_PATHS)
+        );
+        if is_max_auto_expanded_paths {
+            parser.next_token();
+            ensure!(
+                max_auto_expanded_paths.is_none(),
+                InvalidSqlSnafu {
+                    msg: format!("duplicated JSON2 option '{MAX_AUTO_EXPANDED_PATHS}'")
+                }
+            );
+            parser.expect_token(&Token::Eq).context(SyntaxSnafu)?;
+            let token = parser.next_token();
+            let Token::Number(value, _) = token.token else {
+                return InvalidSqlSnafu {
+                    msg: format!(
+                        "JSON2 option '{MAX_AUTO_EXPANDED_PATHS}' expects a non-negative integer"
+                    ),
+                }
+                .fail();
+            };
+            max_auto_expanded_paths = Some(value.parse::<u32>().map_err(|_| {
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "JSON2 option '{MAX_AUTO_EXPANDED_PATHS}' expects a non-negative integer"
+                    ),
+                }
+                .build()
+            })?);
+        } else {
+            let hint = parse_json2_type_hint(parser)?;
+            ensure_no_path_conflict(&hints, &hint.path)?;
+            hints.push(hint);
+        }
 
         if parser.consume_token(&Token::Comma) {
             if parser.consume_token(&Token::RParen) {
@@ -72,11 +118,19 @@ fn parse_json2_type_hints(parser: &mut Parser<'_>) -> Result<Vec<JsonTypeHint>> 
         }
     }
 
-    Ok(hints)
+    Ok((max_auto_expanded_paths, hints))
 }
 
 fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
     let path = parse_json2_path(parser)?;
+    ensure!(
+        path.first().is_none_or(|x| x != JSON2_REMAINDER_FIELD_NAME),
+        InvalidSqlSnafu {
+            msg: format!(
+                "JSON2 type hint path cannot be rooted at reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
+            )
+        }
+    );
     ensure!(
         path.len() <= JSON2_MAX_STRUCTURED_DEPTH,
         InvalidSqlSnafu {
@@ -309,7 +363,7 @@ CREATE TABLE traces (
             column.column_def.data_type,
             DataType::Custom(_, _)
         ));
-        let hints = column.extensions.json_type_hints;
+        let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 4);
 
         assert_eq!(hints[0].path, vec!["service.name"]);
@@ -340,6 +394,57 @@ CREATE TABLE traces (
     }
 
     #[test]
+    fn test_parse_json2_max_auto_expanded_paths() {
+        let column = parse_json2_column(
+            r#"
+CREATE TABLE traces (
+    log_json_data JSON2 (
+        http.method STRING,
+        max_auto_expanded_paths = 0
+    ),
+    ts TIMESTAMP TIME INDEX,
+)"#,
+        );
+
+        let options = column.extensions.json2_options.unwrap();
+        assert_eq!(options.max_auto_expanded_paths, Some(0));
+        assert_eq!(options.type_hints.len(), 1);
+
+        let empty = parse_json2_column(
+            r#"
+CREATE TABLE traces (
+    log_json_data JSON2 (),
+    ts TIMESTAMP TIME INDEX,
+)"#,
+        );
+        assert!(empty.extensions.json2_options.is_none());
+    }
+
+    #[test]
+    fn test_parse_json2_max_auto_expanded_paths_rejects_invalid_options() {
+        for options in [
+            "max_auto_expanded_paths = 0, max_auto_expanded_paths = 1",
+            "max_auto_expanded_paths = -1",
+            "max_auto_expanded_paths = 1.5",
+            "max_auto_expanded_paths = 4294967296",
+            r#""!__remainder__!".value STRING"#,
+        ] {
+            let sql = format!(
+                "CREATE TABLE traces (log_json_data JSON2 ({options}), ts TIMESTAMP TIME INDEX)"
+            );
+            assert!(
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default()
+                )
+                .is_err(),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_json2_type_hint_default_nullable() {
         let column = parse_json2_column(
             r#"
@@ -349,7 +454,7 @@ CREATE TABLE traces (
 )"#,
         );
 
-        let hints = column.extensions.json_type_hints;
+        let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 1);
         assert!(hints[0].nullable);
     }
@@ -369,7 +474,7 @@ CREATE TABLE traces (
 )"#,
         );
 
-        let hints = column.extensions.json_type_hints;
+        let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 4);
         assert_eq!(hints[0].path, vec!["a", "b"]);
         assert_eq!(hints[1].path, vec!["x", "y"]);
@@ -402,7 +507,7 @@ CREATE TABLE traces (
 )"#,
         );
 
-        let hints = column.extensions.json_type_hints;
+        let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 14);
         for hint in hints.iter().take(6) {
             assert_eq!(hint.data_type, DataType::BigInt(None));
@@ -428,7 +533,7 @@ CREATE TABLE traces (
 )"#,
         );
 
-        let hints = column.extensions.json_type_hints;
+        let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 2);
         assert_eq!(
             hints[0]

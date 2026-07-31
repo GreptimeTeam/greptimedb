@@ -44,6 +44,11 @@ pub const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
 pub struct JsonSettings {
     #[serde(default)]
     pub type_hints: Vec<JsonTypeHint>,
+    /// Maximum number of unhinted JSON leaf paths expanded into Arrow fields.
+    ///
+    /// `None` preserves the legacy unlimited-expansion behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_auto_expanded_paths: Option<u32>,
 }
 
 /// Declares selected JSON2 subpaths as typed fields.
@@ -80,7 +85,10 @@ pub struct JsonContext<'a> {
 
 impl JsonSettings {
     pub fn new(type_hints: Vec<JsonTypeHint>) -> Self {
-        Self { type_hints }
+        Self {
+            type_hints,
+            max_auto_expanded_paths: None,
+        }
     }
 
     /// Decode an encoded StructValue back into a serde_json::Value.
@@ -537,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_json_settings_ser_de() {
-        let settings = JsonSettings::new(vec![
+        let mut settings = JsonSettings::new(vec![
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
@@ -553,6 +561,7 @@ mod tests {
                 inverted_index: false,
             },
         ]);
+        settings.max_auto_expanded_paths = Some(1);
 
         let serialized = serde_json::to_string(&settings).unwrap();
         let deserialized = serde_json::from_str::<JsonSettings>(&serialized).unwrap();
