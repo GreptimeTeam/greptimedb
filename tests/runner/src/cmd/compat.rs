@@ -440,10 +440,7 @@ impl CompatCommand {
         // to_bins_dir was already resolved during version-range filtering
         println!("Restarting cluster with to-version binary on preserved state...");
         let to_bins_dir = to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode");
-        match topology {
-            CompatTopology::Distributed => env.compat_restart_distributed(&db, to_bins_dir).await,
-            CompatTopology::Standalone => env.compat_restart_standalone(&db, to_bins_dir).await,
-        }
+        env.compat_restart(&db, to_bins_dir).await;
 
         // ---- 10. Run verify phase on the to-version cluster ----
         println!("Running verify phase...");

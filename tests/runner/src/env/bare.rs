@@ -650,17 +650,8 @@ impl Env {
         self.start_standalone(id).await
     }
 
-    /// Full restart of all distributed processes with a new binary directory,
-    /// preserving the same context and data.
-    /// After restart, waits for the frontend gRPC endpoint to become ready.
-    pub(crate) async fn compat_restart_distributed(&self, db: &GreptimeDB, bins_dir: PathBuf) {
-        *db.active_bins_dir.lock().unwrap() = Some(bins_dir);
-        self.restart_server(db, true).await;
-        self.wait_query_ready(db).await;
-    }
-
-    /// Restart a standalone instance with a new binary directory.
-    pub(crate) async fn compat_restart_standalone(&self, db: &GreptimeDB, bins_dir: PathBuf) {
+    /// Restart a compatibility instance with a new binary directory.
+    pub(crate) async fn compat_restart(&self, db: &GreptimeDB, bins_dir: PathBuf) {
         *db.active_bins_dir.lock().unwrap() = Some(bins_dir);
         self.restart_server(db, true).await;
         self.wait_query_ready(db).await;
