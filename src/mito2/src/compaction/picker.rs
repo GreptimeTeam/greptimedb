@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use api::v1::region::compact_request;
 use common_time::range::TimestampRange;
+use common_time::{TimeToLive, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::compactor::CompactionRegion;
@@ -26,6 +27,7 @@ use crate::compaction::{CompactionOutput, SerializedCompactionOutput};
 use crate::region::options::CompactionOptions;
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::FilePurger;
+use crate::sst::version::LevelMeta;
 
 #[async_trait::async_trait]
 pub(crate) trait CompactionTask: Debug + Send + Sync + 'static {
@@ -148,6 +150,22 @@ pub fn new_picker(
             }) as Arc<_>,
         }
     }
+}
+
+/// Finds all expired SSTs across levels.
+pub(super) fn get_expired_ssts(
+    levels: &[LevelMeta],
+    ttl: Option<TimeToLive>,
+    now: Timestamp,
+) -> Vec<FileHandle> {
+    let Some(ttl) = ttl else {
+        return vec![];
+    };
+
+    levels
+        .iter()
+        .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
+        .collect()
 }
 
 #[cfg(test)]

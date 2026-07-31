@@ -37,7 +37,8 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
-use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
+use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error;
