@@ -686,11 +686,10 @@ impl CompactionScheduler {
 
     #[cfg(test)]
     fn request_cancel(&mut self, region_id: RegionId) -> RequestCancelResult {
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return RequestCancelResult::NotRunning;
-        };
-
-        status.request_cancel()
+        self.region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .request_cancel()
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
