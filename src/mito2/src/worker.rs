@@ -1148,8 +1148,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop)
-                        .await
+                    self.handle_drop_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
@@ -1367,6 +1368,20 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = region_id;
+    }
+
+    pub(crate) async fn on_flush_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_commit_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) fn on_flush_cancel_requested(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_cancel_requested(_region_id);
+        }
     }
 
     pub(crate) fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {

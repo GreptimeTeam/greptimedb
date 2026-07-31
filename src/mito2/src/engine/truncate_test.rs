@@ -14,8 +14,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Rows;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionEngine;
@@ -26,7 +29,7 @@ use store_api::storage::RegionId;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::engine::listener::FlushTruncateListener;
+use crate::engine::listener::FlushCancellationListener;
 use crate::test_util::{
     CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, put_rows, rows_schema,
 };
@@ -350,7 +353,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush").await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(FlushTruncateListener::default());
+    let listener = Arc::new(FlushCancellationListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig {
@@ -399,23 +402,29 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
             .await
     });
 
-    // Wait truncate before flush memtable.
-    listener.wait_truncate().await;
+    // Ensure the flush is running before submitting truncate.
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_started())
+        .await
+        .expect("flush did not reach the cancellation gate");
 
-    // Truncate the region.
-    engine
-        .handle_request(
+    // Truncate cancels the flush, releases the listener gate, and runs after cancellation.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
             region_id,
             RegionRequest::Truncate(RegionTruncateRequest::All),
-        )
+        ),
+    )
+    .await
+    .expect("truncate did not finish after cancelling flush")
+    .unwrap();
+
+    let flush_err = tokio::time::timeout(Duration::from_secs(5), flush_task)
         .await
-        .unwrap();
-
-    // Notify region to continue flushing.
-    listener.notify_flush();
-
-    // Wait handle flushed finish.
-    let _err = flush_task.await.unwrap().unwrap_err();
+        .expect("cancelled flush did not finish")
+        .expect("flush task panicked")
+        .unwrap_err();
+    assert_eq!(flush_err.status_code(), StatusCode::Cancelled);
 
     // Check sequences and entry id.
     let version_data = region.version_control.current();

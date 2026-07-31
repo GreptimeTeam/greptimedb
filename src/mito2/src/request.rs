@@ -976,6 +976,13 @@ pub(crate) struct FlushFailed {
     pub(crate) err: Arc<Error>,
 }
 
+impl FlushFailed {
+    /// Returns whether the flush was cancelled cooperatively.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.err.as_ref(), Error::FlushCancelled { .. })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
     pub(crate) manifest_version: ManifestVersion,

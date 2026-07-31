@@ -52,7 +52,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -547,6 +547,7 @@ impl SstMerger for DefaultSstMerger {
 pub struct DefaultCompactor<M = DefaultSstMerger> {
     merger: M,
     cancel_handle: Arc<CancellationHandle>,
+    uncommitted: Option<UncommittedSsts>,
 }
 
 #[cfg(test)]
@@ -555,15 +556,20 @@ impl<M: SstMerger> DefaultCompactor<M> {
         Self {
             merger,
             cancel_handle: Arc::new(CancellationHandle::default()),
+            uncommitted: None,
         }
     }
 }
 
 impl DefaultCompactor {
-    pub fn with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
+    pub(crate) fn with_cancel_handle(
+        cancel_handle: Arc<CancellationHandle>,
+        uncommitted: UncommittedSsts,
+    ) -> Self {
         Self {
             merger: DefaultSstMerger,
             cancel_handle,
+            uncommitted: Some(uncommitted),
         }
     }
 }
@@ -596,10 +602,15 @@ where
             };
             let merger = self.merger.clone();
             let compaction_region = compaction_region.clone();
+            let uncommitted = self.uncommitted.clone();
             let fut = async move {
-                merger
+                let result = merger
                     .merge_single_output(compaction_region, output, write_opts)
-                    .await
+                    .await;
+                if let (Some(uncommitted), Ok((_, infos))) = (&uncommitted, &result) {
+                    uncommitted.track(infos);
+                }
+                result
             };
             tasks.push((inputs_to_remove, fut));
         }
@@ -627,9 +638,9 @@ where
                 })
                 .collect();
 
-            while let Some((inputs, handle)) = spawned.pop() {
+            while let Some((inputs, mut handle)) = spawned.pop() {
                 let abort_handle = handle.abort_handle();
-                match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
+                match CancellableFuture::new(&mut handle, self.cancel_handle.clone()).await {
                     Ok(Ok(Ok((files, infos)))) => {
                         output_files.extend(files);
                         if hook.is_some() {
@@ -655,8 +666,11 @@ where
                         // cancel the remaining tasks before returns the error.
                         if self.cancel_handle.is_cancelled() {
                             abort_handle.abort();
-                            for (_, handle) in spawned {
+                            for (_, handle) in &spawned {
                                 handle.abort();
+                            }
+                            for (_, handle) in spawned {
+                                let _ = handle.await;
                             }
                         }
                         return Err(e).context(error::JoinSnafu);
@@ -668,8 +682,12 @@ where
                             spawned.len(),
                         );
                         abort_handle.abort();
-                        for (_, handle) in spawned {
+                        for (_, handle) in &spawned {
                             handle.abort();
+                        }
+                        let _ = handle.await;
+                        for (_, handle) in spawned {
+                            let _ = handle.await;
                         }
                         break;
                     }
@@ -1004,6 +1022,7 @@ mod tests {
                 call_idx: call_idx.clone(),
             },
             cancel_handle: cancel_handle.clone(),
+            uncommitted: None,
         };
 
         let picker_output = PickerOutput {
