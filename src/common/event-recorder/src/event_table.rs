@@ -137,6 +137,9 @@ pub const PRUNABLE_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
 /// The canonical Kafka latest offset, which is an exclusive upper bound.
 pub const LATEST_OFFSET_COLUMN: EventTableColumn =
     EventTableColumn::new("latest_offset", ColumnDataType::Uint64, SemanticType::Field);
+/// The canonical per-region GC report field.
+pub const GC_REPORT_COLUMN: EventTableColumn =
+    EventTableColumn::json_binary("gc_report", ColumnDataType::Binary, SemanticType::Field);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -271,6 +274,11 @@ where
     T: AsRef<str>,
 {
     nullable_value(value.map(|value| ValueData::StringValue(value.as_ref().to_string())))
+}
+
+/// Builds a nullable API JSONB value.
+pub fn nullable_json(value: Option<&serde_json::Value>) -> Value {
+    nullable_value(value.map(|value| ValueData::BinaryValue(jsonb::Value::from(value).to_vec())))
 }
 
 #[cfg(test)]

@@ -26,11 +26,12 @@ use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
-use crate::region::MitoRegionRef;
+use crate::region::version::VersionRef;
+use crate::region::{IndexBuildSource, MitoRegionRef};
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
 };
-use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
     cleanup_stale_index_caches,
@@ -41,11 +42,12 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) fn new_index_build_task(
         &self,
         region: &MitoRegionRef,
+        version: &VersionRef,
         file: FileHandle,
+        file_meta: FileMeta,
         build_type: IndexBuildType,
         result_sender: ResultMpscSender,
     ) -> IndexBuildTask {
-        let version = region.version();
         let access_layer = region.access_layer.clone();
 
         let puffin_manager = if let Some(write_cache) = self.cache_manager.write_cache() {
@@ -77,7 +79,7 @@ impl<S> RegionWorkerLoop<S> {
         IndexBuildTask {
             region_id: region.region_id,
             file: file.clone(),
-            file_meta: file.meta_ref().clone(),
+            source: IndexBuildSource::new(file_meta, version.metadata.schema_version),
             reason: build_type,
             access_layer: access_layer.clone(),
             listener: self.listener.clone(),
@@ -121,6 +123,20 @@ impl<S> RegionWorkerLoop<S> {
 
         let version_control = region.version_control.clone();
         let version = version_control.current().version;
+        // A committed index publication may not have reached version control
+        // yet. Use the manifest's FileMeta as the conditional publication
+        // source while keeping the builder's schema generation from `version`.
+        let manifest = region.manifest_ctx.manifest().await;
+        let current_file_meta = |file_id| {
+            let file_meta = manifest.files.get(&file_id);
+            if file_meta.is_none() {
+                debug!(
+                    "Skipping index build because file is absent from manifest, region: {}, file_id: {}",
+                    region_id, file_id
+                );
+            }
+            file_meta.cloned()
+        };
 
         let all_files: HashMap<FileId, FileHandle> = version
             .ssts
@@ -135,18 +151,21 @@ impl<S> RegionWorkerLoop<S> {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             all_files
                 .values()
-                .filter(|file| {
-                    !file
-                        .meta_ref()
-                        .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                .filter_map(|file| {
+                    let file_meta = current_file_meta(file.meta_ref().file_id)?;
+                    (!file_meta.is_index_consistent_with_region(&version.metadata.column_metadatas))
+                        .then(|| (file.clone(), file_meta))
                 })
-                .cloned()
                 .collect::<Vec<_>>()
         } else {
             request
                 .file_metas
                 .iter()
-                .filter_map(|meta| all_files.get(&meta.file_id).cloned())
+                .filter_map(|meta| {
+                    let file = all_files.get(&meta.file_id)?;
+                    let file_meta = current_file_meta(meta.file_id)?;
+                    Some((file.clone(), file_meta))
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -162,7 +181,7 @@ impl<S> RegionWorkerLoop<S> {
         let num_tasks = build_tasks.len();
         let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(num_tasks);
 
-        for file_handle in build_tasks {
+        for (file_handle, file_meta) in build_tasks {
             debug!(
                 "Scheduling index build for region {}, file_id {}",
                 region_id,
@@ -181,7 +200,9 @@ impl<S> RegionWorkerLoop<S> {
 
             let task = self.new_index_build_task(
                 &region,
+                &version,
                 file_handle.clone(),
+                file_meta,
                 request.build_type.clone(),
                 tx.clone(),
             );

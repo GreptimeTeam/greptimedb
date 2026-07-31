@@ -23,7 +23,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `wal` | `src/mito2/src/wal.rs` | Write-ahead log wrapper over `log-store` |
 | `memtable` | `src/mito2/src/memtable/` | In-memory write buffers (time-series / bulk / partition) |
 | `flush` | `src/mito2/src/flush.rs` | `FlushScheduler`, `WriteBufferManager`, memtable → SST |
-| `compaction` | `src/mito2/src/compaction/` | TWCS picker, strict-window manual picker, compactor, memory control |
+| `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
