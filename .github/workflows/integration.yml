@@ -49,7 +49,7 @@ jobs:
           shared-key: "build-binaries"
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Report build binaries cache lookup
         shell: bash
         run: |
