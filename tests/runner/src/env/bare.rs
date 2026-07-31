@@ -645,37 +645,50 @@ impl Env {
         self.start_distributed(id).await
     }
 
+    /// Start a standalone GreptimeDB instance. Exposed for compat runner.
+    pub(crate) async fn compat_start_standalone(&self, id: usize) -> GreptimeDB {
+        self.start_standalone(id).await
+    }
+
     /// Full restart of all distributed processes with a new binary directory,
     /// preserving the same context and data.
     /// After restart, waits for the frontend gRPC endpoint to become ready.
-    pub(crate) async fn compat_restart_all(&self, db: &GreptimeDB, bins_dir: PathBuf) {
+    pub(crate) async fn compat_restart_distributed(&self, db: &GreptimeDB, bins_dir: PathBuf) {
         *db.active_bins_dir.lock().unwrap() = Some(bins_dir);
         self.restart_server(db, true).await;
-        self.wait_frontend_ready(db).await;
+        self.wait_query_ready(db).await;
     }
 
-    /// Wait for frontend gRPC readiness after restart.
-    async fn wait_frontend_ready(&self, db: &GreptimeDB) {
-        let frontend_mode = db
-            .ctx
-            .get_server_mode(SERVER_MODE_FRONTEND_IDX)
-            .cloned()
-            .unwrap();
-        if let Some(addr) = frontend_mode.check_addrs().first() {
-            println!("Waiting for frontend gRPC readiness at {addr}...");
+    /// Restart a standalone instance with a new binary directory.
+    pub(crate) async fn compat_restart_standalone(&self, db: &GreptimeDB, bins_dir: PathBuf) {
+        *db.active_bins_dir.lock().unwrap() = Some(bins_dir);
+        self.restart_server(db, true).await;
+        self.wait_query_ready(db).await;
+    }
+
+    /// Wait for the query endpoint to become ready after restart.
+    async fn wait_query_ready(&self, db: &GreptimeDB) {
+        let server_mode_idx = if db.is_standalone {
+            SERVER_MODE_STANDALONE_IDX
+        } else {
+            SERVER_MODE_FRONTEND_IDX
+        };
+        let server_mode = db.ctx.get_server_mode(server_mode_idx).cloned().unwrap();
+        if let Some(addr) = server_mode.check_addrs().first() {
+            println!("Waiting for query endpoint readiness at {addr}...");
             crate::util::retry_with_backoff(
                 || async {
                     let mut client = db.client.lock().await;
                     match client.grpc_query("SELECT 1").await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format!("Frontend not ready: {e}")),
+                        Err(e) => Err(format!("Query endpoint not ready: {e}")),
                     }
                 },
                 10,
                 std::time::Duration::from_secs(1),
             )
             .await
-            .unwrap_or_else(|e| panic!("Frontend failed to become ready: {e}"));
+            .unwrap_or_else(|e| panic!("Query endpoint failed to become ready: {e}"));
         }
     }
 }

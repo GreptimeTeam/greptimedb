@@ -4,3 +4,6 @@
 # versions against the PR-built `to` binary. Broader historical windows should
 # run in nightly or release-validation workflows.
 from_versions = ["v1.0.0", "v1.1.0"]
+
+# Recent releases that must be able to reopen tables written by the PR build.
+downgrade_to_versions = ["v1.1.4"]

@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use sqlness::QueryContext;
 use sqlness::interceptor::template::DELIMITER as TEMPLATE_DELIMITER;
 use sqlness::interceptor::{InterceptorRef, Registry};
@@ -26,15 +26,29 @@ use crate::env::bare::{Env, StoreConfig, WalConfig};
 use crate::protocol_interceptor::{self, POSTGRES, PROTOCOL_KEY};
 use crate::util;
 
-const COMPAT_TOPOLOGY: &str = "distributed";
 const COMMENT_PREFIX: &str = "--";
 const INTERCEPTOR_PREFIX: &str = "-- SQLNESS";
 const QUERY_DELIMITER: char = ';';
 
-/// Run compatibility tests in bare distributed mode.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum CompatTopology {
+    Distributed,
+    Standalone,
+}
+
+impl CompatTopology {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Distributed => "distributed",
+            Self::Standalone => "standalone",
+        }
+    }
+}
+
+/// Run compatibility tests in bare mode.
 ///
-/// Starts an old-version distributed cluster, runs setup SQLs,
-/// then restarts the cluster with a new version on preserved state,
+/// Starts a "from" distributed cluster, runs setup SQLs,
+/// then restarts the cluster with a "to" version on preserved state,
 /// and runs verify SQLs comparing results against `verify.result` files.
 ///
 /// PR1 notes:
@@ -57,6 +71,12 @@ pub struct CompatCommand {
     #[clap(long)]
     to_bins_dir: Option<PathBuf>,
 
+    /// Version of the "to" GreptimeDB binary (e.g. "v0.9.5") or "current".
+    /// Downloads the release binary when needed. Cannot be used with
+    /// `--to-bins-dir`.
+    #[clap(long)]
+    to_version: Option<String>,
+
     /// Directory of compatibility test cases.
     /// Defaults to `tests/compatibility/cases` relative to workspace root.
     #[clap(long)]
@@ -65,6 +85,10 @@ pub struct CompatCommand {
     /// Name of test cases to run. Accepts a regexp.
     #[clap(long, default_value = ".*")]
     test_filter: String,
+
+    /// Topology to start for the compatibility test.
+    #[clap(long, value_enum, default_value_t = CompatTopology::Distributed)]
+    topology: CompatTopology,
 
     /// Fail this run as soon as one case fails.
     #[clap(long, default_value = "false")]
@@ -93,9 +117,14 @@ pub struct CompatCommand {
 impl CompatCommand {
     pub async fn run(self) {
         let dry_run = self.dry_run;
+        let topology = self.topology;
+
+        if self.to_bins_dir.is_some() && self.to_version.is_some() {
+            panic!("--to-version cannot be used with --to-bins-dir");
+        }
 
         // ---- 1. Validate MVP runtime constraints ----
-        if !dry_run && !self.setup_etcd {
+        if !dry_run && topology == CompatTopology::Distributed && !self.setup_etcd {
             panic!(
                 "compat MVP requires Docker etcd (--setup-etcd=true); external metadata stores are not supported yet"
             );
@@ -117,18 +146,25 @@ impl CompatCommand {
         cases.retain(|c| filter_re.is_match(&c.metadata.name));
 
         // Filter by topology
-        cases.retain(|c| c.metadata.topologies.iter().any(|t| t == COMPAT_TOPOLOGY));
+        cases.retain(|c| {
+            c.metadata
+                .topologies
+                .iter()
+                .any(|candidate| candidate == topology.as_str())
+        });
 
         if cases.is_empty() {
             if dry_run {
                 println!(
                     "DRY-RUN: no compat cases found matching filter '{}' and topology '{}'",
-                    self.test_filter, COMPAT_TOPOLOGY
+                    self.test_filter,
+                    topology.as_str()
                 );
             } else {
                 println!(
                     "No compat cases found matching filter '{}' and topology '{}'",
-                    self.test_filter, COMPAT_TOPOLOGY
+                    self.test_filter,
+                    topology.as_str()
                 );
             }
             return;
@@ -168,11 +204,19 @@ impl CompatCommand {
                     .as_deref()
                     .and_then(|s| compat_case::Version::parse(s).ok());
 
-                let dry_run_to_bins_dir = self
-                    .to_bins_dir
-                    .clone()
-                    .unwrap_or_else(|| util::get_binary_dir("debug"));
-                let to_ver_str = try_infer_version(&dry_run_to_bins_dir).map(|v| v.to_string());
+                let dry_run_to_bins_dir = self.to_bins_dir.clone().unwrap_or_else(|| {
+                    self.to_version
+                        .as_deref()
+                        .filter(|version| *version != "current")
+                        .map(|version| PathBuf::from(util::get_workspace_root()).join(version))
+                        .unwrap_or_else(|| util::get_binary_dir("debug"))
+                });
+                let to_ver_str = self
+                    .to_version
+                    .as_deref()
+                    .filter(|version| *version != "current")
+                    .map(str::to_string)
+                    .or_else(|| try_infer_version(&dry_run_to_bins_dir).map(|v| v.to_string()));
                 let to_ver_parsed = to_ver_str
                     .as_deref()
                     .and_then(|s| compat_case::Version::parse(s).ok());
@@ -208,9 +252,18 @@ impl CompatCommand {
                     .as_deref()
                     .and_then(|s| compat_case::Version::parse(s).ok());
 
-                let to_bins_dir =
-                    resolve_bins(self.to_bins_dir.as_ref(), None, self.pull_version_on_need).await;
-                let to_version = try_infer_version(&to_bins_dir).map(|v| v.to_string());
+                let to_bins_dir = resolve_bins(
+                    self.to_bins_dir.as_ref(),
+                    self.to_version.as_deref(),
+                    self.pull_version_on_need,
+                )
+                .await;
+                let to_version = self
+                    .to_version
+                    .as_deref()
+                    .filter(|version| *version != "current")
+                    .map(str::to_string)
+                    .or_else(|| try_infer_version(&to_bins_dir).map(|v| v.to_string()));
                 let to_ver_parsed = to_version
                     .as_deref()
                     .and_then(|s| compat_case::Version::parse(s).ok());
@@ -275,7 +328,7 @@ impl CompatCommand {
 
         if dry_run {
             println!("DRY-RUN: would run {} compat case(s)", cases.len());
-            println!("  topology:     {}", COMPAT_TOPOLOGY);
+            println!("  topology:     {}", topology.as_str());
             println!(
                 "  from version: {}",
                 from_version.as_deref().unwrap_or(
@@ -312,7 +365,7 @@ impl CompatCommand {
         println!(
             "Running {} compat case(s) with topology {}:",
             cases.len(),
-            COMPAT_TOPOLOGY
+            topology.as_str()
         );
         for c in &cases {
             println!(
@@ -334,14 +387,15 @@ impl CompatCommand {
         // ---- 7. Build interceptor registry ----
         let interceptor_registry = create_interceptor_registry();
 
-        // ---- 7b. Create Env for bare distributed mode ----
+        // ---- 7b. Create Env for the selected topology ----
+        let setup_etcd = topology == CompatTopology::Distributed && self.setup_etcd;
         let store_config = StoreConfig {
-            store_addrs: if self.setup_etcd {
+            store_addrs: if setup_etcd {
                 vec!["127.0.0.1:2379".to_string()]
             } else {
                 vec![]
             },
-            setup_etcd: self.setup_etcd,
+            setup_etcd,
             setup_pg: None,
             setup_mysql: None,
             enable_flat_format: false,
@@ -361,15 +415,18 @@ impl CompatCommand {
         // ---- 7c. Etcd cleanup guard ----
         // Arm this only immediately before starting the cluster. Earlier validation
         // failures should not stop an unrelated local container named `etcd`.
-        let mut etcd_guard = if self.setup_etcd {
+        let mut etcd_guard = if setup_etcd {
             Some(EtcdGuard::new())
         } else {
             None
         };
 
-        // ---- 8. Run setup phase on old cluster ----
-        println!("Starting old-version distributed cluster with flownode...");
-        let mut db = env.compat_start_distributed(0).await;
+        // ---- 8. Run setup phase on the from-version cluster ----
+        println!("Starting from-version {} cluster...", topology.as_str());
+        let mut db = match topology {
+            CompatTopology::Distributed => env.compat_start_distributed(0).await,
+            CompatTopology::Standalone => env.compat_start_standalone(0).await,
+        };
 
         println!("Running setup phase...");
         for case in &cases {
@@ -379,16 +436,16 @@ impl CompatCommand {
             println!("  Setup: {} - OK", case.metadata.name);
         }
 
-        // ---- 9. Switch to "to" binary and restart cluster ----
+        // ---- 9. Switch to the to-version binary and restart cluster ----
         // to_bins_dir was already resolved during version-range filtering
-        println!("Restarting cluster with new-version binary on preserved state...");
-        env.compat_restart_all(
-            &db,
-            to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode"),
-        )
-        .await;
+        println!("Restarting cluster with to-version binary on preserved state...");
+        let to_bins_dir = to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode");
+        match topology {
+            CompatTopology::Distributed => env.compat_restart_distributed(&db, to_bins_dir).await,
+            CompatTopology::Standalone => env.compat_restart_standalone(&db, to_bins_dir).await,
+        }
 
-        // ---- 10. Run verify phase on new cluster ----
+        // ---- 10. Run verify phase on the to-version cluster ----
         println!("Running verify phase...");
         let mut failed = Vec::new();
         for case in &cases {
@@ -409,7 +466,7 @@ impl CompatCommand {
 
         // ---- 12. Cleanup ----
         // Etcd is always cleaned up; --preserve-state only preserves sqlness_home.
-        if self.setup_etcd {
+        if setup_etcd {
             println!("Stopping etcd");
             util::stop_rm_etcd();
         }
