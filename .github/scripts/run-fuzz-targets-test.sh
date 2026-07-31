@@ -72,6 +72,7 @@ run_fixture() {
     "FUZZ_ARTIFACT_ROOT=${artifact_root}"
     "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector"
     "GITHUB_SHA=deadbeef"
+    "GITHUB_STEP_SUMMARY=${fixture}/github-step-summary.md"
   )
   if [[ "${fail_fast}" != unset ]]; then
     runner_env+=("FUZZ_FAIL_FAST=${fail_fast}")
@@ -101,6 +102,15 @@ test_successful_targets_run_in_order() {
   assert_eq success "$(jq -r '.[0].status' "${fixture}/artifacts/manifest.json")" "first status"
   assert_eq success "$(jq -r '.[1].status' "${fixture}/artifacts/manifest.json")" "second status"
   assert_file "${fixture}/artifacts/summary.md"
+  grep -q 'Policy: `continue-after-failure`' "${fixture}/artifacts/summary.md" || \
+    fail "group policy missing from summary"
+  grep -q 'Results: \*\*2 passed\*\*, \*\*0 failed\*\*, \*\*0 skipped\*\* / 2 total' \
+    "${fixture}/artifacts/summary.md" || fail "group counts missing from summary"
+  grep -q 'title=Fuzz target completed' "${fixture}/stdout.log" || \
+    fail "target completion notice missing"
+  grep -q 'title=Fuzz group completed' "${fixture}/stdout.log" || \
+    fail "group completion notice missing"
+  assert_file "${fixture}/github-step-summary.md"
   cleanup_fixture
 }
 
@@ -115,18 +125,28 @@ test_fail_fast_stops_after_first_failure() {
   assert_eq skipped_after_failure "$(jq -r '.[2].status' "${fixture}/artifacts/manifest.json")" "skipped status"
   assert_eq true "$(jq -r '.[2].after_prior_failure' "${fixture}/artifacts/manifest.json")" "skipped provenance"
   assert_file "${fixture}/artifacts/targets/fuzz_insert/mock-artifacts/state.txt"
+  grep -q 'title=Fuzz target failed.*target=fuzz_insert' "${fixture}/stdout.log" || \
+    fail "target failure annotation missing"
+  grep -q 'title=Fuzz target skipped.*target=fuzz_alter_table' "${fixture}/stdout.log" || \
+    fail "skipped target annotation missing"
+  grep -q '### Reproduce failed targets' "${fixture}/artifacts/summary.md" || \
+    fail "reproduction section missing"
+  grep -q 'cargo fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
+    fail "reproduction command missing"
   cleanup_fixture
 }
 
 test_fail_fast_defaults_to_true() {
   new_fixture
-  run_fixture $'fuzz_create_table\nfuzz_insert\nfuzz_alter_table' unset false "fuzz_insert"
+  run_fixture $'fuzz_create_table\nfuzz_insert\nfuzz_alter_table' unset true "fuzz_insert"
 
   assert_eq 1 "${fixture_status}" "default fail-fast run status"
   assert_eq 2 "$(wc -l <"${fixture}/cargo.log" | tr -d ' ')" "default fail-fast cargo count"
   assert_eq skipped_after_failure \
     "$(jq -r '.[2].status' "${fixture}/artifacts/manifest.json")" \
     "default fail-fast skipped status"
+  grep -q -- '--features=unstable' "${fixture}/artifacts/summary.md" || \
+    fail "unstable reproduction argument missing"
   cleanup_fixture
 }
 
@@ -232,5 +252,21 @@ test_non_fail_fast_marks_later_targets
 test_invalid_configuration_fails_before_cargo
 test_collector_keeps_target_scopes_separate
 test_cluster_collector_honors_target_scope_and_namespace
+
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  cat >>"${GITHUB_STEP_SUMMARY}" <<'EOF'
+## Fuzz orchestration script tests
+
+✅ All orchestration scenarios passed.
+
+- ordered execution and unstable arguments;
+- explicit and default fail-fast behavior;
+- continue-after-failure provenance;
+- invalid configuration rejection;
+- standalone service-log isolation;
+- Kubernetes, Kind, and monitor artifact isolation;
+- target and group annotations, summaries, and reproduction commands.
+EOF
+fi
 
 printf 'All fuzz orchestration script tests passed.\n'

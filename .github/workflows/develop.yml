@@ -248,12 +248,9 @@ jobs:
           fi
       - name: Upload fuzz test artifacts
         if: ${{ failure() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-fuzz-artifacts
         with:
-          name: fuzz-standalone-${{ matrix.group.id }}
-          path: /tmp/greptime-fuzz-artifacts
-          if-no-files-found: warn
-          retention-days: 3
+          artifact-name: fuzz-standalone-${{ matrix.group.id }}
 
   unstable-fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -320,12 +317,9 @@ jobs:
           fi
       - name: Upload fuzz test artifacts
         if: ${{ failure() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-fuzz-artifacts
         with:
-          name: fuzz-unstable-standalone
-          path: /tmp/greptime-fuzz-artifacts
-          if-no-files-found: warn
-          retention-days: 3
+          artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -577,12 +571,9 @@ jobs:
           fi
       - name: Upload fuzz test artifacts
         if: ${{ failure() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-fuzz-artifacts
         with:
-          name: fuzz-distributed-${{ matrix.mode.id }}-${{ matrix.group.id }}
-          path: /tmp/greptime-fuzz-artifacts
-          if-no-files-found: warn
-          retention-days: 3
+          artifact-name: fuzz-distributed-${{ matrix.mode.id }}-${{ matrix.group.id }}
       - name: Delete cluster
         if: success()
         shell: bash
@@ -761,12 +752,9 @@ jobs:
           fi
       - name: Upload fuzz test artifacts
         if: ${{ failure() && !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-fuzz-artifacts
         with:
-          name: fuzz-distributed-chaos-${{ matrix.mode.id }}-${{ matrix.group.id }}
-          path: /tmp/greptime-fuzz-artifacts
-          if-no-files-found: warn
-          retention-days: 3
+          artifact-name: fuzz-distributed-chaos-${{ matrix.mode.id }}-${{ matrix.group.id }}
       - name: Delete cluster
         if: success()
         shell: bash
