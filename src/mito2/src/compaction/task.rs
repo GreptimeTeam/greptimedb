@@ -333,17 +333,6 @@ impl CompactionTask for CompactionTaskImpl {
             }
         };
 
-        // Cancellation may be requested immediately after memory acquisition completes.
-        if self.state.is_cancelled() {
-            let notify = self.cancelled_notify();
-            self.send_to_worker(WorkerRequest::Background {
-                region_id: self.compaction_region.region_id,
-                notify,
-            })
-            .await;
-            return;
-        }
-
         self.handle_expiration().await;
 
         // The local compactor owns cancellation of its spawned merge tasks. Waiting for it to
