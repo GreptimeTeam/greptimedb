@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -32,6 +33,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, hash_utils,
 };
+use datafusion_common::ScalarValue;
 use datafusion_expr::col;
 use datatypes::arrow::compute;
 use futures::{Stream, StreamExt, ready};
@@ -412,6 +414,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
             output_schema: self.output_schema.clone(),
             random_state: self.random_state.clone(),
             lhs_signatures: HashSet::default(),
+            lhs_values: HashMap::default(),
             hashes: Vec::new(),
             phase: StreamPhase::Left,
             metric: BaselineMetrics::new(&self.metric, partition),
@@ -454,6 +457,11 @@ pub struct UnionDistinctOnStream {
     output_schema: SchemaRef,
     random_state: RandomState,
     lhs_signatures: HashSet<u64>,
+    /// Maps each LHS row's (compare_keys, ts) hash to the actual row values so that
+    /// hash collisions can be resolved with value-level equality. A row may only be
+    /// dropped from the right input when its hash matches an LHS row's hash *and* its
+    /// compare-key values are equal to that LHS row's values.
+    lhs_values: HashMap<u64, Vec<Vec<ScalarValue>>>,
     hashes: Vec<u64>,
     phase: StreamPhase,
     metric: BaselineMetrics,
@@ -479,12 +487,30 @@ impl UnionDistinctOnStream {
         Ok(())
     }
 
+    fn row_values(&self, batch: &RecordBatch, row: usize) -> DataFusionResult<Vec<ScalarValue>> {
+        self.compare_keys
+            .iter()
+            .map(|index| ScalarValue::try_from_array(batch.column(*index).as_ref(), row))
+            .collect()
+    }
+
     fn filter_rhs_batch(&mut self, batch: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         self.hash_batch(&batch)?;
         let mut survivor_indices: Option<Vec<usize>> = None;
         for (index, hash) in self.hashes.iter().enumerate() {
             if self.lhs_signatures.contains(hash) {
-                survivor_indices.get_or_insert_with(|| (0..index).collect());
+                // The 64-bit hash is only a fast path: a hit can be a hash collision,
+                // so verify equality on the actual (compare_keys, ts) values before
+                // suppressing the row.
+                let values = self.row_values(&batch, index)?;
+                let matches_lhs = self.lhs_values.get(hash).is_some_and(|lhs_value_groups| {
+                    lhs_value_groups.iter().any(|lhs| lhs == &values)
+                });
+                if matches_lhs {
+                    survivor_indices.get_or_insert_with(|| (0..index).collect());
+                } else if let Some(indices) = &mut survivor_indices {
+                    indices.push(index);
+                }
             } else if let Some(indices) = &mut survivor_indices {
                 indices.push(index);
             }
@@ -552,6 +578,13 @@ impl UnionDistinctOnStream {
                             return self.terminal_error(error);
                         }
                         self.lhs_signatures.extend(self.hashes.iter().copied());
+                        for (row, hash) in self.hashes.iter().copied().enumerate() {
+                            let values = match self.row_values(&batch, row) {
+                                Ok(values) => values,
+                                Err(error) => return self.terminal_error(error),
+                            };
+                            self.lhs_values.entry(hash).or_default().push(values);
+                        }
                     }
                     match with_schema(batch, self.output_schema.clone()) {
                         Ok(batch) => Poll::Ready(Some(Ok(batch))),
@@ -967,6 +1000,7 @@ mod test {
             output_schema,
             random_state: RandomState::new(),
             lhs_signatures: HashSet::default(),
+            lhs_values: HashMap::default(),
             hashes: Vec::new(),
             phase: StreamPhase::Left,
             metric: BaselineMetrics::new(&metrics, 0),
@@ -1299,6 +1333,79 @@ mod test {
                 (1, "later".to_string(), 14.0),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn qp_003_hash_collision_between_distinct_rows_keeps_rhs_row() {
+        // Regression test for QP-003: dedup was based only on the 64-bit hash of the
+        // (compare_keys, ts) columns, without value-level verification. Two rows whose
+        // hashes collide (but whose compare-key values differ) made the RHS row be
+        // wrongly dropped.
+        //
+        // `datafusion_common::hash_utils::create_hashes` leaves the hash unchanged for
+        // null values, so the following two rows hash identically for ANY random state:
+        //   LHS: (ts=null, label=null, extra=7, value=1.0)
+        //        -> label null keeps 0; extra=7 => combine(hash(7), 0); ts null keeps it
+        //   RHS: (ts=7, label=null, extra=null, value=2.0)
+        //        -> label null keeps 0; extra null keeps 0; ts=7 => combine(hash(7), 0)
+        // Both rows end with the same combined hash, but their compare-key values
+        // (label, extra, ts) differ, so the RHS row must be preserved.
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, true),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("extra", DataType::Int64, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("rhs_ts", DataType::Int64, true),
+            Field::new("rhs_label", DataType::Utf8, true),
+            Field::new("rhs_extra", DataType::Int64, true),
+            Field::new("rhs_value", DataType::Float64, true),
+        ]));
+        let (left, right) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left, right, vec![1, 2], 0).unwrap();
+
+        let lhs = RecordBatch::try_new(
+            left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![None::<i64>])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(Int64Array::from(vec![Some(7)])),
+                Arc::new(Float64Array::from(vec![Some(1.0)])),
+            ],
+        )
+        .unwrap();
+        let rhs = RecordBatch::try_new(
+            right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(7)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(Int64Array::from(vec![None::<i64>])),
+                Arc::new(Float64Array::from(vec![Some(2.0)])),
+            ],
+        )
+        .unwrap();
+
+        let result = execute(&plan, lhs, rhs).await;
+        assert_eq!(
+            result.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            2,
+            "RHS row whose hash collides with an LHS row but whose compare-key values \
+             differ must not be deduped"
+        );
+        // LHS row: extra=7, value=1.0; RHS row: extra=null, value=2.0
+        let extra = result[1]
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let values = result[1]
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(extra.is_null(0));
+        assert_eq!(values.value(0), 2.0);
     }
 
     #[tokio::test]
