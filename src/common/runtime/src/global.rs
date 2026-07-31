@@ -36,6 +36,8 @@ pub struct RuntimeOptions {
     pub global_rt_size: usize,
     /// The number of threads to execute the runtime for compact operations.
     pub compact_rt_size: usize,
+    /// The maximum number of blocking threads for compact operations.
+    pub compact_rt_max_blocking_threads: usize,
     /// The number of threads to execute datanode query operations.
     pub query_rt_size: usize,
     /// The number of threads to execute datanode ingestion operations.
@@ -48,6 +50,7 @@ impl Default for RuntimeOptions {
         Self {
             global_rt_size: cpus,
             compact_rt_size: usize::max(cpus / 2, 1),
+            compact_rt_max_blocking_threads: usize::max(cpus / 2, 1),
             query_rt_size: usize::max(cpus.saturating_sub(1), 1),
             ingest_rt_size: cpus,
         }
@@ -62,6 +65,25 @@ pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usi
         .runtime_name(runtime_name)
         .thread_name(thread_name)
         .worker_threads(worker_threads)
+        .build()
+        .expect("Fail to create runtime")
+}
+
+fn create_compact_runtime(
+    runtime_name: &str,
+    thread_name: &str,
+    worker_threads: usize,
+    max_blocking_threads: usize,
+) -> Runtime {
+    let max_blocking_threads = max_blocking_threads.max(1);
+    info!(
+        "Creating compact runtime with runtime_name: {runtime_name}, thread_name: {thread_name}, work_threads: {worker_threads}, max_blocking_threads: {max_blocking_threads}."
+    );
+    Builder::default()
+        .runtime_name(runtime_name)
+        .thread_name(thread_name)
+        .worker_threads(worker_threads)
+        .max_blocking_threads(max_blocking_threads)
         .build()
         .expect("Fail to create runtime")
 }
@@ -122,8 +144,16 @@ impl GlobalRuntimes {
 
         Self {
             global_runtime,
-            compact_runtime: compact
-                .unwrap_or_else(|| create_runtime("compact", "compact-worker", COMPACT_WORKERS)),
+            compact_runtime: compact.unwrap_or_else(|| {
+                let max_blocking_threads =
+                    RuntimeOptions::default().compact_rt_max_blocking_threads;
+                create_compact_runtime(
+                    "compact",
+                    "compact-worker",
+                    COMPACT_WORKERS,
+                    max_blocking_threads,
+                )
+            }),
             hb_runtime: heartbeat
                 .unwrap_or_else(|| create_runtime("heartbeat", "hb-worker", HB_WORKERS)),
             query_runtime,
@@ -172,10 +202,11 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
             "global-worker",
             options.global_rt_size,
         ));
-        c.compact_runtime = Some(create_runtime(
+        c.compact_runtime = Some(create_compact_runtime(
             "compact",
             "compact-worker",
             options.compact_rt_size,
+            options.compact_rt_max_blocking_threads,
         ));
         c.hb_runtime = Some(create_runtime("heartbeat", "hb-worker", HB_WORKERS));
     });
@@ -246,6 +277,9 @@ define_global_runtime_spawn!(ingest);
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use tokio_test::assert_ok;
 
     use super::*;
@@ -257,6 +291,10 @@ mod tests {
 
         assert_eq!(cpus, options.global_rt_size);
         assert_eq!(usize::max(cpus / 2, 1), options.compact_rt_size);
+        assert_eq!(
+            usize::max(cpus / 2, 1),
+            options.compact_rt_max_blocking_threads
+        );
         assert_eq!(usize::max(cpus.saturating_sub(1), 1), options.query_rt_size);
         assert_eq!(cpus, options.ingest_rt_size);
     }
@@ -274,6 +312,45 @@ mod tests {
         assert_eq!("test-global", runtimes.global_runtime.name());
         assert_eq!("test-global", runtimes.query_runtime.name());
         assert_eq!("test-global", runtimes.ingest_runtime.name());
+    }
+
+    #[test]
+    fn test_create_compact_runtime_with_zero_max_blocking_threads() {
+        let runtime = create_compact_runtime("test-compact", "test-compact-worker", 1, 0);
+        let handle = runtime.spawn_blocking(|| 1 + 1);
+
+        assert_eq!(2, runtime.block_on(handle).unwrap());
+    }
+
+    #[test]
+    fn test_compact_runtime_limits_blocking_threads() {
+        let runtime = create_compact_runtime("test-compact", "test-compact-worker", 1, 1);
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first = runtime.spawn_blocking(move || {
+            first_started_tx.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+        });
+        first_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let second = runtime.spawn_blocking(move || second_started_tx.send(()).unwrap());
+        assert!(
+            second_started_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+
+        release_first_tx.send(()).unwrap();
+        second_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        runtime.block_on(async {
+            first.await.unwrap();
+            second.await.unwrap();
+        });
     }
 
     #[test]

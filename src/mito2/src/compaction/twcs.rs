@@ -23,7 +23,6 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use rayon::prelude::*;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
@@ -188,7 +187,7 @@ impl TwcsPicker {
         let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
         'chunks: for chunk in windows.chunks(chunk_size) {
             for (inputs, filter_deleted) in chunk
-                .par_iter() // parallelly calculate the inputs
+                .iter()
                 .map(|window| find_inputs(window, time_windows))
                 .collect::<Vec<_>>()
             {
