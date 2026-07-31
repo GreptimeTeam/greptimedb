@@ -1330,7 +1330,9 @@ async fn check_region_migration_events_system_table(
     tokio::time::sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
 
     // The query is equivalent to the following SQL:
-    //   SELECT region_migration_trigger_reason, procedure_state FROM greptime_private.events WHERE
+    //   SELECT region_migration_trigger_reason, procedure_state,
+    //          json_get_string(procedure_trigger, 'type') AS procedure_trigger
+    //   FROM greptime_private.events WHERE
     //       type = 'region_migration' AND
     //       procedure_id = '${procedure_id}' AND
     //       table_id = ${table_id} AND
@@ -1342,12 +1344,8 @@ async fn check_region_migration_events_system_table(
         .column(RegionMigrationEvents::RegionMigrationTriggerReason)
         .column(RegionMigrationEvents::ProcedureState)
         .expr_as(
-            Expr::cust("json_path_match(procedure_trigger, '$.type == \"Submitted\"')"),
-            Alias::new("procedure_submitted"),
-        )
-        .expr_as(
-            Expr::cust("json_path_match(procedure_trigger, '$.type == \"Succeeded\"')"),
-            Alias::new("procedure_succeeded"),
+            Expr::cust("json_get_string(procedure_trigger, 'type')"),
+            Alias::new("procedure_trigger"),
         )
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
@@ -1364,11 +1362,11 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+---------------------------------+-----------------+---------------------+---------------------+
-| region_migration_trigger_reason | procedure_state | procedure_submitted | procedure_succeeded |
-+---------------------------------+-----------------+---------------------+---------------------+
-| Manual                          | Running         | true                | false               |
-| Manual                          | Done            | false               | true                |
-+---------------------------------+-----------------+---------------------+---------------------+";
++---------------------------------+-----------------+-------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger |
++---------------------------------+-----------------+-------------------+
+| Manual                          | Running         | Submitted         |
+| Manual                          | Done            | Succeeded         |
++---------------------------------+-----------------+-------------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }

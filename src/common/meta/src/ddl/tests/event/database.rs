@@ -194,7 +194,7 @@ fn test_database_events_preserve_procedure_envelope_contract() {
         &submitted,
         CREATE_DATABASE_EVENT_TYPE,
         "Running",
-        EventTrigger::Submitted,
+        "Submitted",
         Some("greptime"),
         Some("metrics"),
     );
@@ -202,7 +202,7 @@ fn test_database_events_preserve_procedure_envelope_contract() {
         &lifecycle,
         CREATE_DATABASE_EVENT_TYPE,
         "Done",
-        EventTrigger::Succeeded,
+        "Succeeded",
         None,
         None,
     );
@@ -286,7 +286,7 @@ fn assert_procedure_event_contract(
     event: &ProcedureEvent,
     event_type: &str,
     procedure_state: &str,
-    procedure_trigger: EventTrigger,
+    procedure_trigger: &str,
     catalog_name: Option<&str>,
     schema_name: Option<&str>,
 ) {
@@ -314,7 +314,7 @@ fn assert_procedure_event_contract(
                 Value {
                     value_data: Some(ValueData::StringValue(String::new())),
                 },
-                jsonb_value(&serde_json::to_value(procedure_trigger).unwrap()),
+                jsonb_value(&serde_json::json!({"type": procedure_trigger})),
                 Value {
                     value_data: catalog_name.map(|value| ValueData::StringValue(value.to_string())),
                 },

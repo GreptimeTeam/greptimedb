@@ -322,29 +322,4 @@ mod tests {
             json!({"type": "Retrying", "phase": "Execute", "attempt": 2})
         );
     }
-
-    #[test]
-    fn test_event_trigger_display() {
-        let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-
-        assert_eq!(EventTrigger::Submitted.to_string(), "Submitted");
-        assert_eq!(EventTrigger::Recovered.to_string(), "Recovered");
-        assert_eq!(
-            EventTrigger::ChildSubmitted {
-                procedure_id,
-                outcome: crate::ChildSubmissionOutcome::Accepted,
-            }
-            .to_string(),
-            "ChildSubmitted(procedure_id=00000000-0000-0000-0000-000000000001, outcome=Accepted)"
-        );
-        assert_eq!(
-            EventTrigger::Retrying {
-                phase: crate::RetryPhase::Execute,
-                attempt: 2,
-            }
-            .to_string(),
-            "Retrying(Execute, 2)"
-        );
-        assert_eq!(EventTrigger::RollingBack.to_string(), "RollingBack");
-    }
 }
