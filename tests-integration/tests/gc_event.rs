@@ -148,7 +148,7 @@ FROM greptime_private.events
 WHERE type = 'batch_gc'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
-  AND procedure_trigger = 'Succeeded'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND json_is_null(payload)"#,
     );
     let actual_report: serde_json::Value =

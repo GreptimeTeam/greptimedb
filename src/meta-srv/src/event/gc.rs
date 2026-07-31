@@ -214,7 +214,7 @@ mod tests {
     use common_event_recorder::EventTypeFilter;
     use common_event_recorder::event_table::{
         PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN,
+        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
     use common_meta::key::TableMetadataManager;
@@ -526,7 +526,7 @@ mod tests {
             ValueData::StringValue(procedure_id.to_string()).into(),
             ValueData::StringValue("Done".to_string()).into(),
             ValueData::StringValue(String::new()).into(),
-            ValueData::StringValue("Succeeded".to_string()).into(),
+            jsonb_value(&serde_json::json!({"type": "Succeeded"})),
         ];
         values.extend(
             region_row(
