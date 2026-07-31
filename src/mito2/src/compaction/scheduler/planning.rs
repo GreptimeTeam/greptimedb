@@ -39,9 +39,7 @@ use crate::compaction::scheduler::state::{
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
-use crate::error::{
-    CompactRegionSnafu, Error, JoinSnafu, RemoteCompactionSnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{CompactRegionSnafu, Error, RemoteCompactionSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
 };
@@ -254,16 +252,10 @@ impl CompactionScheduler {
         };
 
         listener.on_compaction_pick_begin(region_id).await;
-        let picker_region = compaction_region.clone();
-        let picker_output = match common_runtime::spawn_blocking_compact(move || {
-            let _pick_timer = COMPACTION_STAGE_ELAPSED
-                .with_label_values(&["pick"])
-                .start_timer();
-            picker.pick(&picker_region)
-        })
-        .await
-        .context(JoinSnafu)
-        {
+        let _pick_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["pick"])
+            .start_timer();
+        let picker_output = match picker.pick(&compaction_region).await {
             Ok(output) => output,
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
