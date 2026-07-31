@@ -20,18 +20,20 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::{CompactionOutput, get_expired_ssts};
+use crate::error::{JoinSnafu, Result};
 use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
 /// the data segments intersects with those windows of files together so that the output files
 /// never overlaps.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WindowedCompactionPicker {
     compaction_time_window_seconds: Option<i64>,
     time_range: Option<TimestampRange>,
@@ -115,20 +117,25 @@ impl WindowedCompactionPicker {
     }
 }
 
+#[async_trait::async_trait]
 impl Picker for WindowedCompactionPicker {
-    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
-        let (outputs, expired_ssts, time_window) = self.pick_inner(
-            compaction_region.current_version.metadata.region_id,
-            &compaction_region.current_version,
-            Timestamp::current_millis(),
-        );
+    async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
+        let picker = self.clone();
+        let region_id = compaction_region.current_version.metadata.region_id;
+        let current_version = compaction_region.current_version.clone();
+        let (outputs, expired_ssts, time_window) =
+            common_runtime::spawn_blocking_compact(move || {
+                picker.pick_inner(region_id, &current_version, Timestamp::current_millis())
+            })
+            .await
+            .context(JoinSnafu)?;
 
-        Some(PickerOutput {
+        Ok(Some(PickerOutput {
             outputs,
             expired_ssts,
             time_window_size: time_window,
             max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
-        })
+        }))
     }
 }
 

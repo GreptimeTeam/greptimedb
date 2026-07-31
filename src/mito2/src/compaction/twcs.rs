@@ -16,6 +16,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -23,6 +24,7 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
@@ -33,6 +35,7 @@ use crate::compaction::run::{
     merge_primary_key_ranges, merge_seq_files, primary_key_ranges_overlap, reduce_runs,
 };
 use crate::compaction::{CompactionOutput, get_expired_ssts};
+use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, Level, overlaps};
 use crate::sst::version::LevelMeta;
 
@@ -43,7 +46,7 @@ const DEFAULT_MAX_INPUT_FILE_NUM: usize = 32;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TwcsPicker {
     /// Minimum file num to trigger a compaction.
     pub trigger_file_num: usize,
@@ -62,22 +65,23 @@ pub struct TwcsPicker {
 impl TwcsPicker {
     /// Builds compaction output from files.
     #[cfg(test)]
-    fn build_output(
+    async fn build_output(
         &self,
         region_id: RegionId,
-        time_windows: &mut BTreeMap<i64, Window>,
+        time_windows: BTreeMap<i64, Window>,
         active_window: Option<i64>,
-    ) -> Vec<CompactionOutput> {
+    ) -> Result<Vec<CompactionOutput>> {
         self.build_output_with_time_range(region_id, time_windows, active_window, None)
+            .await
     }
 
-    fn build_output_with_time_range(
+    async fn build_output_with_time_range(
         &self,
         region_id: RegionId,
-        time_windows: &mut BTreeMap<i64, Window>,
+        time_windows: BTreeMap<i64, Window>,
         active_window: Option<i64>,
         time_window_size: Option<i64>,
-    ) -> Vec<CompactionOutput> {
+    ) -> Result<Vec<CompactionOutput>> {
         let mut output = vec![];
         let windows = time_windows
             .values()
@@ -93,14 +97,27 @@ impl TwcsPicker {
                         })
                     })
             })
+            .map(|window| window.time_window)
             .collect::<Vec<_>>();
+        let time_windows = Arc::new(time_windows);
         let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
         'chunks: for chunk in windows.chunks(chunk_size) {
-            for (inputs, filter_deleted) in chunk
-                .iter()
-                .map(|window| self.find_inputs(region_id, active_window, window, time_windows))
-                .collect::<Vec<_>>()
-            {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for window in chunk {
+                let picker = self.clone();
+                let time_windows = time_windows.clone();
+                let window = *window;
+                handles.push(common_runtime::spawn_blocking_compact(move || {
+                    time_windows.get(&window).map(|window| {
+                        picker.find_inputs(region_id, active_window, window, &time_windows)
+                    })
+                }));
+                tokio::task::yield_now().await;
+            }
+            for result in futures::future::join_all(handles).await {
+                let Some((inputs, filter_deleted)) = result.context(JoinSnafu)? else {
+                    continue;
+                };
                 if inputs.is_empty() {
                     continue;
                 }
@@ -123,7 +140,7 @@ impl TwcsPicker {
                 }
             }
         }
-        output
+        Ok(output)
     }
 
     fn find_inputs(
@@ -267,67 +284,77 @@ fn log_pick_result(
     );
 }
 
+#[async_trait::async_trait]
 impl Picker for TwcsPicker {
-    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
+    async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
         let region_id = compaction_region.region_id;
-        let levels = compaction_region.current_version.ssts.levels();
-
-        let expired_ssts =
-            get_expired_ssts(levels, compaction_region.ttl, Timestamp::current_millis());
-        if !expired_ssts.is_empty() {
-            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-        }
-        let expired_file_ids = expired_ssts
-            .iter()
-            .map(|file| file.file_id())
-            .collect::<HashSet<_>>();
-
-        let compaction_time_window = compaction_region
-            .current_version
-            .compaction_time_window
-            .map(|window| window.as_secs() as i64);
-        let time_window_size = compaction_time_window
-            .or(self.time_window_seconds)
-            .unwrap_or_else(|| {
-                let inferred = infer_time_bucket(levels[0].files());
-                info!(
-                    "Compaction window for region {} is not present, inferring from files: {:?}",
-                    region_id, inferred
+        let picker = self.clone();
+        let compaction_region = compaction_region.clone();
+        let (expired_ssts, time_window_size, active_window, windows) =
+            common_runtime::spawn_blocking_compact(move || {
+                let levels = compaction_region.current_version.ssts.levels();
+                let expired_ssts = get_expired_ssts(
+                    levels,
+                    compaction_region.ttl,
+                    Timestamp::current_millis(),
                 );
-                inferred
-            });
+                if !expired_ssts.is_empty() {
+                    info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
+                }
+                let expired_file_ids = expired_ssts
+                    .iter()
+                    .map(|file| file.file_id())
+                    .collect::<HashSet<_>>();
 
-        // Find active window from files in level 0.
-        let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
-        // Assign files to windows
-        let mut windows = assign_to_windows(
-            levels
-                .iter()
-                .flat_map(LevelMeta::files)
-                .filter(|file| !expired_file_ids.contains(&file.file_id())),
-            time_window_size,
-        );
-        let outputs = self.build_output_with_time_range(
-            region_id,
-            &mut windows,
-            active_window,
-            Some(time_window_size),
-        );
+                let compaction_time_window = compaction_region
+                    .current_version
+                    .compaction_time_window
+                    .map(|window| window.as_secs() as i64);
+                let time_window_size = compaction_time_window
+                    .or(picker.time_window_seconds)
+                    .unwrap_or_else(|| {
+                        let inferred = infer_time_bucket(levels[0].files());
+                        info!(
+                            "Compaction window for region {} is not present, inferring from files: {:?}",
+                            region_id, inferred
+                        );
+                        inferred
+                    });
+
+                let active_window =
+                    find_latest_window_in_seconds(levels[0].files(), time_window_size);
+                let windows = assign_to_windows(
+                    levels
+                        .iter()
+                        .flat_map(LevelMeta::files)
+                        .filter(|file| !expired_file_ids.contains(&file.file_id())),
+                    time_window_size,
+                );
+
+                (expired_ssts, time_window_size, active_window, windows)
+            })
+            .await
+            .context(JoinSnafu)?;
+
+        let outputs = self
+            .build_output_with_time_range(region_id, windows, active_window, Some(time_window_size))
+            .await?;
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let max_file_size = self.max_output_file_size.map(|v| v as usize);
-        Some(PickerOutput {
+        Ok(Some(PickerOutput {
             outputs,
             expired_ssts,
             time_window_size,
             max_file_size,
-        })
+        }))
     }
 }
 
+#[derive(Clone)]
 struct Window {
     start: Timestamp,
     end: Timestamp,
@@ -561,7 +588,7 @@ mod tests {
         };
         let compaction_region = compaction_region_with_expired_sst().await;
 
-        let output = picker.pick(&compaction_region).unwrap();
+        let output = picker.pick(&compaction_region).await.unwrap().unwrap();
 
         assert!(output.outputs.is_empty());
         assert!(!output.expired_ssts.is_empty());
@@ -939,14 +966,14 @@ mod tests {
     }
 
     impl CompactionPickerTestCase {
-        fn check(&self) {
+        async fn check(&self) {
             let file_id_to_idx = self
                 .input_files
                 .iter()
                 .enumerate()
                 .map(|(idx, file)| (file.file_id(), idx))
                 .collect::<HashMap<_, _>>();
-            let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
             let output = TwcsPicker {
@@ -957,7 +984,9 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
             }
-            .build_output(RegionId::from_u64(0), &mut windows, active_window);
+            .build_output(RegionId::from_u64(0), windows, active_window)
+            .await
+            .unwrap();
 
             let output = output
                 .iter()
@@ -988,8 +1017,8 @@ mod tests {
         output_level: Level,
     }
 
-    #[test]
-    fn test_build_twcs_output() {
+    #[tokio::test]
+    async fn test_build_twcs_output() {
         let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
 
         // Case 1: 2 runs found in each time window.
@@ -1013,7 +1042,8 @@ mod tests {
                 },
             ],
         }
-        .check();
+        .check()
+        .await;
 
         // Case 2:
         //    -2000........-3
@@ -1043,7 +1073,8 @@ mod tests {
                 },
             ],
         }
-        .check();
+        .check()
+        .await;
 
         // Case 3:
         // A compaction may split output into several files that have overlapping time ranges and same sequence,
@@ -1064,11 +1095,12 @@ mod tests {
                 output_level: 1,
             }],
         }
-        .check();
+        .check()
+        .await;
     }
 
-    #[test]
-    fn test_build_output_skips_pk_disjoint_files() {
+    #[tokio::test]
+    async fn test_build_output_skips_pk_disjoint_files() {
         let files = [
             new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
@@ -1089,7 +1121,7 @@ mod tests {
                 pk_range(b"x", b"z"),
             ),
         ];
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
         let output = TwcsPicker {
             trigger_file_num: 4,
@@ -1099,7 +1131,9 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
         }
-        .build_output(RegionId::from_u64(0), &mut windows, active_window);
+        .build_output(RegionId::from_u64(0), windows, active_window)
+        .await
+        .unwrap();
 
         assert!(output.is_empty());
     }
@@ -1144,8 +1178,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_output_multiple_windows_with_zero_runs() {
+    #[tokio::test]
+    async fn test_build_output_multiple_windows_with_zero_runs() {
         let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
 
         let files = [
@@ -1159,7 +1193,7 @@ mod tests {
             new_file_handle_with_sequence(file_ids[5], 3000, 3999, 0, 6),
         ];
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         // Create picker with trigger_file_num of 4 so single files won't form runs in first window
         let picker = TwcsPicker {
@@ -1172,7 +1206,10 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(123), windows, active_window)
+            .await
+            .unwrap();
 
         assert!(
             !output.is_empty(),
@@ -1193,8 +1230,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_output_single_window_zero_runs() {
+    #[tokio::test]
+    async fn test_build_output_single_window_zero_runs() {
         let file_ids = (0..2).map(|_| FileId::random()).collect::<Vec<_>>();
 
         let large_file_1 = new_file_handle_with_size_and_sequence(file_ids[0], 0, 999, 0, 1, 2000); // 2000 bytes
@@ -1202,7 +1239,7 @@ mod tests {
 
         let files = [large_file_1, large_file_2];
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
             trigger_file_num: 2,
@@ -1214,7 +1251,10 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(456), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(456), windows, active_window)
+            .await
+            .unwrap();
 
         // Should return empty output (no compaction needed)
         assert!(
@@ -1223,8 +1263,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_max_background_tasks_truncation() {
+    #[tokio::test]
+    async fn test_max_background_tasks_truncation() {
         let file_ids = (0..10).map(|_| FileId::random()).collect::<Vec<_>>();
         let max_background_tasks = 3;
 
@@ -1245,7 +1285,7 @@ mod tests {
             new_file_handle_with_sequence(file_ids[9], 6000, 6999, 0, 10),
         ];
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
@@ -1257,7 +1297,10 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(123), windows, active_window)
+            .await
+            .unwrap();
 
         // Should have at most max_background_tasks outputs
         assert!(
@@ -1277,12 +1320,11 @@ mod tests {
             time_range: None,
         };
 
-        let mut windows_no_limit = assign_to_windows(files.iter(), 3);
-        let output_no_limit = picker_no_limit.build_output(
-            RegionId::from_u64(123),
-            &mut windows_no_limit,
-            active_window,
-        );
+        let windows_no_limit = assign_to_windows(files.iter(), 3);
+        let output_no_limit = picker_no_limit
+            .build_output(RegionId::from_u64(123), windows_no_limit, active_window)
+            .await
+            .unwrap();
 
         // Without limit, should have more outputs (if there are enough windows)
         if output_no_limit.len() > max_background_tasks {
@@ -1293,8 +1335,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_max_background_tasks_no_truncation_when_under_limit() {
+    #[tokio::test]
+    async fn test_max_background_tasks_no_truncation_when_under_limit() {
         let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
         let max_background_tasks = 10; // Larger than expected outputs
 
@@ -1306,7 +1348,7 @@ mod tests {
             new_file_handle_with_sequence(file_ids[3], 0, 999, 0, 4),
         ];
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
@@ -1318,7 +1360,10 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(123), windows, active_window)
+            .await
+            .unwrap();
 
         // Should have all outputs since we're under the limit
         assert!(
@@ -1329,8 +1374,8 @@ mod tests {
         assert!(!output.is_empty(), "Should have at least one output");
     }
 
-    #[test]
-    fn test_pick_multiple_runs() {
+    #[tokio::test]
+    async fn test_pick_multiple_runs() {
         common_telemetry::init_default_ut_logging();
 
         let num_files = 8;
@@ -1352,7 +1397,7 @@ mod tests {
             })
             .collect();
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
@@ -1364,14 +1409,17 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(123), windows, active_window)
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(output[0].inputs.len(), 2);
     }
 
-    #[test]
-    fn test_limit_max_input_files() {
+    #[tokio::test]
+    async fn test_limit_max_input_files() {
         common_telemetry::init_default_ut_logging();
 
         let num_files = 50;
@@ -1393,7 +1441,7 @@ mod tests {
             })
             .collect();
 
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
 
         let picker = TwcsPicker {
             trigger_file_num: 4,
@@ -1405,7 +1453,10 @@ mod tests {
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
-        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+        let output = picker
+            .build_output(RegionId::from_u64(123), windows, active_window)
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(output[0].inputs.len(), 32);
@@ -1436,8 +1487,8 @@ mod tests {
         assert!(!time_window_intersects_range(0, 4, &overflowing_range));
     }
 
-    #[test]
-    fn test_time_range_filter_precedes_background_task_limit() {
+    #[tokio::test]
+    async fn test_time_range_filter_precedes_background_task_limit() {
         let early_file_ids = [FileId::random(), FileId::random()];
         let selected_file_ids = [FileId::random(), FileId::random()];
         let files = [
@@ -1446,7 +1497,7 @@ mod tests {
             new_file_handle_with_sequence(selected_file_ids[0], 7_000, 7_999, 0, 3),
             new_file_handle_with_sequence(selected_file_ids[1], 7_000, 7_999, 0, 4),
         ];
-        let mut windows = assign_to_windows(files.iter(), 3);
+        let windows = assign_to_windows(files.iter(), 3);
         let picker = TwcsPicker {
             trigger_file_num: 2,
             time_window_seconds: Some(3),
@@ -1459,12 +1510,10 @@ mod tests {
             ),
         };
 
-        let output = picker.build_output_with_time_range(
-            RegionId::from_u64(123),
-            &mut windows,
-            Some(9),
-            Some(3),
-        );
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), Some(3))
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(

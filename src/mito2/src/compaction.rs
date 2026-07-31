@@ -61,7 +61,7 @@ use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, DataTypeMismatchSnafu, Error,
-    GetSchemaMetadataSnafu, JoinSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
+    GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
     TimeRangePredicateOverflowSnafu, TimeoutSnafu, UnexpectedSnafu,
 };
@@ -834,16 +834,10 @@ impl CompactionScheduler {
         };
 
         listener.on_compaction_pick_begin(region_id).await;
-        let picker_region = compaction_region.clone();
-        let picker_output = match common_runtime::spawn_blocking_compact(move || {
-            let _pick_timer = COMPACTION_STAGE_ELAPSED
-                .with_label_values(&["pick"])
-                .start_timer();
-            picker.pick(&picker_region)
-        })
-        .await
-        .context(JoinSnafu)
-        {
+        let _pick_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["pick"])
+            .start_timer();
+        let picker_output = match picker.pick(&compaction_region).await {
             Ok(output) => output,
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
