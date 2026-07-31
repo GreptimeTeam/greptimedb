@@ -2810,6 +2810,8 @@ impl PromPlanner {
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
         let alternative_samples =
             Self::field_columns_are_alternative_samples(input_schema, &self.ctx.field_columns);
+        let all_field_columns_are_native_histogram_ranges =
+            self.all_field_columns_are_native_histogram_ranges(input_schema);
 
         // TODO(ruihang): set this according to in-param list
         let field_column_pos = 0;
@@ -2826,140 +2828,192 @@ impl PromPlanner {
             ))
         };
         let scalar_func = match func.name {
-            "increase" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::ExtrapolateUdf(
-                    Arc::new(NativeHistogramIncrease::scalar_udf_with_collector(
+            "increase" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(NativeHistogramIncrease::scalar_udf_with_collector(
+                            self.promql_annotations.clone(),
+                        )),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                } else {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(Increase::scalar_udf()),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                }
+            }
+            "rate" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(NativeHistogramRate::scalar_udf_with_collector(
+                            self.promql_annotations.clone(),
+                        )),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                } else {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(Rate::scalar_udf()),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                }
+            }
+            "delta" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(NativeHistogramDelta::scalar_udf_with_collector(
+                            self.promql_annotations.clone(),
+                        )),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                } else {
+                    ScalarFunc::ExtrapolateUdf(
+                        Arc::new(Delta::scalar_udf()),
+                        self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                    )
+                }
+            }
+            "idelta" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramIDelta::scalar_udf_with_collector(
                         self.promql_annotations.clone(),
-                    )),
-                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-                )
+                    )))
+                } else {
+                    ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf()))
+                }
             }
-            "increase" => ScalarFunc::ExtrapolateUdf(
-                Arc::new(Increase::scalar_udf()),
-                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ),
-            "rate" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::ExtrapolateUdf(
-                    Arc::new(NativeHistogramRate::scalar_udf_with_collector(
+            "irate" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramIRate::scalar_udf_with_collector(
                         self.promql_annotations.clone(),
-                    )),
-                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-                )
+                    )))
+                } else {
+                    ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf()))
+                }
             }
-            "rate" => ScalarFunc::ExtrapolateUdf(
-                Arc::new(Rate::scalar_udf()),
-                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ),
-            "delta" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::ExtrapolateUdf(
-                    Arc::new(NativeHistogramDelta::scalar_udf_with_collector(
-                        self.promql_annotations.clone(),
-                    )),
-                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-                )
+            "resets" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramResets::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(Resets::scalar_udf()))
+                }
             }
-            "delta" => ScalarFunc::ExtrapolateUdf(
-                Arc::new(Delta::scalar_udf()),
-                self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ),
-            "idelta" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(NativeHistogramIDelta::scalar_udf_with_collector(
-                    self.promql_annotations.clone(),
-                )))
+            "changes" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramChanges::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(Changes::scalar_udf()))
+                }
             }
-            "idelta" => ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf())),
-            "irate" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(NativeHistogramIRate::scalar_udf_with_collector(
-                    self.promql_annotations.clone(),
-                )))
+            "deriv" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(Deriv::scalar_udf()))
+                }
             }
-            "irate" => ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf())),
-            "resets" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(NativeHistogramResets::scalar_udf()))
+            "avg_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(
+                        NativeHistogramAvgOverTime::scalar_udf_with_collector(
+                            self.promql_annotations.clone(),
+                        ),
+                    ))
+                } else {
+                    ScalarFunc::Udf(Arc::new(AvgOverTime::scalar_udf()))
+                }
             }
-            "resets" => ScalarFunc::Udf(Arc::new(Resets::scalar_udf())),
-            "changes" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(NativeHistogramChanges::scalar_udf()))
+            "min_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(MinOverTime::scalar_udf()))
+                }
             }
-            "changes" => ScalarFunc::Udf(Arc::new(Changes::scalar_udf())),
-            "deriv" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            "max_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(MaxOverTime::scalar_udf()))
+                }
             }
-            "deriv" => ScalarFunc::Udf(Arc::new(Deriv::scalar_udf())),
-            "avg_over_time" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(
-                    NativeHistogramAvgOverTime::scalar_udf_with_collector(
-                        self.promql_annotations.clone(),
-                    ),
-                ))
+            "sum_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(
+                        NativeHistogramSumOverTime::scalar_udf_with_collector(
+                            self.promql_annotations.clone(),
+                        ),
+                    ))
+                } else {
+                    ScalarFunc::Udf(Arc::new(SumOverTime::scalar_udf()))
+                }
             }
-            "avg_over_time" => ScalarFunc::Udf(Arc::new(AvgOverTime::scalar_udf())),
-            "min_over_time" | "max_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            "count_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramCountOverTime::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(CountOverTime::scalar_udf()))
+                }
             }
-            "min_over_time" => ScalarFunc::Udf(Arc::new(MinOverTime::scalar_udf())),
-            "max_over_time" => ScalarFunc::Udf(Arc::new(MaxOverTime::scalar_udf())),
-            "sum_over_time" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
-                ScalarFunc::Udf(Arc::new(
-                    NativeHistogramSumOverTime::scalar_udf_with_collector(
-                        self.promql_annotations.clone(),
-                    ),
-                ))
+            "last_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramLastOverTime::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(LastOverTime::scalar_udf()))
+                }
             }
-            "sum_over_time" => ScalarFunc::Udf(Arc::new(SumOverTime::scalar_udf())),
-            "count_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(Arc::new(NativeHistogramCountOverTime::scalar_udf()))
+            "absent_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramAbsentOverTime::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(AbsentOverTime::scalar_udf()))
+                }
             }
-            "count_over_time" => ScalarFunc::Udf(Arc::new(CountOverTime::scalar_udf())),
-            "last_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(Arc::new(NativeHistogramLastOverTime::scalar_udf()))
+            "present_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramPresentOverTime::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf()))
+                }
             }
-            "last_over_time" => ScalarFunc::Udf(Arc::new(LastOverTime::scalar_udf())),
-            "absent_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(Arc::new(NativeHistogramAbsentOverTime::scalar_udf()))
+            "stddev_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf()))
+                }
             }
-            "absent_over_time" => ScalarFunc::Udf(Arc::new(AbsentOverTime::scalar_udf())),
-            "present_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(Arc::new(NativeHistogramPresentOverTime::scalar_udf()))
+            "stdvar_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf()))
+                }
             }
-            "present_over_time" => ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf())),
-            "stddev_over_time" | "stdvar_over_time" | "quantile_over_time"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
-            }
-            "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
-            "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
-            "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
-            "predict_linear"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            "quantile_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf()))
+                }
             }
             "predict_linear" => {
-                other_input_exprs[0] = DfExpr::Cast(Cast {
-                    expr: Box::new(other_input_exprs[0].clone()),
-                    data_type: ArrowDataType::Int64,
-                });
-                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
-            }
-            "double_exponential_smoothing" | "holt_winters"
-                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
-            {
-                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    other_input_exprs[0] = DfExpr::Cast(Cast {
+                        expr: Box::new(other_input_exprs[0].clone()),
+                        data_type: ArrowDataType::Int64,
+                    });
+                    ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
+                }
             }
             "double_exponential_smoothing" | "holt_winters" => {
-                ScalarFunc::Udf(Arc::new(DoubleExponentialSmoothing::scalar_udf()))
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+                } else {
+                    ScalarFunc::Udf(Arc::new(DoubleExponentialSmoothing::scalar_udf()))
+                }
             }
             "histogram_count" => {
                 ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramCount::scalar_udf()))
