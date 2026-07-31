@@ -23,7 +23,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
-use common_query::prelude::greptime_value;
+use common_query::prelude::{greptime_native_histogram, greptime_value};
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
@@ -48,7 +48,7 @@ use datafusion::sql::TableReference;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality};
 use datafusion_expr::expr::WindowFunctionParams;
-use datafusion_expr::utils::conjunction;
+use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
 };
@@ -387,6 +387,7 @@ impl PromPlannerContext {
 pub struct PromPlanner {
     table_provider: DfTableSourceProvider,
     ctx: PromPlannerContext,
+    /// Optional collector passed to native histogram UDFs.
     promql_annotations: Option<PromqlAnnotationCollector>,
 }
 
@@ -399,6 +400,7 @@ impl PromPlanner {
         Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None).await
     }
 
+    /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
@@ -725,7 +727,7 @@ impl PromPlanner {
 
         if self.all_field_columns_are_native_histograms(input.schema()) {
             let promql_annotations = self.promql_annotations.clone();
-            return self.projection_for_each_field_column(input, |col| {
+            let input = self.projection_for_each_field_column(input, |col| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramDrop::float_null_udf(
                         format!(
@@ -736,7 +738,12 @@ impl PromPlanner {
                     )),
                     args: vec![DfExpr::Column(Column::from_name(col))],
                 }))
-            });
+            })?;
+            return LogicalPlanBuilder::from(input)
+                .filter(self.create_empty_values_filter_expr(false)?)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu);
         }
 
         let val = Self::get_param_as_literal_expr(param, Some(*op), Some(ArrowDataType::Float64))?;
@@ -1665,6 +1672,8 @@ impl PromPlanner {
                 ),
             })
         };
+        let preserve_any_value =
+            Self::field_columns_are_alternative_samples(input.schema(), &self.ctx.field_columns);
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
@@ -1682,7 +1691,7 @@ impl PromPlanner {
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
-            .filter(self.create_empty_values_filter_expr()?)
+            .filter(self.create_empty_values_filter_expr(preserve_any_value)?)
             .context(DataFusionPlanningSnafu)?;
 
         let builder = match func.name {
@@ -3586,7 +3595,7 @@ impl PromPlanner {
             .collect::<Result<Vec<_>>>()
     }
 
-    fn create_empty_values_filter_expr(&self) -> Result<DfExpr> {
+    fn create_empty_values_filter_expr(&self, preserve_any_value: bool) -> Result<DfExpr> {
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         for value in &self.ctx.field_columns {
             let expr = DfExpr::Column(Column::from_name(value)).is_not_null();
@@ -3596,8 +3605,13 @@ impl PromPlanner {
         // This error context should be computed lazily: the planner may set `ctx.table_name` to
         // `None` for derived expressions (e.g. after projecting the LHS of a vector-vector
         // comparison filter). Eagerly calling `table_ref()?` here can turn a valid plan into
-        // a `TableNameNotFound` error even when `conjunction(exprs)` succeeds.
-        conjunction(exprs).with_context(|| ValueNotFoundSnafu {
+        // a `TableNameNotFound` error even when predicate construction succeeds.
+        let predicate = if preserve_any_value {
+            disjunction(exprs)
+        } else {
+            conjunction(exprs)
+        };
+        predicate.with_context(|| ValueNotFoundSnafu {
             table: self
                 .table_ref()
                 .map(|t| t.to_quoted_string())
@@ -3957,7 +3971,7 @@ impl PromPlanner {
         LogicalPlanBuilder::from(input_plan)
             .project(project_exprs)
             .context(DataFusionPlanningSnafu)?
-            .filter(self.create_empty_values_filter_expr()?)
+            .filter(self.create_empty_values_filter_expr(false)?)
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)
@@ -4345,6 +4359,19 @@ impl PromPlanner {
         if field_columns.len() != 2 {
             return None;
         }
+
+        let canonical_float = field_columns.iter().find(|field| {
+            field.as_str() == greptime_value()
+                && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+        });
+        let canonical_histogram = field_columns.iter().find(|field| {
+            field.as_str() == greptime_native_histogram()
+                && Self::field_column_is_native_histogram(schema, field)
+        });
+        if let (Some(float), Some(histogram)) = (canonical_float, canonical_histogram) {
+            return Some((float, histogram));
+        }
+
         let float = field_columns.iter().find(|field| {
             field.starts_with(OR_FLOAT_FIELD_PREFIX)
                 && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
@@ -6132,6 +6159,130 @@ mod test {
             .schema(schema)
             .primary_key_indices(vec![0])
             .value_indices(vec![2])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_multi_histogram_table_provider(table_name: &str) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        let columns = vec![
+            ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                greptime_native_histogram().to_string(),
+                native_histogram_value_type().clone(),
+                true,
+            ),
+            ColumnSchema::new(
+                "native_histogram_2".to_string(),
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2, 3])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_mixed_native_histogram_table_provider(
+        table_name: &str,
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        let columns = vec![
+            ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                greptime_native_histogram().to_string(),
+                native_histogram_value_type().clone(),
+                true,
+            ),
+            ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2, 3])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -8432,6 +8583,29 @@ mod test {
 
         assert!(plan.contains("prom_native_histogram_quantile"), "{plan}");
         assert!(!plan.contains("PromHistogramFold"), "{plan}");
+        // The phi literal is threaded into the native quantile UDF as its second argument.
+        assert!(plan.contains("Float64(0.9)"), "{plan}");
+        // The empty-values filter drops NULL quantile results so the output is empty
+        // when all native histogram samples are dropped.
+        assert!(plan.contains("IS NOT NULL"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn native_histogram_quantile_rejects_multi_field_input() {
+        let table_provider = build_test_multi_histogram_table_provider("some_metric").await;
+        let result = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt("histogram_quantile(0.9, some_metric)"),
+            &build_query_engine_state(),
+        )
+        .await;
+
+        let err = result.expect_err("histogram_quantile on two native histogram fields must fail");
+        assert!(
+            err.to_string()
+                .contains("Multi fields calculation is not supported in histogram_quantile"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -8439,6 +8613,11 @@ mod test {
         let plan = native_histogram_plan("topk(1, some_metric)").await;
 
         assert!(plan.contains("prom_native_histogram_drop_float"), "{plan}");
+        assert!(
+            plan.contains("Filter: prom_native_histogram_drop_float")
+                && plan.contains("IS NOT NULL"),
+            "{plan}"
+        );
     }
 
     #[tokio::test]
@@ -8498,6 +8677,184 @@ mod test {
         assert!(
             plan.contains("prom_native_histogram_absent_over_time"),
             "{plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_histogram_all_function_arms_route_correctly() {
+        // Every native-histogram match arm in `create_function_expr` must route to the
+        // expected UDF when all field columns are native histograms. `holt_winters` shares
+        // the `double_exponential_smoothing` arm but is not registered in the promql
+        // parser (0.10), so it cannot be exercised through a query string.
+        let cases = [
+            // Range functions routed to native histogram UDFs.
+            (
+                "increase(some_metric[5m])",
+                "prom_native_histogram_increase",
+            ),
+            ("rate(some_metric[5m])", "prom_native_histogram_rate"),
+            ("delta(some_metric[5m])", "prom_native_histogram_delta"),
+            ("idelta(some_metric[5m])", "prom_native_histogram_idelta"),
+            ("irate(some_metric[5m])", "prom_native_histogram_irate"),
+            ("resets(some_metric[5m])", "prom_native_histogram_resets"),
+            ("changes(some_metric[5m])", "prom_native_histogram_changes"),
+            (
+                "avg_over_time(some_metric[5m])",
+                "prom_native_histogram_avg_over_time",
+            ),
+            (
+                "sum_over_time(some_metric[5m])",
+                "prom_native_histogram_sum_over_time",
+            ),
+            (
+                "count_over_time(some_metric[5m])",
+                "prom_native_histogram_count_over_time",
+            ),
+            (
+                "last_over_time(some_metric[5m])",
+                "prom_native_histogram_last_over_time",
+            ),
+            (
+                "present_over_time(some_metric[5m])",
+                "prom_native_histogram_present_over_time",
+            ),
+            // Unsupported functions dropped with the float-null UDF.
+            ("deriv(some_metric[5m])", "prom_native_histogram_drop_float"),
+            (
+                "min_over_time(some_metric[5m])",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "max_over_time(some_metric[5m])",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "stddev_over_time(some_metric[5m])",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "stdvar_over_time(some_metric[5m])",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "quantile_over_time(0.9, some_metric[5m])",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "predict_linear(some_metric[5m], 60)",
+                "prom_native_histogram_drop_float",
+            ),
+            (
+                "double_exponential_smoothing(some_metric[5m], 0.5, 0.5)",
+                "prom_native_histogram_drop_float",
+            ),
+            ("round(some_metric)", "prom_native_histogram_drop_float"),
+            ("rad(some_metric)", "prom_native_histogram_drop_float"),
+            ("deg(some_metric)", "prom_native_histogram_drop_float"),
+            ("sgn(some_metric)", "prom_native_histogram_drop_float"),
+            // Instant helper functions routed to native histogram UDFs.
+            (
+                "histogram_count(some_metric)",
+                "prom_native_histogram_count",
+            ),
+            ("histogram_sum(some_metric)", "prom_native_histogram_sum"),
+            ("histogram_avg(some_metric)", "prom_native_histogram_avg"),
+            (
+                "histogram_stddev(some_metric)",
+                "prom_native_histogram_stddev",
+            ),
+            (
+                "histogram_stdvar(some_metric)",
+                "prom_native_histogram_stdvar",
+            ),
+            (
+                "histogram_fraction(0, 1, some_metric)",
+                "prom_native_histogram_fraction",
+            ),
+        ];
+
+        for (query, expected_udf) in cases {
+            let plan = native_histogram_plan(query).await;
+            assert!(plan.contains(expected_udf), "{query}\n{plan}");
+        }
+    }
+
+    #[tokio::test]
+    async fn native_histogram_mixed_field_table_behaves() {
+        // Metric Engine exposes float and histogram samples as alternative nullable fields.
+        // Histogram functions must select the histogram field without adding a NULL float
+        // field that would make the empty-value filter reject every row.
+        let table_provider = build_test_mixed_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt("histogram_count(some_metric)"),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("prom_native_histogram_count"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("Float64(NULL)"), "{plan_str}");
+        assert!(
+            plan_str.contains("prom_native_histogram_count(greptime_native_histogram) IS NOT NULL"),
+            "{plan_str}"
+        );
+
+        // Value sorting keeps the float column and never sorts by the histogram column.
+        let table_provider = build_test_mixed_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt("sort(some_metric)"),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("greptime_value ASC NULLS FIRST"),
+            "{plan_str}"
+        );
+        assert!(
+            !plan_str.contains("greptime_native_histogram ASC"),
+            "{plan_str}"
+        );
+
+        // scalar() ignores histogram samples and evaluates only the float field.
+        let table_provider = build_test_mixed_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt("scalar(some_metric)"),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("ScalarCalculate"), "{plan_str}");
+        assert!(
+            plan_str.contains("greptime_value IS NOT NULL"),
+            "{plan_str}"
+        );
+
+        // Functions that preserve both alternative fields keep rows with either sample type.
+        let table_provider = build_test_mixed_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(r#"label_replace(some_metric, "copied", "$1", "tag_0", "(.*)")"#),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        let filter = plan_str.lines().next().unwrap();
+        assert!(
+            filter.starts_with("Filter: ")
+                && filter.contains("greptime_native_histogram IS NOT NULL")
+                && filter.contains(" OR ")
+                && filter.contains("greptime_value IS NOT NULL"),
+            "{plan_str}"
         );
     }
 
