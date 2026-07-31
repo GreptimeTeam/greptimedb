@@ -1169,7 +1169,7 @@ pub async fn prepare_file_table_files(
     } else {
         Source::Dir
     };
-    let lister = Lister::new(backend.object_store.clone(), source, url.to_string(), regex);
+    let lister = Lister::new(backend.object_store.clone(), source, url.clone(), regex);
     // If we scan files in a directory every time the database restarts,
     // then it might lead to a potential undefined behavior:
     // If a user adds a file with an incompatible schema to that directory,
