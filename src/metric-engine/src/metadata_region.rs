@@ -124,6 +124,9 @@ impl CacheAccessLockLease {
     fn lock(&self) -> &RwLock<()> {
         self.lock
             .as_deref()
+            // Safety: `lock` is initialized when the lease is created and is taken only
+            // by `Drop`. `read` and `write` borrow `self`, so `Drop` cannot run while
+            // this reference is in use.
             .expect("cache access lock lease must hold a lock")
     }
 }
