@@ -25,7 +25,7 @@ on:
       - 'Makefile'
   workflow_dispatch:
 
-name: CI
+name: Docs CI
 
 # To pass the required status check, see:
 # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks
