@@ -469,13 +469,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to parse data source url"))]
-    ParseUrl {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_datasource::error::Error,
-    },
-
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat {
         #[snafu(implicit)]
@@ -852,13 +845,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Path not found: {path}"))]
-    PathNotFound {
-        path: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid time index type: {}", ty))]
     InvalidTimeIndexType {
         ty: arrow::datatypes::DataType,
@@ -1040,9 +1026,9 @@ impl ErrorExt for Error {
             Error::ReadObject { .. }
             | Error::ReadParquetMetadata { .. }
             | Error::ReadOrc { .. } => StatusCode::StorageUnavailable,
-            Error::ListObjects { source, .. }
-            | Error::ParseUrl { source, .. }
-            | Error::BuildBackend { source, .. } => source.status_code(),
+            Error::ListObjects { source, .. } | Error::BuildBackend { source, .. } => {
+                source.status_code()
+            }
             Error::ExecuteDdl { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } | Error::InvalidCopyDatabasePath { .. } => {
                 StatusCode::InvalidArguments
@@ -1063,7 +1049,6 @@ impl ErrorExt for Error {
             }
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
-            Error::PathNotFound { .. } => StatusCode::InvalidArguments,
             Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
             #[cfg(feature = "enterprise")]
@@ -1096,7 +1081,6 @@ impl ErrorExt for Error {
             Error::ParseFileFormat { source, .. }
             | Error::InferSchema { source, .. }
             | Error::ListObjects { source, .. }
-            | Error::ParseUrl { source, .. }
             | Error::BuildBackend { source, .. }
             | Error::ReadOrc { source, .. } => source.retry_hint(),
 

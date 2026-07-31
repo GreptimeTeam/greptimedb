@@ -850,7 +850,10 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Start GreptimeDB standalone
+        env:
+          GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT: ${{ runner.temp }}/greptime-export-import-v2
         run: |
+          mkdir -p "${GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT}"
           ./bins/greptime standalone start > greptimedb.log 2>&1 &
           greptime_pid=$!
           echo "Waiting for GreptimeDB..."
@@ -870,6 +873,7 @@ jobs:
       - name: Run export/import v2 E2E tests
         run: cargo test -p cli data::export_v2::tests --lib -- --ignored --test-threads=1
         env:
+          TMPDIR: ${{ runner.temp }}/greptime-export-import-v2
           GREPTIME_ADDR: 127.0.0.1:4000
           GT_S3_BUCKET: greptime
           GT_S3_ACCESS_KEY_ID: superpower_ci_user
