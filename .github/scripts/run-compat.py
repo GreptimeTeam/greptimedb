@@ -21,7 +21,7 @@ here:
 - read `tests/compatibility/ci.toml`
 - validate the checked-in recent-release window
 - preview selected cases with `compat --dry-run`
-- run the real compat check for each sampled `from` version
+- run the real compat check for each sampled upgrade and downgrade version
 """
 
 from __future__ import annotations
@@ -64,39 +64,43 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_from_versions(config_path: Path) -> list[str]:
+def load_versions(
+    config_path: Path, key: str, *, required: bool = True
+) -> list[str]:
     if not config_path.is_file():
         raise SystemExit(f"Compatibility CI config not found: {config_path}")
 
     # Parse the simple TOML string array without depending on Python 3.11+
-    # tomllib. This intentionally supports only the checked-in shape used by
-    # the CI job: from_versions = ["vX.Y.Z", ...].
+    # tomllib. This intentionally supports only the checked-in string-array
+    # shapes used by the CI job.
     content = config_path.read_text(encoding="utf-8")
     content_without_comments = "\n".join(
         line.split("#", 1)[0] for line in content.splitlines()
     )
     match = re.search(
-        r"(?ms)^\s*from_versions\s*=\s*(\[[^\]]*\])",
+        rf"(?ms)^\s*{re.escape(key)}\s*=\s*(\[[^\]]*\])",
         content_without_comments,
     )
     if match is None:
-        raise SystemExit(f"{config_path} must define from_versions")
+        if required:
+            raise SystemExit(f"{config_path} must define {key}")
+        return []
 
     try:
         versions = ast.literal_eval(match.group(1))
     except (SyntaxError, ValueError) as err:
-        raise SystemExit(f"Invalid from_versions in {config_path}: {err}") from err
+        raise SystemExit(f"Invalid {key} in {config_path}: {err}") from err
 
     if not isinstance(versions, list) or not versions:
-        raise SystemExit(f"{config_path} must define a non-empty from_versions list")
+        raise SystemExit(f"{config_path} must define a non-empty {key} list")
 
     seen: set[str] = set()
     validated: list[str] = []
     for version in versions:
         if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
-            raise SystemExit(f"Invalid compat from version: {version!r}")
+            raise SystemExit(f"Invalid compat {key} version: {version!r}")
         if version in seen:
-            raise SystemExit(f"Duplicate compat from version: {version}")
+            raise SystemExit(f"Duplicate compat {key} version: {version}")
         seen.add(version)
         validated.append(version)
 
@@ -128,6 +132,26 @@ def run_command(command: list[str], *, env: dict[str, str] | None = None) -> Non
     subprocess.run(command, check=True, env=env)
 
 
+def run_compat(
+    *,
+    base_command: list[str],
+    preview_title: str,
+    compatibility_title: str,
+    preserve_state: bool,
+) -> None:
+    with github_group(preview_title):
+        run_command([*base_command, "--dry-run"])
+
+    real_command = [*base_command]
+    if preserve_state:
+        real_command.append("--preserve-state")
+
+    env = os.environ.copy()
+    env.setdefault("RUST_BACKTRACE", "1")
+    with github_group(compatibility_title):
+        run_command(real_command, env=env)
+
+
 def run_for_version(
     *,
     runner: Path,
@@ -144,17 +168,43 @@ def run_for_version(
         str(to_bins_dir),
     ]
 
-    with github_group(f"Preview {from_version} -> current"):
-        run_command([*base_command, "--dry-run"])
+    run_compat(
+        base_command=base_command,
+        preview_title=f"Preview {from_version} -> current",
+        compatibility_title=f"Compatibility {from_version} -> current",
+        preserve_state=preserve_state,
+    )
 
-    real_command = [*base_command]
-    if preserve_state:
-        real_command.append("--preserve-state")
 
-    env = os.environ.copy()
-    env.setdefault("RUST_BACKTRACE", "1")
-    with github_group(f"Compatibility {from_version} -> current"):
-        run_command(real_command, env=env)
+def run_downgrade_for_version(
+    *,
+    runner: Path,
+    current_bins_dir: Path,
+    to_version: str,
+    preserve_state: bool,
+) -> None:
+    for topology in ("distributed", "standalone"):
+        base_command = [
+            str(runner),
+            "compat",
+            "--from-bins-dir",
+            str(current_bins_dir),
+            "--to-version",
+            to_version,
+            "--topology",
+            topology,
+            "--test-filter",
+            "^downgrade_compatibility$",
+            "--expect-cases",
+            "1",
+        ]
+
+        run_compat(
+            base_command=base_command,
+            preview_title=f"Preview current -> {to_version} ({topology})",
+            compatibility_title=f"Compatibility current -> {to_version} ({topology})",
+            preserve_state=preserve_state,
+        )
 
 
 def main() -> int:
@@ -164,7 +214,10 @@ def main() -> int:
     to_bins_dir = Path(args.to_bins_dir)
 
     check_inputs(runner, to_bins_dir)
-    from_versions = load_from_versions(config_path)
+    from_versions = load_versions(config_path, "from_versions")
+    downgrade_to_versions = load_versions(
+        config_path, "downgrade_to_versions", required=False
+    )
 
     print("Compatibility from-version window:", flush=True)
     for version in from_versions:
@@ -175,6 +228,19 @@ def main() -> int:
             runner=runner,
             to_bins_dir=to_bins_dir,
             from_version=from_version,
+            preserve_state=args.preserve_state,
+        )
+
+    if downgrade_to_versions:
+        print("Compatibility downgrade-to-version window:", flush=True)
+        for version in downgrade_to_versions:
+            print(f"  - {version}", flush=True)
+
+    for to_version in downgrade_to_versions:
+        run_downgrade_for_version(
+            runner=runner,
+            current_bins_dir=to_bins_dir,
+            to_version=to_version,
             preserve_state=args.preserve_state,
         )
 
