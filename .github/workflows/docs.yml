@@ -55,8 +55,10 @@ jobs:
     strategy:
       matrix:
         check:
+          - Check
           - Rustfmt
           - Clippy
+          - Unused Dependencies
           - Sqlness Test (Basic)
           - Sqlness Test (Remote WAL)
           - test
