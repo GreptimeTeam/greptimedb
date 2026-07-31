@@ -97,6 +97,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Location must include a file or object name: '{}'", path))]
+    MissingObjectName {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid local filesystem root '{}'", root))]
     InvalidLocalFileRoot {
         root: String,
@@ -283,6 +290,7 @@ impl ErrorExt for Error {
             | LocalFileAccessDisabled { .. }
             | LocalFileAccessDenied { .. }
             | LocalFilePathNotFound { .. }
+            | MissingObjectName { .. }
             | InvalidLocalFileRoot { .. }
             | InvalidLocalFileRootConfig { .. }
             | EmptyHostPath { .. }

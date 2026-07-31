@@ -300,9 +300,11 @@ pub async fn build_backend(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<ObjectStore> {
-    Ok(build_backend_with_path(url, connection, local_file_access)
-        .await?
-        .object_store)
+    Ok(
+        build_backend_inner(url, connection, local_file_access, false, false)
+            .await?
+            .object_store,
+    )
 }
 
 /// Builds a backend and returns the target path relative to the backend root.
@@ -311,7 +313,7 @@ pub async fn build_backend_with_path(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<BuiltBackend> {
-    build_backend_inner(url, connection, local_file_access, false).await
+    build_backend_inner(url, connection, local_file_access, false, false).await
 }
 
 /// Builds a backend for an operation that may create the target directory.
@@ -321,7 +323,7 @@ pub async fn build_backend_for_write(
     local_file_access: &LocalFileAccess,
 ) -> Result<ObjectStore> {
     Ok(
-        build_backend_for_write_with_path(url, connection, local_file_access)
+        build_backend_inner(url, connection, local_file_access, true, false)
             .await?
             .object_store,
     )
@@ -333,7 +335,7 @@ pub async fn build_backend_for_write_with_path(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
 ) -> Result<BuiltBackend> {
-    build_backend_inner(url, connection, local_file_access, true).await
+    build_backend_inner(url, connection, local_file_access, true, true).await
 }
 
 async fn build_backend_inner(
@@ -341,6 +343,7 @@ async fn build_backend_inner(
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
     create_local_root: bool,
+    require_object_path: bool,
 ) -> Result<BuiltBackend> {
     let (schema, host, path) = parse_url(url)?;
     let normalized_schema = schema.to_uppercase();
@@ -364,6 +367,12 @@ async fn build_backend_inner(
         };
         let authorized = local_file_access.authorize(url, &local_path, trailing_slash)?;
         let (root, object_path) = find_dir_and_filename(&authorized);
+        if require_object_path && object_path.is_none() {
+            return error::MissingObjectNameSnafu {
+                path: url.to_string(),
+            }
+            .fail();
+        }
         let root = local_file_access
             .open_backend_root(url, &root, create_local_root)
             .await?;
@@ -432,11 +441,9 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use url::Url;
 
-    #[cfg(windows)]
-    use super::build_backend_for_write_with_path;
     use super::{
-        LocalFileAccess, build_backend, build_backend_for_write, build_backend_with_path,
-        handle_windows_path,
+        LocalFileAccess, build_backend, build_backend_for_write, build_backend_for_write_with_path,
+        build_backend_with_path, handle_windows_path,
     };
     use crate::error::Error;
 
@@ -594,6 +601,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_write_with_path_rejects_directory_before_creation() {
+        let temp_dir = create_temp_dir("write_with_path_rejects_directory");
+        let copy_root = temp_dir.path().join("copy");
+        let target = copy_root.join("new directory");
+        let location = Url::from_directory_path(&target).unwrap().to_string();
+        let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
+
+        let result = build_backend_for_write_with_path(&location, &HashMap::new(), &access).await;
+
+        assert!(matches!(result, Err(Error::MissingObjectName { .. })));
+        assert!(!target.exists());
+
+        let result = build_backend_for_write_with_path(
+            &location,
+            &HashMap::new(),
+            &LocalFileAccess::Disabled,
+        )
+        .await;
+        assert!(matches!(result, Err(Error::LocalFileAccessDisabled { .. })));
+        assert!(!target.exists());
+
+        let relative_target = copy_root.join("relative directory");
+        let result =
+            build_backend_for_write_with_path("relative directory/", &HashMap::new(), &access)
+                .await;
+        assert!(matches!(result, Err(Error::MissingObjectName { .. })));
+        assert!(!relative_target.exists());
+
+        let allowed_directory = copy_root.join("allowed directory");
+        build_backend_for_write("allowed directory/", &HashMap::new(), &access)
+            .await
+            .unwrap();
+        assert!(allowed_directory.is_dir());
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn test_windows_backslash_path_returns_backend_relative_path() {
@@ -622,11 +665,13 @@ mod tests {
             b"data"
         );
 
-        let directory_location = format!("{}\\", directory.display());
-        let backend = build_backend_for_write_with_path(&directory_location, &connection, &access)
-            .await
-            .unwrap();
-        assert_eq!(backend.object_path, None);
+        let new_directory = copy_root.join("new directory");
+        let directory_location = format!("{}\\", new_directory.display());
+        assert!(matches!(
+            build_backend_for_write_with_path(&directory_location, &connection, &access).await,
+            Err(Error::MissingObjectName { .. })
+        ));
+        assert!(!new_directory.exists());
     }
 
     #[tokio::test]
@@ -669,10 +714,13 @@ mod tests {
             ),
         ];
         for (location, connection, expected_path) in cases {
-            let backend =
-                build_backend_with_path(location, &connection, &LocalFileAccess::Disabled)
-                    .await
-                    .unwrap();
+            let backend = build_backend_for_write_with_path(
+                location,
+                &connection,
+                &LocalFileAccess::Disabled,
+            )
+            .await
+            .unwrap();
             assert_eq!(backend.object_path.as_deref(), Some(expected_path));
         }
     }
