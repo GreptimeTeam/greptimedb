@@ -282,20 +282,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
           key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
-          lookup-only: true
-      - name: Remove unused software
-        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
-        run: |
-          echo "Disk space before:"
-          df -h
-          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-          echo "Disk space after:"
-          df -h
       - name: Set Rust Fuzz
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
@@ -355,6 +341,13 @@ jobs:
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
           key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+      - name: Upload prebuilt fuzz binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          retention-days: 1
+          if-no-files-found: error
 
   fuzztest:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
@@ -381,18 +374,6 @@ jobs:
               fuzz_alter_logical_table
               fuzz_insert_logical_table
     steps:
-      - name: Remove unused software
-        run: |
-          echo "Disk space before:"
-          df -h
-          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-          echo "Disk space after:"
-          df -h
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -411,11 +392,11 @@ jobs:
           cache-targets: "false"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Restore prebuilt fuzz binaries
-        uses: actions/cache/restore@v4
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
         with:
+          name: fuzz-target-binaries
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -465,18 +446,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Remove unused software
-        run: |
-          echo "Disk space before:"
-          df -h
-          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-          echo "Disk space after:"
-          df -h
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -495,11 +464,11 @@ jobs:
           cache-targets: "false"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Restore prebuilt fuzz binaries
-        uses: actions/cache/restore@v4
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
         with:
+          name: fuzz-target-binaries
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Download pre-built binary
         uses: actions/download-artifact@v4
         with:
@@ -637,18 +606,6 @@ jobs:
               values: "with-remote-wal-logical-prune.yaml"
               kafkaWalHelper: true
     steps:
-      - name: Remove unused software
-        run: |
-          echo "Disk space before:"
-          df -h
-          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-          echo "Disk space after:"
-          df -h
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -678,11 +635,11 @@ jobs:
           cache-targets: "false"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Restore prebuilt fuzz binaries
-        uses: actions/cache/restore@v4
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
         with:
+          name: fuzz-target-binaries
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -864,18 +821,6 @@ jobs:
               kafka: false
               values: "with-minio-repartition-gc.yaml"
     steps:
-      - name: Remove unused software
-        run: |
-          echo "Disk space before:"
-          df -h
-          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-          echo "Disk space after:"
-          df -h
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -907,11 +852,11 @@ jobs:
           cache-targets: "false"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Restore prebuilt fuzz binaries
-        uses: actions/cache/restore@v4
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
         with:
+          name: fuzz-target-binaries
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
