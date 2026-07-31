@@ -286,7 +286,27 @@ impl BatchGcProcedure {
     }
 
     fn merge_gc_report(&mut self, report: GcReport) {
-        self.data.gc_report.get_or_insert_default().merge(report);
+        let accumulated = self.data.gc_report.get_or_insert_default();
+        // Deleted objects are cumulative, while these sets describe the latest outcome
+        // for each region covered by this report.
+        let affected_regions: HashSet<_> = report
+            .processed_regions
+            .iter()
+            .chain(&report.need_retry_regions)
+            .copied()
+            .collect();
+
+        let mut processed_regions = std::mem::take(&mut accumulated.processed_regions);
+        processed_regions.retain(|region| !affected_regions.contains(region));
+        processed_regions.extend(report.processed_regions.iter().copied());
+
+        let mut need_retry_regions = std::mem::take(&mut accumulated.need_retry_regions);
+        need_retry_regions.retain(|region| !affected_regions.contains(region));
+        need_retry_regions.extend(report.need_retry_regions.iter().copied());
+
+        accumulated.merge(report);
+        accumulated.processed_regions = processed_regions;
+        accumulated.need_retry_regions = need_retry_regions;
     }
 
     fn done_with_gc_report(&self) -> ProcedureResult<Status> {
@@ -1149,6 +1169,27 @@ mod tests {
         assert_eq!(report.deleted_files.len(), 2);
         assert_eq!(report.deleted_files[&first_region], vec![first_file]);
         assert_eq!(report.deleted_files[&second_region], vec![second_file]);
+    }
+
+    #[test]
+    fn test_merge_gc_report_uses_latest_region_outcome() {
+        let region_id = RegionId::new(1024, 1);
+        let mut procedure = batch_gc_procedure();
+
+        procedure.merge_gc_report(GcReport {
+            deleted_files: HashMap::from([(region_id, vec![])]),
+            processed_regions: HashSet::from([region_id]),
+            ..Default::default()
+        });
+        procedure.merge_gc_report(GcReport {
+            need_retry_regions: HashSet::from([region_id]),
+            ..Default::default()
+        });
+
+        let report = procedure.data.gc_report.unwrap();
+        assert_eq!(report.deleted_files[&region_id], Vec::<FileId>::new());
+        assert!(!report.processed_regions.contains(&region_id));
+        assert!(report.need_retry_regions.contains(&region_id));
     }
 
     #[tokio::test]
