@@ -26,7 +26,7 @@ mod promql;
 mod region_query;
 pub mod standalone;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
@@ -50,6 +50,7 @@ use common_event_recorder::EventRecorderRef;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::flow::flow_info::FlowInfoManager;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
@@ -61,7 +62,7 @@ use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
-use futures::{Stream, StreamExt, future};
+use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
@@ -100,7 +101,9 @@ use sql::statements::tql::Tql;
 use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 pub use standalone::StandaloneDatanodeManager;
+use table::metadata::TableType;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
+use table::table_name::TableName;
 use tracing::Span;
 
 use crate::error::{
@@ -1097,70 +1100,133 @@ impl Instance {
             .transpose()
     }
 
-    async fn is_physical_query_permission_target(
-        &self,
-        target: &PermissionTableTarget,
-        query_ctx: &QueryContextRef,
-    ) -> server_error::Result<bool> {
-        self.catalog_manager
-            .table(
-                &target.catalog,
-                &target.schema,
-                &target.table,
-                Some(query_ctx),
-            )
-            .await
-            .map(|table| table.is_some_and(|table| table.table_info().is_physical_table()))
-            .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)
-    }
-
     async fn resolve_query_permission_targets(
         &self,
         targets: PermissionTableTargets,
         query_ctx: &QueryContextRef,
     ) -> server_error::Result<PermissionTableTargets> {
-        const CONCURRENCY: usize = 8;
-
         let checker = self.plugins.get::<PermissionCheckerRef>();
         if !checker.as_ref().uses_table_targets() {
             return Ok(targets);
         }
 
-        let PermissionTableTargets::Resolved(mut targets) = targets else {
+        let PermissionTableTargets::Resolved(targets) = targets else {
             return Ok(PermissionTableTargets::Unresolved);
         };
-        if targets.len() > 1 {
-            let mut seen = HashSet::with_capacity(targets.len());
-            targets.retain(|target| seen.insert(target.clone()));
-        }
-        if let [target] = targets.as_slice() {
-            return if self
-                .is_physical_query_permission_target(target, query_ctx)
-                .await?
-            {
-                Ok(PermissionTableTargets::Unresolved)
-            } else {
-                Ok(PermissionTableTargets::resolved(targets))
-            };
-        }
 
-        // Bound catalog load and inspect results in target order to preserve serial semantics.
-        for chunk in targets.chunks(CONCURRENCY) {
-            let results = future::join_all(
-                chunk
-                    .iter()
-                    .map(|target| self.is_physical_query_permission_target(target, query_ctx)),
-            )
-            .await;
-            for result in results {
-                if result? {
-                    return Ok(PermissionTableTargets::Unresolved);
+        // Every resolved query target is expanded to the permission targets that must
+        // be checked. A view expands to its stored source relations (recursively),
+        // and a flow sink table expands to the flow's source relations, so that
+        // reading a view/flow also requires privileges on everything it reads.
+        // Metric-engine physical tables cannot be narrowed to a single target, and
+        // source relations that cannot be looked up fail closed: both make the whole
+        // request [`PermissionTableTargets::Unresolved`].
+        let mut resolved = Vec::with_capacity(targets.len());
+        let mut visited = HashSet::with_capacity(targets.len());
+        // Flow source relations, lazily loaded once and keyed by the sink table.
+        let mut flow_sources: Option<HashMap<PermissionTableTarget, Vec<TableName>>> = None;
+        let mut pending: Vec<PermissionTableTarget> = targets;
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target.clone()) {
+                // Already handled (duplicate target or view/flow cycle).
+                continue;
+            }
+
+            let Some(table) = self
+                .catalog_manager
+                .table(
+                    &target.catalog,
+                    &target.schema,
+                    &target.table,
+                    Some(query_ctx),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?
+            else {
+                // Not a catalog table (e.g. a virtual or system name): nothing to expand.
+                resolved.push(target);
+                continue;
+            };
+
+            if table.table_info().is_physical_table() {
+                return Ok(PermissionTableTargets::Unresolved);
+            }
+
+            match table.table_info().table_type {
+                TableType::View => {
+                    let Some(view_info) = self
+                        .table_metadata_manager
+                        .view_info_manager()
+                        .get(table.table_info().ident.table_id)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExecuteQuerySnafu)?
+                    else {
+                        // The view's source relations are missing: fail closed.
+                        return Ok(PermissionTableTargets::Unresolved);
+                    };
+                    let view_info = view_info.into_inner();
+                    resolved.push(target);
+                    pending.extend(view_info.table_names.into_iter().map(|table_name| {
+                        PermissionTableTarget::new(
+                            table_name.catalog_name,
+                            table_name.schema_name,
+                            table_name.table_name,
+                        )
+                    }));
+                }
+                TableType::Base | TableType::Temporary => {
+                    if flow_sources.is_none() {
+                        flow_sources = Some(self.flow_sources_by_sink_table().await?);
+                    }
+                    let sources = flow_sources
+                        .as_ref()
+                        .unwrap()
+                        .get(&target)
+                        .cloned()
+                        .unwrap_or_default();
+                    resolved.push(target);
+                    pending.extend(sources.into_iter().map(|table_name| {
+                        PermissionTableTarget::new(
+                            table_name.catalog_name,
+                            table_name.schema_name,
+                            table_name.table_name,
+                        )
+                    }));
                 }
             }
         }
 
-        Ok(PermissionTableTargets::resolved(targets))
+        // Deterministic order for the permission checker.
+        resolved.sort_by(|a, b| {
+            (&a.catalog, &a.schema, &a.table).cmp(&(&b.catalog, &b.schema, &b.table))
+        });
+        Ok(PermissionTableTargets::resolved(resolved))
+    }
+
+    /// Loads every flow's source relations, keyed by its sink table, so a query's
+    /// flow-sink targets can be expanded. Flows have no sink-table index, so the
+    /// flow metadata is scanned at most once per permission check.
+    async fn flow_sources_by_sink_table(
+        &self,
+    ) -> server_error::Result<HashMap<PermissionTableTarget, Vec<TableName>>> {
+        let flow_info_manager =
+            FlowInfoManager::new(self.table_metadata_manager.kv_backend().clone());
+        let mut flows = flow_info_manager.flow_infos();
+        let mut sources = HashMap::new();
+        while let Some(flow) = flows.next().await {
+            let (_, flow_info) = flow.map_err(BoxedError::new).context(ExecuteQuerySnafu)?;
+            sources.insert(
+                PermissionTableTarget::new(
+                    flow_info.sink_table_name.catalog_name,
+                    flow_info.sink_table_name.schema_name,
+                    flow_info.sink_table_name.table_name,
+                ),
+                flow_info.all_source_table_names,
+            );
+        }
+        Ok(sources)
     }
 
     fn prom_queries_permission_targets(
@@ -1660,7 +1726,7 @@ fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bo
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1681,7 +1747,12 @@ mod tests {
     use common_error::status_code::StatusCode;
     use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_frontend::slow_query_event::SlowQueryEvent;
+    use common_meta::FlownodeId;
     use common_meta::cache::LayeredCacheRegistryBuilder;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::flow::flow_info::{FlowInfoValue, FlowStatus};
+    use common_meta::key::{FlowId, FlowPartitionId, TableMetadataManager};
+    use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
     use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -1715,7 +1786,9 @@ mod tests {
     };
     use store_api::storage::ScanRequest;
     use strfmt::Format;
-    use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{
+        FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType,
+    };
     use table::table_name::TableName;
     use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
@@ -1831,6 +1904,13 @@ mod tests {
         RegisterTable {
             table_name: String,
             source: catalog::error::Error,
+            #[snafu(implicit)]
+            location: Location,
+        },
+
+        #[snafu(display("Failed to write test metadata to kv backend"))]
+        WriteTestMetadata {
+            source: common_meta::error::Error,
             #[snafu(implicit)]
             location: Location,
         },
@@ -2366,6 +2446,66 @@ mod tests {
         Ok(EmptyTable::from_table_info(&table_info))
     }
 
+    fn test_view_table(table_id: u32, table_name: &str) -> TestResult<table::TableRef> {
+        let mut table_info = test_table_info(table_id, table_name)?;
+        table_info.table_type = TableType::View;
+        Ok(EmptyTable::from_table_info(&table_info))
+    }
+
+    /// Persists a view's source relations the same way `CREATE VIEW` does.
+    async fn test_put_view_info(
+        kv_backend: KvBackendRef,
+        view_id: u32,
+        view_name: &str,
+        table_names: HashSet<TableName>,
+    ) -> TestResult<()> {
+        let mut view_info = test_table_info(view_id, view_name)?;
+        view_info.table_type = TableType::View;
+        TableMetadataManager::new(kv_backend)
+            .create_view_metadata(
+                view_info,
+                Vec::new(),
+                table_names,
+                Vec::new(),
+                Vec::new(),
+                "SELECT * FROM source".to_string(),
+            )
+            .await
+            .context(WriteTestMetadataSnafu)
+    }
+
+    /// Persists a flow's metadata the same way `CREATE FLOW` does.
+    async fn test_put_flow_info(
+        kv_backend: KvBackendRef,
+        flow_id: FlowId,
+        sink_table_name: TableName,
+        source_table_names: Vec<TableName>,
+    ) -> TestResult<()> {
+        let flow_info = FlowInfoValue {
+            catalog_name: sink_table_name.catalog_name.clone(),
+            query_context: None,
+            flow_name: "my_flow".to_string(),
+            source_table_ids: vec![],
+            all_source_table_names: source_table_names,
+            unresolved_source_table_names: vec![],
+            sink_table_name,
+            flownode_ids: BTreeMap::<FlowPartitionId, FlownodeId>::new(),
+            raw_sql: "CREATE FLOW my_flow SINK TO flow_sink AS SELECT * FROM source".to_string(),
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            options: HashMap::new(),
+            status: FlowStatus::Active,
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            eval_schedule: None,
+        };
+        FlowMetadataManager::new(kv_backend)
+            .create_flow_metadata(flow_id, flow_info, Vec::new())
+            .await
+            .context(WriteTestMetadataSnafu)
+    }
+
     fn test_metric_names_table() -> TableRef {
         let schema = Arc::new(GtSchema::new(vec![
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
@@ -2480,19 +2620,36 @@ mod tests {
         metric_names_table: Option<TableRef>,
     ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
+        test_instance_with_kv_backend_and_plugins_and_metric_names(
+            kv_backend,
+            source_table,
+            target_table,
+            plugins,
+            metric_names_table,
+        )
+        .await
+    }
+
+    async fn test_instance_with_kv_backend_and_plugins_and_metric_names(
+        kv_backend: KvBackendRef,
+        source_table: TableRef,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+    ) -> TestResult<Instance> {
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
         let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
-        let target_table_name = "target";
+        let target_table_name = target_table.table_info().name.clone();
         catalog_manager
             .register_table_sync(catalog::RegisterTableRequest {
                 catalog: "greptime".to_string(),
                 schema: "public".to_string(),
-                table_name: target_table_name.to_string(),
+                table_name: target_table_name.clone(),
                 table_id: 1025,
                 table: target_table,
             })
             .with_context(|_| RegisterTableSnafu {
-                table_name: target_table_name.to_string(),
+                table_name: target_table_name.clone(),
             })?;
         if let Some(table) = metric_names_table {
             catalog_manager
@@ -2934,6 +3091,213 @@ mod tests {
         .unwrap_err();
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qp_015_view_target_expands_to_its_source_tables() -> TestResult<()> {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_kv_backend_and_plugins_and_metric_names(
+            kv_backend.clone(),
+            test_table(1024, "source")?,
+            test_view_table(1025, "my_view")?,
+            plugins,
+            None,
+        )
+        .await?;
+
+        // Persisted at CREATE VIEW time: the view's fully-qualified source relations.
+        test_put_view_info(
+            kv_backend.clone(),
+            1025,
+            "my_view",
+            HashSet::from([TableName::new("greptime", "public", "source")]),
+        )
+        .await?;
+
+        let ctx = test_query_ctx(1);
+        let targets = instance
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "my_view",
+                )]),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let PermissionTableTargets::Resolved(targets) = targets else {
+            panic!("view target should stay resolved, got {targets:?}");
+        };
+        let names: Vec<&str> = targets.iter().map(|t| t.table.as_str()).collect();
+        assert!(
+            names.contains(&"my_view"),
+            "the view itself must remain a permission target, got {names:?}"
+        );
+        assert!(
+            names.contains(&"source"),
+            "the view's source table must be expanded into permission targets, got {names:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qp_015_query_on_view_over_denied_source_is_rejected() -> TestResult<()> {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_kv_backend_and_plugins_and_metric_names(
+            kv_backend.clone(),
+            test_table(1024, "denied")?,
+            test_view_table(1025, "my_view")?,
+            plugins,
+            None,
+        )
+        .await?;
+
+        test_put_view_info(
+            kv_backend.clone(),
+            1025,
+            "my_view",
+            HashSet::from([TableName::new("greptime", "public", "denied")]),
+        )
+        .await?;
+
+        let ctx = test_query_ctx(1);
+        let targets = instance
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "my_view",
+                )]),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let stmt = parse_one_sql("SELECT * FROM my_view");
+        let result =
+            instance.check_table_permission(&ctx, PermissionReq::SqlStatement(&stmt), targets);
+        let err = match result {
+            Ok(_) => panic!("query on a view over a denied source table must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qp_015_flow_sink_target_expands_to_its_source_tables() -> TestResult<()> {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_kv_backend_and_plugins_and_metric_names(
+            kv_backend.clone(),
+            test_table(1024, "source")?,
+            test_table(1025, "flow_sink")?,
+            plugins,
+            None,
+        )
+        .await?;
+
+        test_put_flow_info(
+            kv_backend.clone(),
+            42,
+            TableName::new("greptime", "public", "flow_sink"),
+            vec![TableName::new("greptime", "public", "source")],
+        )
+        .await?;
+
+        let ctx = test_query_ctx(1);
+        let targets = instance
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime",
+                    "public",
+                    "flow_sink",
+                )]),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let PermissionTableTargets::Resolved(targets) = targets else {
+            panic!("flow sink target should stay resolved, got {targets:?}");
+        };
+        let names: Vec<&str> = targets.iter().map(|t| t.table.as_str()).collect();
+        assert!(
+            names.contains(&"flow_sink"),
+            "the flow sink table itself must remain a permission target, got {names:?}"
+        );
+        assert!(
+            names.contains(&"source"),
+            "the flow's source tables must be expanded into permission targets, got {names:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qp_015_view_target_cycles_terminate() -> TestResult<()> {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_kv_backend_and_plugins_and_metric_names(
+            kv_backend.clone(),
+            test_table(1024, "source")?,
+            test_view_table(1025, "view_a")?,
+            plugins,
+            None,
+        )
+        .await?;
+        instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "view_b".to_string(),
+                table_id: 1026,
+                table: test_view_table(1026, "view_b")?,
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "view_b".to_string(),
+            })?;
+
+        // view_a references view_b and view_b references view_a: resolution must terminate.
+        test_put_view_info(
+            kv_backend.clone(),
+            1025,
+            "view_a",
+            HashSet::from([TableName::new("greptime", "public", "view_b")]),
+        )
+        .await?;
+        test_put_view_info(
+            kv_backend.clone(),
+            1026,
+            "view_b",
+            HashSet::from([TableName::new("greptime", "public", "view_a")]),
+        )
+        .await?;
+
+        let ctx = test_query_ctx(1);
+        let targets = instance
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "view_a",
+                )]),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let PermissionTableTargets::Resolved(targets) = targets else {
+            panic!("view cycle should stay resolved, got {targets:?}");
+        };
+        let names: Vec<&str> = targets.iter().map(|t| t.table.as_str()).collect();
+        assert!(names.contains(&"view_a"));
+        assert!(names.contains(&"view_b"));
         Ok(())
     }
 
