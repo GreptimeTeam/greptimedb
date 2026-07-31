@@ -81,6 +81,7 @@ fn test_load_runtime_options_without_max_blocking_threads() {
 }
 
 #[test]
+#[cfg(feature = "hdfs-object-store")]
 fn test_load_datanode_hdfs_config() {
     let config = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(

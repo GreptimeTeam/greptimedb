@@ -9458,6 +9458,7 @@ dependencies = [
  "common-test-util",
  "derive_builder 0.20.2",
  "futures",
+ "hdfs-native",
  "humantime-serde",
  "lazy_static",
  "object_store",

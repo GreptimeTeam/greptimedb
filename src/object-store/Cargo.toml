@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
+hdfs-object-store = ["dep:hdfs-native", "opendal/services-hdfs-native"]
 mysql-object-store = ["opendal/services-mysql"]
 services-memory = ["opendal/services-memory"]
 testing = ["derive_builder"]
@@ -26,6 +27,7 @@ datafusion_object_store.workspace = true
 derive_builder = { workspace = true, optional = true }
 futures.workspace = true
 humantime-serde.workspace = true
+hdfs-native = { version = "0.13.5", optional = true }
 lazy_static.workspace = true
 opendal = { version = "0.57", features = [
     "layers-tracing",
@@ -33,7 +35,6 @@ opendal = { version = "0.57", features = [
     "services-azblob",
     "services-fs",
     "services-gcs",
-    "services-hdfs-native",
     "services-http",
     "services-oss",
     "services-s3",

@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "hdfs-object-store")]
 use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
+#[cfg(feature = "hdfs-object-store")]
+use opendal::services::HdfsNative;
 #[cfg(feature = "mysql-object-store")]
 use opendal::services::Mysql;
-use opendal::services::{Azblob, Gcs, HdfsNative, Oss, S3};
+use opendal::services::{Azblob, Gcs, Oss, S3};
 use serde::{Deserialize, Serialize};
 
 use crate::util;
@@ -35,6 +38,7 @@ pub enum ObjectStoreConfig {
     Oss(OssConfig),
     Azblob(AzblobConfig),
     Gcs(GcsConfig),
+    #[cfg(feature = "hdfs-object-store")]
     Hdfs(HdfsConfig),
     #[cfg(feature = "mysql-object-store")]
     Mysql(MysqlConfig),
@@ -55,6 +59,7 @@ impl ObjectStoreConfig {
             Self::Oss(_) => "Oss",
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
+            #[cfg(feature = "hdfs-object-store")]
             Self::Hdfs(_) => "Hdfs",
             #[cfg(feature = "mysql-object-store")]
             Self::Mysql(_) => "Mysql",
@@ -75,6 +80,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => &oss.name,
             Self::Azblob(az) => &az.name,
             Self::Gcs(gcs) => &gcs.name,
+            #[cfg(feature = "hdfs-object-store")]
             Self::Hdfs(hdfs) => &hdfs.name,
             #[cfg(feature = "mysql-object-store")]
             Self::Mysql(mysql) => &mysql.name,
@@ -95,6 +101,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&oss.cache),
             Self::Azblob(az) => Some(&az.cache),
             Self::Gcs(gcs) => Some(&gcs.cache),
+            #[cfg(feature = "hdfs-object-store")]
             Self::Hdfs(hdfs) => Some(&hdfs.cache),
             #[cfg(feature = "mysql-object-store")]
             Self::Mysql(mysql) => Some(&mysql.cache),
@@ -109,6 +116,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&mut oss.cache),
             Self::Azblob(az) => Some(&mut az.cache),
             Self::Gcs(gcs) => Some(&mut gcs.cache),
+            #[cfg(feature = "hdfs-object-store")]
             Self::Hdfs(hdfs) => Some(&mut hdfs.cache),
             #[cfg(feature = "mysql-object-store")]
             Self::Mysql(mysql) => Some(&mut mysql.cache),
@@ -298,6 +306,7 @@ impl From<&GcsConnection> for Gcs {
 /// Connection options for a Hadoop Distributed File System backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
+#[cfg(feature = "hdfs-object-store")]
 pub struct HdfsConnection {
     /// Working directory for all object-store operations.
     pub root: String,
@@ -307,6 +316,7 @@ pub struct HdfsConnection {
     pub options: HashMap<String, String>,
 }
 
+#[cfg(feature = "hdfs-object-store")]
 impl From<&HdfsConnection> for HdfsNative {
     fn from(connection: &HdfsConnection) -> Self {
         let root = util::normalize_dir(&connection.root);
@@ -320,6 +330,7 @@ impl From<&HdfsConnection> for HdfsNative {
 /// Hadoop Distributed File System object storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
+#[cfg(feature = "hdfs-object-store")]
 pub struct HdfsConfig {
     pub name: String,
     #[serde(flatten)]
@@ -450,16 +461,19 @@ mod tests {
         assert_eq!("test", s3_config.config_name());
         assert_eq!("S3", s3_config.provider_name());
 
-        let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig::default());
-        assert_eq!("Hdfs", hdfs_config.config_name());
-        assert_eq!("Hdfs", hdfs_config.provider_name());
+        #[cfg(feature = "hdfs-object-store")]
+        {
+            let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig::default());
+            assert_eq!("Hdfs", hdfs_config.config_name());
+            assert_eq!("Hdfs", hdfs_config.provider_name());
 
-        let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        });
-        assert_eq!("test", hdfs_config.config_name());
-        assert_eq!("Hdfs", hdfs_config.provider_name());
+            let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig {
+                name: "test".to_string(),
+                ..Default::default()
+            });
+            assert_eq!("test", hdfs_config.config_name());
+            assert_eq!("Hdfs", hdfs_config.provider_name());
+        }
 
         #[cfg(feature = "mysql-object-store")]
         {
@@ -488,8 +502,11 @@ mod tests {
         assert!(gcs_config.is_object_storage());
         let azblob_config = ObjectStoreConfig::Azblob(AzblobConfig::default());
         assert!(azblob_config.is_object_storage());
-        let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig::default());
-        assert!(hdfs_config.is_object_storage());
+        #[cfg(feature = "hdfs-object-store")]
+        {
+            let hdfs_config = ObjectStoreConfig::Hdfs(HdfsConfig::default());
+            assert!(hdfs_config.is_object_storage());
+        }
         #[cfg(feature = "mysql-object-store")]
         {
             let mysql_config = ObjectStoreConfig::Mysql(MysqlConfig::default());
@@ -497,6 +514,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "hdfs-object-store")]
     #[test]
     fn test_hdfs_config_serde() {
         let config: ObjectStoreConfig = toml::from_str(
