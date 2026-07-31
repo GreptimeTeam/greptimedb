@@ -17,6 +17,9 @@ on:
 
 name: CI
 
+env:
+  CARGO_FUZZ_VERSION: "0.12.0"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -205,12 +208,24 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz"
+          workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
-          rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+          if ! command -v cargo-fuzz >/dev/null; then
+            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          fi
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -279,11 +294,24 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz"
+          workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt update && sudo apt install -y libfuzzer-14-dev
-          cargo install cargo-fuzz cargo-gc-bin --force
+          if ! command -v cargo-fuzz >/dev/null; then
+            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          fi
       - name: Download pre-built binary
         uses: actions/download-artifact@v4
         with:
@@ -450,12 +478,24 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz"
+          workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
-          rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+          if ! command -v cargo-fuzz >/dev/null; then
+            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          fi
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -669,12 +709,24 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz"
+          workspaces: "tests-fuzz -> tests-fuzz/target"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
-          rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+          if ! command -v cargo-fuzz >/dev/null; then
+            cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          fi
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
