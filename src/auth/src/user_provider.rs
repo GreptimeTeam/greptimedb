@@ -78,12 +78,7 @@ pub trait UserProvider: Send + Sync {
     /// today's behavior. Providers that support token auth override this to
     /// validate the token, resolve it to a user, and
     /// [`authorize`](Self::authorize) the connection.
-    async fn auth_token(
-        &self,
-        _token: &str,
-        _catalog: &str,
-        _schema: &str,
-    ) -> Result<UserInfoRef> {
+    async fn auth_token(&self, _token: &str, _catalog: &str, _schema: &str) -> Result<UserInfoRef> {
         UnsupportedAuthMethodSnafu {
             method: "bearer token",
         }

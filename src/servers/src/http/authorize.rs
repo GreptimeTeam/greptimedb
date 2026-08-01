@@ -665,19 +665,34 @@ mod tests {
             Some("tok")
         );
         let mut req = mock_http_request(Some("Bearer xyz"), None).unwrap();
-        req.headers_mut().insert(AUTHORIZATION_HEADER, "Bearer from-x-greptime".parse().unwrap());
+        req.headers_mut().insert(
+            AUTHORIZATION_HEADER,
+            "Bearer from-x-greptime".parse().unwrap(),
+        );
         assert_eq!(
             extract_bearer_token(&req).as_deref(),
             Some("from-x-greptime")
         );
 
         // Non-bearer schemes are ignored so the caller falls through to Basic.
-        assert_eq!(extract_bearer_token(&bearer("Basic", "dXNlcjpwYXNz")).as_deref(), None);
-        assert_eq!(extract_bearer_token(&bearer("Token", "u:p")).as_deref(), None);
-        assert_eq!(extract_bearer_token(&bearer("Splunk", "u:p")).as_deref(), None);
+        assert_eq!(
+            extract_bearer_token(&bearer("Basic", "dXNlcjpwYXNz")).as_deref(),
+            None
+        );
+        assert_eq!(
+            extract_bearer_token(&bearer("Token", "u:p")).as_deref(),
+            None
+        );
+        assert_eq!(
+            extract_bearer_token(&bearer("Splunk", "u:p")).as_deref(),
+            None
+        );
 
         // No header, empty token.
-        assert_eq!(extract_bearer_token(&mock_http_request(None, None).unwrap()).as_deref(), None);
+        assert_eq!(
+            extract_bearer_token(&mock_http_request(None, None).unwrap()).as_deref(),
+            None
+        );
         assert_eq!(extract_bearer_token(&bearer("Bearer", "")).as_deref(), None);
     }
 
@@ -720,7 +735,10 @@ mod tests {
             if token == self.token {
                 Ok(self.user.clone())
             } else {
-                auth::error::UnsupportedAuthMethodSnafu { method: "bearer token" }.fail()
+                auth::error::UnsupportedAuthMethodSnafu {
+                    method: "bearer token",
+                }
+                .fail()
             }
         }
     }
@@ -733,9 +751,12 @@ mod tests {
         };
         let req = mock_http_request(Some("Bearer good-token"), None).unwrap();
 
-        let req = inner_auth::<()>(Some(std::sync::Arc::new(provider) as auth::UserProviderRef), req)
-            .await
-            .expect("valid bearer token authenticates");
+        let req = inner_auth::<()>(
+            Some(std::sync::Arc::new(provider) as auth::UserProviderRef),
+            req,
+        )
+        .await
+        .expect("valid bearer token authenticates");
 
         let user = req
             .extensions()
@@ -764,9 +785,13 @@ mod tests {
     #[tokio::test]
     async fn test_default_provider_rejects_bearer() {
         // A password-only provider uses the default `auth_token`, which rejects.
-        let provider = auth::user_provider_from_option("static_user_provider:cmd:alice=s3cret").unwrap();
+        let provider =
+            auth::user_provider_from_option("static_user_provider:cmd:alice=s3cret").unwrap();
         let req = mock_http_request(Some("Bearer some-jwt"), None).unwrap();
         let result = inner_auth::<()>(Some(provider), req).await;
-        assert!(result.is_err(), "password-only providers reject bearer tokens");
+        assert!(
+            result.is_err(),
+            "password-only providers reject bearer tokens"
+        );
     }
 }
