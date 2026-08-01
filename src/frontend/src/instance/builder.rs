@@ -19,6 +19,7 @@ use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUT
 use catalog::CatalogManagerRef;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
@@ -65,6 +66,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
+    local_file_access: LocalFileAccess,
 }
 
 impl FrontendBuilder {
@@ -88,6 +90,7 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             process_manager,
+            local_file_access: LocalFileAccess::Disabled,
         }
     }
 
@@ -132,6 +135,11 @@ impl FrontendBuilder {
             local_cache_invalidator: Some(cache_invalidator),
             ..self
         }
+    }
+
+    pub fn with_local_file_access(mut self, local_file_access: LocalFileAccess) -> Self {
+        self.local_file_access = local_file_access;
+        self
     }
 
     pub fn options(&self) -> &FrontendOptions {
@@ -271,6 +279,7 @@ impl FrontendBuilder {
             partition_manager,
             Some(process_manager.clone()),
             frontend_peer_addr.clone(),
+            self.local_file_access,
         );
 
         let statement_executor =
@@ -304,11 +313,16 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            statement_executor.clone(),
-            self.options.slow_query.ttl,
-            self.options.event_recorder.ttl,
-        ))));
+        let slow_query_recorder = Arc::new(EventRecorderImpl::new(Box::new(
+            EventHandlerImpl::new(statement_executor.clone(), self.options.slow_query.ttl),
+        )));
+        let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
+            Box::new(EventHandlerImpl::new(
+                statement_executor.clone(),
+                self.options.event_recorder.ttl,
+            )),
+            self.options.event_recorder.event_types.clone(),
+        ));
 
         Ok(Instance {
             frontend_peer_addr,
@@ -320,7 +334,8 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager,
-            event_recorder: Some(event_recorder),
+            event_recorder,
+            slow_query_recorder,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),

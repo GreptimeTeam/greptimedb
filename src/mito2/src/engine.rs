@@ -105,6 +105,7 @@ use common_wal::options::WalOptions;
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
+use region_hook::RegionHookRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
@@ -219,6 +220,9 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         self.config.sanitize(self.data_home)?;
 
         let config = Arc::new(self.config);
+        // Extract the region hook before `plugins` is moved into the WorkerGroup,
+        // so the engine (and thus the GC worker) can fire `on_region_gc`.
+        let region_hook = self.plugins.get::<RegionHookRef>();
         let workers = WorkerGroup::start(
             config.clone(),
             self.log_store.clone(),
@@ -250,6 +254,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
+            region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -326,6 +331,12 @@ impl MitoEngine {
 
     pub fn schema_metadata_manager(&self) -> &SchemaMetadataManagerRef {
         self.inner.workers.schema_metadata_manager()
+    }
+
+    /// Returns the registered region hook (if any), for the GC worker to fire
+    /// [`RegionHook::on_region_gc`].
+    pub fn region_hook(&self) -> Option<RegionHookRef> {
+        self.inner.region_hook.clone()
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
@@ -728,6 +739,9 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
+    /// The region hook (if any) registered via plugins; exposed for the GC worker
+    /// to fire [`RegionHook::on_region_gc`].
+    region_hook: Option<RegionHookRef>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -1458,6 +1472,7 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
+                region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

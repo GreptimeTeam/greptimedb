@@ -49,7 +49,7 @@ use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
 use crate::prom_remote_write::validation::PromValidationMode;
-use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
+use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
@@ -752,11 +752,6 @@ pub async fn remote_read(
     query_ctx.set_channel(Channel::Prometheus);
 
     let request = decode_remote_read_request(body).await?;
-
-    // Extract schema from special labels and set it in query context
-    if let Some(schema) = extract_schema_from_read_request(&request) {
-        query_ctx.set_current_schema(&schema);
-    }
 
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED

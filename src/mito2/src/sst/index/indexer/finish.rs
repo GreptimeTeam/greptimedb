@@ -76,7 +76,7 @@ impl Indexer {
 
         let err = match puffin_manager
             .writer(&RegionIndexId::new(
-                RegionFileId::new(self.region_id, self.file_id),
+                RegionFileId::new(self.physical_region_id, self.file_id),
                 self.index_version,
             ))
             .await

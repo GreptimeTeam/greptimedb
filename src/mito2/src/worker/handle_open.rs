@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use object_store::util::{join_path, normalize_dir};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
@@ -25,6 +25,8 @@ use store_api::region_request::{AffectedRows, RegionCleanUpRequest, RegionOpenRe
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
 
+use crate::access_layer::AccessLayer;
+use crate::engine::region_hook::{RegionGcInfo, RegionHookRef};
 use crate::error::{
     ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu,
     Result,
@@ -66,6 +68,49 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let table_dir = normalize_dir(&request.table_dir);
         let region_dir = region_dir_from_table_dir(&table_dir, region_id, request.path_type);
         remove_region_dir_for_full_drop(&region_dir, &object_store).await?;
+
+        // The region directory is gone. Offline cleanup (soft-drop PURGE) is a
+        // terminal physical removal, identical in effect to the drop GC
+        // worker's directory deletion — but unlike the drop worker it never
+        // fires `on_region_files_removed`, because the region is offline and
+        // carries no `RegionMetadataRef`. Fire `on_region_gc` instead: it
+        // accepts an absent region and lets extensions with sidecar files
+        // outside the region dir (e.g. an Iceberg export) reclaim their
+        // per-region state.
+        //
+        // Propagate the hook's error so the caller retries the cleanup, mirroring
+        // how the global GC worker keeps a region for the next pass when
+        // `on_region_gc` fails. The whole handler is idempotent (the existing
+        // `test_engine_offline_cleanup_closed_region` already drives it twice in
+        // a row), so a retry re-runs the directory removal, WAL obsolete and the
+        // hook safely. Runs inline, consistent with the blocking directory
+        // removal above; offline cleanup is already a slow path.
+        if let Some(hook) = self.plugins.get::<RegionHookRef>() {
+            let access_layer = Arc::new(AccessLayer::new(
+                table_dir.clone(),
+                request.path_type,
+                object_store.clone(),
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+            ));
+            let gc_info = RegionGcInfo {
+                removed_files: &[],
+                is_region_dropped: true,
+                full_file_listing: true,
+            };
+            if let Err(err) = hook
+                .on_region_gc(region_id, None, &access_layer, &gc_info)
+                .await
+            {
+                warn!(
+                    err;
+                    "Region hook on_region_gc failed during offline cleanup for region {}; \
+                     returning the error so the caller retries the cleanup",
+                    region_id,
+                );
+                return Err(err);
+            }
+        }
 
         self.cleanup_dropped_region_runtime_state(region_id).await;
         self.dropping_regions.remove_region(region_id);

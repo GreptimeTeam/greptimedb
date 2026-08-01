@@ -20,7 +20,7 @@ pub mod cache_invalidator;
 pub mod cluster;
 pub mod discovery;
 pub mod error;
-pub mod events;
+pub mod event;
 mod failure_detector;
 pub mod gc;
 pub mod handler;

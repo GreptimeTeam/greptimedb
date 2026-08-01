@@ -183,6 +183,181 @@ async fn test_engine_offline_cleanup_rejects_opened_region() {
     assert!(object_store.exists(&region_dir).await.unwrap());
 }
 
+/// Offline cleanup (soft-drop PURGE) removes the region directory directly,
+/// bypassing the drop GC worker, so it must notify extensions via
+/// `on_region_gc` — otherwise sidecar state (e.g. an Iceberg export) leaks.
+///
+/// Covers the wiring: `handle_offline_cleanup_request` fires `on_region_gc`
+/// with `is_region_dropped = true` and `full_file_listing = true` once the
+/// region dir is physically removed, and does NOT fire `on_region_files_removed`
+/// (the region is offline and carries no `RegionMetadataRef`).
+#[tokio::test]
+async fn test_engine_offline_cleanup_fires_on_region_gc() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("offline-cleanup-gc-hook").await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let path_type = request.path_type;
+    let options = request.options.clone();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, path_type);
+    let object_store = env.get_object_store().unwrap();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert!(object_store.exists(&region_dir).await.unwrap());
+
+    // Close the region first — offline cleanup refuses a still-registered region.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert!(!engine.is_region_exists(region_id));
+
+    let gc_before = hook.gc_count.load(Ordering::Relaxed);
+    let files_removed_before = hook.files_removed_count.load(Ordering::Relaxed);
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir,
+                path_type,
+                options,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The region directory is gone …
+    assert!(!engine.is_region_exists(region_id));
+    assert!(!object_store.exists(&region_dir).await.unwrap());
+
+    // … and the extension was notified exactly once via `on_region_gc`, with the
+    // flags that authorize full sidecar reclamation. `on_region_files_removed`
+    // must NOT fire for the offline path (no region metadata is available).
+    assert_eq!(
+        hook.gc_count.load(Ordering::Relaxed),
+        gc_before + 1,
+        "offline cleanup must fire on_region_gc"
+    );
+    assert!(
+        hook.last_gc_is_region_dropped.load(Ordering::Relaxed),
+        "on_region_gc during offline cleanup must report is_region_dropped = true"
+    );
+    assert!(
+        hook.last_gc_full_file_listing.load(Ordering::Relaxed),
+        "on_region_gc during offline cleanup must report full_file_listing = true"
+    );
+    assert_eq!(
+        hook.files_removed_count.load(Ordering::Relaxed),
+        files_removed_before,
+        "offline cleanup must not fire on_region_files_removed"
+    );
+}
+
+/// A failing `on_region_gc` during offline cleanup must surface as an error so
+/// the caller (`PurgeDroppedTableProcedure`) retries the `CleanUp`, and the
+/// retry must succeed once the hook stops failing — the handler is idempotent
+/// (it re-runs the directory removal, WAL obsolete and the hook safely).
+#[tokio::test]
+async fn test_engine_offline_cleanup_propagates_on_region_gc_error() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("offline-cleanup-gc-hook-retry").await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(2, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let path_type = request.path_type;
+    let options = request.options.clone();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, path_type);
+    let object_store = env.get_object_store().unwrap();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    // Force the extension hook to fail: the offline cleanup must return the
+    // error so the caller retries, instead of swallowing it.
+    hook.gc_should_fail.store(true, Ordering::Relaxed);
+    let gc_before = hook.gc_count.load(Ordering::Relaxed);
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir: table_dir.clone(),
+                path_type,
+                options: options.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        StatusCode::Unexpected,
+        "offline cleanup must propagate the on_region_gc error"
+    );
+    assert_eq!(
+        hook.gc_count.load(Ordering::Relaxed),
+        gc_before + 1,
+        "on_region_gc must fire even when it fails"
+    );
+
+    // Retry: clear the failure and the same CleanUp must now succeed. The
+    // directory removal and WAL obsolete are idempotent, so the second attempt
+    // re-runs them and the hook without complaint.
+    hook.gc_should_fail.store(false, Ordering::Relaxed);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir,
+                path_type,
+                options,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!engine.is_region_exists(region_id));
+    assert!(!object_store.exists(&region_dir).await.unwrap());
+    assert_eq!(
+        hook.gc_count.load(Ordering::Relaxed),
+        gc_before + 2,
+        "on_region_gc must fire again on the successful retry"
+    );
+}
+
 #[tokio::test]
 async fn test_engine_open_existing() {
     test_engine_open_existing_with_format(false).await;

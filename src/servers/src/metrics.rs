@@ -177,6 +177,12 @@ lazy_static! {
         "Total pending rows flush failures"
     )
     .unwrap();
+    pub static ref FLOW_NOTIFICATION_DROPPED: IntCounterVec = register_int_counter_vec!(
+        "greptime_prom_store_flow_notification_dropped_total",
+        "Total flow notifications dropped by the pending rows batcher",
+        &["reason"]
+    )
+    .unwrap();
     pub static ref PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_prom_store_pending_rows_batch_ingest_stage_elapsed",
         "Elapsed time of pending rows batch ingestion stages in seconds",

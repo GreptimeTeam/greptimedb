@@ -22,12 +22,12 @@ EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_ex
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host >= Utf8(\"m\") AND host IS NOT NULL"], "flat_format": REDACTED, "REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host < Utf8(\"m\") OR host IS NULL"], "files": REDACTED, "flat_format": REDACTED, "REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host < Utf8(\"m\") OR host IS NULL"], "files": REDACTED, "flat_format": REDACTED, "REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host >= Utf8(\"m\") AND host IS NOT NULL"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

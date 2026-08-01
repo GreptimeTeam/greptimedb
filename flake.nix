@@ -2,7 +2,7 @@
   description = "Development environment flake";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,7 +15,9 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         buildInputs = with pkgs; [
-          libz.out
+          libgit2
+          zlib
+          stdenv.cc.cc.lib
         ];
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
@@ -52,10 +54,7 @@
 
           buildInputs = buildInputs;
           NIX_HARDENING_ENABLE = "";
-          LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
-            stdenv.cc.cc.lib
-            libz
-          ];
+          LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
         };
       });
 }

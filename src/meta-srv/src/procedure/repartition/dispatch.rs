@@ -56,7 +56,7 @@ impl State for Dispatch {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         ctx.volatile_ctx.dispatch_start_time = Some(Instant::now());
         let table_id = ctx.persistent_ctx.table_id;
@@ -74,9 +74,11 @@ impl State for Dispatch {
             );
             let persistent_ctx = repartition::group::PersistentContext::new(
                 plan.group_id,
+                procedure_ctx.procedure_id,
                 table_id,
                 ctx.persistent_ctx.catalog_name.clone(),
                 ctx.persistent_ctx.schema_name.clone(),
+                ctx.persistent_ctx.table_name.clone(),
                 plan.source_regions.clone(),
                 plan.target_regions.clone(),
                 region_mapping,

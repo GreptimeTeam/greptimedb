@@ -41,6 +41,12 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
     }
 
+    /// Notifies the listener after a flush becomes non-cancellable and before commit.
+    async fn on_flush_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after flush cancellation is requested and its DDL is queued.
+    fn on_flush_cancel_requested(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that the later drop task starts running.
     /// Returns the gc interval if we want to override the default one.
     fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {
@@ -71,6 +77,18 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the compaction is scheduled.
     fn on_compaction_scheduled(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener immediately before compaction planning invokes the picker.
+    async fn on_compaction_pick_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after local compaction becomes non-cancellable and before commit.
+    async fn on_compaction_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction results are sent and before pending DDL dispatch.
+    async fn on_compaction_result_notified(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction cancellation is requested and its DDL is queued.
+    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 
@@ -85,6 +103,12 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the index build task is aborted.
     async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener after the final source check and before manifest publication.
+    async fn on_index_build_before_manifest_commit(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener after manifest publication and before notifying the worker.
+    async fn on_index_build_manifest_committed(&self, _region_file_id: RegionFileId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -142,43 +166,37 @@ impl EventListener for StallListener {
     }
 }
 
-/// Listener to watch begin flush events.
+/// Blocks a flush at its begin event until the worker requests flush cancellation.
 ///
-/// Creates a background thread to execute flush region, and the main thread calls `wait_truncate()`
-/// to block and wait for `on_flush_region()`.
-/// When the background thread calls `on_flush_begin()`, the main thread is notified to truncate
-/// region, and background thread thread blocks and waits for `notify_flush()` to continue flushing.
+/// Tests use this gate to ensure a flush is active before submitting a lifecycle DDL.
 #[derive(Default)]
-pub struct FlushTruncateListener {
-    /// Notify flush operation.
-    notify_flush: Notify,
-    /// Notify truncate operation.
-    notify_truncate: Notify,
+pub struct FlushCancellationListener {
+    flush_started: Notify,
+    resume_flush: Notify,
 }
 
-impl FlushTruncateListener {
-    /// Notify flush region to proceed.
-    pub fn notify_flush(&self) {
-        self.notify_flush.notify_one();
+impl FlushCancellationListener {
+    /// Waits until the flush reaches the cancellation gate.
+    pub async fn wait_flush_started(&self) {
+        self.flush_started.notified().await;
     }
 
-    /// Wait for a truncate event.
-    pub async fn wait_truncate(&self) {
-        self.notify_truncate.notified().await;
+    /// Allows the blocked flush to continue.
+    pub fn resume_flush(&self) {
+        self.resume_flush.notify_one();
     }
 }
 
 #[async_trait]
-impl EventListener for FlushTruncateListener {
-    /// Calling this function will block the thread!
-    /// Notify the listener to perform a truncate region and block the flush region job.
+impl EventListener for FlushCancellationListener {
     async fn on_flush_begin(&self, region_id: RegionId) {
-        info!(
-            "Region {} begin do flush, notify region to truncate",
-            region_id
-        );
-        self.notify_truncate.notify_one();
-        self.notify_flush.notified().await;
+        info!("Region {} reached the flush cancellation gate", region_id);
+        self.flush_started.notify_one();
+        self.resume_flush.notified().await;
+    }
+
+    fn on_flush_cancel_requested(&self, _region_id: RegionId) {
+        self.resume_flush();
     }
 }
 
@@ -456,6 +474,8 @@ impl EventListener for IndexBuildListener {
 /// gate.release_begin();           // let begin proceed
 /// ```
 pub struct GateIndexBuildListener {
+    recv_count: AtomicUsize,
+    recv_notify: Notify,
     begin_count: AtomicUsize,
     begin_notify: Notify,
     /// Blocks `on_index_build_begin` until released by the test.
@@ -471,6 +491,8 @@ pub struct GateIndexBuildListener {
 impl Default for GateIndexBuildListener {
     fn default() -> Self {
         Self {
+            recv_count: AtomicUsize::new(0),
+            recv_notify: Notify::new(),
             begin_count: AtomicUsize::new(0),
             begin_notify: Notify::new(),
             begin_blocker: Semaphore::new(0),
@@ -484,6 +506,13 @@ impl Default for GateIndexBuildListener {
 }
 
 impl GateIndexBuildListener {
+    /// Wait until the worker has received at least `times` requests.
+    pub async fn wait_recv(&self, times: usize) {
+        while self.recv_count.load(Ordering::Relaxed) < times {
+            self.recv_notify.notified().await;
+        }
+    }
+
     /// Wait until index build begin is reached for `times` times.
     pub async fn wait_begin(&self, times: usize) {
         while self.begin_count.load(Ordering::Relaxed) < times {
@@ -536,10 +565,20 @@ impl GateIndexBuildListener {
     pub fn abort_count(&self) -> usize {
         self.abort_count.load(Ordering::Relaxed)
     }
+
+    /// Returns the number of requests received by the worker.
+    pub fn recv_count(&self) -> usize {
+        self.recv_count.load(Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
 impl EventListener for GateIndexBuildListener {
+    fn on_recv_requests(&self, request_num: usize) {
+        self.recv_count.fetch_add(request_num, Ordering::Relaxed);
+        self.recv_notify.notify_one();
+    }
+
     async fn on_index_build_begin(&self, region_file_id: RegionFileId) {
         info!("Region {} index build begin (gated)", region_file_id);
         self.begin_count.fetch_add(1, Ordering::Relaxed);

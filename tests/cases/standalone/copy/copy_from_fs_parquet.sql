@@ -99,3 +99,42 @@ drop table with_limit_rows_segment;
 drop table demo_with_external_column;
 
 drop table demo_with_less_columns;
+
+-- QX-083: COPY FROM Parquet honors LIMIT for a single file.
+CREATE TABLE qx_083_copy_limit_source(pk_col INTEGER PRIMARY KEY, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO qx_083_copy_limit_source VALUES
+    (1, 1704067200000),
+    (2, 1704067201000),
+    (3, 1704067202000);
+
+COPY qx_083_copy_limit_source TO '${SQLNESS_HOME}/qx_083_copy_limit.parquet' WITH (format='parquet');
+
+-- LIMIT 0 control: affected rows 0; count 0.
+CREATE TABLE qx_083_copy_limit_limit_0(pk_col INTEGER PRIMARY KEY, ts TIMESTAMP TIME INDEX);
+
+COPY qx_083_copy_limit_limit_0 FROM '${SQLNESS_HOME}/qx_083_copy_limit.parquet' WITH (format='parquet') LIMIT 0;
+
+SELECT count(*) FROM qx_083_copy_limit_limit_0;
+
+-- LIMIT 1 target: affected rows 1; count 1.
+CREATE TABLE qx_083_copy_limit_limit_1(pk_col INTEGER PRIMARY KEY, ts TIMESTAMP TIME INDEX);
+
+COPY qx_083_copy_limit_limit_1 FROM '${SQLNESS_HOME}/qx_083_copy_limit.parquet' WITH (format='parquet') LIMIT 1;
+
+SELECT count(*) FROM qx_083_copy_limit_limit_1;
+
+-- Cross-file LIMIT 4 target: affected rows 4; count 4.
+CREATE TABLE qx_083_copy_limit_cross_file(host string, cpu double, memory double, ts TIMESTAMP TIME INDEX);
+
+COPY qx_083_copy_limit_cross_file FROM '${SQLNESS_HOME}/demo/export/parquet_files/' WITH (start_time='2022-06-15 07:02:36') LIMIT 4;
+
+SELECT count(*) FROM qx_083_copy_limit_cross_file;
+
+DROP TABLE qx_083_copy_limit_source;
+
+DROP TABLE qx_083_copy_limit_limit_0;
+
+DROP TABLE qx_083_copy_limit_limit_1;
+
+DROP TABLE qx_083_copy_limit_cross_file;

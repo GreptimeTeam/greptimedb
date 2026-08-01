@@ -22,7 +22,6 @@ use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{DEFAULT_COMPACTION_TIME_WINDOW, EventRecorderImpl, EventRecorderRef};
-use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{
@@ -57,7 +56,7 @@ use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
-use crate::events::EventHandlerImpl;
+use crate::event::EventHandlerImpl;
 use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -72,6 +71,7 @@ use crate::metasrv::{
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
 use crate::procedure::repartition::{
     DefaultRepartitionProcedureFactory, GcDisabledRepartitionProcedureFactory,
 };
@@ -247,14 +247,17 @@ impl MetasrvBuilder {
             }),
         ));
         // Builds the event recorder to record important events and persist them as the system table.
-        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            event_inserter,
-        ))));
+        let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
+            Box::new(EventHandlerImpl::new(event_inserter)),
+            options.event_recorder.event_types.clone(),
+        ));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+        let repartition_gc_requirement_manager =
+            Arc::new(RepartitionGcRequirementManager::new(kv_backend.clone()));
         let procedure_manager = build_procedure_manager(
             &options,
             &kv_backend,
@@ -324,10 +327,7 @@ impl MetasrvBuilder {
 
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
-            let datanode_client_channel_config = ChannelConfig::new()
-                .timeout(Some(options.datanode.client.timeout))
-                .connect_timeout(options.datanode.client.connect_timeout)
-                .tcp_nodelay(options.datanode.client.tcp_nodelay);
+            let datanode_client_channel_config = options.datanode.client.channel_config();
             Arc::new(NodeClients::new(datanode_client_channel_config))
         });
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
@@ -439,11 +439,13 @@ impl MetasrvBuilder {
             Arc::new(DefaultRepartitionProcedureFactory::new(
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                repartition_gc_requirement_manager.clone(),
             ))
         } else {
             Arc::new(GcDisabledRepartitionProcedureFactory::new(
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                repartition_gc_requirement_manager.clone(),
             ))
         };
         let ddl_manager = DdlManager::new(
@@ -631,6 +633,7 @@ impl MetasrvBuilder {
             wal_provider,
             table_metadata_manager,
             runtime_switch_manager,
+            repartition_gc_requirement_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
                 meta_peer_client,

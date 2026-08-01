@@ -381,6 +381,11 @@ impl RegionManifestManager {
         self.stopped = true;
     }
 
+    /// Returns whether the manager has stopped accepting updates.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
     /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
     /// Returns installed version.

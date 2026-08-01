@@ -127,6 +127,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to persist the repartition GC requirement"))]
+    PersistRepartitionGcRequirement {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         #[snafu(implicit)]
@@ -1264,6 +1271,7 @@ impl ErrorExt for Error {
             ProcedureStateReceiver { source, .. } => source.status_code(),
             RegisterRepartitionProcedureLoader { source, .. } => source.status_code(),
             CreateRepartitionProcedure { source, .. } => source.status_code(),
+            PersistRepartitionGcRequirement { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
@@ -1336,7 +1344,8 @@ impl ErrorExt for Error {
             | OperateDatanode { source, .. }
             | AbortProcedure { source, .. }
             | RegisterRepartitionProcedureLoader { source, .. }
-            | CreateRepartitionProcedure { source, .. } => source.retry_hint(),
+            | CreateRepartitionProcedure { source, .. }
+            | PersistRepartitionGcRequirement { source, .. } => source.retry_hint(),
             Table { source, .. } => source.retry_hint(),
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),

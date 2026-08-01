@@ -38,29 +38,32 @@ impl ConstraintPruner {
         column_datatypes: HashMap<String, ConcreteDataType>,
     ) -> Result<Vec<RegionId>> {
         let start = std::time::Instant::now();
+        let all_regions = partitions
+            .iter()
+            .map(|partition| partition.id)
+            .collect::<Vec<_>>();
         if query_expressions.is_empty() || partitions.is_empty() {
             // No constraints, return all regions
-            return Ok(partitions.iter().map(|p| p.id).collect());
+            return Ok(all_regions);
         }
 
         // Collect all partition expressions for unified normalization
-        let mut expression_to_partition = Vec::with_capacity(partitions.len());
-        let mut all_partition_expressions = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            if let Some(expr) = &partition.partition_expr {
-                expression_to_partition.push(partition.id);
-                all_partition_expressions.push(expr.clone());
-            }
-        }
-        if all_partition_expressions.is_empty() {
-            return Ok(partitions.iter().map(|p| p.id).collect());
-        }
+        let Some(all_partition_expressions) = partitions
+            .iter()
+            .map(|partition| partition.partition_expr.clone())
+            .collect::<Option<Vec<_>>>()
+        else {
+            debug!(
+                "Partition metadata contains a missing partition expression, returning all regions conservatively"
+            );
+            return Ok(all_regions);
+        };
 
         // Create unified collider with both query and partition expressions for consistent normalization
         let mut all_expressions = query_expressions.to_vec();
         all_expressions.extend(all_partition_expressions.iter().cloned());
         if !Self::normalize_datatype(&mut all_expressions, &column_datatypes) {
-            return Ok(partitions.iter().map(|p| p.id).collect());
+            return Ok(all_regions);
         }
 
         let collider = match Collider::new(&all_expressions) {
@@ -70,7 +73,7 @@ impl ConstraintPruner {
                     "Failed to create unified collider: {}, returning all regions conservatively",
                     err
                 );
-                return Ok(partitions.iter().map(|p| p.id).collect());
+                return Ok(all_regions);
             }
         };
 
@@ -91,7 +94,7 @@ impl ConstraintPruner {
             if Self::atomic_sets_overlap(&query_atomics, region_atomics) {
                 let partition_expr_index =
                     region_atomics.source_expr_index - query_expressions.len();
-                candidate_regions.insert(expression_to_partition[partition_expr_index]);
+                candidate_regions.insert(all_regions[partition_expr_index]);
             }
         }
 
@@ -382,6 +385,30 @@ mod tests {
 
         // No constraints should return all regions
         assert_eq!(pruned.len(), 2);
+    }
+
+    #[test]
+    fn test_missing_partition_expression_returns_all_regions() {
+        let partitions = vec![
+            create_test_partition_info(1, Some(col("user_id").lt(Value::Int64(100)))),
+            create_test_partition_info(2, None),
+            create_test_partition_info(3, Some(col("user_id").gt_eq(Value::Int64(200)))),
+        ];
+        let query_exprs = vec![col("user_id").eq(Value::Int64(150))];
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
+
+        assert_eq!(
+            vec![
+                RegionId::new(1, 1),
+                RegionId::new(1, 2),
+                RegionId::new(1, 3),
+            ],
+            pruned
+        );
     }
 
     #[test]

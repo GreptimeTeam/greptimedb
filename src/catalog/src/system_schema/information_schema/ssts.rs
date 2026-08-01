@@ -36,7 +36,7 @@ use crate::information_schema::{
 use crate::system_schema::utils;
 
 fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
-    if let Some(p) = request.projection_indices() {
+    if let Some(p) = request.projection.as_deref() {
         Ok(Arc::new(schema.try_project(p).context(ProjectSchemaSnafu)?))
     } else {
         Ok(schema.clone())
@@ -331,7 +331,7 @@ mod tests {
             .unwrap();
 
         let request = ScanRequest {
-            projection_input: Some(vec![0].into()),
+            projection: Some(vec![0]),
             ..Default::default()
         };
         let plan = table.scan_to_plan(request).unwrap().unwrap();

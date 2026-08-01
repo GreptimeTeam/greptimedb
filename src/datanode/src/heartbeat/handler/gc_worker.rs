@@ -169,6 +169,7 @@ impl GcRegionsHandler {
             file_ref_manifest.clone(),
             &mito_engine.gc_limiter(),
             full_file_listing,
+            mito_engine.region_hook(),
         )
         .await
         .context(GcMitoEngineSnafu {

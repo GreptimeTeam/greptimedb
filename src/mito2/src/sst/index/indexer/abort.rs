@@ -102,7 +102,7 @@ impl Indexer {
         let fs_accessor = puffin_manager.file_accessor();
 
         let fs_handle = RegionIndexId::new(
-            RegionFileId::new(self.region_id, self.file_id),
+            RegionFileId::new(self.physical_region_id, self.file_id),
             self.index_version,
         )
         .to_string();

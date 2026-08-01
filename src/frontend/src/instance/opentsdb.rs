@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    OPENTSDB_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
     PermissionTableTargets,
 };
 use common_error::ext::BoxedError;
@@ -51,7 +51,7 @@ impl OpentsdbProtocolHandler for Instance {
     ) -> server_error::Result<()> {
         self.check_table_permission(
             &ctx,
-            PermissionReq::Opentsdb,
+            PermissionReq::Action(OPENTSDB_WRITE),
             permission_targets(data_points, &ctx),
         )
         .context(AuthSnafu)?;
@@ -67,11 +67,11 @@ impl OpentsdbProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
+            .check_permission(ctx.current_user(), PermissionReq::Action(OPENTSDB_WRITE))
             .context(AuthSnafu)?;
 
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
-        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Opentsdb)
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OPENTSDB_WRITE))
             .context(AuthSnafu)?;
 
         let ctx = {

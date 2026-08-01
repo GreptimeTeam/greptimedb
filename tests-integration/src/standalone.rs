@@ -26,6 +26,7 @@ use cmd::error::StartFlownodeSnafu;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
+use common_datasource::object_store::LocalFileAccess;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
@@ -40,8 +41,10 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_provider::build_wal_provider;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::local::EventRecorderHandle;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
+use common_test_util::find_workspace_path;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
@@ -64,6 +67,7 @@ pub struct GreptimeDbStandalone {
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+    pub event_recorder_handle: EventRecorderHandle,
 }
 
 impl GreptimeDbStandalone {
@@ -157,6 +161,7 @@ impl GreptimeDbStandaloneBuilder {
         guard: TestGuard,
         opts: StandaloneOptions,
         procedure_manager: ProcedureManagerRef,
+        event_recorder_handle: EventRecorderHandle,
         register_procedure_loaders: bool,
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
@@ -169,7 +174,9 @@ impl GreptimeDbStandaloneBuilder {
 
         let mut builder =
             DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
+        let local_file_access = LocalFileAccess::sandboxed(find_workspace_path(".")).unwrap();
         builder.with_cache_registry(layered_cache_registry);
+        builder.with_local_file_access(local_file_access.clone());
         let datanode = builder.build().await.unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
@@ -275,11 +282,14 @@ impl GreptimeDbStandaloneBuilder {
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
+        .with_local_file_access(local_file_access)
         .with_plugin(plugins.clone())
         .try_build()
         .await
         .unwrap();
         let instance = Arc::new(instance);
+
+        event_recorder_handle.install(instance.event_recorder());
 
         // set the frontend client for flownode
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
@@ -324,6 +334,7 @@ impl GreptimeDbStandaloneBuilder {
             guard,
             kv_backend,
             procedure_manager,
+            event_recorder_handle,
         }
     }
 
@@ -347,7 +358,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend_config,
         )
         .unwrap();
-        let procedure_manager =
+        let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
         let standalone_opts = StandaloneOptions {
@@ -361,7 +372,14 @@ impl GreptimeDbStandaloneBuilder {
             ..StandaloneOptions::default()
         };
 
-        self.build_with(kv_backend, guard, standalone_opts, procedure_manager, true)
-            .await
+        self.build_with(
+            kv_backend,
+            guard,
+            standalone_opts,
+            procedure_manager,
+            event_recorder_handle,
+            true,
+        )
+        .await
     }
 }

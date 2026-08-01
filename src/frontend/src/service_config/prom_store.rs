@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,9 @@ pub struct PromStoreOptions {
     pub worker_channel_capacity: usize,
     #[serde(default = "default_max_inflight_requests")]
     pub max_inflight_requests: usize,
+    /// Maximum number of logical-table flow notifications waiting in the shared queue.
+    #[serde(default = "default_flow_notification_queue_capacity")]
+    pub flow_notification_queue_capacity: NonZeroUsize,
 }
 
 fn default_max_batch_rows() -> usize {
@@ -48,6 +52,26 @@ fn default_max_inflight_requests() -> usize {
     3000
 }
 
+fn default_flow_notification_queue_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN)
+}
+
+impl PromStoreOptions {
+    /// Returns whether the pending rows batcher can be enabled with these
+    /// options. Mirrors the enablement conditions of
+    /// `PendingRowsBatcher::try_new` in the servers crate, which returns
+    /// `None` when any of these knobs is zero.
+    pub fn pending_rows_batching_enabled(&self) -> bool {
+        self.enable
+            && self.with_metric_engine
+            && !self.pending_rows_flush_interval.is_zero()
+            && self.max_batch_rows > 0
+            && self.max_concurrent_flushes > 0
+            && self.worker_channel_capacity > 0
+            && self.max_inflight_requests > 0
+    }
+}
+
 impl Default for PromStoreOptions {
     fn default() -> Self {
         Self {
@@ -58,6 +82,7 @@ impl Default for PromStoreOptions {
             max_concurrent_flushes: default_max_concurrent_flushes(),
             worker_channel_capacity: default_worker_channel_capacity(),
             max_inflight_requests: default_max_inflight_requests(),
+            flow_notification_queue_capacity: default_flow_notification_queue_capacity(),
         }
     }
 }
@@ -68,7 +93,8 @@ mod tests {
 
     use super::PromStoreOptions;
     use crate::service_config::prom_store::{
-        default_max_batch_rows, default_max_concurrent_flushes, default_max_inflight_requests,
+        default_flow_notification_queue_capacity, default_max_batch_rows,
+        default_max_concurrent_flushes, default_max_inflight_requests,
         default_worker_channel_capacity,
     };
 
@@ -90,6 +116,10 @@ mod tests {
         assert_eq!(
             default.max_inflight_requests,
             default_max_inflight_requests()
+        );
+        assert_eq!(
+            default.flow_notification_queue_capacity,
+            default_flow_notification_queue_capacity()
         );
     }
 }

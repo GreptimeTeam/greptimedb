@@ -205,8 +205,71 @@ experiment matrix for those policy comparisons.
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
-TQL selectors. It is not included in the default case set because ingestion cost
-dominates routine CI validation.
+TQL selectors. It is not included in the default `all` case set because ingestion
+cost dominates routine CI validation. Adding the `heavy-regression` PR label runs
+only this case; `query-regression` runs the five routine default cases. Manual
+workflow dispatch accepts the `heavy` token to select this case.
+
+## OTLP trace load scenario
+
+`scenario.kind = "otlp_trace_load"` runs a bounded native `otelgen` process
+against each local distributed cluster. The runner excludes the configured
+warmup window, derives throughput and mean request latency from GreptimeDB's
+OTLP-specific metrics, flushes the trace table, and verifies its row count
+against the accepted-span counter. The case is intentionally outside the
+default set until its variance is known.
+
+Build base/candidate `greptime` binaries with the same profile, build the
+candidate `query_perf_fixture`, then run the case explicitly:
+
+```bash
+WORK_DIR="$(mktemp -d /tmp/query-perf-otlp.XXXXXX)"
+REPORT="$WORK_DIR/trace-report.json"
+python3 tests/perf/query_regression_runner.py \
+  --case tests/perf/query_cases/otlp_trace_load/case.toml \
+  --base-bin /path/to/base/target/nightly/greptime \
+  --candidate-bin /path/to/candidate/target/nightly/greptime \
+  --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
+  --otelgen-bin /path/to/otelgen \
+  --work-dir "$WORK_DIR" \
+  --output "$REPORT"
+```
+
+Install [YouPlot](https://github.com/red-data-tools/YouPlot) once, then render
+all comparison metrics and threshold results in the terminal:
+
+```bash
+brew install youplot
+tests/perf/plot_otlp_trace_report.sh "$REPORT"
+```
+
+For each target, `accepted_spans` should equal `table_rows`, and `failures`
+should stay within `max_failure_count`. Throughput is better when
+`spans_per_second` is higher; its `actual_pct` is
+`(base - candidate) / base * 100`. Latency is better when `mean_latency_ms` is
+lower; its `actual_pct` is `(candidate - base) / base * 100`. A positive
+`actual_pct` is a candidate regression, while a negative value is an
+improvement. The case passes when every `actual_pct` is at or below its
+`limit_pct` and every failure-count threshold passes. For local results, run
+the case at least three times on an otherwise idle machine and compare the
+median regressions rather than relying on one run.
+
+The CI runner image includes the pinned `otelgen` binary. Until this case is
+added to the default set, run it explicitly with `workflow_dispatch`:
+
+```bash
+gh workflow run query-regression.yml \
+  --ref <workflow-branch> \
+  -f case=tests/perf/query_cases/otlp_trace_load/case.toml \
+  -f base_ref=<full-base-sha> \
+  -f candidate_ref=<full-candidate-sha> \
+  -f cargo_profile=nightly \
+  -f http_timeout=300 \
+  -f runner=perf-regression-8-cores
+```
+
+The selected ARC scale set must already be deployed with the runner-image
+digest built from the current query-regression Dockerfile.
 
 ## Generator contract
 
@@ -408,11 +471,13 @@ binaries. Candidate `query_perf_fixture` is the extra head-side helper binary;
 the runner uses candidate `greptime datanode parquetbench/scanbench` as the
 read-bench tool against each target's data directory.
 
-The workflow runs automatically only when `query-regression` is added to a
-non-draft PR; it does not rerun on pushes, ready-for-review, or reopen events.
-PR runs build base/candidate once and then run the default case set with
-`--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`, one case
-path, or a comma/whitespace-separated list of case paths, and can override refs.
+The workflow runs automatically only when `query-regression` or `heavy-regression`
+is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or
+reopen events. `query-regression` runs the five routine default cases, while
+`heavy-regression` runs only the high-cardinality remote-write #7913 case. PR runs
+build base/candidate once and use `--allow-large-fixture`. Manual
+`workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a
+comma/whitespace-separated list of case paths, and can override refs.
 The main report artifact uploads only aggregate/per-target JSON reports,
 component logs, and `query-regression-summary.md` with seven-day retention;
 fixture data, SSTs, and cluster state are excluded. PR runs also upload a

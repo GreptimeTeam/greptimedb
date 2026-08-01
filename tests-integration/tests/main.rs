@@ -14,21 +14,29 @@
 
 #![recursion_limit = "256"]
 
+mod database_ddl_event;
+mod event_recorder_test_util;
 #[macro_use]
 mod grpc;
 #[macro_use]
 mod http;
+mod flow_ddl_event;
+mod gc_event;
 mod json2;
 mod jsonbench;
 #[macro_use]
 mod sql;
 #[macro_use]
 mod region_migration;
+mod table_ddl_event;
 #[macro_use]
 mod repartition;
+mod repartition_event;
 #[macro_use]
 mod repartition_expr_version;
 mod mysql;
+mod view_ddl_event;
+mod wal_prune_event;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 

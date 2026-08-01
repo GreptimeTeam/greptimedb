@@ -34,7 +34,6 @@ use common_telemetry::{error, info, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
 use tonic::Status;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{LeaderProviderRef, util};
@@ -155,10 +154,10 @@ impl Inner {
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ClusterClient<Channel>> {
         let channel = self.channel_manager.get(addr).context(CreateChannelSnafu)?;
 
-        Ok(ClusterClient::new(channel)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd))
+        Ok(common_grpc::configure_tonic_client!(
+            ClusterClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]

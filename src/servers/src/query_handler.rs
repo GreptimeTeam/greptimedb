@@ -177,6 +177,14 @@ pub trait PipelineHandler {
         inputs: Vec<(QueryContextRef, RowInsertRequests)>,
     ) -> Result<Vec<Result<Output>>>;
 
+    fn check_pipeline_query_permission(&self, query_ctx: &QueryContextRef) -> Result<()>;
+
+    /// Loads a compiled pipeline for execution.
+    ///
+    /// This intentionally does not check pipeline-query permission: users with
+    /// write-only permission can ingest through an existing pipeline. Inspection
+    /// and preview callers must check query permission first; ingestion enforces
+    /// write and table-target permissions separately.
     async fn get_pipeline(
         &self,
         name: &str,

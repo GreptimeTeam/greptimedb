@@ -6,18 +6,6 @@ create table json2_table (
     'sst_format' = 'flat',
 );
 
-insert into json2_table (ts, j) values (101, '[1, 2, 3]');
-
-insert into json2_table (ts, j) values (102, '"hello"');
-
-insert into json2_table (ts, j) values (103, '42');
-
-insert into json2_table (ts, j) values (104, 'true');
-
-insert into json2_table (ts, j) values (105, 'null');
-
-insert into json2_table (ts, j) values (1, '{}');
-
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -62,6 +50,20 @@ select j from json2_table order by ts;
 
 select * from json2_table order by ts;
 
+select count(*) from (select j from json2_table group by j);
+
+select count(*) from (select distinct j from json2_table);
+
+select ts, j from (select ts, j from json2_table) order by ts;
+
+select json_get(j, '') from json2_table order by ts;
+
+select json_get(j, '$') from json2_table order by ts;
+
+select json_get(j, '.') from json2_table order by ts;
+
+select json_get(j, '$.') from json2_table order by ts;
+
 select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;
@@ -73,51 +75,29 @@ select j.d from json2_table order by ts;
 
 drop table json2_table;
 
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-create table json2_append_mode_false (
+-- A JSON null in a dynamically typed field must remain SQL NULL when the
+-- field is projected to the default string type, rather than becoming "null".
+create table json2_variant_null (
     ts timestamp time index,
     j json2
 ) with (
-    'append_mode' = 'false'
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
 );
 
-create table json2_alter_non_append (
-    ts timestamp time index
-);
+insert into json2_variant_null values
+    (1, '{"payload":{"value":1}}'),
+    (2, '{"payload":"text"}'),
+    (3, '{"payload":null}');
 
-alter table json2_alter_non_append add column j json2;
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
 
-drop table json2_alter_non_append;
+admin flush_table('json2_variant_null');
 
-create table json2_default_null_ok (
-    ts timestamp time index,
-    j json2(
-        a int64 null default null
-    )
-) with (
-    'append_mode' = 'true'
-);
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
 
-drop table json2_default_null_ok;
-
-create table json2_default_null_check (
-    ts timestamp time index,
-    j json2(
-        a int64 not null default null
-    )
-);
-
-create table json2_set_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'true'
-);
-
-alter table json2_set_append_mode_false set 'append_mode' = 'false';
-
-drop table json2_set_append_mode_false;
+drop table json2_variant_null;

@@ -63,8 +63,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Run GitHub script tests
+      - name: Run Node GitHub script tests
         run: node --test .github/scripts/query-regression-comment.test.cjs
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - name: Run check-version script tests
+        run: uv run --no-project python .github/scripts/check-version-test.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -161,6 +167,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
     steps:
@@ -218,6 +225,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         target: [ "unstable_fuzz_create_table_standalone" ]
     steps:
@@ -328,6 +336,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
         mode:
@@ -443,7 +452,7 @@ jobs:
           kubectl wait \
             --for=condition=Ready \
             pod -l app.kubernetes.io/instance=kafka \
-            --timeout=120s \
+            --timeout=180s \
             -n kafka-cluster
       - if: matrix.mode.kafkaWalHelper
         name: Setup Kafka WAL helper
@@ -555,6 +564,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
         mode:
@@ -653,7 +663,7 @@ jobs:
           kubectl wait \
             --for=condition=Ready \
             pod -l app.kubernetes.io/instance=kafka \
-            --timeout=120s \
+            --timeout=180s \
             -n kafka-cluster
       - name: Print etcd info
         shell: bash
@@ -840,7 +850,10 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Start GreptimeDB standalone
+        env:
+          GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT: ${{ runner.temp }}/greptime-export-import-v2
         run: |
+          mkdir -p "${GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT}"
           ./bins/greptime standalone start > greptimedb.log 2>&1 &
           greptime_pid=$!
           echo "Waiting for GreptimeDB..."
@@ -860,6 +873,7 @@ jobs:
       - name: Run export/import v2 E2E tests
         run: cargo test -p cli data::export_v2::tests --lib -- --ignored --test-threads=1
         env:
+          TMPDIR: ${{ runner.temp }}/greptime-export-import-v2
           GREPTIME_ADDR: 127.0.0.1:4000
           GT_S3_BUCKET: greptime
           GT_S3_ACCESS_KEY_ID: superpower_ci_user

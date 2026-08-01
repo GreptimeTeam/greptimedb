@@ -217,7 +217,6 @@ impl WriteCache {
         let indexer = IndexerBuilderImpl {
             build_type: write_request.op_type.into(),
             metadata: write_request.metadata.clone(),
-            row_group_size: write_opts.row_group_size,
             puffin_manager: self
                 .puffin_manager_factory
                 .build(store.clone(), path_provider.clone()),

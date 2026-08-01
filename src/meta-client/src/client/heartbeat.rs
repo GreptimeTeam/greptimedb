@@ -27,7 +27,6 @@ use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{Id, LeaderProviderRef};
@@ -282,16 +281,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        let config = self.channel_manager.config();
-        let max_decoding_message_size = config.max_recv_message_size.as_bytes() as usize;
-        let max_encoding_message_size = config.max_send_message_size.as_bytes() as usize;
-
-        Ok(HeartbeatClient::new(channel)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd)
-            .max_decoding_message_size(max_decoding_message_size)
-            .max_encoding_message_size(max_encoding_message_size))
+        Ok(common_grpc::configure_tonic_client!(
+            HeartbeatClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]

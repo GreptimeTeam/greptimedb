@@ -2,7 +2,8 @@
 ## @toml2docs:none-default
 node_id = 42
 
-## The default column prefix for auto-created time index and value columns.
+## The default column prefix for auto-created time index, value, and native histogram columns.
+## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
@@ -80,8 +81,11 @@ watch = false
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
+## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
+## The maximum number of blocking threads for compact operations.
+## Defaults to max(num_cpus / 2, 1).
+#+ compact_rt_max_blocking_threads = 4
 ## The number of threads to execute datanode query operations.
 ## Defaults to max(num_cpus - 1, 1).
 #+ query_rt_size = 7

@@ -14,12 +14,11 @@
 
 use api::v1::ColumnDataType;
 use api::v1::value::ValueData;
-use itertools::Itertools;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 
 pub fn bytes_to_hex_string(bs: &[u8]) -> String {
-    bs.iter().map(|b| format!("{:02x}", b)).join("")
+    hex::encode(bs)
 }
 
 pub fn any_value_to_jsonb(value: any_value::Value) -> JsonbValue<'static> {

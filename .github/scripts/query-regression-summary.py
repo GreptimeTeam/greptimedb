@@ -32,15 +32,25 @@ def fmt_ms(value: Any) -> str:
         return "N/A"
 
 
+def fmt_pct(value: Any) -> str:
+    formatted = fmt_ms(value)
+    return formatted if formatted == "N/A" else f"{formatted}%"
+
+
 def esc(value: Any) -> str:
     text = "N/A" if value is None else str(value)
     return text.replace("|", "\\|").replace("\n", " ")
 
 
 def status_emoji(status: str | None) -> str:
-    return {"ok": "✅", "measured": "✅", "failed": "❌", "planned": "📝", "fixture-ready": "🧪"}.get(
-        status or "", "⚠️"
-    )
+    return {
+        "ok": "✅",
+        "passed": "✅",
+        "measured": "✅",
+        "failed": "❌",
+        "planned": "📝",
+        "fixture-ready": "🧪",
+    }.get(status or "", "⚠️")
 
 
 def measurement_map(target: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -114,6 +124,50 @@ def comparison_table(targets: list[dict[str, Any]], thresholds: list[dict[str, A
     return "\n".join(rows)
 
 
+def otlp_comparison_table(targets: list[dict[str, Any]], thresholds: list[dict[str, Any]]) -> str:
+    rows = [
+        "| Target | Accepted spans | Table rows | Spans/s | Mean HTTP latency ms | Failures |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for target in targets:
+        metrics = target.get("metrics") or {}
+        visibility = target.get("visibility") or {}
+        rows.append(
+            "| {target} | {accepted} | {stored} | {rate} | {latency} | {failures} |".format(
+                target=esc(target.get("name")),
+                accepted=esc(metrics.get("accepted_spans")),
+                stored=esc(visibility.get("observed_rows")),
+                rate=fmt_ms(metrics.get("accepted_spans_per_second")),
+                latency=fmt_ms(metrics.get("mean_http_latency_ms")),
+                failures=esc(metrics.get("failure_count")),
+            )
+        )
+
+    rows.extend(
+        [
+            "",
+            "| Threshold | Scope | Actual | Limit | Status | Reason |",
+            "| --- | --- | ---: | ---: | --- | --- |",
+        ]
+    )
+    for threshold in thresholds:
+        is_pct = "actual_pct" in threshold or "limit_pct" in threshold
+        actual = fmt_pct(threshold.get("actual_pct")) if is_pct else esc(threshold.get("actual"))
+        limit = fmt_pct(threshold.get("limit_pct")) if is_pct else esc(threshold.get("limit"))
+        rows.append(
+            "| {threshold} | {scope} | {actual} | {limit} | {status} {raw} | {reason} |".format(
+                threshold=esc(threshold.get("threshold")),
+                scope=esc(threshold.get("target") or "base vs candidate"),
+                actual=actual,
+                limit=limit,
+                status=status_emoji(threshold.get("status")),
+                raw=esc(threshold.get("status")),
+                reason=esc(threshold.get("reason")),
+            )
+        )
+    return "\n".join(rows)
+
+
 def build_markdown(
     report: dict[str, Any],
     report_path: Path,
@@ -141,7 +195,12 @@ def build_markdown(
 
     targets = report.get("targets") or []
     lines.extend(["", "### Targets", "", target_table(targets)])
-    lines.extend(["", "### Query comparison", "", comparison_table(targets, report.get("thresholds") or [])])
+    if (report.get("scenario") or {}).get("kind") == "otlp_trace_load":
+        lines.extend(
+            ["", "### OTLP trace comparison", "", otlp_comparison_table(targets, report.get("thresholds") or [])]
+        )
+    else:
+        lines.extend(["", "### Query comparison", "", comparison_table(targets, report.get("thresholds") or [])])
 
     not_enforced = [t for t in report.get("thresholds") or [] if t.get("status") == "not_enforced"]
     if not_enforced:

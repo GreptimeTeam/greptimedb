@@ -8,30 +8,6 @@ create table json2_table (
 
 Affected Rows: 0
 
-insert into json2_table (ts, j) values (101, '[1, 2, 3]');
-
-Error: 1001(Unsupported), Non-object json is not supported currently
-
-insert into json2_table (ts, j) values (102, '"hello"');
-
-Error: 1001(Unsupported), Non-object json is not supported currently
-
-insert into json2_table (ts, j) values (103, '42');
-
-Error: 1001(Unsupported), Non-object json is not supported currently
-
-insert into json2_table (ts, j) values (104, 'true');
-
-Error: 1001(Unsupported), Non-object json is not supported currently
-
-insert into json2_table (ts, j) values (105, 'null');
-
-Error: 1001(Unsupported), Non-object json is not supported currently
-
-insert into json2_table (ts, j) values (1, '{}');
-
-Error: 1004(InvalidArguments), Invalid InsertRequest, reason: empty json object is not supported, consider adding a dummy field
-
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -150,12 +126,12 @@ select j.a, j.a.x from json2_table order by ts;
 | {"b":-2}                          |                                     |
 | {"b":3}                           |                                     |
 | {"b":-4}                          |                                     |
-| {"b":null}                        |                                     |
+|                                   |                                     |
 |                                   |                                     |
 | {"b":"s7"}                        |                                     |
 | {"b":8}                           |                                     |
 | {"b":null,"x":true}               | true                                |
-| {"b":10,"x":null}                 | null                                |
+| {"b":10,"x":null}                 |                                     |
 +-----------------------------------+-------------------------------------+
 
 select j.c, j.y from json2_table order by ts;
@@ -177,11 +153,138 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
++--------------------------------------------------------------------+
+| j                                                                  |
++--------------------------------------------------------------------+
+| {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| {"a":{"b":3},"c":"s3","d":null}                                    |
+| {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| {"a":null,"c":"s5","d":null}                                       |
+| {"a":null,"c":"s6","d":null}                                       |
+| {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| {"a":{"b":8},"c":"s8","d":null}                                    |
+| {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++--------------------------------------------------------------------+
 
 select * from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
++-------------------------+--------------------------------------------------------------------+
+| ts                      | j                                                                  |
++-------------------------+--------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| 1970-01-01T00:00:00.002 | {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| 1970-01-01T00:00:00.003 | {"a":{"b":3},"c":"s3","d":null}                                    |
+| 1970-01-01T00:00:00.004 | {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| 1970-01-01T00:00:00.005 | {"a":null,"c":"s5","d":null}                                       |
+| 1970-01-01T00:00:00.006 | {"a":null,"c":"s6","d":null}                                       |
+| 1970-01-01T00:00:00.007 | {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| 1970-01-01T00:00:00.008 | {"a":{"b":8},"c":"s8","d":null}                                    |
+| 1970-01-01T00:00:00.009 | {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| 1970-01-01T00:00:00.010 | {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++-------------------------+--------------------------------------------------------------------+
+
+select count(*) from (select j from json2_table group by j);
+
++----------+
+| count(*) |
++----------+
+| 10       |
++----------+
+
+select count(*) from (select distinct j from json2_table);
+
++----------+
+| count(*) |
++----------+
+| 10       |
++----------+
+
+select ts, j from (select ts, j from json2_table) order by ts;
+
++-------------------------+--------------------------------------------------------------------+
+| ts                      | j                                                                  |
++-------------------------+--------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| 1970-01-01T00:00:00.002 | {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| 1970-01-01T00:00:00.003 | {"a":{"b":3},"c":"s3","d":null}                                    |
+| 1970-01-01T00:00:00.004 | {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| 1970-01-01T00:00:00.005 | {"a":null,"c":"s5","d":null}                                       |
+| 1970-01-01T00:00:00.006 | {"a":null,"c":"s6","d":null}                                       |
+| 1970-01-01T00:00:00.007 | {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| 1970-01-01T00:00:00.008 | {"a":{"b":8},"c":"s8","d":null}                                    |
+| 1970-01-01T00:00:00.009 | {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| 1970-01-01T00:00:00.010 | {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++-------------------------+--------------------------------------------------------------------+
+
+select json_get(j, '') from json2_table order by ts;
+
++--------------------------------------------------------------------+
+| json_get(json2_table.j,Utf8(""))                                   |
++--------------------------------------------------------------------+
+| {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| {"a":{"b":3},"c":"s3","d":null}                                    |
+| {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| {"a":null,"c":"s5","d":null}                                       |
+| {"a":null,"c":"s6","d":null}                                       |
+| {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| {"a":{"b":8},"c":"s8","d":null}                                    |
+| {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++--------------------------------------------------------------------+
+
+select json_get(j, '$') from json2_table order by ts;
+
++--------------------------------------------------------------------+
+| json_get(json2_table.j,Utf8("$"))                                  |
++--------------------------------------------------------------------+
+| {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| {"a":{"b":3},"c":"s3","d":null}                                    |
+| {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| {"a":null,"c":"s5","d":null}                                       |
+| {"a":null,"c":"s6","d":null}                                       |
+| {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| {"a":{"b":8},"c":"s8","d":null}                                    |
+| {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++--------------------------------------------------------------------+
+
+select json_get(j, '.') from json2_table order by ts;
+
++--------------------------------------------------------------------+
+| json_get(json2_table.j,Utf8("."))                                  |
++--------------------------------------------------------------------+
+| {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| {"a":{"b":3},"c":"s3","d":null}                                    |
+| {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| {"a":null,"c":"s5","d":null}                                       |
+| {"a":null,"c":"s6","d":null}                                       |
+| {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| {"a":{"b":8},"c":"s8","d":null}                                    |
+| {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++--------------------------------------------------------------------+
+
+select json_get(j, '$.') from json2_table order by ts;
+
++--------------------------------------------------------------------+
+| json_get(json2_table.j,Utf8("$."))                                 |
++--------------------------------------------------------------------+
+| {"a":{"b":1},"c":"s1","d":[{"e":{"f":0.1,"g":null}}]}              |
+| {"a":{"b":-2},"c":"s2","d":[{"e":{"f":0.2,"g":null}}]}             |
+| {"a":{"b":3},"c":"s3","d":null}                                    |
+| {"a":{"b":-4},"c":null,"d":[{"e":{"f":null,"g":-0.4}}]}            |
+| {"a":null,"c":"s5","d":null}                                       |
+| {"a":null,"c":"s6","d":null}                                       |
+| {"a":{"b":"s7"},"c":[1],"d":[{"e":{"g":-0.7}}]}                    |
+| {"a":{"b":8},"c":"s8","d":null}                                    |
+| {"a":{"b":null,"x":true},"c":"s9","d":[{"e":{"g":-0.9}}],"y":null} |
+| {"a":{"b":10,"x":null},"c":null,"d":null,"y":false}                |
++--------------------------------------------------------------------+
 
 select j.a.b + 1 from json2_table order by ts;
 
@@ -218,15 +321,15 @@ select j.d from json2_table order by ts;
 +-----------------------------------+
 | json_get(json2_table.j,Utf8("d")) |
 +-----------------------------------+
-| [{e: {f: 0.1, g: }}]              |
-| [{e: {f: 0.2, g: }}]              |
+| [{"e":{"f":0.1,"g":null}}]        |
+| [{"e":{"f":0.2,"g":null}}]        |
 |                                   |
-| [{e: {f: , g: -0.4}}]             |
+| [{"e":{"f":null,"g":-0.4}}]       |
 |                                   |
 |                                   |
-| [{e: {g: -0.7}}]                  |
+| [{"e":{"g":-0.7}}]                |
 |                                   |
-| [{e: {g: -0.9}}]                  |
+| [{"e":{"g":-0.9}}]                |
 |                                   |
 +-----------------------------------+
 
@@ -234,74 +337,58 @@ drop table json2_table;
 
 Affected Rows: 0
 
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-create table json2_append_mode_false (
+-- A JSON null in a dynamically typed field must remain SQL NULL when the
+-- field is projected to the default string type, rather than becoming "null".
+create table json2_variant_null (
     ts timestamp time index,
     j json2
 ) with (
-    'append_mode' = 'false'
-);
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-create table json2_alter_non_append (
-    ts timestamp time index
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
 );
 
 Affected Rows: 0
 
-alter table json2_alter_non_append add column j json2;
+insert into json2_variant_null values
+    (1, '{"payload":{"value":1}}'),
+    (2, '{"payload":"text"}'),
+    (3, '{"payload":null}');
 
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+Affected Rows: 3
 
-drop table json2_alter_non_append;
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
 
-Affected Rows: 0
++-------------------------+------------------------------------------------+-----------------+
+| ts                      | json_get(json2_variant_null.j,Utf8("payload")) | payload_is_null |
++-------------------------+------------------------------------------------+-----------------+
+| 1970-01-01T00:00:00.001 | {"value":1}                                    | false           |
+| 1970-01-01T00:00:00.002 | text                                           | false           |
+| 1970-01-01T00:00:00.003 |                                                | true            |
++-------------------------+------------------------------------------------+-----------------+
 
-create table json2_default_null_ok (
-    ts timestamp time index,
-    j json2(
-        a int64 null default null
-    )
-) with (
-    'append_mode' = 'true'
-);
+admin flush_table('json2_variant_null');
 
-Affected Rows: 0
++-----------------------------------------+
+| ADMIN flush_table('json2_variant_null') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
 
-drop table json2_default_null_ok;
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
 
-Affected Rows: 0
++-------------------------+------------------------------------------------+-----------------+
+| ts                      | json_get(json2_variant_null.j,Utf8("payload")) | payload_is_null |
++-------------------------+------------------------------------------------+-----------------+
+| 1970-01-01T00:00:00.001 | {"value":1}                                    | false           |
+| 1970-01-01T00:00:00.002 | text                                           | false           |
+| 1970-01-01T00:00:00.003 |                                                | true            |
++-------------------------+------------------------------------------------+-----------------+
 
-create table json2_default_null_check (
-    ts timestamp time index,
-    j json2(
-        a int64 not null default null
-    )
-);
-
-Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
-
-create table json2_set_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'true'
-);
-
-Affected Rows: 0
-
-alter table json2_set_append_mode_false set 'append_mode' = 'false';
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-drop table json2_set_append_mode_false;
+drop table json2_variant_null;
 
 Affected Rows: 0
 

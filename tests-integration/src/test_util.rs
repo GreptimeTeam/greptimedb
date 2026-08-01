@@ -362,6 +362,7 @@ pub(crate) fn create_datanode_opts(
         require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
+            copy_root: None,
             providers,
             store: default_store,
         },
@@ -653,6 +654,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),
+            frontend_ref.table_flownode_set_cache().clone(),
             true,
             frontend_ref.clone(),
             Duration::from_millis(50),
@@ -660,6 +662,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             4,
             64,
             64,
+            std::num::NonZeroUsize::new(1024).unwrap(),
         )
     } else {
         None

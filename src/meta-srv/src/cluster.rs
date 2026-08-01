@@ -81,10 +81,7 @@ impl KvBackend for MetaPeerClient {
         let retry_interval_ms = self.retry_interval_ms;
 
         for _ in 0..max_retry_count {
-            match self
-                .remote_range(req.key.clone(), req.range_end.clone(), req.keys_only)
-                .await
-            {
+            match self.remote_range(req.clone()).await {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     if need_retry(&e) {
@@ -238,12 +235,7 @@ impl MetaPeerClient {
         to_stat_kv_map(res.kvs)
     }
 
-    async fn remote_range(
-        &self,
-        key: Vec<u8>,
-        range_end: Vec<u8>,
-        keys_only: bool,
-    ) -> Result<RangeResponse> {
+    async fn remote_range(&self, req: RangeRequest) -> Result<RangeResponse> {
         // Safety: when self.is_leader() == false, election must not empty.
         let election = self.election.as_ref().unwrap();
 
@@ -254,14 +246,11 @@ impl MetaPeerClient {
             .get(&leader_addr)
             .context(error::CreateChannelSnafu)?;
 
-        let request = tonic::Request::new(PbRangeRequest {
-            key,
-            range_end,
-            keys_only,
-            ..Default::default()
-        });
+        let request = tonic::Request::new(PbRangeRequest::from(req));
 
-        let response: PbRangeResponse = ClusterClient::new(channel)
+        let mut client =
+            common_grpc::configure_tonic_client!(ClusterClient::new(channel), self.channel_manager);
+        let response: PbRangeResponse = client
             .range(request)
             .await
             .context(error::RangeSnafu)?
@@ -291,7 +280,9 @@ impl MetaPeerClient {
             ..Default::default()
         });
 
-        let response: PbBatchGetResponse = ClusterClient::new(channel)
+        let mut client =
+            common_grpc::configure_tonic_client!(ClusterClient::new(channel), self.channel_manager);
+        let response: PbBatchGetResponse = client
             .batch_get(request)
             .await
             .context(error::BatchGetSnafu)?
@@ -365,12 +356,167 @@ fn need_retry(error: &error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::{Error, ErrorCode, ResponseHeader};
-    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
-    use common_meta::rpc::KeyValue;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
-    use super::{Context, check_resp_header, to_stat_kv_map};
+    use api::v1::meta::cluster_server::{Cluster, ClusterServer};
+    use api::v1::meta::{
+        BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse, Error,
+        ErrorCode, MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
+        RangeResponse as PbRangeResponse, ResponseHeader,
+    };
+    use common_grpc::channel_manager::ChannelManager;
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
+    use common_meta::election::{Election, LeaderChangeMessage, LeaderValue, MetasrvNodeInfo};
+    use common_meta::kv_backend::KvBackend;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::rpc::KeyValue;
+    use common_meta::rpc::store::RangeRequest;
+    use hyper_util::rt::TokioIo;
+    use tonic::{Request, Response, Status};
+    use tower::service_fn;
+
+    use super::{Context, MetaPeerClientBuilder, check_resp_header, to_stat_kv_map};
     use crate::error;
+
+    struct FollowerElection {
+        leader_addr: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Election for FollowerElection {
+        type Leader = LeaderValue;
+
+        fn is_leader(&self) -> bool {
+            false
+        }
+
+        fn in_leader_infancy(&self) -> bool {
+            false
+        }
+
+        async fn register_candidate(&self, _: &MetasrvNodeInfo) -> common_meta::error::Result<()> {
+            Ok(())
+        }
+
+        async fn all_candidates(&self) -> common_meta::error::Result<Vec<MetasrvNodeInfo>> {
+            Ok(vec![])
+        }
+
+        async fn campaign(&self) -> common_meta::error::Result<()> {
+            Ok(())
+        }
+
+        async fn leader(&self) -> common_meta::error::Result<Self::Leader> {
+            Ok(LeaderValue(self.leader_addr.clone()))
+        }
+
+        async fn resign(&self) -> common_meta::error::Result<()> {
+            Ok(())
+        }
+
+        fn subscribe_leader_change(&self) -> tokio::sync::broadcast::Receiver<LeaderChangeMessage> {
+            let (_, receiver) = tokio::sync::broadcast::channel(1);
+            receiver
+        }
+    }
+
+    struct RangeServer {
+        requested_limit: Arc<AtomicI64>,
+    }
+
+    #[async_trait::async_trait]
+    impl Cluster for RangeServer {
+        async fn batch_get(
+            &self,
+            _: Request<PbBatchGetRequest>,
+        ) -> std::result::Result<Response<PbBatchGetResponse>, Status> {
+            Err(Status::unimplemented("batch_get is not used in this test"))
+        }
+
+        async fn range(
+            &self,
+            request: Request<PbRangeRequest>,
+        ) -> std::result::Result<Response<PbRangeResponse>, Status> {
+            self.requested_limit
+                .store(request.into_inner().limit, Ordering::Relaxed);
+            Ok(Response::new(PbRangeResponse {
+                header: Some(ResponseHeader::success()),
+                kvs: vec![api::v1::meta::KeyValue {
+                    key: b"key".to_vec(),
+                    value: b"value".to_vec(),
+                }],
+                more: true,
+            }))
+        }
+
+        async fn metasrv_peers(
+            &self,
+            _: Request<MetasrvPeersRequest>,
+        ) -> std::result::Result<Response<MetasrvPeersResponse>, Status> {
+            Err(Status::unimplemented(
+                "metasrv_peers is not used in this test",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_follower_range_forwards_limit() {
+        let requested_limit = Arc::new(AtomicI64::new(0));
+        let range_server = RangeServer {
+            requested_limit: requested_limit.clone(),
+        };
+        let (client, server) = tokio::io::duplex(1024);
+        let _server_handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    ClusterServer::new(range_server)
+                        .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                        .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+                )
+                .serve_with_incoming(futures::stream::iter([Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        let channel_manager = ChannelManager::new();
+        let mut client = Some(client);
+        channel_manager
+            .reset_with_connector(
+                "leader:0",
+                service_fn(move |_| {
+                    let client = client.take();
+                    async move {
+                        client
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
+
+        let follower = MetaPeerClientBuilder::default()
+            .election(Some(Arc::new(FollowerElection {
+                leader_addr: "leader:0".to_string(),
+            })))
+            .in_memory(Arc::new(MemoryKvBackend::new()))
+            .channel_manager(channel_manager)
+            .max_retry_count(1)
+            .build()
+            .unwrap();
+
+        let response = follower
+            .range(RangeRequest {
+                key: b"key".to_vec(),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, requested_limit.load(Ordering::Relaxed));
+        assert_eq!(1, response.kvs.len());
+        assert!(response.more);
+    }
 
     #[test]
     fn test_to_stat_kv_map() {

@@ -30,21 +30,24 @@ kubectl -n arc-runners create secret generic greptimedb-arc-github-app \
 
 The values files here reference that secret by name.
 
-A maintainer applying the `query-regression` label is **trust admission for
-that exact PR revision**. The admitted job may use this scale set's dedicated,
-writable persistent cache. `pull_request: labeled` is the only PR trigger: the
-label event snapshots its merge, head, and base SHAs. A queued job fetches that
-immutable event merge SHA directly, verifies it is a two-parent merge whose
-parents include the snapshotted head exactly once, and uses its other parent as
-the actual base build revision. The snapshotted event base is retained for audit
-only, so a difference from the merge's non-head parent is not a failure. The job
-never follows a newer mutable PR merge ref. An unavailable event merge, or one
-that does not contain exactly one snapshotted head parent, fails closed. A later
-PR head change does not retarget an already queued run: it may execute only its
-previously trusted event revision if that revision remains fetchable. To run the
-new revision, the maintainer must review it, remove the label, and re-add
-`query-regression`; cancel the old run if it is no longer wanted. An existing
-label does not automatically rerun the benchmark.
+A maintainer applying the `query-regression` or `heavy-regression` label is
+**trust admission for that exact PR revision**. `query-regression` runs the five
+routine default cases; `heavy-regression` runs only the high-cardinality
+`prom_remote_write_7913` remote-write case. The admitted job may use this scale
+set's dedicated, writable persistent cache. `pull_request: labeled` is the only
+PR trigger: the label event snapshots its merge, head, and base SHAs. A queued
+job fetches that immutable event merge SHA directly, verifies it is a two-parent
+merge whose parents include the snapshotted head exactly once, and uses its
+other parent as the actual base build revision. The snapshotted event base is
+retained for audit only, so a difference from the merge's non-head parent is
+not a failure. The job never follows a newer mutable PR merge ref. An
+unavailable event merge, or one that does not contain exactly one snapshotted
+head parent, fails closed. A later PR head change does not retarget an already
+queued run: it may execute only its previously trusted event revision if that
+revision remains fetchable. To run the new revision, the maintainer must review
+it, remove the label, and re-add the desired regression label; cancel the old
+run if it is no longer wanted. An existing label does not automatically rerun
+the benchmark.
 
 Admission does not relax runner hardening or GitHub permissions. Keep
 service-account token mounting disabled; do not mount host paths, the Docker
@@ -68,10 +71,15 @@ operator before any canary.
 ## Runner image and workflow tools
 
 Build and push the derived runner image; it preserves the official
-`/home/runner/run.sh` entrypoint and supplies CI tools needed at runtime:
+`/home/runner/run.sh` entrypoint and supplies CI tools needed at runtime. The
+image builds `otelgen` from
+[`WenyXu/otelgen`](https://github.com/WenyXu/otelgen) commit
+[`863a3f395d062c7322cc1de08a38774b7fdaa6c8`](https://github.com/WenyXu/otelgen/commit/863a3f395d062c7322cc1de08a38774b7fdaa6c8)
+so trace cases do not download or compile tools during a benchmark run:
 
 ```bash
 docker build \
+  --platform linux/amd64 \
   -f .github/runner-scale-sets/query-regression/Dockerfile \
   -t greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest \
   .github/runner-scale-sets/query-regression
@@ -79,9 +87,11 @@ docker build \
 docker push greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest
 ```
 
-Deploy by digest, not mutable tag, by updating `values-8-cores.yaml` after a
-rebuild. If the registry is private, use a dedicated read-only pull secret only
-as `imagePullSecrets`; never expose registry credentials to runner containers.
+Deploy by digest, not mutable tag, by updating both image references in
+`values-8-cores.yaml` after a rebuild. Update `RUNNER_IMAGE_DIGEST` and bump
+`RUNNER_IMAGE_EPOCH` in `query-regression.yml` at the same time. If the registry
+is private, use a dedicated read-only pull secret only as `imagePullSecrets`;
+never expose registry credentials to runner containers.
 Both digest-pinned init and runner containers use `IfNotPresent`: the immutable
 digest makes a cached image safe and avoids adding a registry dependency to every
 runner startup.
@@ -94,7 +104,8 @@ credentials or secrets must never be placed in a ConfigMap.
 
 Before builds, the workflow asserts UID/GID 1001 and exact image tool versions:
 `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`, `sccache
-0.16.0`, root-owned `rustup 1.29.0`, and the image-baked
+0.16.0`, `otelgen` commit `863a3f395d062c7322cc1de08a38774b7fdaa6c8`,
+root-owned `rustup 1.29.0`, and the image-baked
 `nightly-2026-03-21` Rust toolchain. Rustup, Cargo, and Rustc must resolve from
 `/opt/cargo/bin`; the runner cannot write `/opt/rustup` or `/opt/cargo/bin`.
 Protobuf well-known includes, including `google/protobuf/any.proto` and

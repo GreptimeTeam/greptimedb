@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
@@ -48,9 +49,13 @@ pub struct FileRegionEngine {
 }
 
 impl FileRegionEngine {
-    pub fn new(_config: EngineConfig, object_store: ObjectStore) -> Self {
+    pub fn new(
+        _config: EngineConfig,
+        object_store: ObjectStore,
+        local_file_access: LocalFileAccess,
+    ) -> Self {
         Self {
-            inner: Arc::new(EngineInner::new(object_store)),
+            inner: Arc::new(EngineInner::new(object_store, local_file_access)),
         }
     }
 
@@ -64,7 +69,8 @@ impl FileRegionEngine {
             .await
             .context(RegionNotFoundSnafu { region_id })
             .map_err(BoxedError::new)?
-            .query(request)
+            .query(request, &self.inner.local_file_access)
+            .await
             .map_err(BoxedError::new)
     }
 }
@@ -182,6 +188,8 @@ struct EngineInner {
     region_mutex: Mutex<()>,
 
     object_store: ObjectStore,
+
+    local_file_access: LocalFileAccess,
 }
 
 type EngineInnerRef = Arc<EngineInner>;
@@ -205,11 +213,12 @@ fn ensure_region_requirements(
 }
 
 impl EngineInner {
-    fn new(object_store: ObjectStore) -> Self {
+    fn new(object_store: ObjectStore, local_file_access: LocalFileAccess) -> Self {
         Self {
             regions: RwLock::new(HashMap::new()),
             region_mutex: Mutex::new(()),
             object_store,
+            local_file_access,
         }
     }
 

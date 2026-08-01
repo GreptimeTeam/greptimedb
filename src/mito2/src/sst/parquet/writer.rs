@@ -177,7 +177,9 @@ where
         metrics: &'a mut Metrics,
     ) -> ParquetWriter<'a, F, I, P> {
         let init_file = FileId::random();
-        let indexer = indexer_builder.build(init_file, 0).await;
+        let indexer = indexer_builder
+            .build(RegionFileId::new(metadata.region_id, init_file), 0, None)
+            .await;
 
         ParquetWriter {
             path_provider,
@@ -462,7 +464,14 @@ where
                     .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
 
-            let indexer = self.indexer_builder.build(self.current_file, 0).await;
+            let indexer = self
+                .indexer_builder
+                .build(
+                    RegionFileId::new(self.metadata.region_id, self.current_file),
+                    0,
+                    Some(opts.row_group_size),
+                )
+                .await;
             self.current_indexer = Some(indexer);
 
             // safety: self.writer is assigned above

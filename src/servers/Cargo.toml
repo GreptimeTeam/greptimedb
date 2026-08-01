@@ -68,6 +68,7 @@ either.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 headers = "0.4"
+hex.workspace = true
 hostname = "0.3"
 http.workspace = true
 humantime.workspace = true
@@ -155,6 +156,7 @@ common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
+moka.workspace = true
 mysql_async = { version = "0.35", default-features = false, features = [
     "default-rustls",
 ] }

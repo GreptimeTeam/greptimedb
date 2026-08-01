@@ -18,22 +18,170 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
-use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionDropRequest, RegionRequest};
+use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_request::{
+    RegionDropRequest, RegionFlushReason, RegionFlushRequest, RegionRequest,
+};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockRegionHook;
-use crate::engine::listener::DropListener;
+use crate::engine::listener::{DropListener, FlushCancellationListener};
 use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows_for_key, flush_region,
+    put_rows, rows_schema,
 };
 use crate::worker::DROPPING_MARKER_FILE;
+
+#[tokio::test]
+async fn test_drop_cancels_running_flush() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("drop-during-flush").await;
+    let listener = Arc::new(FlushCancellationListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            Some(Arc::new(MockWriteBufferManager::default())),
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(100, 1);
+    let request = CreateRequestBuilder::new().build();
+    let rows = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows,
+            rows: build_rows_for_key("a", 0, 2, 0),
+        },
+    )
+    .await;
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_started())
+        .await
+        .expect("flush did not reach the cancellation gate");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        ),
+    )
+    .await
+    .expect("drop did not finish after cancelling flush")
+    .unwrap();
+
+    let flush_err = tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("cancelled flush did not finish")
+        .expect("flush task panicked")
+        .unwrap_err();
+    assert_eq!(flush_err.status_code(), StatusCode::Cancelled);
+    assert!(engine.get_region(region_id).is_none());
+}
+
+#[tokio::test]
+async fn test_drop_rejects_downgrading_region_without_cancelling_flush() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("drop-during-downgrade-flush").await;
+    let listener = Arc::new(FlushCancellationListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            Some(Arc::new(MockWriteBufferManager::default())),
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(101, 1);
+    let request = CreateRequestBuilder::new().build();
+    let rows = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows,
+            rows: build_rows_for_key("a", 0, 2, 0),
+        },
+    )
+    .await;
+    engine
+        .set_region_role(region_id, RegionRole::DowngradingLeader)
+        .unwrap();
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    reason: Some(RegionFlushReason::Downgrading),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_started())
+        .await
+        .expect("downgrade flush did not reach the cancellation gate");
+
+    let drop_err = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        ),
+    )
+    .await
+    .expect("drop was not rejected while the downgrade flush was blocked")
+    .unwrap_err();
+    assert_eq!(drop_err.status_code(), StatusCode::RegionNotReady);
+    assert!(engine.get_region(region_id).is_some());
+    assert_eq!(engine.role(region_id), Some(RegionRole::DowngradingLeader));
+
+    listener.resume_flush();
+    let flush_result = tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("downgrade flush did not finish")
+        .expect("downgrade flush task panicked")
+        .expect("downgrade flush was cancelled");
+    assert_eq!(flush_result.affected_rows, 0);
+}
 
 #[tokio::test]
 async fn test_engine_drop_region() {

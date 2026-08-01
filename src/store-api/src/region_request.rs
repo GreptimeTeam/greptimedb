@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::time::Duration;
 
-use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
+use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges, from_pb_time_unit};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
@@ -36,6 +36,7 @@ pub use common_base::AffectedRows;
 use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
+use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
@@ -54,7 +55,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
     TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
@@ -390,11 +392,41 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     } else {
         Some(compact.parallelism)
     };
+    let time_range = compact
+        .time_range
+        .map(|range| {
+            let time_unit = v1::TimeUnit::try_from(range.time_unit).map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!("invalid compaction time unit: {}", range.time_unit),
+                }
+                .build()
+            })?;
+            let time_unit = from_pb_time_unit(time_unit);
+            let start = Timestamp::new(range.start, time_unit);
+            let end = Timestamp::new(range.end, time_unit);
+            ensure!(
+                start < end,
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!(
+                        "compaction start time must be earlier than end time: {} >= {}",
+                        range.start, range.end
+                    ),
+                }
+            );
+            TimestampRange::new(start, end).with_context(|| InvalidRegionRequestSnafu {
+                region_id,
+                err: "invalid compaction time range".to_string(),
+            })
+        })
+        .transpose()?;
     Ok(vec![(
         region_id,
         RegionRequest::Compact(RegionCompactRequest {
             options,
             parallelism,
+            time_range,
         }),
     )])
 }
@@ -1416,6 +1448,8 @@ pub enum SetRegionOption {
     AppendMode(bool),
     // Modifying the per-region auto flush interval override.
     AutoFlushInterval(Option<Duration>),
+    // Modifying the max number of rows in a parquet row group.
+    MaxRowGroupRowCount(Option<usize>),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1460,6 +1494,19 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
+            MAX_ROW_GROUP_ROW_COUNT => {
+                if value.is_empty() {
+                    return Ok(Self::MaxRowGroupRowCount(None));
+                }
+                let row_count = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|row_count| {
+                        *row_count > 0 && *row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT
+                    })
+                    .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::MaxRowGroupRowCount(Some(row_count)))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1478,6 +1525,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
         }
     }
@@ -1493,6 +1541,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1504,6 +1553,7 @@ pub enum UnsetRegionOption {
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    MaxRowGroupRowCount,
     WriteBufferSize,
 }
 
@@ -1515,6 +1565,7 @@ impl UnsetRegionOption {
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+            Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
         }
     }
 }
@@ -1549,6 +1600,7 @@ pub struct RegionFlushRequest {
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
     pub parallelism: Option<u32>,
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1557,6 +1609,7 @@ impl Default for RegionCompactRequest {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
             parallelism: None,
+            time_range: None,
         }
     }
 }
@@ -1706,11 +1759,40 @@ mod tests {
 
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
+    use common_time::range::TimestampRange;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_make_region_compact_with_time_range() {
+        let requests = make_region_compact(CompactRequest {
+            region_id: 42,
+            time_range: Some(api::v1::region::CompactionTimeRange {
+                start: 1_000,
+                end: 2_000,
+                time_unit: api::v1::TimeUnit::Microsecond as i32,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let RegionRequest::Compact(request) = &requests[0].1 else {
+            unreachable!();
+        };
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::new_microsecond(1_000),
+                    Timestamp::new_microsecond(2_000),
+                )
+                .unwrap()
+            ),
+            request.time_range
+        );
+    }
 
     #[test]
     fn test_from_proto_location() {
@@ -1785,6 +1867,44 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_max_row_group_row_count_try_from() {
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: "512".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(Some(512)),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: String::new(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(None),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in [
+            "0".to_string(),
+            (MAX_ROW_GROUP_ROW_COUNT_LIMIT + 1).to_string(),
+            "invalid".to_string(),
+        ] {
+            let pb = PbOption {
+                key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+                value,
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::MaxRowGroupRowCount,
+            UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
     }
 
     #[test]

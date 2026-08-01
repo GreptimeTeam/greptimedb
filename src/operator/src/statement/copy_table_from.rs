@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -28,8 +27,7 @@ use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
-use common_datasource::util::find_dir_and_filename;
+use common_datasource::object_store::build_backend_with_path;
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
@@ -54,7 +52,7 @@ use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use crate::error::{self, IntoVectorsSnafu, PathNotFoundSnafu, Result};
+use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
@@ -99,16 +97,10 @@ impl StatementExecutor {
         &self,
         req: &CopyTableRequest,
     ) -> Result<(ObjectStore, Vec<Entry>)> {
-        let (schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
-
-        if schema.to_uppercase() == FS_SCHEMA {
-            ensure!(Path::new(&path).exists(), PathNotFoundSnafu { path });
-        }
-
-        let object_store =
-            build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
-
-        let (dir, filename) = find_dir_and_filename(&path);
+        let backend =
+            build_backend_with_path(&req.location, &req.connection, &self.local_file_access)
+                .await
+                .context(error::BuildBackendSnafu)?;
         let regex = req
             .pattern
             .as_ref()
@@ -116,17 +108,25 @@ impl StatementExecutor {
             .transpose()
             .context(error::BuildRegexSnafu)?;
 
-        let source = if let Some(filename) = filename {
+        let source = if let Some(filename) = backend.object_path {
             Source::Filename(filename)
         } else {
             Source::Dir
         };
 
-        let lister = Lister::new(object_store.clone(), source.clone(), dir.clone(), regex);
+        let lister = Lister::new(
+            backend.object_store.clone(),
+            source.clone(),
+            req.location.clone(),
+            regex,
+        );
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
-        debug!("Copy from dir: {dir:?}, {source:?}, entries: {entries:?}");
-        Ok((object_store, entries))
+        debug!(
+            "Copy from location: {:?}, {source:?}, entries: {entries:?}",
+            req.location
+        );
+        Ok((backend.object_store, entries))
     }
 
     async fn collect_metadata(
@@ -417,7 +417,23 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
-        let max_insert_rows = req.limit.map(|n| n as usize);
+        let max_insert_rows = req
+            .limit
+            .map(|n| {
+                usize::try_from(n).map_err(|_| {
+                    error::InvalidCopyParameterSnafu {
+                        key: "limit".to_string(),
+                        value: n.to_string(),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?;
+        if max_insert_rows == Some(0) {
+            return Ok(gen_insert_output(rows_inserted, insert_cost));
+        }
+
+        let mut accepted_rows = 0;
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -443,6 +459,17 @@ impl StatementExecutor {
 
             while let Some(r) = stream.next().await {
                 let record_batch = r.context(error::ReadDfRecordBatchSnafu)?;
+                let record_batch = if let Some(max_insert_rows) = max_insert_rows {
+                    let remaining_rows = max_insert_rows - accepted_rows;
+                    if record_batch.num_rows() > remaining_rows {
+                        record_batch.slice(0, remaining_rows)
+                    } else {
+                        record_batch
+                    }
+                } else {
+                    record_batch
+                };
+                let record_batch_rows = record_batch.num_rows();
                 let vectors =
                     Helper::try_into_vectors(record_batch.columns()).context(IntoVectorsSnafu)?;
 
@@ -463,6 +490,7 @@ impl StatementExecutor {
                     },
                     query_ctx.clone(),
                 ));
+                accepted_rows += record_batch_rows;
 
                 if pending_mem_size as u64 >= pending_mem_threshold {
                     let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
@@ -471,8 +499,14 @@ impl StatementExecutor {
                 }
 
                 if let Some(max_insert_rows) = max_insert_rows
-                    && rows_inserted >= max_insert_rows
+                    && accepted_rows == max_insert_rows
                 {
+                    if !pending.is_empty() {
+                        let (rows, cost) =
+                            batch_insert(&mut pending, &mut pending_mem_size).await?;
+                        rows_inserted += rows;
+                        insert_cost += cost;
+                    }
                     return Ok(gen_insert_output(rows_inserted, insert_cost));
                 }
             }

@@ -39,11 +39,16 @@ pub struct ResponseFuture<T> {
     inner: T,
     #[pin]
     sleep: Sleep,
+    status_code: StatusCode,
 }
 
 impl<T> ResponseFuture<T> {
-    pub(crate) fn new(inner: T, sleep: Sleep) -> Self {
-        ResponseFuture { inner, sleep }
+    pub(crate) fn new(inner: T, sleep: Sleep, status_code: StatusCode) -> Self {
+        ResponseFuture {
+            inner,
+            sleep,
+            status_code,
+        }
     }
 }
 
@@ -58,7 +63,7 @@ where
 
         if this.sleep.poll(cx).is_ready() {
             let mut res = Response::default();
-            *res.status_mut() = StatusCode::REQUEST_TIMEOUT;
+            *res.status_mut() = *this.status_code;
             return Poll::Ready(Ok(res));
         }
 
@@ -72,12 +77,22 @@ where
 #[derive(Debug, Clone)]
 pub struct DynamicTimeoutLayer {
     default_timeout: Duration,
+    status_code_fn: fn(&Request<Body>) -> StatusCode,
 }
 
 impl DynamicTimeoutLayer {
     /// Create a timeout from a duration
     pub fn new(default_timeout: Duration) -> Self {
-        DynamicTimeoutLayer { default_timeout }
+        DynamicTimeoutLayer {
+            default_timeout,
+            status_code_fn: |_| StatusCode::REQUEST_TIMEOUT,
+        }
+    }
+
+    /// Sets a function that selects the timeout response status for each request.
+    pub fn with_status_code_fn(mut self, status_code_fn: fn(&Request<Body>) -> StatusCode) -> Self {
+        self.status_code_fn = status_code_fn;
+        self
     }
 }
 
@@ -85,7 +100,7 @@ impl<S> Layer<S> for DynamicTimeoutLayer {
     type Service = DynamicTimeout<S>;
 
     fn layer(&self, service: S) -> Self::Service {
-        DynamicTimeout::new(service, self.default_timeout)
+        DynamicTimeout::new(service, self.default_timeout, self.status_code_fn)
     }
 }
 
@@ -94,14 +109,20 @@ impl<S> Layer<S> for DynamicTimeoutLayer {
 pub struct DynamicTimeout<S> {
     inner: S,
     default_timeout: Duration,
+    status_code_fn: fn(&Request<Body>) -> StatusCode,
 }
 
 impl<S> DynamicTimeout<S> {
     /// Create a new [`DynamicTimeout`] with the given timeout
-    pub fn new(inner: S, default_timeout: Duration) -> Self {
+    pub fn new(
+        inner: S,
+        default_timeout: Duration,
+        status_code_fn: fn(&Request<Body>) -> StatusCode,
+    ) -> Self {
         DynamicTimeout {
             inner,
             default_timeout,
+            status_code_fn,
         }
     }
 }
@@ -122,6 +143,7 @@ where
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
+        let status_code = (self.status_code_fn)(&request);
         let timeout = request
             .headers()
             .get(GREPTIME_DB_HEADER_TIMEOUT)
@@ -137,10 +159,10 @@ where
         if timeout.is_zero() {
             // 30 years. See `Instant::far_future`.
             let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
-            ResponseFuture::new(response, tokio::time::sleep_until(far_future))
+            ResponseFuture::new(response, tokio::time::sleep_until(far_future), status_code)
         } else {
             let sleep = tokio::time::sleep(timeout);
-            ResponseFuture::new(response, sleep)
+            ResponseFuture::new(response, sleep, status_code)
         }
     }
 }

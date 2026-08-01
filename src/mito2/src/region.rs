@@ -849,6 +849,44 @@ impl MitoRegion {
             .collect::<Vec<_>>()
     }
 
+    /// Returns all live SST file metas and the current manifest version from
+    /// the region manifest, merging both the normal and staging manifests.
+    ///
+    /// While the region is in staging mode (e.g. during region copy/migration),
+    /// the authoritative live file set lives in the staging manifest, so this
+    /// method merges both — matching the semantics of [`manifest_sst_entries`].
+    ///
+    /// The returned manifest version is the staging version when a staging
+    /// manifest is present, otherwise the normal manifest version.
+    pub async fn all_manifest_files(&self) -> (Vec<FileMeta>, ManifestVersion) {
+        let manifest = self.manifest_ctx.manifest().await;
+        let staging = self
+            .manifest_ctx
+            .staging_manifest()
+            .await
+            .map(|m| (m.files.clone(), m.manifest_version));
+
+        let version = staging
+            .as_ref()
+            .map(|(_, v)| *v)
+            .unwrap_or(manifest.manifest_version);
+
+        let files = match staging {
+            Some((staging_files, _)) => {
+                let merged = manifest
+                    .files
+                    .clone()
+                    .into_iter()
+                    .chain(staging_files)
+                    .collect::<std::collections::HashMap<_, _>>();
+                merged.into_values().collect()
+            }
+            None => manifest.files.values().cloned().collect(),
+        };
+
+        (files, version)
+    }
+
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
     /// Merges staged manifest actions into the live manifest and exits staging mode.
     ///
@@ -1016,6 +1054,47 @@ impl MitoRegion {
 impl Drop for MitoRegion {
     fn drop(&mut self) {
         self.remove_region_metrics();
+    }
+}
+
+/// Result of publishing rebuilt index metadata to the manifest.
+#[derive(Debug)]
+pub(crate) enum IndexPublication {
+    /// The index metadata was committed.
+    Committed {
+        manifest_version: ManifestVersion,
+        file_meta: FileMeta,
+    },
+    /// The build no longer matches the current manifest.
+    Stale(IndexPublicationStale),
+}
+
+/// Why an index publication became stale.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IndexPublicationStale {
+    /// The source SST or region incarnation is no longer publishable.
+    SourceChanged,
+    /// The SST still matches, but the schema generation changed.
+    SchemaChanged,
+}
+
+/// Manifest state an index build is based on.
+///
+/// Both fields must still match when the rebuilt index is published. The file
+/// metadata identifies the exact SST generation, while the schema version
+/// identifies the exact index definition used by the builder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexBuildSource {
+    pub(crate) file_meta: FileMeta,
+    pub(crate) schema_version: u64,
+}
+
+impl IndexBuildSource {
+    pub(crate) fn new(file_meta: FileMeta, schema_version: u64) -> Self {
+        Self {
+            file_meta,
+            schema_version,
+        }
     }
 }
 
@@ -1207,6 +1286,67 @@ impl ManifestContext {
         .await
     }
 
+    /// Conditionally publishes rebuilt index metadata for `source`.
+    ///
+    /// The source SST and schema-generation checks share the manifest write lock
+    /// with the update, so a concurrent compaction, schema change, or another
+    /// index build cannot commit between them.
+    pub(crate) async fn update_manifest_for_index(
+        &self,
+        source: &IndexBuildSource,
+        updated: FileMeta,
+    ) -> Result<IndexPublication> {
+        let manager = self.manifest_manager.write().await;
+        let manifest = manager.manifest();
+        let current_state = self.state.load();
+        if !matches!(
+            current_state,
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        ) || manager.is_stopped()
+        {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
+        }
+
+        if manifest.files.get(&source.file_meta.file_id) != Some(&source.file_meta) {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SourceChanged,
+            ));
+        }
+
+        if manifest.metadata.schema_version != source.schema_version {
+            return Ok(IndexPublication::Stale(
+                IndexPublicationStale::SchemaChanged,
+            ));
+        }
+
+        // Only index metadata is allowed to change in this publication.
+        let mut committed = source.file_meta.clone();
+        committed.available_indexes = updated.available_indexes;
+        committed.indexes = updated.indexes;
+        committed.index_file_size = updated.index_file_size;
+        committed.index_version = updated.index_version;
+
+        let edit = crate::manifest::action::RegionEdit {
+            files_to_add: vec![committed.clone()],
+            files_to_remove: Vec::new(),
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+            flushed_sequence: None,
+            flushed_entry_id: None,
+            committed_sequence: None,
+            compaction_time_window: None,
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
+
+        Ok(IndexPublication::Committed {
+            manifest_version,
+            file_meta: committed,
+        })
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. This is the sole caller of
@@ -1240,6 +1380,38 @@ impl ManifestContext {
         ))
     }
 
+    /// Updates the manifest using a caller-held write lock, releases the lock,
+    /// and then fires the manifest hook.
+    ///
+    /// Callers must perform state and applicability checks before calling this
+    /// method so the checks and update remain in the same lock critical section.
+    async fn update_and_fire(
+        &self,
+        mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<ManifestVersion> {
+        let region_id = manager.manifest().metadata.region_id;
+        let pending = self
+            .update_locked(&mut manager, action_list, is_staging)
+            .await?;
+        let version = pending.version();
+
+        // Hook implementations may read the manifest or send region requests
+        // that acquire this lock.
+        drop(manager);
+
+        if self.state.load() == RegionRoleState::Follower {
+            warn!(
+                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
+                region_id
+            );
+        }
+
+        pending.fire().await;
+        Ok(version)
+    }
+
     async fn update_manifest_with_state_check(
         &self,
         action_list: RegionMetaActionList,
@@ -1247,7 +1419,7 @@ impl ManifestContext {
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
         // Acquires the write lock of the manifest manager.
-        let mut manager = self.manifest_manager.write().await;
+        let manager = self.manifest_manager.write().await;
         // Gets current manifest.
         let manifest = manager.manifest();
         // Checks state inside the lock. This is to ensure that we won't update the manifest
@@ -1305,28 +1477,7 @@ impl ManifestContext {
             }
         }
 
-        // `update_locked` returns a `PendingManifestHook` we fire after releasing the lock.
-        let region_id = manifest.metadata.region_id;
-        let pending = self
-            .update_locked(&mut manager, action_list, is_staging)
-            .await?;
-        let version = pending.version();
-
-        // Drop the write lock before invoking the hook. Hook implementations may
-        // read the manifest or send region requests that acquire this lock;
-        // holding it would deadlock. Slow hooks also must not block manifest updates.
-        drop(manager);
-
-        if self.state.load() == RegionRoleState::Follower {
-            warn!(
-                "Region {} becomes follower while updating manifest which may cause inconsistency, manifest version: {version}",
-                region_id
-            );
-        }
-
-        pending.fire().await;
-
-        Ok(version)
+        self.update_and_fire(manager, action_list, is_staging).await
     }
 
     /// Sets the [`RegionRole`].
@@ -1802,7 +1953,8 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
+        IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
+        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -1925,6 +2077,150 @@ mod tests {
                 .files
                 .contains_key(&file_id)
         );
+    }
+
+    #[tokio::test]
+    async fn test_index_publication_rejects_older_source_generation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let source = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            ..Default::default()
+        };
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![source.clone()],
+                    ..empty_edit()
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut first_update = source.clone();
+        first_update.index_version = 1;
+        first_update.index_file_size = 128;
+        let schema_version = region.version().metadata.schema_version;
+        let initial_source = IndexBuildSource::new(source.clone(), schema_version);
+        let first_committed = match region
+            .manifest_ctx
+            .update_manifest_for_index(&initial_source, first_update)
+            .await
+            .unwrap()
+        {
+            IndexPublication::Committed { file_meta, .. } => file_meta,
+            IndexPublication::Stale(_) => panic!("first index publication should commit"),
+        };
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let delayed_manifest_ctx = region.manifest_ctx.clone();
+        let delayed_source = IndexBuildSource::new(first_committed.clone(), schema_version);
+        let delayed_publication = tokio::spawn(async move {
+            let mut delayed_update = delayed_source.file_meta.clone();
+            delayed_update.index_version = 2;
+            delayed_update.index_file_size = 128;
+            ready_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            delayed_manifest_ctx
+                .update_manifest_for_index(&delayed_source, delayed_update)
+                .await
+        });
+        ready_rx.await.unwrap();
+
+        let mut newer_update = first_committed.clone();
+        newer_update.index_version = 3;
+        newer_update.index_file_size = 256;
+        let newer_source = IndexBuildSource::new(first_committed, schema_version);
+        let newer_committed = match region
+            .manifest_ctx
+            .update_manifest_for_index(&newer_source, newer_update)
+            .await
+            .unwrap()
+        {
+            IndexPublication::Committed { file_meta, .. } => file_meta,
+            IndexPublication::Stale(_) => panic!("newer index publication should commit"),
+        };
+
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            delayed_publication.await.unwrap().unwrap(),
+            IndexPublication::Stale(IndexPublicationStale::SourceChanged)
+        ));
+        assert_eq!(
+            region
+                .manifest_ctx
+                .manifest()
+                .await
+                .files
+                .get(&source.file_id),
+            Some(&newer_committed)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_publication_rejects_older_schema_generation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let source_meta = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            ..Default::default()
+        };
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![source_meta.clone()],
+                    ..empty_edit()
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let old_schema_version = region.version().metadata.schema_version;
+        let source = IndexBuildSource::new(source_meta.clone(), old_schema_version);
+        let mut new_metadata = region.version().metadata.as_ref().clone();
+        new_metadata.schema_version += 1;
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(new_metadata),
+                    sst_format: FormatType::PrimaryKey,
+                    append_mode: None,
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut updated = source_meta.clone();
+        updated.index_version = 1;
+        updated.index_file_size = 128;
+        assert!(matches!(
+            region
+                .manifest_ctx
+                .update_manifest_for_index(&source, updated)
+                .await
+                .unwrap(),
+            IndexPublication::Stale(IndexPublicationStale::SchemaChanged)
+        ));
+
+        let manifest = region.manifest_ctx.manifest().await;
+        assert_eq!(manifest.metadata.schema_version, old_schema_version + 1);
+        assert_eq!(manifest.files.get(&source_meta.file_id), Some(&source_meta));
     }
 
     #[tokio::test]

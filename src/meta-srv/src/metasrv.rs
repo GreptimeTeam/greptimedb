@@ -75,6 +75,7 @@ use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::flush_trigger::RegionFlushTickerRef;
@@ -408,7 +409,11 @@ impl Default for MetasrvOptions {
 
 impl Configurable for MetasrvOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints", "store_addrs"])
+        Some(&[
+            "wal.broker_endpoints",
+            "store_addrs",
+            "event_recorder.event_types",
+        ])
     }
 }
 
@@ -578,6 +583,7 @@ pub struct Metasrv {
     wal_provider: WalProviderRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
+    repartition_gc_requirement_manager: RepartitionGcRequirementManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -597,7 +603,18 @@ pub struct Metasrv {
 }
 
 impl Metasrv {
+    pub(crate) async fn ensure_repartition_gc_enabled(&self) -> Result<()> {
+        self.repartition_gc_requirement_manager
+            .ensure_gc_enabled(self.options.gc.enable, &self.procedure_manager)
+            .await
+    }
+
     pub async fn try_start(&self) -> Result<()> {
+        self.ensure_repartition_gc_enabled().await?;
+        self.try_start_after_gc_check().await
+    }
+
+    pub(crate) async fn try_start_after_gc_check(&self) -> Result<()> {
         if self
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -942,6 +959,9 @@ impl Metasrv {
 
 #[cfg(test)]
 mod tests {
+    use common_event_recorder::EventTypeFilter;
+
+    use super::*;
     use crate::metasrv::MetasrvNodeInfo;
 
     #[test]
@@ -952,5 +972,21 @@ mod tests {
         assert_eq!(node_info.version, "0.1.0");
         assert_eq!(node_info.git_commit, "1234567890");
         assert_eq!(node_info.start_time_ms, 1715145600);
+    }
+
+    #[test]
+    fn test_metasrv_event_recorder_options_preserve_event_type_filter_semantics() {
+        let all = MetasrvOptions::default().event_recorder;
+        let none: EventRecorderOptions = toml::from_str("ttl = '90d'\nevent_types = []").unwrap();
+        let selected: EventRecorderOptions =
+            toml::from_str("ttl = '90d'\nevent_types = ['create_database']").unwrap();
+
+        assert!(all.event_types.allows("future_event"));
+        assert_eq!(
+            none.event_types.as_ref(),
+            &EventTypeFilter::Only(Default::default())
+        );
+        assert!(selected.event_types.allows("create_database"));
+        assert!(!selected.event_types.allows("drop_database"));
     }
 }

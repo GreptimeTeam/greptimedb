@@ -114,11 +114,11 @@ Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an 
 
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
 
-Error: 3001(EngineExecuteQuery), Error during planning: Cannot infer common argument type for comparison operation Timestamp(ms) > Int64
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Timestamp(ms)
 
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
 
-Error: 3001(EngineExecuteQuery), Error during planning: Cannot infer common argument type for comparison operation Timestamp(ms) > Int64
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Timestamp(ms)
 
 SELECT * FROM integers as int LIMIT (SELECT NULL);
 

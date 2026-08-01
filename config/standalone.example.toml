@@ -2,7 +2,8 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index and value columns.
+## The default column prefix for auto-created time index, value, and native histogram columns.
+## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
@@ -53,14 +54,19 @@ max_concurrent_queries = 0
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
+## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
+## The maximum number of blocking threads for compact operations.
+## Defaults to max(num_cpus / 2, 1).
+#+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
+## When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the
+## `prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -83,6 +89,14 @@ prom_validation_mode = "strict"
 experimental_enable_prometheus_native_histogram = false
 ## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
 experimental_enable_explain_analyze_stream = true
+
+## Whether to start the dedicated public HTTP **API** server. This server serves
+## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
+## option with the main server. It is disabled by default; set to `true` to enable.
+enable_api_server = false
+## The address to bind the dedicated HTTP API server, in the same form as `addr`.
+## Defaults to `127.0.0.1:4006`.
+api_server_addr = "127.0.0.1:4006"
 
 ## The gRPC server options.
 [grpc]
@@ -199,7 +213,7 @@ enable = true
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
-trace_ingest_chunk_size = 128
+trace_ingest_chunk_size = 512
 
 ## Prometheus remote storage options
 [prom_store]
@@ -218,6 +232,8 @@ with_metric_engine = true
 #+worker_channel_capacity = 65526
 ## Max inflight write requests before backpressure.
 #+max_inflight_requests = 3000
+## Maximum number of logical-table flow notifications waiting in the shared queue.
+#+flow_notification_queue_capacity = 1024
 
 ## The WAL options.
 [wal]
@@ -428,6 +444,15 @@ memory_pool_size = "50%"
 [storage]
 ## The working home directory.
 data_home = "./greptimedb_data"
+
+## Root directory for standalone SQL access to local files.
+## Relative SQL paths are resolved below this directory. Absolute paths are accepted only when
+## they are inside this directory. Defaults to `<data_home>/copy`.
+## Distributed deployments always reject SQL access to local files.
+## Upgrade note: COPY commands and existing external tables that reference paths outside this
+## directory will fail. Move those files below the copy root, set this option to a dedicated
+## directory containing them, or migrate the files to object storage before upgrading.
+#+ copy_root = "./greptimedb_data/copy"
 
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.
@@ -885,6 +910,19 @@ default_ratio = 1.0
 ## The tokio console address.
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
+
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events. Default is `90d`.
+ttl = "90d"
+## Event types to record. Current available event types: `create_database`,
+## `alter_database`, `drop_database`, `create_flow`, `drop_flow`,
+## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
+## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
+## `create_view`, `drop_view`.
+## When omitted, all current and future event types are recorded.
+## Set to an empty array to disable event recording.
+#+ event_types = ["create_database"]
 
 ## The memory options.
 [memory]

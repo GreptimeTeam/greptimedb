@@ -67,7 +67,7 @@ The parser in
 produces one `TraceSpanGroup` per resource/scope pair.
 
 `ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
-each group into owned chunks. `trace_ingest_chunk_size` defaults to 128; setting
+each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
 it to 0 disables splitting. The option is defined in
 [`service_config/otlp.rs`](../../service_config/otlp.rs).
 

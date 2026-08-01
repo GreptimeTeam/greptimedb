@@ -133,7 +133,7 @@ impl RegionInfoEntry {
     pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
         let table_source = LogicalTableSource::new(Self::schema().arrow_schema().clone());
 
-        let projection = scan_request.projection_input.map(|input| input.projection);
+        let projection = scan_request.projection;
         let mut builder = LogicalPlanBuilder::scan(
             Self::reserved_table_name_for_inspection(),
             Arc::new(table_source),
@@ -315,9 +315,9 @@ mod tests {
 
     #[test]
     fn test_region_info_build_plan() {
-        let projection_input = Some(vec![0, 5, 7, 11].into());
+        let projection = Some(vec![0, 5, 7, 11]);
         let request = ScanRequest {
-            projection_input,
+            projection,
             filters: vec![binary_expr(col("writable"), Operator::Eq, lit(true))],
             limit: Some(10),
             ..Default::default()

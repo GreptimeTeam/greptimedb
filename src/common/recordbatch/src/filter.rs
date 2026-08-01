@@ -269,7 +269,7 @@ impl SimpleFilterEvaluator {
         };
         result
             .context(ArrowComputeSnafu)
-            .map(|array| array.values().clone())
+            .map(|array| boolean_array_to_scan_mask(&array).values().clone())
     }
 
     /// Builds a regex pattern from a scalar value and operator.
@@ -364,8 +364,24 @@ pub fn batch_filter(
                     Ok::<BooleanArray, DataFusionError>(BooleanArray::new_null(null_array.len()))
                 }
             }?;
-            Ok(filter_record_batch(batch, &filter_array)?)
+            Ok(filter_record_batch(
+                batch,
+                &boolean_array_to_scan_mask(&filter_array),
+            )?)
         })
+}
+
+/// Converts nullable SQL predicate values to a scan mask, where `NULL` is `false`.
+fn boolean_array_to_scan_mask(array: &BooleanArray) -> BooleanArray {
+    if array.null_count() == 0 {
+        return array.clone();
+    }
+
+    let mut values = BooleanBufferBuilder::new(array.len());
+    for index in 0..array.len() {
+        values.append(array.is_valid(index) && array.value(index));
+    }
+    BooleanArray::new(values.into(), None)
 }
 
 /// The same as arrow [regexp_is_match_scalar()](datatypes::compute::kernels::regexp::regexp_is_match_scalar())
@@ -421,13 +437,15 @@ pub fn regexp_is_match_dictionary(
             ArrowError::CastError("Dictionary values must be StringArray".to_string())
         })?;
 
-    let null_bit_buffer = dict_array.nulls().map(|x| x.inner().sliced());
+    // Dictionary logical nulls include both null keys and keys whose dictionary value is null.
+    let logical_nulls = dict_array.logical_nulls();
+    let null_bit_buffer = logical_nulls.as_ref().map(|x| x.inner().sliced());
     let mut result = BooleanBufferBuilder::new(dict_array.len());
 
     if let Some(re) = regex {
         let keys = dict_array.keys().values();
         for i in 0..dict_array.len() {
-            if dict_array.is_null(i) {
+            if logical_nulls.as_ref().is_some_and(|nulls| nulls.is_null(i)) {
                 result.append(false);
             } else {
                 let key = keys[i] as usize;
@@ -769,5 +787,94 @@ mod test {
         assert!(result3.value(1));
         assert!(result3.value(2));
         assert!(result3.value(3));
+    }
+
+    #[test]
+    fn test_regex_scan_masks_preserve_sql_null_semantics() {
+        let plain = Arc::new(datatypes::arrow::array::StringArray::from(vec![
+            Some("api"),
+            Some("API"),
+            Some("db"),
+            None,
+        ])) as ArrayRef;
+        assert_regex_scan_masks(
+            &plain,
+            [
+                vec![true, false, false, false],
+                vec![true, true, false, false],
+                vec![false, true, true, false],
+                vec![false, false, true, false],
+            ],
+        );
+
+        let dictionary = DictionaryArray::new(
+            datatypes::arrow::array::UInt32Array::from(vec![
+                Some(0),
+                Some(1),
+                Some(2),
+                None,
+                Some(3),
+            ]),
+            Arc::new(datatypes::arrow::array::StringArray::from(vec![
+                Some("api"),
+                Some("API"),
+                Some("db"),
+                None,
+            ])),
+        );
+        let raw =
+            regexp_is_match_dictionary(&dictionary, Some(&Regex::new("^api$").unwrap())).unwrap();
+        assert!(raw.is_null(3)); // null dictionary key
+        assert!(raw.is_null(4)); // non-null key referencing a null dictionary value
+
+        let dictionary = Arc::new(dictionary) as ArrayRef;
+        assert_regex_scan_masks(
+            &dictionary,
+            [
+                vec![true, false, false, false, false],
+                vec![true, true, false, false, false],
+                vec![false, true, true, false, false],
+                vec![false, false, true, false, false],
+            ],
+        );
+
+        let negative = regex_evaluator(Operator::RegexNotMatch);
+        assert!(!negative.evaluate_scalar(&ScalarValue::Utf8(None)).unwrap());
+    }
+
+    #[test]
+    fn test_nullable_boolean_predicate_becomes_scan_mask() {
+        let predicate = BooleanArray::from(vec![Some(true), None, Some(false)]);
+        assert_eq!(
+            BooleanArray::from(vec![true, false, false]),
+            boolean_array_to_scan_mask(&predicate)
+        );
+    }
+
+    fn assert_regex_scan_masks(input: &ArrayRef, expected: [Vec<bool>; 4]) {
+        for (op, expected) in [
+            Operator::RegexMatch,
+            Operator::RegexIMatch,
+            Operator::RegexNotMatch,
+            Operator::RegexNotIMatch,
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            assert_eq!(
+                BooleanBuffer::from(expected),
+                regex_evaluator(op).evaluate_array(input).unwrap(),
+                "{op:?}"
+            );
+        }
+    }
+
+    fn regex_evaluator(op: Operator) -> SimpleFilterEvaluator {
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Column(Column::from_name("host"))),
+            op,
+            right: Box::new("^api$".lit()),
+        });
+        SimpleFilterEvaluator::try_new(&expr).unwrap()
     }
 }

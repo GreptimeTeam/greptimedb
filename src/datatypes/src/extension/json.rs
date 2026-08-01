@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arrow_schema::extension::ExtensionType;
-use arrow_schema::{ArrowError, DataType, FieldRef};
+use arrow_schema::{ArrowError, DataType, Field, FieldRef};
 use serde::{Deserialize, Serialize};
 
 use crate::json::JsonSettings;
@@ -103,8 +103,22 @@ impl ExtensionType for JsonExtensionType {
 }
 
 /// Check if this field is to be treated as json extension type.
-pub fn is_json_extension_type(field: &FieldRef) -> bool {
-    field.extension_type_name() == Some(JsonExtensionType::NAME)
+pub fn is_json_extension_type<T: AsRef<Field>>(field: T) -> bool {
+    field.as_ref().extension_type_name() == Some(JsonExtensionType::NAME)
+}
+
+/// Check if this field is a JSON2 extension type.
+///
+/// Legacy JSONB and JSON2 share the same JSON extension name. The column schema construction
+/// invariant is that JSON2 always stores its settings as `Some`, including default settings,
+/// while legacy JSONB stores no JSON settings. Therefore, after checking the extension name,
+/// the presence of JSON settings distinguishes JSON2 from legacy JSONB.
+pub fn is_json2_extension_type<T: AsRef<Field>>(field: T) -> bool {
+    let field = field.as_ref();
+    is_json_extension_type(field)
+        && field
+            .try_extension_type::<JsonExtensionType>()
+            .is_ok_and(|x| x.metadata().json_settings.is_some())
 }
 
 /// Check if this field is a structured JSON field.

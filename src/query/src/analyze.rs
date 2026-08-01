@@ -355,7 +355,7 @@ impl JsonMetrics {
         let mut elapsed_compute = 0;
         let mut output_rows = 0;
         let mut other_metrics = HashMap::default();
-        let (name, param) = raw_name.split_once(": ").unwrap_or_default();
+        let (name, param) = raw_name.split_once(": ").unwrap_or((raw_name, ""));
 
         for (name, value) in plan_metrics.metrics.into_iter() {
             if name == "elapsed_compute" {
@@ -452,5 +452,43 @@ mod tests {
         let rebuilt = rebuilt.as_any().downcast_ref::<DistAnalyzeExec>().unwrap();
 
         assert_eq!(rebuilt.input().schema().field(0).name(), "replacement");
+    }
+
+    #[test]
+    fn qbs_analyze_json_preserves_plan_name_without_parameters() {
+        let input = empty_plan("input");
+        let mut collector = MetricCollector::new(false);
+        accept(input.as_ref(), &mut collector).unwrap();
+
+        let plan_metrics = &collector.record_batch_metrics.plan_metrics;
+        assert_eq!(plan_metrics.len(), 1);
+        assert_eq!(plan_metrics[0].level, 0);
+        assert_eq!(plan_metrics[0].plan, input.name());
+
+        let analyze: Arc<dyn ExecutionPlan> = Arc::new(DistAnalyzeExec::new(
+            input.clone(),
+            false,
+            AnalyzeFormat::JSON,
+        ));
+        let metrics = analyze_plan_metrics_to_json_value(&analyze, false).unwrap();
+        let plan_name = metrics[0]["plan"]["name"].as_str().unwrap();
+        let plan_param = metrics[0]["plan"]["param"].as_str().unwrap();
+
+        assert!(!plan_name.is_empty());
+        assert_eq!(plan_name, input.name());
+        assert!(plan_param.is_empty());
+    }
+
+    #[test]
+    fn qbs_analyze_json_splits_plan_name_and_parameters() {
+        let (_, metrics) = JsonMetrics::from_plan_metrics(PlanMetrics {
+            plan: "FilterExec: predicate".to_string(),
+            plan_name: "FilterExec".to_string(),
+            level: 0,
+            metrics: vec![],
+        });
+
+        assert_eq!(metrics.name, "FilterExec");
+        assert_eq!(metrics.param, "predicate");
     }
 }

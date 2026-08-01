@@ -37,6 +37,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error;
 use crate::error::Result;
+use crate::pending_rows_batcher::RecordBatchWithTsIdx;
 
 /// Extract timestamp, field, and tag column names from a logical region schema.
 fn unzip_logical_region_schema(
@@ -85,7 +86,7 @@ fn unzip_logical_region_schema(
 pub(crate) fn rows_to_aligned_record_batch(
     rows: &Rows,
     target_schema: &ArrowSchema,
-) -> Result<RecordBatch> {
+) -> Result<RecordBatchWithTsIdx> {
     let row_count = rows.rows.len();
     let column_count = rows.schema.len();
 
@@ -105,6 +106,15 @@ pub(crate) fn rows_to_aligned_record_batch(
 
     let (target_ts_name, target_field_name, _target_tags) =
         unzip_logical_region_schema(target_schema)?;
+    let timestamp_index = target_schema
+        .column_with_name(&target_ts_name)
+        .map(|(index, _)| index)
+        .with_context(|| error::UnexpectedResultSnafu {
+            reason: format!(
+                "Failed to resolve timestamp column '{}' in target schema",
+                target_ts_name
+            ),
+        })?;
 
     // Map effective target column name → (source column index, source arrow type).
     // Handles prom renames: Timestamp → target ts name, Float64 → target field name.
@@ -165,7 +175,7 @@ pub(crate) fn rows_to_aligned_record_batch(
 
     let batch = RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
         .context(error::ArrowSnafu)?;
-    Ok(batch)
+    RecordBatchWithTsIdx::try_new(batch, timestamp_index)
 }
 
 /// Identify tag columns in the proto `rows_schema` that are absent from the
@@ -367,7 +377,9 @@ mod tests {
             Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        let aligned_batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        let (batch, timestamp_index) = aligned_batch.into_parts();
+        assert_eq!(0, timestamp_index);
         assert_eq!(batch.schema().as_ref(), &target);
         assert_eq!(2, batch.num_rows());
         assert_eq!(3, batch.num_columns());
@@ -456,7 +468,9 @@ mod tests {
             Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        let aligned_batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        let (batch, timestamp_index) = aligned_batch.into_parts();
+        assert_eq!(0, timestamp_index);
         assert_eq!(batch.schema().as_ref(), &target);
         assert_eq!(1, batch.num_rows());
         assert_eq!(4, batch.num_columns());

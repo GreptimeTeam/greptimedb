@@ -35,18 +35,19 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
     PermissionTableTargets,
 };
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
-    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
+    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryRecorder, SlowQueryTimer,
 };
 use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
+use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
@@ -58,6 +59,7 @@ use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
 use lazy_static::lazy_static;
@@ -127,7 +129,8 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    event_recorder: Option<EventRecorderRef>,
+    event_recorder: EventRecorderRef,
+    slow_query_recorder: EventRecorderRef,
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
@@ -158,6 +161,19 @@ impl Instance {
         &self.plugins
     }
 
+    fn check_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+    ) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), req)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
     pub fn statement_executor(&self) -> &StatementExecutorRef {
         &self.statement_executor
     }
@@ -174,12 +190,21 @@ impl Instance {
         &self.process_manager
     }
 
+    /// Returns the event recorder configured for this frontend instance.
+    pub fn event_recorder(&self) -> EventRecorderRef {
+        self.event_recorder.clone()
+    }
+
     pub fn node_manager(&self) -> &NodeManagerRef {
         self.inserter.node_manager()
     }
 
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
         self.inserter.partition_manager()
+    }
+
+    pub fn table_flownode_set_cache(&self) -> &TableFlownodeSetCacheRef {
+        self.inserter.table_flownode_set_cache()
     }
 
     pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
@@ -201,6 +226,10 @@ impl Instance {
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
     ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
+}
+
+fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
+    matches!(stmt, Statement::Explain(explain) if explain.analyze && explain.verbose)
 }
 
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
@@ -241,16 +270,14 @@ impl Instance {
             return None;
         }
 
-        self.event_recorder.clone().map(|event_recorder| {
-            SlowQueryTimer::new(
-                CatalogQueryStatement::Sql(stmt.clone()),
-                schema_name,
-                self.slow_query_options.threshold,
-                self.slow_query_options.sample_ratio,
-                self.slow_query_options.record_type,
-                event_recorder,
-            )
-        })
+        Some(SlowQueryTimer::new(
+            CatalogQueryStatement::Sql(stmt.clone()),
+            schema_name,
+            self.slow_query_options.threshold,
+            self.slow_query_options.sample_ratio,
+            self.slow_query_options.record_type,
+            self.slow_query_recorder.clone(),
+        ))
     }
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
@@ -263,6 +290,9 @@ impl Instance {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
             let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+            let timeout_recorder = is_explain_analyze_verbose(&stmt)
+                .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
+                .flatten();
 
             let ticket = self.process_manager.register_query(
                 catalog_name,
@@ -273,7 +303,12 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+            let query_fut = self.exec_statement_with_timeout(
+                stmt,
+                query_ctx,
+                query_interceptor,
+                timeout_recorder,
+            );
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -290,7 +325,7 @@ impl Instance {
                     Output { data, meta }
                 })
         } else {
-            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
+            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor, None)
                 .await
         }
     }
@@ -300,6 +335,7 @@ impl Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+        timeout_recorder: Option<SlowQueryRecorder>,
     ) -> Result<Output> {
         let timeout = derive_timeout(&stmt, &query_ctx);
         match timeout {
@@ -314,7 +350,7 @@ impl Instance {
                 let output = map_query_output(output)?;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
-                attach_timeout(output, remaining_timeout)
+                attach_timeout(output, remaining_timeout, timeout_recorder)
             }
             None => self
                 .exec_statement(stmt, query_ctx, query_interceptor)
@@ -551,18 +587,44 @@ fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> O
     }
 }
 
-fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
+fn record_explain_analyze_timeout(
+    recorder: Option<&SlowQueryRecorder>,
+    plan: Option<&Arc<dyn ExecutionPlan>>,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let metrics = plan
+        .and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
+    recorder.force_record_with_payload(serde_json::json!({
+        "timed_out": true,
+        "metrics": metrics,
+    }));
+}
+
+fn attach_timeout(
+    output: Output,
+    mut timeout: Duration,
+    timeout_recorder: Option<SlowQueryRecorder>,
+) -> Result<Output> {
     if timeout.is_zero() {
         return StatementTimeoutSnafu.fail();
     }
 
+    let plan = timeout_recorder
+        .as_ref()
+        .and_then(|_| output.meta.plan.clone());
     let output = match output.data {
         OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
         OutputData::Stream(mut stream) => {
             let schema = stream.schema();
             let s = Box::pin(stream! {
                 let mut start = tokio::time::Instant::now();
-                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
+                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| {
+                    record_explain_analyze_timeout(timeout_recorder.as_ref(), plan.as_ref());
+                    StreamTimeoutSnafu.build()
+                })? {
                     yield item;
 
                     let now = tokio::time::Instant::now();
@@ -570,6 +632,7 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
                     start = now;
                     // tokio::time::timeout may not return an error immediately when timeout is 0.
                     if timeout.is_zero() {
+                        record_explain_analyze_timeout(timeout_recorder.as_ref(), plan.as_ref());
                         StreamTimeoutSnafu.fail()?;
                     }
                 }
@@ -668,7 +731,7 @@ impl Instance {
             slow_query_timer,
         );
         let query_fut =
-            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
+            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor, None);
         let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| error::CancelledSnafu.build())??;
@@ -751,6 +814,7 @@ impl Instance {
         &self,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
+        timeout_recorder: Option<SlowQueryRecorder>,
     ) -> Result<Output> {
         let timeout = derive_timeout_for_plan(&plan, &query_ctx);
         match timeout {
@@ -761,7 +825,7 @@ impl Instance {
                     .map_err(|_| StatementTimeoutSnafu.build())??;
                 let output = map_query_output(output)?;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
-                attach_timeout(output, remaining_timeout)
+                attach_timeout(output, remaining_timeout, timeout_recorder)
             }
             None => self
                 .exec_plan(plan, query_ctx)
@@ -793,24 +857,25 @@ impl Instance {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
             let slow_query_timer = if plan_is_readonly {
-                self.slow_query_options
-                    .enable
-                    .then(|| self.event_recorder.clone())
-                    .flatten()
-                    .map(|event_recorder| {
-                        SlowQueryTimer::new(
-                            CatalogQueryStatement::Plan(query.clone()),
-                            schema_name.clone(),
-                            self.slow_query_options.threshold,
-                            self.slow_query_options.sample_ratio,
-                            self.slow_query_options.record_type,
-                            event_recorder,
-                        )
-                    })
+                self.slow_query_options.enable.then(|| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Plan(query.clone()),
+                        schema_name.clone(),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
+                        self.slow_query_recorder.clone(),
+                    )
+                })
             } else {
                 None
             };
 
+            let timeout_recorder = stmt
+                .as_ref()
+                .is_some_and(is_explain_analyze_verbose)
+                .then(|| slow_query_timer.as_ref().map(SlowQueryTimer::recorder))
+                .flatten();
             let ticket = self.process_manager.register_query(
                 catalog_name,
                 vec![schema_name],
@@ -820,7 +885,7 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone());
+            let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
@@ -837,7 +902,8 @@ impl Instance {
                     Output { data, meta }
                 })
         } else {
-            self.exec_plan_with_timeout(plan, query_ctx.clone()).await
+            self.exec_plan_with_timeout(plan, query_ctx.clone(), None)
+                .await
         };
 
         result.and_then(|output| query_interceptor.post_execute(output, query_ctx))
@@ -1001,7 +1067,10 @@ impl Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .check_permission(
+                query_ctx.current_user(),
+                PermissionReq::Action(PROMQL_QUERY),
+            )
             .context(AuthSnafu)?;
         Ok(())
     }
@@ -1180,21 +1249,16 @@ impl PrometheusHandler for Instance {
         };
         let raw_query = query_statement.to_string();
 
-        let slow_query_timer = self
-            .slow_query_options
-            .enable
-            .then(|| self.event_recorder.clone())
-            .flatten()
-            .map(|event_recorder| {
-                SlowQueryTimer::new(
-                    query_statement,
-                    query_ctx.current_schema(),
-                    self.slow_query_options.threshold,
-                    self.slow_query_options.sample_ratio,
-                    self.slow_query_options.record_type,
-                    event_recorder,
-                )
-            });
+        let slow_query_timer = self.slow_query_options.enable.then(|| {
+            SlowQueryTimer::new(
+                query_statement,
+                query_ctx.current_schema(),
+                self.slow_query_options.threshold,
+                self.slow_query_options.sample_ratio,
+                self.slow_query_options.record_type,
+                self.slow_query_recorder.clone(),
+            )
+        });
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
@@ -1258,7 +1322,7 @@ impl PrometheusHandler for Instance {
         let targets = self
             .resolve_query_permission_targets(targets, query_ctx)
             .await?;
-        self.check_table_permission(query_ctx, PermissionReq::PromQuery, targets)
+        self.check_table_permission(query_ctx, PermissionReq::Action(PROMQL_QUERY), targets)
             .context(AuthSnafu)?;
         Ok(())
     }
@@ -1280,7 +1344,7 @@ impl PrometheusHandler for Instance {
                 .as_ref()
                 .check_permission_with_table_targets(
                     query_ctx.current_user(),
-                    PermissionReq::PromQuery,
+                    PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
                 )
                 .context(AuthSnafu);
@@ -1304,7 +1368,7 @@ impl PrometheusHandler for Instance {
                 .as_ref()
                 .check_permission_with_table_targets(
                     query_ctx.current_user(),
-                    PermissionReq::PromQuery,
+                    PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
                 )
                 .context(AuthSnafu)
@@ -1611,11 +1675,17 @@ mod tests {
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-    use auth::{PermissionResp, UserInfoRef};
-    use catalog::process_manager::ProcessManager;
+    use auth::{
+        DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY, PIPELINE_DELETE,
+        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfoRef,
+    };
+    use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
+    use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
     use common_error::ext::{BoxedError, PlainError};
     use common_error::status_code::StatusCode;
+    use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
+    use common_frontend::slow_query_event::SlowQueryEvent;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
@@ -1623,19 +1693,24 @@ mod tests {
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
-    use common_query::Output;
+    use common_query::{Output, OutputMeta};
     use common_recordbatch::{
         OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
     };
+    use common_telemetry::logging::SlowQueriesRecordType;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_expr::dml::InsertOp;
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
-    use datatypes::vectors::{StringVector, VectorRef};
+    use datatypes::vectors::{StringVector, TimestampNanosecondVector, VectorRef};
     use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
-    use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
+    use servers::query_handler::{
+        DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler, PipelineHandlerRef,
+        PromStoreProtocolHandler,
+    };
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
@@ -1650,6 +1725,7 @@ mod tests {
     use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::frontend::FrontendOptions;
@@ -1657,6 +1733,27 @@ mod tests {
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingSlowQueryEventRecorder {
+        payloads: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl EventRecorder for RecordingSlowQueryEventRecorder {
+        fn record(&self, event: Box<dyn Event>) {
+            let event = event
+                .as_any()
+                .downcast_ref::<SlowQueryEvent>()
+                .expect("expected a slow query event");
+            self.payloads.lock().unwrap().push(event.payload.clone());
+        }
+
+        fn event_type_filter(&self) -> EventTypeFilterRef {
+            Arc::new(EventTypeFilter::All)
+        }
+
+        fn close(&self) {}
     }
 
     #[test]
@@ -1693,6 +1790,21 @@ mod tests {
             parse_test_sql("explain analyze verbose select 1; select 2").len(),
             2
         );
+
+        assert!(is_explain_analyze_verbose(
+            &parse_test_sql("explain analyze verbose select 1")[0]
+        ));
+        for sql in [
+            "select 1",
+            "explain select 1",
+            "explain analyze select 1",
+            "explain verbose select 1",
+        ] {
+            assert!(
+                !is_explain_analyze_verbose(&parse_test_sql(sql)[0]),
+                "{sql}"
+            );
+        }
     }
 
     #[derive(Debug, Snafu)]
@@ -1852,6 +1964,87 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct CheckedAction {
+        action: PermissionAction,
+        targets: Option<PermissionTableTargets>,
+    }
+
+    #[derive(Default)]
+    struct RejectEndpointPermissionChecker {
+        checks: std::sync::Mutex<Vec<CheckedAction>>,
+    }
+
+    impl RejectEndpointPermissionChecker {
+        fn reject(
+            &self,
+            action: PermissionAction,
+            targets: Option<PermissionTableTargets>,
+        ) -> PermissionResp {
+            self.checks
+                .lock()
+                .unwrap()
+                .push(CheckedAction { action, targets });
+            PermissionResp::Reject
+        }
+
+        fn take_check(&self) -> CheckedAction {
+            let mut checks = self.checks.lock().unwrap();
+            assert_eq!(1, checks.len());
+            checks.pop().unwrap()
+        }
+    }
+
+    impl PermissionChecker for RejectEndpointPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(match req {
+                PermissionReq::Action(action) => self.reject(action, None),
+                _ => PermissionResp::Allow,
+            })
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(match req {
+                PermissionReq::Action(action) => self.reject(action, Some(targets)),
+                _ => PermissionResp::Allow,
+            })
+        }
+    }
+
+    struct WriteOnlyPermissionChecker;
+
+    impl PermissionChecker for WriteOnlyPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(if req.is_readonly() {
+                PermissionResp::Reject
+            } else {
+                PermissionResp::Allow
+            })
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            user_info: UserInfoRef,
+            req: PermissionReq,
+            _targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            self.check_permission(user_info, req)
+        }
+    }
+
     #[derive(Default)]
     struct TargetIndependentPermissionChecker {
         checks: atomic::AtomicUsize,
@@ -1959,6 +2152,73 @@ mod tests {
     }
 
     impl Unpin for PendingRecordBatchStream {}
+
+    #[test]
+    fn test_record_explain_analyze_timeout_uses_empty_metrics_without_plan() {
+        let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        let timer = SlowQueryTimer::new(
+            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            "public".to_string(),
+            Duration::from_secs(3600),
+            0.0,
+            SlowQueriesRecordType::SystemTable,
+            event_recorder.clone(),
+        );
+        let timeout_recorder = timer.recorder();
+
+        record_explain_analyze_timeout(Some(&timeout_recorder), None);
+        drop(timer);
+
+        let payloads = event_recorder.payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["timed_out"], true);
+        assert_eq!(payloads[0]["metrics"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_attach_timeout_records_explain_analyze_metrics() {
+        let event_recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        let timer = SlowQueryTimer::new(
+            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            "public".to_string(),
+            Duration::from_secs(3600),
+            0.0,
+            SlowQueriesRecordType::SystemTable,
+            event_recorder.clone(),
+        );
+        let timeout_recorder = timer.recorder();
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(Schema::empty())));
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let stream = PendingRecordBatchStream {
+            schema: Arc::new(GtSchema::new(vec![])),
+            polled_tx: None,
+            _finish_tx: finish_tx,
+            finish_rx: Box::pin(finish_rx),
+        };
+        let output = Output::new(
+            OutputData::Stream(Box::pin(stream)),
+            OutputMeta::new_with_plan(plan),
+        );
+        let output =
+            attach_timeout(output, Duration::from_millis(10), Some(timeout_recorder)).unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            unreachable!();
+        };
+
+        let err = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(err.to_string(), "Stream timeout");
+        drop(stream);
+        drop(timer);
+
+        let payloads = event_recorder.payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["timed_out"], true);
+        assert!(
+            payloads[0]["metrics"]
+                .as_array()
+                .is_some_and(|metrics| !metrics.is_empty())
+        );
+    }
 
     struct PendingDataSource {
         schema: GtSchemaRef,
@@ -2139,6 +2399,38 @@ mod tests {
         )
     }
 
+    fn test_pipeline_table() -> TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("content_type", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("pipeline", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "created_at",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(StringVector::from(vec!["pipeline"])),
+            Arc::new(StringVector::from(vec!["public"])),
+            Arc::new(StringVector::from(vec!["application/yaml"])),
+            Arc::new(StringVector::from(vec![
+                "transform:\n- field: ts\n  type: timestamp, ns\n  index: time\n",
+            ])),
+            Arc::new(TimestampNanosecondVector::from_values([1])),
+        ];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        MemTable::new_with_catalog(
+            "pipelines",
+            record_batch,
+            2049,
+            "greptime".to_string(),
+            DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+        )
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -2260,6 +2552,193 @@ mod tests {
         results.remove(0).with_context(|_| ExecuteSqlSnafu {
             sql: sql.to_string(),
         })
+    }
+
+    fn assert_permission_denied<T>(result: servers::error::Result<T>) {
+        let err = match result {
+            Ok(_) => panic!("request should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+    }
+
+    fn assert_action_checked(
+        checker: &RejectEndpointPermissionChecker,
+        action: PermissionAction,
+        targets: Option<PermissionTableTargets>,
+    ) {
+        assert_eq!(CheckedAction { action, targets }, checker.take_check());
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder_is_exposed() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let _event_recorder = instance.event_recorder();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_restricted_endpoint_handlers_check_permissions() -> TestResult<()> {
+        let checker = Arc::new(RejectEndpointPermissionChecker::default());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_table(1024, "denied")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let mut ctx = test_query_ctx(1);
+        Arc::get_mut(&mut ctx).unwrap().set_extension(
+            servers::http::jaeger::JAEGER_QUERY_TABLE_NAME_KEY,
+            "denied".to_string(),
+        );
+        let jaeger_targets = Some(PermissionTableTargets::resolved(vec![
+            PermissionTableTarget::new("greptime", "public", "denied"),
+        ]));
+
+        assert_permission_denied(JaegerQueryHandler::get_services(&instance, ctx.clone()).await);
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
+        assert_permission_denied(
+            JaegerQueryHandler::get_operations(&instance, ctx.clone(), "service", None).await,
+        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
+        assert_permission_denied(
+            JaegerQueryHandler::get_trace(&instance, ctx.clone(), "trace", None, None, None).await,
+        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets.clone());
+        assert_permission_denied(
+            JaegerQueryHandler::find_traces(
+                &instance,
+                ctx.clone(),
+                servers::http::jaeger::QueryTraceParams {
+                    service_name: "service".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert_action_checked(&checker, JAEGER_QUERY, jaeger_targets);
+
+        assert_permission_denied(
+            PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
+        );
+        assert_action_checked(&checker, PIPELINE_QUERY, None);
+        assert_permission_denied(
+            PipelineHandler::insert_pipeline(
+                &instance,
+                "pipeline",
+                "application/yaml",
+                "",
+                ctx.clone(),
+            )
+            .await,
+        );
+        assert_action_checked(&checker, PIPELINE_INSERT, None);
+        assert_permission_denied(
+            PipelineHandler::delete_pipeline(&instance, "pipeline", None, ctx.clone()).await,
+        );
+        assert_action_checked(&checker, PIPELINE_DELETE, None);
+        let app = axum::Router::new()
+            .route(
+                "/pipelines/_dryrun",
+                axum::routing::post(servers::http::event::pipeline_dryrun),
+            )
+            .with_state(servers::http::event::LogState {
+                log_handler: Arc::new(instance.clone()),
+                log_validator: None,
+                ingest_interceptor: None,
+            })
+            .layer(axum::Extension((*ctx).clone()));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/pipelines/_dryrun")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+        assert_action_checked(&checker, PIPELINE_QUERY, None);
+
+        assert_permission_denied(
+            DashboardHandler::save(&instance, "dashboard", "{}", ctx.clone()).await,
+        );
+        assert_action_checked(&checker, DASHBOARD_SAVE, None);
+        assert_permission_denied(DashboardHandler::list(&instance, ctx.clone()).await);
+        assert_action_checked(&checker, DASHBOARD_QUERY, None);
+        assert_permission_denied(
+            DashboardHandler::delete(&instance, "dashboard", ctx.clone()).await,
+        );
+        assert_action_checked(&checker, DASHBOARD_DELETE, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_only_ingestion_loads_named_pipeline() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+                table_name: "pipelines".to_string(),
+                table_id: 2049,
+                table: test_pipeline_table(),
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "pipelines".to_string(),
+            })?;
+        let ctx = test_query_ctx(1);
+        let handler: PipelineHandlerRef = Arc::new(instance.clone());
+
+        handler
+            .get_pipeline("pipeline", None, ctx.clone())
+            .await
+            .unwrap();
+        assert_permission_denied(
+            PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
+        );
+
+        let app = axum::Router::new()
+            .route(
+                "/pipelines/_dryrun",
+                axum::routing::post(servers::http::event::pipeline_dryrun),
+            )
+            .with_state(servers::http::event::LogState {
+                log_handler: handler,
+                log_validator: None,
+                ingest_interceptor: None,
+            })
+            .layer(axum::Extension((*ctx).clone()));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/pipelines/_dryrun")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+
+        Ok(())
     }
 
     #[tokio::test]

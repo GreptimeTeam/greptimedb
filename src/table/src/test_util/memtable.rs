@@ -121,7 +121,7 @@ impl DataSource for MemtableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let df_recordbatch = if let Some(indices) = request.projection_indices() {
+        let df_recordbatch = if let Some(indices) = request.projection.as_deref() {
             self.recordbatch
                 .df_record_batch()
                 .project(indices)
@@ -198,9 +198,8 @@ mod test {
     async fn test_scan_with_projection() {
         let table = build_testing_table();
 
-        let projection_input = Some(vec![1].into());
         let scan_req = ScanRequest {
-            projection_input,
+            projection: Some(vec![1]),
             ..Default::default()
         };
         let stream = table.scan_to_stream(scan_req).await.unwrap();

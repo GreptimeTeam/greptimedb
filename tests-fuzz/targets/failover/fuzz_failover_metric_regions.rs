@@ -252,7 +252,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // Recovers pod failures
     recover_pod_failure(ctx.kube.clone(), &ctx.namespace, &chaos_name).await?;
-    wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
+    wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(180)).await;
 
     tokio::time::sleep(default_distributed_time_constants().region_lease).await;
     // Validates value rows

@@ -74,6 +74,23 @@ impl TableData {
         self.rows.reserve(additional);
     }
 
+    pub(crate) fn ensure_column(&mut self, column_schema: ColumnSchema) -> Result<usize> {
+        if let Some(index) = self.column_indexes.get(&column_schema.column_name).copied() {
+            check_schema_number(
+                column_schema.datatype,
+                column_schema.semantic_type,
+                &self.schema[index],
+            )?;
+            return Ok(index);
+        }
+
+        let index = self.schema.len();
+        let name = column_schema.column_name.clone();
+        self.schema.push(column_schema);
+        self.column_indexes.insert(name, index);
+        Ok(index)
+    }
+
     #[allow(dead_code)]
     pub fn columns(&self) -> &Vec<ColumnSchema> {
         &self.schema

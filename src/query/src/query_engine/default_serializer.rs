@@ -30,9 +30,18 @@ use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
-    quantile_udaf,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, NativeHistogramAbsentOverTime,
+    NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg,
+    NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
+    NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDivScalar,
+    NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta,
+    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
+    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
+    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
+    StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -168,6 +177,48 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
         let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
 
+        for udf in [
+            NativeHistogramAbsentOverTime::scalar_udf(),
+            NativeHistogramAdd::scalar_udf(),
+            NativeHistogramAvg::scalar_udf(),
+            NativeHistogramAvgOverTime::scalar_udf(),
+            NativeHistogramChanges::scalar_udf(),
+            NativeHistogramCount::scalar_udf(),
+            NativeHistogramCountOverTime::scalar_udf(),
+            NativeHistogramDelta::scalar_udf(),
+            NativeHistogramDivScalar::scalar_udf(),
+            NativeHistogramDrop::bool_false_udf(String::new(), None),
+            NativeHistogramDrop::float_null_udf(String::new(), None),
+            NativeHistogramEq::scalar_udf(),
+            NativeHistogramFraction::scalar_udf(),
+            NativeHistogramIDelta::scalar_udf(),
+            NativeHistogramIRate::scalar_udf(),
+            NativeHistogramIncrease::scalar_udf(),
+            NativeHistogramLastOverTime::scalar_udf(),
+            NativeHistogramMulScalar::scalar_udf(),
+            NativeHistogramNeg::scalar_udf(),
+            NativeHistogramNotEq::scalar_udf(),
+            NativeHistogramPresentOverTime::scalar_udf(),
+            NativeHistogramQuantile::scalar_udf(),
+            NativeHistogramRate::scalar_udf(),
+            NativeHistogramResets::scalar_udf(),
+            NativeHistogramScalarMul::scalar_udf(),
+            NativeHistogramStddev::scalar_udf(),
+            NativeHistogramStdvar::scalar_udf(),
+            NativeHistogramSub::scalar_udf(),
+            NativeHistogramSum::scalar_udf(),
+            NativeHistogramSumOverTime::scalar_udf(),
+            NativeHistogramToString::scalar_udf(),
+        ] {
+            let _ = session_state.register_udf(Arc::new(udf));
+        }
+        for udaf in [
+            NativeHistogramAggAvg::aggregate_udf(),
+            NativeHistogramAggSum::aggregate_udf(),
+        ] {
+            let _ = session_state.register_udaf(Arc::new(udaf));
+        }
+
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)
             .await
@@ -186,9 +237,13 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
+    use common_query::native_histogram::native_histogram_value_type;
     use datafusion::catalog::TableProvider;
-    use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource, col, lit};
-    use datatypes::arrow::datatypes::SchemaRef;
+    use datafusion::datasource::MemTable;
+    use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, col, lit};
+    use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
+    use datatypes::data_type::DataType;
     use session::context::QueryContext;
 
     use super::*;
@@ -248,5 +303,76 @@ mod tests {
   TableScan: devices",
             decode_plan.to_string(),
         );
+    }
+
+    #[tokio::test]
+    async fn test_serializer_decode_native_histogram_udf() {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "histogram",
+            native_histogram_value_type().as_arrow_type(),
+            true,
+        )]));
+        let plan = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .project(vec![
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramCount::scalar_udf()),
+                args: vec![col("histogram")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::bool_false_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("histogram")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::float_null_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("histogram")],
+            }),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+
+        let decoded = plan_decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let decoded = decoded.to_string();
+        assert!(decoded.contains("prom_native_histogram_count"));
+        assert!(decoded.contains("prom_native_histogram_drop_bool"));
+        assert!(decoded.contains("prom_native_histogram_drop_float"));
     }
 }

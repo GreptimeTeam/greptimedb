@@ -31,7 +31,7 @@ use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
 use servers::error::{self, Result};
 use servers::pending_rows_batcher::{
     PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
-    PhysicalTableMetadata, TableBatch, flush_batch_physical,
+    PhysicalTableMetadata, RecordBatchWithTsIdx, TableBatch, flush_batch_physical,
 };
 use store_api::storage::RegionId;
 use table::test_util::table_info::test_table_info;
@@ -201,7 +201,7 @@ fn make_table_batches(
             TableBatch {
                 table_name: format!("logical_{}", i),
                 table_id: (100 + i) as u32,
-                batches: vec![batch],
+                batches: vec![RecordBatchWithTsIdx::try_new(batch, 0).unwrap()],
                 row_count,
             }
         })

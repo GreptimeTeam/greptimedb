@@ -2,7 +2,8 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index and value columns.
+## The default column prefix for auto-created time index, value, and native histogram columns.
+## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
@@ -40,14 +41,19 @@ default_column_prefix = "greptime"
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
+## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
+## The maximum number of blocking threads for compact operations.
+## Defaults to max(num_cpus / 2, 1).
+#+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
+## When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the
+## `prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -69,6 +75,14 @@ prom_validation_mode = "strict"
 experimental_enable_prometheus_native_histogram = false
 ## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
 experimental_enable_explain_analyze_stream = true
+
+## Whether to start the dedicated public HTTP **API** server. This server serves
+## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
+## option with the main server. It is disabled by default; set to `true` to enable.
+enable_api_server = false
+## The address to bind the dedicated HTTP API server, in the same form as `addr`.
+## Defaults to `127.0.0.1:4006`.
+api_server_addr = "127.0.0.1:4006"
 
 ## The gRPC server options.
 [grpc]
@@ -232,7 +246,7 @@ enable = true
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
-trace_ingest_chunk_size = 128
+trace_ingest_chunk_size = 512
 
 ## Prometheus remote storage options
 [prom_store]
@@ -251,6 +265,8 @@ with_metric_engine = true
 #+worker_channel_capacity = 65526
 ## Max inflight write requests before backpressure.
 #+max_inflight_requests = 3000
+## Maximum number of logical-table flow notifications waiting in the shared queue.
+#+flow_notification_queue_capacity = 1024
 
 ## The metasrv client options.
 [meta_client]
@@ -300,6 +316,10 @@ memory_pool_size = "50%"
 [datanode.client]
 connect_timeout = "10s"
 tcp_nodelay = true
+## The maximum receive message size for the gRPC client.
+max_recv_message_size = "512MB"
+## The maximum send message size for the gRPC client.
+max_send_message_size = "512MB"
 
 ## The logging options.
 [logging]

@@ -17,7 +17,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -36,14 +36,16 @@ use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, ReplayCheckpoint, SetRegionOption,
+    UnsetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
+use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{EventListener, FlushListener, StallListener};
-use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef, SstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
@@ -126,6 +128,134 @@ impl EventListener for RegionFlushGate {
 async fn test_manual_flush() {
     test_manual_flush_with_format(false).await;
     test_manual_flush_with_format(true).await;
+}
+
+fn set_max_row_group_row_count(row_count: usize) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::MaxRowGroupRowCount(Some(row_count))],
+        },
+    })
+}
+
+#[tokio::test]
+async fn test_flush_and_alter_max_row_group_row_count() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("max_row_group_row_count", "10")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 15),
+        },
+    )
+    .await;
+
+    // Setting the same value is a no-op and must not flush pending data.
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(10))
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(!version.memtables.is_empty());
+    assert!(version.ssts.levels()[0].files.is_empty());
+
+    // Altering a builder-affecting option flushes pending rows with the old size.
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        Some(5),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(15, 30),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let mut row_group_counts = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .map(|file| file.meta_ref().num_row_groups)
+        .collect::<Vec<_>>();
+    row_group_counts.sort_unstable();
+    assert_eq!(vec![2, 3], row_group_counts);
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::UnsetRegionOptions {
+                    keys: vec![UnsetRegionOption::MaxRowGroupRowCount],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        None,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
+
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(0))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        None,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
 }
 
 async fn test_manual_flush_with_format(flat_format: bool) {
@@ -1477,6 +1607,12 @@ pub(super) struct MockRegionHook {
     pub(super) closed_count: AtomicUsize,
     pub(super) dropped_count: AtomicUsize,
     pub(super) files_removed_count: AtomicUsize,
+    pub(super) gc_count: AtomicUsize,
+    pub(super) last_gc_is_region_dropped: AtomicBool,
+    pub(super) last_gc_full_file_listing: AtomicBool,
+    /// When set, `on_region_gc` returns `Err` (after recording the call), to
+    /// exercise the callers' retry/propagation behavior.
+    pub(super) gc_should_fail: AtomicBool,
     notify: Notify,
     dropped_notify: Notify,
     files_removed_notify: Notify,
@@ -1491,6 +1627,10 @@ impl MockRegionHook {
             closed_count: AtomicUsize::new(0),
             dropped_count: AtomicUsize::new(0),
             files_removed_count: AtomicUsize::new(0),
+            gc_count: AtomicUsize::new(0),
+            last_gc_is_region_dropped: AtomicBool::new(false),
+            last_gc_full_file_listing: AtomicBool::new(false),
+            gc_should_fail: AtomicBool::new(false),
             notify: Notify::new(),
             dropped_notify: Notify::new(),
             files_removed_notify: Notify::new(),
@@ -1591,6 +1731,33 @@ impl RegionHook for MockRegionHook {
             region_id
         );
         self.files_removed_notify.notify_one();
+    }
+
+    async fn on_region_gc(
+        &self,
+        region_id: RegionId,
+        _region_metadata: Option<&RegionMetadataRef>,
+        _access_layer: &AccessLayerRef,
+        info: &RegionGcInfo<'_>,
+    ) -> Result<(), Error> {
+        self.gc_count.fetch_add(1, Ordering::Relaxed);
+        self.last_gc_is_region_dropped
+            .store(info.is_region_dropped, Ordering::Relaxed);
+        self.last_gc_full_file_listing
+            .store(info.full_file_listing, Ordering::Relaxed);
+        common_telemetry::info!(
+            "MockRegionHook::on_region_gc: region={}, is_region_dropped={}, full_file_listing={}",
+            region_id,
+            info.is_region_dropped,
+            info.full_file_listing
+        );
+        if self.gc_should_fail.load(Ordering::Relaxed) {
+            return crate::error::UnexpectedSnafu {
+                reason: "simulated offline-cleanup hook failure".to_string(),
+            }
+            .fail();
+        }
+        Ok(())
     }
 }
 

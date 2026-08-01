@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    LOG_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PermissionChecker,
+    PermissionCheckerRef, PermissionReq,
+};
 use client::Output;
 use common_error::ext::BoxedError;
 use datatypes::timestamp::TimestampNanosecond;
@@ -42,7 +45,7 @@ impl Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::LogWrite)
+            .check_permission(ctx.current_user(), PermissionReq::Action(LOG_WRITE))
             .context(AuthSnafu)?;
 
         let log = self
@@ -51,7 +54,7 @@ impl Instance {
             .as_ref()
             .pre_ingest(log, ctx.clone())?;
 
-        self.check_row_insert_permission(&log, &ctx, PermissionReq::LogWrite)
+        self.check_row_insert_permission(&log, &ctx, PermissionReq::Action(LOG_WRITE))
             .context(AuthSnafu)?;
 
         Ok(log)
@@ -84,6 +87,10 @@ impl PipelineHandler for Instance {
         Ok(outputs)
     }
 
+    fn check_pipeline_query_permission(&self, query_ctx: &QueryContextRef) -> ServerResult<()> {
+        self.check_permission(query_ctx, PermissionReq::Action(PIPELINE_QUERY))
+    }
+
     async fn get_pipeline(
         &self,
         name: &str,
@@ -103,6 +110,7 @@ impl PipelineHandler for Instance {
         pipeline: &str,
         query_ctx: QueryContextRef,
     ) -> ServerResult<PipelineInfo> {
+        self.check_permission(&query_ctx, PermissionReq::Action(PIPELINE_INSERT))?;
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await
@@ -115,6 +123,7 @@ impl PipelineHandler for Instance {
         version: PipelineVersion,
         ctx: QueryContextRef,
     ) -> ServerResult<Option<()>> {
+        self.check_permission(&ctx, PermissionReq::Action(PIPELINE_DELETE))?;
         self.pipeline_operator
             .delete_pipeline(name, version, ctx)
             .await
@@ -143,6 +152,7 @@ impl PipelineHandler for Instance {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> ServerResult<(String, TimestampNanosecond)> {
+        self.check_permission(&query_ctx, PermissionReq::Action(PIPELINE_QUERY))?;
         self.pipeline_operator
             .get_pipeline_str(name, version, query_ctx)
             .await

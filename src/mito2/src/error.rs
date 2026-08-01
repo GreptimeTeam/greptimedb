@@ -465,6 +465,14 @@ pub enum Error {
         error: datafusion::error::DataFusionError,
     },
 
+    #[snafu(display("Failed to merge candidate series"))]
+    MergeCandidateSeries {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -549,6 +557,16 @@ pub enum Error {
 
     #[snafu(display("Region {} is closed", region_id))]
     RegionClosed {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Stale compaction execution for region {}, the region may have been reopened, truncated or the compaction was superseded",
+        region_id
+    ))]
+    StaleCompactionExecution {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1142,6 +1160,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("Flush is cancelled."))]
+    FlushCancelled {},
+
     #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
         region_id: RegionId,
@@ -1338,6 +1359,36 @@ impl Error {
             _ => false,
         }
     }
+
+    /// Returns whether a failed manifest update may have been persisted.
+    ///
+    /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
+    /// manifest write could leave the manifest referencing missing files.
+    pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
+        match self {
+            Error::UpdateManifest { .. }
+            | Error::RegionState { .. }
+            | Error::RegionTruncated { .. }
+            | Error::RegionStopped { .. }
+            | Error::SerdeJson { .. }
+            | Error::CompressObject { .. } => false,
+            Error::OpenDal { error, .. } => !matches!(
+                error.kind(),
+                ErrorKind::Unsupported
+                    | ErrorKind::ConfigInvalid
+                    | ErrorKind::NotFound
+                    | ErrorKind::PermissionDenied
+                    | ErrorKind::IsADirectory
+                    | ErrorKind::NotADirectory
+                    | ErrorKind::AlreadyExists
+                    | ErrorKind::RateLimited
+                    | ErrorKind::IsSameFile
+                    | ErrorKind::ConditionNotMatch
+                    | ErrorKind::RangeNotSatisfied
+            ),
+            _ => true,
+        }
+    }
 }
 
 impl ErrorExt for Error {
@@ -1402,6 +1453,7 @@ impl ErrorExt for Error {
             | DecodeWal { .. }
             | ComputeArrow { .. }
             | EvalPartitionFilter { .. }
+            | MergeCandidateSeries { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
@@ -1434,6 +1486,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            StaleCompactionExecution { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
@@ -1494,7 +1547,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "vector_index")]
             VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
-            ManualCompactionOverride {} | CompactionCancelled {} => StatusCode::Cancelled,
+            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
+                StatusCode::Cancelled
+            }
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
@@ -1598,5 +1653,48 @@ impl ErrorExt for Error {
 
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use snafu::IntoError;
+
+    use super::*;
+
+    #[test]
+    fn test_manifest_update_persistence() {
+        let rejected_kinds = [
+            ErrorKind::Unsupported,
+            ErrorKind::ConfigInvalid,
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::IsADirectory,
+            ErrorKind::NotADirectory,
+            ErrorKind::AlreadyExists,
+            ErrorKind::RateLimited,
+            ErrorKind::IsSameFile,
+            ErrorKind::ConditionNotMatch,
+            ErrorKind::RangeNotSatisfied,
+        ];
+        for kind in rejected_kinds {
+            let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
+            assert!(
+                !error.may_have_persisted_manifest_update(),
+                "error kind {kind:?} should prove the manifest was not persisted"
+            );
+        }
+
+        let error =
+            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
+        assert!(error.may_have_persisted_manifest_update());
+
+        let region_id = RegionId::new(1, 1);
+        let error = RegionTruncatedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+
+        // This can be raised while applying an edit after its manifest file was saved.
+        let error = RegionMetadataNotFoundSnafu {}.build();
+        assert!(error.may_have_persisted_manifest_update());
     }
 }

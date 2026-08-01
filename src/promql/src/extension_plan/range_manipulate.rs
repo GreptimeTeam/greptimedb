@@ -719,7 +719,9 @@ impl RangeManipulateStream {
             first_ts + (self.interval - remainder)
         };
         let last_ts = ts_column.value(ts_column.len() - 1);
-        let last_ts_aligned = ((last_ts + self.range) / self.interval) * self.interval;
+        let last_ts_with_range = last_ts + self.range;
+        let remainder = (last_ts_with_range - self.start).rem_euclid(self.interval);
+        let last_ts_aligned = last_ts_with_range - remainder;
         let start = self.start.max(first_ts_aligned);
         let end = self.end.min(last_ts_aligned);
         if start > end {
@@ -1108,5 +1110,38 @@ mod test {
                 "All timestamps should maintain query alignment pattern"
             );
         }
+    }
+
+    #[test]
+    fn test_calculate_range_keeps_query_aligned_tail() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
+        let stream = RangeManipulateStream {
+            start: 4,
+            end: 94,
+            interval: 30,
+            range: 15,
+            time_index: 0,
+            field_columns: vec![],
+            aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
+            output_schema: schema.clone(),
+            input: Box::pin(empty_stream),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(vec![20, 50, 80]))],
+        )
+        .unwrap();
+
+        let (ranges, bounds) = stream.calculate_range(&batch).unwrap();
+
+        assert_eq!(bounds, (34, 94));
+        assert_eq!(ranges, vec![(0, 1), (1, 1), (2, 1)]);
     }
 }

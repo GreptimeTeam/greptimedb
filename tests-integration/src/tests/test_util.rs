@@ -142,11 +142,19 @@ impl MockInstanceBuilder {
                     guard,
                     kv_backend,
                     procedure_manager,
+                    event_recorder_handle,
                     ..
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, guard, opts, procedure_manager, false)
+                        .build_with(
+                            kv_backend,
+                            guard,
+                            opts,
+                            procedure_manager,
+                            event_recorder_handle,
+                            false,
+                        )
                         .await,
                 )
             }
@@ -429,6 +437,16 @@ pub fn prepare_path(p: &str) -> String {
     };
 
     p.to_string()
+}
+
+/// Creates a temporary local-file test directory inside the standalone test sandbox.
+pub fn create_local_file_test_dir(prefix: &str) -> tempfile::TempDir {
+    let parent = find_workspace_path("target/local-file-tests");
+    std::fs::create_dir_all(&parent).unwrap();
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(parent)
+        .unwrap()
 }
 
 /// Find the testing file resource under workspace root to be used in object store.

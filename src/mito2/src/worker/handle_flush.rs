@@ -60,11 +60,15 @@ fn resolve_flush_reason(
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
-        self.flush_scheduler.on_flush_failed(region_id, request.err);
-        debug!(
-            "Flush failed for region {}, handling stalled requests",
-            region_id
-        );
+        let mut pending_ddls = self.flush_scheduler.on_flush_failed(region_id, request.err);
+        if !pending_ddls.is_empty() {
+            info!(
+                "Flush terminated for region {}, handling {} pending lifecycle DDL requests",
+                region_id,
+                pending_ddls.len()
+            );
+            self.handle_ddl_requests(&mut pending_ddls).await;
+        }
         // Maybe flush worker again.
         self.maybe_flush_worker();
 
@@ -230,7 +234,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             access_layer: region.access_layer.clone(),
             listener: self.listener.clone(),
             engine_config,
-            row_group_size,
+            // The request-provided size (e.g. manual flush) takes precedence over the
+            // region option.
+            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
             cache_manager: self.cache_manager.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),

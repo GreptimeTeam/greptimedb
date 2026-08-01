@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::json::JSON2_MAX_STRUCTURED_DEPTH;
 use snafu::{ResultExt, ensure};
 use sqlparser::ast::{DataType, ExactNumberInfo, Expr, ObjectName, UnaryOperator};
 use sqlparser::dialect::keywords::Keyword;
@@ -76,6 +77,14 @@ fn parse_json2_type_hints(parser: &mut Parser<'_>) -> Result<Vec<JsonTypeHint>> 
 
 fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
     let path = parse_json2_path(parser)?;
+    ensure!(
+        path.len() <= JSON2_MAX_STRUCTURED_DEPTH,
+        InvalidSqlSnafu {
+            msg: format!(
+                "JSON2 type hint path cannot exceed {JSON2_MAX_STRUCTURED_DEPTH} segments"
+            ),
+        }
+    );
     let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
     let data_type = normalize_json2_type_hint_type(data_type)?;
 

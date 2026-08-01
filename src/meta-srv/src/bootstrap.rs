@@ -32,7 +32,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
 use servers::configurator::GrpcRouterConfiguratorRef;
-use servers::http::{HttpServer, HttpServerBuilder};
+use servers::http::{ExtraHttpRouterProviders, HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
@@ -105,9 +105,16 @@ impl MetasrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        self.metasrv.ensure_repartition_gc_enabled().await?;
+
         if let Some(builder) = self.http_server.as_mut().left()
-            && let Some(builder) = builder.take()
+            && let Some(mut builder) = builder.take()
         {
+            if let Some(providers) = self.plugins.get::<ExtraHttpRouterProviders>() {
+                for provider in providers.iter() {
+                    builder = builder.with_extra_router(provider.router());
+                }
+            }
             let mut server = builder.build();
 
             let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
@@ -124,7 +131,7 @@ impl MetasrvInstance {
             return Ok(());
         };
 
-        self.metasrv.try_start().await?;
+        self.metasrv.try_start_after_gc_check().await?;
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
@@ -233,13 +240,15 @@ pub async fn bootstrap_metasrv_with_router(
 
 #[macro_export]
 macro_rules! add_compressed_service {
-    ($builder:expr, $server:expr) => {
+    ($builder:expr, $server:expr, $grpc_config:expr) => {
         $builder.add_service(
             $server
                 .accept_compressed(CompressionEncoding::Gzip)
                 .accept_compressed(CompressionEncoding::Zstd)
                 .send_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Zstd),
+                .send_compressed(CompressionEncoding::Zstd)
+                .max_decoding_message_size($grpc_config.max_recv_message_size)
+                .max_encoding_message_size($grpc_config.max_send_message_size),
         )
     };
 }
@@ -252,18 +261,25 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
         .http2_keepalive_interval(Some(metasrv.options().grpc.http2_keep_alive_interval))
         .http2_keepalive_timeout(Some(metasrv.options().grpc.http2_keep_alive_timeout));
     let grpc_config = metasrv.options().grpc.as_config();
-    let heartbeat_server = HeartbeatServer::from_arc(metasrv.clone())
-        .accept_compressed(CompressionEncoding::Gzip)
-        .accept_compressed(CompressionEncoding::Zstd)
-        .send_compressed(CompressionEncoding::Gzip)
-        .send_compressed(CompressionEncoding::Zstd)
-        .max_decoding_message_size(grpc_config.max_recv_message_size)
-        .max_encoding_message_size(grpc_config.max_send_message_size);
-    let router = router.add_service(heartbeat_server);
-    let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
-    let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
-    let router = add_compressed_service!(router, ProcedureServiceServer::from_arc(metasrv.clone()));
-    let router = add_compressed_service!(router, ConfigServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(
+        router,
+        HeartbeatServer::from_arc(metasrv.clone()),
+        grpc_config
+    );
+    let router =
+        add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()), grpc_config);
+    let router = add_compressed_service!(
+        router,
+        ClusterServer::from_arc(metasrv.clone()),
+        grpc_config
+    );
+    let router = add_compressed_service!(
+        router,
+        ProcedureServiceServer::from_arc(metasrv.clone()),
+        grpc_config
+    );
+    let router =
+        add_compressed_service!(router, ConfigServer::from_arc(metasrv.clone()), grpc_config);
     router.add_service(admin::make_admin_service(metasrv))
 }
 
@@ -449,10 +465,16 @@ pub(crate) fn build_default_meta_peer_client(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use servers::http::{ExtraHttpRouterProvider, ExtraHttpRouterProviderRef};
+    use tower::ServiceExt;
 
     use super::*;
     use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
+    use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
 
     struct RecordingSelectorFactory {
         called: Arc<AtomicBool>,
@@ -486,5 +508,79 @@ mod tests {
         .unwrap();
 
         assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn gc_requirement_is_checked_before_http_server_start() {
+        let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
+        RepartitionGcRequirementManager::new(kv_backend.clone())
+            .require_gc()
+            .await
+            .unwrap();
+
+        let opts = MetasrvOptions {
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        let metasrv = MetasrvBuilder::new()
+            .options(opts)
+            .kv_backend(kv_backend)
+            .build()
+            .await
+            .unwrap();
+        let mut instance = MetasrvInstance::new(metasrv).await.unwrap();
+
+        let err = instance.start().await.unwrap_err();
+        assert!(matches!(err, error::Error::RepartitionGcRequired { .. }));
+        assert!(instance.http_server().is_none());
+        assert!(matches!(instance.mut_http_server(), Either::Left(Some(_))));
+    }
+
+    struct TestExtraHttpRouterProvider;
+
+    impl ExtraHttpRouterProvider for TestExtraHttpRouterProvider {
+        fn router(&self) -> axum::Router {
+            axum::Router::new().route(
+                "/test-extra-http-router",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metasrv_add_extra_http_router() -> Result<()> {
+        let mut opts = MetasrvOptions::default();
+        opts.grpc.bind_addr = "127.0.0.1:0".to_string();
+        opts.http.addr = "127.0.0.1:0".to_string();
+        opts.enable_telemetry = false;
+
+        let plugins = Plugins::new();
+        let mut providers = ExtraHttpRouterProviders::new();
+        providers.add(Arc::new(TestExtraHttpRouterProvider) as ExtraHttpRouterProviderRef);
+        plugins.insert(providers);
+
+        let metasrv = MetasrvBuilder::new()
+            .options(opts)
+            .plugins(plugins)
+            .build()
+            .await?;
+        let mut instance = MetasrvInstance::new(metasrv).await?;
+        instance.start().await?;
+
+        let response = instance
+            .http_server()
+            .unwrap()
+            .make_app()
+            .oneshot(
+                Request::get("/test-extra-http-router")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(StatusCode::NO_CONTENT, response.status());
+        instance.shutdown().await?;
+        Ok(())
     }
 }

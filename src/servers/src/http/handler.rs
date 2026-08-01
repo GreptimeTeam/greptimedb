@@ -234,6 +234,7 @@ pub async fn sql_analyze_stream(
         query_ctx.set_current_schema(&schema);
     }
     query_ctx.set_channel(Channel::HttpSql);
+    query_ctx.enable_live_analyze_metrics();
     let query_ctx = Arc::new(query_ctx);
 
     let Some(sql) = query_params.sql.or(form_params.sql) else {
