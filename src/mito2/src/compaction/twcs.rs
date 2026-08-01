@@ -73,6 +73,7 @@ impl TwcsPicker {
         let mut output = vec![];
         let windows = time_windows
             .values()
+            .rev()
             .filter(|window| {
                 !window.files.is_empty()
                     && self.time_range.as_ref().is_none_or(|time_range| {
@@ -1021,11 +1022,11 @@ mod tests {
             .to_vec(),
             expected_outputs: vec![
                 ExpectedOutput {
-                    input_files: vec![0, 1],
+                    input_files: vec![2, 3],
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![2, 3],
+                    input_files: vec![0, 1],
                     output_level: 1,
                 },
             ],
@@ -1052,11 +1053,11 @@ mod tests {
             .to_vec(),
             expected_outputs: vec![
                 ExpectedOutput {
-                    input_files: vec![0, 1],
+                    input_files: vec![2, 4],
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![2, 4],
+                    input_files: vec![0, 1],
                     output_level: 1,
                 },
             ],
@@ -1453,6 +1454,42 @@ mod tests {
 
         assert_eq!(1, output.len());
         assert_eq!(output[0].inputs.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn test_newer_windows_have_priority() {
+        let older_file_ids = [FileId::random(), FileId::random()];
+        let newer_file_ids = [FileId::random(), FileId::random()];
+        let files = [
+            new_file_handle_with_sequence(older_file_ids[0], 1_000, 1_999, 0, 1),
+            new_file_handle_with_sequence(older_file_ids[1], 1_000, 1_999, 0, 2),
+            new_file_handle_with_sequence(newer_file_ids[0], 7_000, 7_999, 0, 3),
+            new_file_handle_with_sequence(newer_file_ids[1], 7_000, 7_999, 0, 4),
+        ];
+        let windows = assign_to_windows(files.iter(), 3);
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: Some(1),
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(
+            newer_file_ids.into_iter().collect::<HashSet<_>>(),
+            output[0]
+                .inputs
+                .iter()
+                .map(|file| file.file_id().file_id())
+                .collect::<HashSet<_>>()
+        );
     }
 
     #[test]
