@@ -339,6 +339,9 @@ otlp_endpoint = "http://localhost:4318/v1/traces"
 ## Whether to append logs to stdout.
 append_stdout = true
 
+## Whether to write logs to files in `dir`.
+enable_file_logging = true
+
 ## The log format. Can be `text`/`json`.
 log_format = "text"
 

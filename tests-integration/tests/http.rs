@@ -2190,6 +2190,7 @@ read_preference = "Leader"
 [logging]
 max_log_files = 720
 append_stdout = true
+enable_file_logging = true
 enable_otlp_tracing = false
 enable_per_region_metrics = false
 
