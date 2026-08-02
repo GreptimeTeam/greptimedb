@@ -342,20 +342,34 @@ fn registry_source(
         .distinct()
 }
 
+/// A declaring table's scan paired with the entity declarations it carries —
+/// the unit `build_registry_plan` derives registry rows from.
+pub struct RegistrySource {
+    pub declarations: Vec<EntityDeclaration>,
+    pub scan: DataFrame,
+}
+
+/// A trace table's scan paired with the `service` declaration it derives
+/// `calls` edges for — the unit `build_calls_plan` consumes.
+pub struct CallsSource {
+    pub service: EntityDeclaration,
+    pub scan: DataFrame,
+}
+
 /// Builds the `semantic_entities` registry plan: one branch and source scan per
 /// declaring table, filtered to `window`, then `UNION ALL` across source tables.
 /// Returns `None` when nothing declared an entity, so the computed table streams
 /// empty.
 pub fn build_registry_plan(
-    sources: Vec<(Vec<EntityDeclaration>, DataFrame)>,
+    sources: Vec<RegistrySource>,
     window: &GraphWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
-    for (declarations, df) in sources {
-        let Some((first, rest)) = declarations.split_first() else {
+    for source in sources {
+        let Some((first, rest)) = source.declarations.split_first() else {
             continue;
         };
-        union_df = union_all(union_df, registry_source(first, rest, df, window)?)?;
+        union_df = union_all(union_df, registry_source(first, rest, source.scan, window)?)?;
     }
     Ok(union_df.map(DataFrame::into_unoptimized_plan))
 }
@@ -404,12 +418,12 @@ const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 /// verified against the trace ingest path. Returns `None` when there is no
 /// trace table.
 pub fn build_calls_plan(
-    traces: Vec<(EntityDeclaration, DataFrame)>,
+    traces: Vec<CallsSource>,
     window: &GraphWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
-    for (service, trace) in traces {
-        union_df = union_all(union_df, calls_pairs(&service, trace, window)?)?;
+    for trace in traces {
+        union_df = union_all(union_df, calls_pairs(&trace.service, trace.scan, window)?)?;
     }
     let Some(pairs) = union_df else {
         return Ok(None);
@@ -625,7 +639,10 @@ mod tests {
         let ctx = metric_table_ctx();
         let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
-            vec![(vec![decl("service", &["service_name"])], df)],
+            vec![RegistrySource {
+                declarations: vec![decl("service", &["service_name"])],
+                scan: df,
+            }],
             &test_window(),
         )
         .unwrap()
@@ -675,9 +692,15 @@ mod tests {
         let df = ctx.table("app_latency").await.unwrap();
         let mut declaration = decl("process", &["service_name", "pid"]);
         declaration.descriptive_columns = vec!["host".to_string()];
-        let plan = build_registry_plan(vec![(vec![declaration], df)], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![declaration],
+                scan: df,
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let mut rows: Vec<(String, Option<String>, Option<String>)> = batches
@@ -727,9 +750,15 @@ mod tests {
         let mut single = decl("service", &["service_name"]);
         single.scope_columns = vec!["host".to_string()];
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(vec![single], df)], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![single],
+                scan: df,
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
         let batches = collect(&ctx, plan).await;
         let mut scopes: Vec<String> = batches.iter().flat_map(|b| strings(b, 7)).collect();
         scopes.sort();
@@ -739,9 +768,15 @@ mod tests {
         let mut multi = decl("service", &["service_name"]);
         multi.scope_columns = vec!["pid".to_string(), "host".to_string()];
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(vec![multi], df)], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![multi],
+                scan: df,
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
         let batches = collect(&ctx, plan).await;
         let mut scopes: Vec<String> = batches.iter().flat_map(|b| strings(b, 7)).collect();
         scopes.sort();
@@ -759,9 +794,15 @@ mod tests {
     async fn registry_skips_null_identity_rows() {
         let ctx = metric_table_ctx();
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(vec![decl("host", &["host"])], df)], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![decl("host", &["host"])],
+                scan: df,
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
         let batches = collect(&ctx, plan).await;
         let mut ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
         ids.sort();
@@ -773,10 +814,10 @@ mod tests {
         let ctx = metric_table_ctx();
         let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
-            vec![(
-                vec![decl("service", &["service_name"]), decl("host", &["pid"])],
-                df,
-            )],
+            vec![RegistrySource {
+                declarations: vec![decl("service", &["service_name"]), decl("host", &["pid"])],
+                scan: df,
+            }],
             &test_window(),
         )
         .unwrap()
@@ -914,7 +955,10 @@ mod tests {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
         let plan = build_calls_plan(
-            vec![(trace_service_decl(&[SERVICE_NAME_COLUMN]), trace)],
+            vec![CallsSource {
+                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                scan: trace,
+            }],
             &test_window(),
         )
         .unwrap()
@@ -974,8 +1018,14 @@ mod tests {
         let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
         let plan = build_calls_plan(
             vec![
-                (trace_service_decl(&[SERVICE_NAME_COLUMN]), t1),
-                (trace_service_decl(&[SERVICE_NAME_COLUMN]), t2),
+                CallsSource {
+                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    scan: t1,
+                },
+                CallsSource {
+                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    scan: t2,
+                },
             ],
             &test_window(),
         )
@@ -1013,10 +1063,10 @@ mod tests {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
         let plan = build_calls_plan(
-            vec![(
-                trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
-                trace,
-            )],
+            vec![CallsSource {
+                service: trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
+                scan: trace,
+            }],
             &test_window(),
         )
         .unwrap()

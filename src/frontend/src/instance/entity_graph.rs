@@ -41,7 +41,8 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    EntityDeclaration, GraphWindow, build_calls_plan, build_registry_plan,
+    CallsSource, EntityDeclaration, GraphWindow, RegistrySource, build_calls_plan,
+    build_registry_plan,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -289,7 +290,10 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         let (sources, _) = self.enumerate(catalog).await?;
         let mut plans = Vec::with_capacity(sources.len());
         for source in sources {
-            plans.push((source.declarations, self.read_table(source.table)?));
+            plans.push(RegistrySource {
+                declarations: source.declarations,
+                scan: self.read_table(source.table)?,
+            });
         }
         let window = Self::query_window(&request);
         let Some(plan) = build_registry_plan(plans, &window)
@@ -309,7 +313,10 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         let (_, traces) = self.enumerate(catalog).await?;
         let mut scans = Vec::with_capacity(traces.len());
         for (service, trace) in traces {
-            scans.push((service, self.read_table(trace)?));
+            scans.push(CallsSource {
+                service,
+                scan: self.read_table(trace)?,
+            });
         }
         let window = Self::query_window(&request);
         let Some(plan) = build_calls_plan(scans, &window)
