@@ -18,7 +18,7 @@ use snafu::OptionExt;
 use crate::error::{InvalidConfigSnafu, Result};
 use crate::user_provider::{
     PgAuthInfo, UserInfoMap, authenticate_with_credential, load_credential_from_file,
-    parse_credential_line, postgres_auth_info_with_credential,
+    parse_credential_line, postgres_auth_info_with_credential, warn_if_pg_scram_disabled,
 };
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
@@ -48,7 +48,10 @@ impl StaticUserProvider {
                     })
                 })
                 .collect::<Result<UserInfoMap>>()
-                .map(|users| StaticUserProvider { users }),
+                .map(|users| {
+                    warn_if_pg_scram_disabled(&users);
+                    StaticUserProvider { users }
+                }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
