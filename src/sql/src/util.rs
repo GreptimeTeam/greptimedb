@@ -334,6 +334,7 @@ fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectNam
         | Statement::ShowCreateDatabase(_)
         | Statement::ShowCreateFlow(_)
         | Statement::ShowFlows(_)
+        | Statement::ShowFlowStatus(_)
         | Statement::ShowStatus(_)
         | Statement::ShowSearchPath(_)
         | Statement::ShowViews(_)
