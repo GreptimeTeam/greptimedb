@@ -1,0 +1,1052 @@
+{
+  "id": null,
+  "panels": [
+    {
+      "collapsed": false,
+      "description": "Procedure volume and lifecycle health for the selected events and object filters.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Number of distinct procedures in the selected time range and filters; this is not the raw event-row count.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT procedure_id) AS procedures FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Procedures",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Distinct procedures that emitted a Succeeded lifecycle trigger in the selected range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN procedure_id END) AS succeeded FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Succeeded",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Distinct procedures that emitted Failed or Poisoned. A non-zero value is a terminal failure signal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN procedure_id END) AS failed_or_poisoned FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed / Poisoned",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Procedures with Submitted but no Succeeded, Failed, or Poisoned lifecycle event after 15 minutes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS long_running FROM (SELECT procedure_id FROM greptime_private.events WHERE type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY procedure_id HAVING COUNT(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN 1 END) > 0 AND COUNT(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 END) = 0 AND MIN(timestamp) < current_timestamp - INTERVAL '15' MINUTE) AS in_flight",
+          "refId": "A"
+        }
+      ],
+      "title": "In-flight > 15m",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "description": "Time-series procedure activity and terminal outcomes by event type.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 6,
+      "panels": [],
+      "title": "Lifecycle",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Five-minute procedure activity by event type. Each series counts distinct procedure_id values, not duplicated topology or locator rows.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineInterpolation": "linear",
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_bin(INTERVAL '5' MINUTE, timestamp) AS time, type AS metric, COUNT(DISTINCT procedure_id) AS value FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY time, metric ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Procedure activity by type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Terminal success, failure or poison, and retry counts by event type. Retry is diagnostic and not a terminal outcome.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "id": 8,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "normal",
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT type, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN procedure_id END) AS succeeded, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN procedure_id END) AS failed_or_poisoned, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Retrying\\\"') THEN procedure_id END) AS retried FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY type ORDER BY type",
+          "refId": "A"
+        }
+      ],
+      "title": "Terminal outcomes by type",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "description": "Failed, poisoned, and long-running procedure investigations.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 9,
+      "panels": [],
+      "title": "Investigation",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Terminal Failed or Poisoned lifecycle rows. Object locator columns can be null on lightweight terminal events; payload preserves submitted intent when available.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CAST(timestamp AS STRING) AS event_time, type, procedure_id, procedure_state, json_get_string(procedure_trigger, 'type') AS trigger, catalog_name, schema_name, table_name, table_id, region_id, procedure_error, payload FROM greptime_private.events WHERE $__timeFilter(timestamp) AND (json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"')) AND type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' ORDER BY timestamp DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed or poisoned procedures",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Procedures with no terminal lifecycle event 15 minutes after submission. Grouping is by procedure_id, so multi-row events appear once.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT type, procedure_id, CAST(MIN(timestamp) AS STRING) AS submitted_at, CAST(MAX(timestamp) AS STRING) AS latest_event_at, MAX(procedure_state) AS latest_state, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(region_id) AS region_id FROM greptime_private.events WHERE type IN (${event_type:sqlstring}) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY type, procedure_id HAVING COUNT(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN 1 END) > 0 AND COUNT(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 END) = 0 AND MIN(timestamp) < current_timestamp - INTERVAL '15' MINUTE ORDER BY submitted_at LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Long-running procedures (> 15m)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Procedure-level database and table DDL executions, including lifecycle outcome, retry count, and Submitted-time object context.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 12,
+      "panels": [],
+      "title": "DDL Operations",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Database DDL execution per procedure. The row combines submission, retries, and terminal outcome; an execution with Submitted but no terminal event is In-flight.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Retrying\\\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type IN ('create_database', 'alter_database', 'drop_database') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(json_to_string(payload)) AS submitted_payload FROM greptime_private.events WHERE type IN ('create_database', 'alter_database', 'drop_database') AND json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') AND $__timeFilter(timestamp) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Database DDL executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Table DDL execution per procedure. Multiple table locators are collapsed into affected_table_count, so logical-table batch operations do not duplicate executions.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Retrying\\\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type IN ('create_table', 'create_logical_tables', 'alter_table', 'alter_logical_tables', 'drop_table', 'undrop_table', 'purge_dropped_table', 'truncate_table') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, COUNT(DISTINCT table_name) AS affected_table_count, MAX(json_to_string(payload)) AS submitted_payload FROM greptime_private.events WHERE type IN ('create_table', 'create_logical_tables', 'alter_table', 'alter_logical_tables', 'drop_table', 'undrop_table', 'purge_dropped_table', 'truncate_table') AND json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') AND $__timeFilter(timestamp) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.affected_table_count, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Table DDL executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Report-only Batch GC records by region. Batch GC does not guarantee a Submitted event, so these rows never contribute to the In-flight lifecycle count.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CAST(timestamp AS STRING) AS event_time, procedure_id, procedure_state, json_get_string(procedure_trigger, 'type') AS trigger, region_id, table_id, region_number, procedure_error, json_to_string(payload) AS payload, json_to_string(gc_report) AS gc_report FROM greptime_private.events WHERE $__timeFilter(timestamp) AND type = 'batch_gc' AND COALESCE(procedure_id, '') LIKE '${procedure_id}' ORDER BY timestamp DESC LIMIT 300",
+          "refId": "A"
+        }
+      ],
+      "title": "Batch GC reports",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete execution row for each Repartition root or group. Group rows are linked to roots from Submitted metadata and retain their own lifecycle outcome without duplicating topology mappings.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "root_procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show repartition topology",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-repartition_parent_id=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "id": 16,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH root_lifecycle AS (SELECT procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN timestamp END) AS root_submitted_time, MAX(timestamp) AS root_last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN timestamp END) AS root_terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Retrying\\\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type = 'repartition' GROUP BY procedure_id), root_context AS (SELECT procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(json_to_string(payload)) AS submitted_payload FROM greptime_private.events WHERE type = 'repartition' AND json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') AND $__timeFilter(timestamp) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND ('${table:raw}' = '$__all' OR COALESCE(table_name, '(none)') IN (${table:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY procedure_id), group_lifecycle AS (SELECT procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') THEN timestamp END) AS group_submitted_time, MAX(timestamp) AS group_last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN timestamp END) AS group_terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Retrying\\\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type = 'repartition_group' GROUP BY procedure_id), group_context AS (SELECT parent_procedure_id, procedure_id AS group_procedure_id, repartition_group_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(json_to_string(payload)) AS submitted_payload, COUNT(*) AS topology_mapping_count FROM greptime_private.events WHERE type = 'repartition_group' AND json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') AND $__timeFilter(timestamp) GROUP BY parent_procedure_id, procedure_id, repartition_group_id), group_parent_summary AS (SELECT c.parent_procedure_id, COUNT(DISTINCT c.group_procedure_id) AS child_group_count, COUNT(DISTINCT CASE WHEN l.succeeded = 1 THEN c.group_procedure_id END) AS succeeded_group_count, COUNT(DISTINCT CASE WHEN l.failed = 1 OR l.poisoned = 1 THEN c.group_procedure_id END) AS failed_group_count FROM group_context c LEFT JOIN group_lifecycle l ON l.procedure_id = c.group_procedure_id GROUP BY c.parent_procedure_id) SELECT 'Root' AS execution_level, l.procedure_id AS root_procedure_id, l.procedure_id AS procedure_id, CAST(NULL AS STRING) AS repartition_group_id, CAST(l.root_submitted_time AS STRING) AS start_time, CAST(l.root_terminal_time AS STRING) AS end_time, CAST(l.root_last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.catalog_name, c.schema_name, c.table_name, c.table_id, c.submitted_payload, COALESCE(p.child_group_count, 0) AS child_group_count, COALESCE(p.succeeded_group_count, 0) AS succeeded_group_count, COALESCE(p.failed_group_count, 0) AS failed_group_count, CAST(NULL AS BIGINT) AS topology_mapping_count FROM root_lifecycle l JOIN root_context c ON c.procedure_id = l.procedure_id LEFT JOIN group_parent_summary p ON p.parent_procedure_id = l.procedure_id WHERE COALESCE(l.procedure_id, '') LIKE '${repartition_parent_id}' UNION ALL SELECT 'Group' AS execution_level, c.parent_procedure_id AS root_procedure_id, l.procedure_id AS procedure_id, c.repartition_group_id, CAST(l.group_submitted_time AS STRING) AS start_time, CAST(l.group_terminal_time AS STRING) AS end_time, CAST(l.group_last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.catalog_name, c.schema_name, c.table_name, c.table_id, c.submitted_payload, CAST(NULL AS BIGINT) AS child_group_count, CAST(NULL AS BIGINT) AS succeeded_group_count, CAST(NULL AS BIGINT) AS failed_group_count, c.topology_mapping_count FROM group_lifecycle l JOIN group_context c ON c.group_procedure_id = l.procedure_id WHERE COALESCE(c.parent_procedure_id, '') LIKE '${repartition_parent_id}' ORDER BY start_time DESC LIMIT 300",
+          "refId": "A"
+        }
+      ],
+      "title": "Repartition executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One source-to-target region mapping per Repartition group. The group outcome is joined by child procedure ID, while root procedure ID provides the parent execution context.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "id": 17,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH group_submitted AS (SELECT parent_procedure_id, procedure_id AS group_procedure_id, repartition_group_id, table_id, timestamp AS group_submitted_time, source_region_id, source_region_number, source_partition_expr, target_region_id, target_region_number, target_partition_expr FROM greptime_private.events WHERE type = 'repartition_group' AND json_path_match(procedure_trigger, '$.type == \\\"Submitted\\\"') AND $__timeFilter(timestamp)), group_lifecycle AS (SELECT procedure_id, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Succeeded\\\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \\\"Failed\\\"') OR json_path_match(procedure_trigger, '$.type == \\\"Poisoned\\\"') THEN 1 ELSE 0 END) AS failed FROM greptime_private.events WHERE type = 'repartition_group' GROUP BY procedure_id) SELECT CAST(s.group_submitted_time AS STRING) AS event_time, s.parent_procedure_id AS root_procedure_id, s.group_procedure_id, s.repartition_group_id, s.table_id, CASE WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS group_outcome, s.source_region_id, s.source_region_number, s.source_partition_expr, s.target_region_id, s.target_region_number, s.target_partition_expr FROM group_submitted s LEFT JOIN group_lifecycle l ON l.procedure_id = s.group_procedure_id WHERE COALESCE(s.parent_procedure_id, '') LIKE '${repartition_parent_id}' ORDER BY s.group_submitted_time DESC LIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Repartition topology",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "All recorded fields for the selected procedure, ordered by event timestamp. Use this trace to inspect Submitted, Retrying, RollingBack, ChildSubmitted, and terminal events behind a summary row.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 18,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CAST(timestamp AS STRING) AS timestamp, type, json_to_string(payload) AS payload, procedure_id, procedure_state, procedure_error, json_to_string(procedure_trigger) AS procedure_trigger, catalog_name, schema_name, table_name, table_id, physical_table_id, region_id, region_number, region_migration_trigger_reason, region_migration_src_node_id, region_migration_src_peer_addr, region_migration_dst_node_id, region_migration_dst_peer_addr, topic_name, prunable_entry_id, latest_offset, json_to_string(gc_report) AS gc_report, parent_procedure_id, repartition_group_id, source_region_id, source_region_number, source_partition_expr, target_region_id, target_region_number, target_partition_expr FROM greptime_private.events WHERE COALESCE(procedure_id, '') = '${trace_procedure_id}' ORDER BY timestamp LIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Procedure lifecycle trace",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Batch GC reports and WAL prune records. These maintenance event types have intentionally sparse lifecycle emission.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "id": 19,
+      "panels": [],
+      "title": "Maintenance Operations",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "description": "Repartition and Region Migration executions, including child-group topology where applicable.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Region Operations",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "description": "Raw recorded fields for one selected procedure, used to inspect every stored lifecycle transition.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 21,
+      "panels": [],
+      "title": "Procedure Trace",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Each persisted WAL Prune transition, including topic and requested prune boundary. latest_offset is the optional observed exclusive upper bound, not a deleted-record count.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 22,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CAST(timestamp AS STRING) AS event_time, topic_name, prunable_entry_id, latest_offset, procedure_id, procedure_state, json_get_string(procedure_trigger, 'type') AS trigger, procedure_error, json_to_string(payload) AS payload FROM greptime_private.events WHERE type = 'wal_prune' AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' ORDER BY timestamp DESC LIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "WAL prune records",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Region Migration execution per procedure, including affected scope, trigger reason, and source and destination datanode identities.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "id": 23,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH lifecycle AS (SELECT procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Submitted\"') THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Succeeded\"') OR json_path_match(procedure_trigger, '$.type == \"Failed\"') OR json_path_match(procedure_trigger, '$.type == \"Poisoned\"') THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \"Retrying\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Succeeded\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Failed\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Poisoned\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type = 'region_migration' GROUP BY procedure_id), migration_context AS (SELECT procedure_id, COUNT(DISTINCT table_id) AS affected_table_count, COUNT(DISTINCT region_id) AS affected_region_count, MAX(region_migration_trigger_reason) AS trigger_reason, MAX(region_migration_src_node_id) AS from_datanode_id, MAX(region_migration_src_peer_addr) AS from_datanode_addr, MAX(region_migration_dst_node_id) AS to_datanode_id, MAX(region_migration_dst_peer_addr) AS to_datanode_addr, MAX(json_to_string(payload)) AS submitted_payload FROM greptime_private.events WHERE type = 'region_migration' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY procedure_id) SELECT l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.affected_table_count, c.affected_region_count, c.trigger_reason, c.from_datanode_id, c.from_datanode_addr, c.to_datanode_id, c.to_datanode_addr, c.submitted_payload FROM lifecycle l JOIN migration_context c ON c.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Region migration executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Flow or View DDL execution per procedure. The row combines submission, retries, and terminal outcome; submitted payload preserves object intent.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Submitted\"') THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Succeeded\"') OR json_path_match(procedure_trigger, '$.type == \"Failed\"') OR json_path_match(procedure_trigger, '$.type == \"Poisoned\"') THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN json_path_match(procedure_trigger, '$.type == \"Retrying\"') THEN timestamp END) AS retry_count, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Succeeded\"') THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Failed\"') THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN json_path_match(procedure_trigger, '$.type == \"Poisoned\"') THEN 1 ELSE 0 END) AS poisoned, MAX(procedure_error) AS procedure_error FROM greptime_private.events WHERE type IN ('create_flow', 'drop_flow', 'create_view', 'drop_view') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(json_to_string(payload)) AS submitted_payload FROM greptime_private.events WHERE type IN ('create_flow', 'drop_flow', 'create_view', 'drop_view') AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') AND $__timeFilter(timestamp) AND ('${catalog:raw}' = '$__all' OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('${schema:raw}' = '$__all' OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND COALESCE(procedure_id, '') LIKE '${procedure_id}' GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Flow and View DDL executions",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "greptimedb",
+    "events",
+    "slo"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "information_schema",
+        "type": "datasource",
+        "query": "mysql",
+        "refresh": 1,
+        "regex": "",
+        "includeAll": false,
+        "options": [],
+        "current": {
+          "text": "information_schema",
+          "value": "${information_schema}"
+        }
+      },
+      {
+        "allValue": "",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT type FROM greptime_private.events ORDER BY type",
+        "includeAll": true,
+        "label": "Event type",
+        "multi": true,
+        "name": "event_type",
+        "query": "SELECT DISTINCT type FROM greptime_private.events ORDER BY type",
+        "type": "query"
+      },
+      {
+        "allValue": "",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT COALESCE(catalog_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "includeAll": true,
+        "label": "Catalog",
+        "multi": true,
+        "name": "catalog",
+        "query": "SELECT DISTINCT COALESCE(catalog_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "type": "query"
+      },
+      {
+        "allValue": "",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT COALESCE(schema_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "includeAll": true,
+        "label": "Schema",
+        "multi": true,
+        "name": "schema",
+        "query": "SELECT DISTINCT COALESCE(schema_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "type": "query"
+      },
+      {
+        "allValue": "",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT COALESCE(table_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "includeAll": true,
+        "label": "Table",
+        "multi": true,
+        "name": "table",
+        "query": "SELECT DISTINCT COALESCE(table_name, '(none)') FROM greptime_private.events ORDER BY 1",
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "%",
+          "value": "%"
+        },
+        "label": "Procedure ID (LIKE)",
+        "name": "procedure_id",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "%",
+          "value": "%"
+        },
+        "label": "Repartition parent ID (LIKE)",
+        "name": "repartition_parent_id",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "__select_a_procedure__",
+          "value": "__select_a_procedure__"
+        },
+        "label": "Trace procedure ID",
+        "name": "trace_procedure_id",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "1h",
+      "6h",
+      "24h",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "GreptimeDB Events",
+  "uid": "greptimedb-events",
+  "version": 1
+}
