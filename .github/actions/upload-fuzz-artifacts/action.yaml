@@ -1,0 +1,50 @@
+name: Upload Fuzz Artifacts
+description: 'Upload target-scoped fuzz diagnostics and link them from the job summary'
+inputs:
+  artifact-name:
+    description: "Name of the fuzz diagnostic artifact"
+    required: true
+  artifact-root:
+    default: '/tmp/greptime-fuzz-artifacts'
+    description: "Directory containing the group manifest and target diagnostics"
+  retention-days:
+    default: '3'
+    description: "Number of days to retain the artifact"
+outputs:
+  artifact-id:
+    description: "GitHub ID of the uploaded artifact"
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-url:
+    description: "URL of the uploaded artifact"
+    value: ${{ steps.upload.outputs.artifact-url }}
+  artifact-digest:
+    description: "SHA-256 digest of the uploaded artifact"
+    value: ${{ steps.upload.outputs.artifact-digest }}
+runs:
+  using: composite
+  steps:
+    - name: Upload fuzz diagnostics
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.artifact-root }}
+        if-no-files-found: warn
+        retention-days: ${{ inputs.retention-days }}
+    - name: Add fuzz diagnostics to job summary
+      shell: bash
+      env:
+        FUZZ_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        FUZZ_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        FUZZ_ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        FUZZ_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        FUZZ_ARTIFACT_RETENTION_DAYS: ${{ inputs.retention-days }}
+      run: |
+        {
+          printf '### Fuzz diagnostics\n\n'
+          printf -- '- Artifact: [%s](%s)\n' "${FUZZ_ARTIFACT_NAME}" "${FUZZ_ARTIFACT_URL}"
+          printf -- '- Artifact ID: `%s`\n' "${FUZZ_ARTIFACT_ID}"
+          printf -- '- SHA-256: `%s`\n' "${FUZZ_ARTIFACT_DIGEST}"
+          printf -- '- Retention: %s days\n' "${FUZZ_ARTIFACT_RETENTION_DAYS}"
+        } >>"${GITHUB_STEP_SUMMARY}"
+        echo "::notice title=Fuzz diagnostics uploaded::artifact=${FUZZ_ARTIFACT_NAME}, digest=${FUZZ_ARTIFACT_DIGEST}"

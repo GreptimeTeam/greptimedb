@@ -63,4 +63,4 @@ would be selected before a real run.
   for a sampled version pair.
 - `.github/scripts/run-compat.py` owns the CI-side window parsing and compat
   invocation. Keep workflow YAML thin; update the script instead of embedding
-  parsing or loops in `.github/workflows/develop.yml`.
+  parsing or loops in `.github/workflows/integration.yml`.
