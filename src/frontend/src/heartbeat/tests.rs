@@ -20,7 +20,10 @@ use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::mailbox_message::Payload;
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, Role};
+use api::v1::meta::{
+    HeartbeatConfig as ApiHeartbeatConfig, HeartbeatRequest, HeartbeatResponse, MailboxMessage,
+    RegionLease, ResponseHeader, Role,
+};
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
@@ -38,6 +41,7 @@ use common_meta::key::table_info::TableInfoKey;
 use common_stat::ResourceStatImpl;
 use common_telemetry::tracing_context::TracingContext;
 use meta_client::client::MetaClient;
+use prost::Message;
 use tokio::sync::{Notify, mpsc};
 
 use super::*;
@@ -46,6 +50,18 @@ use crate::frontend::FrontendOptions;
 #[derive(Default)]
 pub struct MockKvCacheInvalidator {
     inner: Mutex<HashMap<Vec<u8>, i32>>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LegacyHeartbeatResponse {
+    #[prost(message, optional, tag = "1")]
+    header: Option<ResponseHeader>,
+    #[prost(message, optional, tag = "2")]
+    mailbox_message: Option<MailboxMessage>,
+    #[prost(message, optional, tag = "3")]
+    region_lease: Option<RegionLease>,
+    #[prost(message, optional, tag = "4")]
+    heartbeat_config: Option<ApiHeartbeatConfig>,
 }
 
 #[async_trait::async_trait]
@@ -752,6 +768,102 @@ async fn test_response_extension_handler_order() {
         &[(false, true, true, true), (true, false, true, true)]
     );
     assert!(!suspend_state.load(Ordering::Acquire));
+    assert!(!cache.inner.lock().unwrap().contains_key(&table_key));
+}
+
+#[tokio::test]
+async fn test_heartbeat_response_wire_compatibility_preserves_handlers() {
+    let table_id = 42;
+    let table_key = TableInfoKey::new(table_id).to_bytes();
+    let cache = Arc::new(MockKvCacheInvalidator {
+        inner: Mutex::new(HashMap::from([(table_key.clone(), 1)])),
+    });
+    let suspend_state = Arc::new(AtomicBool::new(false));
+    let executor = heartbeat_response_handler_executor(
+        &HeartbeatExtensions::default(),
+        suspend_state.clone(),
+        cache.clone(),
+    );
+    let (mailbox_tx, _) = mpsc::channel(1);
+    let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
+    let heartbeat_config = ApiHeartbeatConfig {
+        heartbeat_interval_ms: 3_000,
+        retry_interval_ms: 500,
+        gc_enabled: true,
+    };
+
+    let new_response = HeartbeatResponse {
+        header: Some(ResponseHeader::success()),
+        mailbox_message: Some(MailboxMessage {
+            payload: Some(Payload::Json(
+                serde_json::to_string(&Instruction::Suspend).unwrap(),
+            )),
+            ..Default::default()
+        }),
+        region_lease: Some(RegionLease::default()),
+        heartbeat_config: Some(heartbeat_config),
+        extensions: HashMap::from([("response-extension".to_string(), b"value".to_vec())]),
+    };
+    let legacy_decoded =
+        LegacyHeartbeatResponse::decode(new_response.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(new_response.header, legacy_decoded.header);
+    assert_eq!(new_response.mailbox_message, legacy_decoded.mailbox_message);
+    assert_eq!(new_response.region_lease, legacy_decoded.region_lease);
+    assert_eq!(
+        new_response.heartbeat_config,
+        legacy_decoded.heartbeat_config
+    );
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox.clone(),
+            HeartbeatResponse {
+                header: legacy_decoded.header,
+                mailbox_message: legacy_decoded.mailbox_message,
+                region_lease: legacy_decoded.region_lease,
+                heartbeat_config: legacy_decoded.heartbeat_config,
+                extensions: HashMap::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(suspend_state.load(Ordering::Acquire));
+
+    let legacy_response = LegacyHeartbeatResponse {
+        header: Some(ResponseHeader::success()),
+        mailbox_message: Some(MailboxMessage {
+            payload: Some(Payload::Json(
+                serde_json::to_string(&Instruction::InvalidateCaches(vec![CacheIdent::TableId(
+                    table_id,
+                )]))
+                .unwrap(),
+            )),
+            ..Default::default()
+        }),
+        region_lease: Some(RegionLease::default()),
+        heartbeat_config: Some(heartbeat_config),
+    };
+    let current_decoded =
+        HeartbeatResponse::decode(legacy_response.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(legacy_response.header, current_decoded.header);
+    assert_eq!(
+        legacy_response.mailbox_message,
+        current_decoded.mailbox_message
+    );
+    assert_eq!(legacy_response.region_lease, current_decoded.region_lease);
+    assert_eq!(
+        legacy_response.heartbeat_config,
+        current_decoded.heartbeat_config
+    );
+    assert!(current_decoded.extensions.is_empty());
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox,
+            current_decoded,
+        ))
+        .await
+        .unwrap();
     assert!(!cache.inner.lock().unwrap().contains_key(&table_key));
 }
 
