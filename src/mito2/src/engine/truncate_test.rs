@@ -22,6 +22,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{info, init_default_ut_logging};
+use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     PathType, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
@@ -574,6 +575,98 @@ async fn test_engine_discard_unflushed_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
+async fn test_engine_discard_unflushed_skip_wal() {
+    let mut env = TestEnv::with_prefix("discard-unflushed-skip-wal").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::Noop).unwrap(),
+    );
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 6),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    let discarded_sequence = version_data.committed_sequence;
+    // Entry ids stay at 0 without a WAL, so only the sequence advances.
+    assert_eq!(0, version_data.last_entry_id);
+    assert!(discarded_sequence > version_data.version.flushed_sequence);
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    let version = region.version();
+    assert!(version.memtables.is_empty());
+    assert_eq!(0, version.flushed_entry_id);
+    assert_eq!(discarded_sequence, version.flushed_sequence);
+    assert_eq!(
+        1,
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .num_files()
+    );
+
+    // The flushed rows survive and the region stays writable.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(6, 8),
+        },
+    )
+    .await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        5,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+#[tokio::test]
 async fn test_engine_discard_unflushed_wakes_stalled_writes() {
     let mut env = TestEnv::with_prefix("discard-unflushed-wake-stalled").await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
@@ -921,5 +1014,17 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool, unflus
     assert_eq!(
         current_version.truncated_entry_id,
         (!unflushed_only).then_some(entry_id)
+    );
+
+    // The cancelled flush wrote no files, so both kinds leave the region empty and the
+    // replay must not bring the discarded rows back.
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
     );
 }

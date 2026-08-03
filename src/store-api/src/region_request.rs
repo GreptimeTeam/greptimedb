@@ -1623,6 +1623,14 @@ pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
     All,
     /// Discard all unflushed data while preserving persisted SST files.
+    ///
+    /// This destroys the region's in-memory data irreversibly. Persisted SST files and
+    /// the writable state are preserved, and the WAL is obsoleted up to the discard point
+    /// so a restart won't replay the discarded data.
+    ///
+    /// An error may be returned after the data has already been discarded, because the
+    /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
+    /// left to discard only re-attempts the WAL obsoletion.
     Unflushed,
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.

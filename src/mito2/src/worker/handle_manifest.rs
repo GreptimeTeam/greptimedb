@@ -25,7 +25,7 @@ use parquet::file::metadata::PageIndexPolicy;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -47,6 +47,7 @@ use crate::request::{
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
+use crate::wal::EntryId;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
@@ -511,9 +512,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn handle_manifest_discard_unflushed_action(
         &self,
         region: MitoRegionRef,
-        edit: RegionEdit,
+        discarded_entry_id: EntryId,
+        discarded_sequence: SequenceNumber,
         discarded_rows: u64,
-        discarded_bytes: usize,
+        discarded_bytes: u64,
         sender: OptionOutputTx,
     ) {
         if let Err(e) = region.set_truncating() {
@@ -522,12 +524,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let region_id = region.region_id;
-        let discarded_entry_id = edit.flushed_entry_id.unwrap_or_default();
-        let discarded_sequence = edit.flushed_sequence.unwrap_or_default();
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
 
         common_runtime::spawn_global(async move {
+            // The frontier moves to the last written entry and sequence, so replaying the
+            // WAL after a restart skips everything the memtables held.
+            let edit = RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: Some(discarded_entry_id),
+                flushed_sequence: Some(discarded_sequence),
+                committed_sequence: None,
+            };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
             let result = manifest_ctx
                 .update_manifest(RegionLeaderState::Truncating, action_list, false)

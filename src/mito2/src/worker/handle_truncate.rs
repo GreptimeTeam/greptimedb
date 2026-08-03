@@ -20,7 +20,7 @@ use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
-use crate::manifest::action::{RegionEdit, RegionTruncate, TruncateKind};
+use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
 use crate::request::{DdlRequest, DiscardUnflushedResult, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
@@ -108,7 +108,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
 
                 let discarded_rows = memtables.num_rows();
-                let discarded_bytes = memtables.mutable_usage() + memtables.immutables_usage();
+                let discarded_bytes =
+                    (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
                 warn!(
                     "Discarding unflushed data from region {}, entry_id: {}, sequence: {}, estimated rows: {}, estimated bytes: {}",
                     region_id,
@@ -118,18 +119,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     discarded_bytes,
                 );
 
-                let edit = RegionEdit {
-                    files_to_add: Vec::new(),
-                    files_to_remove: Vec::new(),
-                    timestamp_ms: None,
-                    compaction_time_window: None,
-                    flushed_entry_id: Some(version_data.last_entry_id),
-                    flushed_sequence: Some(version_data.committed_sequence),
-                    committed_sequence: None,
-                };
                 self.handle_manifest_discard_unflushed_action(
                     region,
-                    edit,
+                    version_data.last_entry_id,
+                    version_data.committed_sequence,
                     discarded_rows,
                     discarded_bytes,
                     sender,
@@ -264,6 +257,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .version_control
             .discard_unflushed(result.discarded_entry_id, result.discarded_sequence);
 
+        // The flush and compaction schedulers are already quiesced because the request
+        // queued itself behind any running job, so these two are usually no-ops. Index
+        // builds aren't queued that way, so pending builds for surviving files are
+        // retired here. They would abort anyway while the region sits in `Truncating`,
+        // and those files may need a later index rebuild.
         self.flush_scheduler.on_region_truncated(region_id);
         self.compaction_scheduler.on_region_truncated(region_id);
         self.index_build_scheduler

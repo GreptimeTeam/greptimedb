@@ -1100,7 +1100,7 @@ pub(crate) struct DiscardUnflushedResult {
     /// Estimated number of discarded rows.
     pub(crate) discarded_rows: u64,
     /// Estimated number of discarded bytes.
-    pub(crate) discarded_bytes: usize,
+    pub(crate) discarded_bytes: u64,
 }
 
 /// Notifies the region the result of writing region change action.
