@@ -27,8 +27,8 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 <a href="https://hub.docker.com/r/greptime/greptimedb/">
 <img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
 </a>
-<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml">
-<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="GitHub Actions"/>
+<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml">
+<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml/badge.svg" alt="GitHub Actions"/>
 </a>
 <a href="https://codecov.io/gh/GreptimeTeam/greptimedb">
 <img src="https://codecov.io/gh/GreptimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
