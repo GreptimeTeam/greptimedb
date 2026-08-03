@@ -398,7 +398,6 @@ impl SeriesReader {
             let non_tag_filters = self.non_tag_filters.clone();
             let partition_pruner = self.partition_pruner.clone();
             let file_scan_semaphore = self.file_scan_semaphore.clone();
-            let final_merge_semaphore = self.final_merge_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
             let range = self.range;
             tasks.push(common_runtime::spawn_query(async move {
@@ -411,7 +410,6 @@ impl SeriesReader {
                     non_tag_filters,
                     partition_pruner,
                     file_scan_semaphore,
-                    final_merge_semaphore,
                     part_metrics,
                 )
                 .await
@@ -449,7 +447,6 @@ async fn build_series_partition_range(
     non_tag_filters: Arc<[PreparedNonTagFilter]>,
     partition_pruner: Arc<PartitionPruner>,
     file_scan_semaphore: Arc<Semaphore>,
-    merge_semaphore: Arc<Semaphore>,
     part_metrics: PartitionMetrics,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
     let cache_key = build_series_range_cache_key(&stream_ctx, &part_range, range);
@@ -563,7 +560,7 @@ async fn build_series_partition_range(
     let stream = SeqScan::build_flat_reader_from_sources(
         &stream_ctx,
         sources,
-        Some(merge_semaphore),
+        None,
         Some(&part_metrics),
         false,
         compute_parallel_channel_size(estimated_batch_size),
@@ -624,6 +621,19 @@ fn scan_series_file_ranges(
                 reader_metrics.num_batches += 1;
                 reader_metrics.num_rows += record_batch.num_rows();
 
+                let num_rows_before_filter = record_batch.num_rows();
+                let Some(record_batch) = range.precise_filter_flat(
+                    record_batch,
+                    range.pre_filter_mode().skip_fields(),
+                    true,
+                )? else {
+                    reader_metrics.filter_metrics.rows_precise_filtered +=
+                        num_rows_before_filter;
+                    continue;
+                };
+                reader_metrics.filter_metrics.rows_precise_filtered +=
+                    num_rows_before_filter - record_batch.num_rows();
+
                 let record_batch = if let Some(mapper) = range.compaction_projection_mapper() {
                     mapper.project(record_batch)?
                 } else {
@@ -639,6 +649,7 @@ fn scan_series_file_ranges(
         }
 
         reader_metrics.observe_rows("series_data");
+        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(&reader_metrics, None);
     }
 }
