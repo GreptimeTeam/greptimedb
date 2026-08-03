@@ -1611,7 +1611,7 @@ mod tests {
     use auth::{PermissionResp, UserInfoRef};
     use catalog::process_manager::ProcessManager;
     use common_base::Plugins;
-    use common_error::ext::{BoxedError, PlainError};
+    use common_error::ext::{BoxedError, ErrorExt, PlainError};
     use common_error::status_code::StatusCode;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1621,6 +1621,7 @@ mod tests {
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
     use common_query::Output;
+    use common_query::prelude::greptime_value;
     use common_recordbatch::{
         OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
     };
@@ -2324,6 +2325,143 @@ mod tests {
             }],
             timeseries.samples
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_prefers_default_value_column() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("extra_field", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new(
+                greptime_value(),
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![99.0, 99.0, 99.0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("multi_field_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let response = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    start_timestamp_ms: 1500,
+                    end_timestamp_ms: 2500,
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "multi_field_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        let response = ReadResponse::decode(body.as_slice()).unwrap();
+
+        assert_eq!(1, response.results.len());
+        assert_eq!(1, response.results[0].timeseries.len());
+        let timeseries = &response.results[0].timeseries[0];
+        assert_eq!(
+            vec![
+                Label {
+                    name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "multi_field_metric".to_string(),
+                },
+                Label {
+                    name: "extra_field".to_string(),
+                    value: "99".to_string(),
+                },
+            ],
+            timeseries.labels
+        );
+        assert_eq!(
+            vec![Sample {
+                value: 2.0,
+                timestamp: 2000,
+            }],
+            timeseries.samples
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_rejects_ambiguous_value_columns() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_a", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new("field_b", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![2.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("ambiguous_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let err = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "ambiguous_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .err()
+        .expect("ambiguous value columns should fail remote read");
+
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(format!("{err:?}").contains("Ambiguous value column"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_event_recorder_is_exposed() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
