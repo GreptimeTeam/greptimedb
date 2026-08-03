@@ -575,8 +575,14 @@ impl RangeBase {
             mask = mask.bitand(&partition_mask);
         }
 
-        if mask.count_set_bits() == 0 {
+        let num_selected = mask.count_set_bits();
+        if num_selected == 0 {
             return Ok(None);
+        }
+        if num_selected == input.num_rows() {
+            // Nothing was filtered out, e.g. all filters were skipped by
+            // `skip_fields`/`skip_tags`. Avoid copying the whole batch.
+            return Ok(Some(input));
         }
 
         let filtered_batch =
@@ -865,6 +871,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    #[test]
+    fn test_precise_filter_flat_returns_input_when_nothing_is_filtered() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let tag_filter =
+            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("z"))).unwrap();
+        let base = new_test_range_base(vec![tag_filter]);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        // The only filter is a tag filter, and it is skipped, so the batch must
+        // come back untouched rather than being copied through `filter_record_batch`.
+        let filtered = base
+            .precise_filter_flat(batch.clone(), false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch, filtered);
     }
 
     #[test]

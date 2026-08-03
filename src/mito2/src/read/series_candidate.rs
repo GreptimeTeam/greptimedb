@@ -88,6 +88,10 @@ impl SeriesCandidateScanner {
     ///
     /// Callers must fall back to the legacy series-scan path when the scan contains
     /// extension ranges. Candidate-series discovery does not support other range types.
+    ///
+    /// `pruner` must be built with `PrunerOptions::enable_predicate_prefilter` set to
+    /// `false`: both scan phases share its file range builders, and the two-stage path
+    /// applies simple filters on the precise-filter path instead.
     pub(crate) fn try_new(
         stream_ctx: Arc<StreamContext>,
         partitions: Vec<Vec<PartitionRange>>,
@@ -106,13 +110,13 @@ impl SeriesCandidateScanner {
                 reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
             }
         );
+        debug_assert!(
+            !pruner.predicate_prefilter_enabled(),
+            "candidate-series scan requires a pruner without predicate prefiltering"
+        );
         let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
         pruner.add_partition_ranges(&all_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new_with_predicate_prefilter(
-            pruner,
-            &all_ranges,
-            false,
-        ));
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &all_ranges));
         Ok(Self {
             stream_ctx,
             partitions,

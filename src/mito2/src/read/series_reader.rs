@@ -240,21 +240,22 @@ pub(crate) struct SeriesReader {
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
-    file_scan_semaphore: Arc<Semaphore>,
-    final_merge_semaphore: Arc<Semaphore>,
+    range_semaphore: Arc<Semaphore>,
     part_metrics: PartitionMetrics,
 }
 
 #[allow(dead_code)]
 impl SeriesReader {
-    #[allow(clippy::too_many_arguments)]
+    /// Creates a reader for the series assigned to one data partition.
+    ///
+    /// A single `range_semaphore` covers both the range-build phase and the final
+    /// merge.
     pub(crate) fn try_new(
         stream_ctx: Arc<StreamContext>,
         partition_ranges: Vec<PartitionRange>,
         assigned_series: AssignedSeriesBatch,
         partition_pruner: Arc<PartitionPruner>,
-        file_scan_semaphore: Arc<Semaphore>,
-        final_merge_semaphore: Arc<Semaphore>,
+        range_semaphore: Arc<Semaphore>,
         part_metrics: PartitionMetrics,
     ) -> Result<Self> {
         validate_metric_metadata(&stream_ctx)?;
@@ -277,8 +278,7 @@ impl SeriesReader {
             filter,
             codec,
             partition_pruner,
-            file_scan_semaphore,
-            final_merge_semaphore,
+            range_semaphore,
             part_metrics,
         })
     }
@@ -294,10 +294,16 @@ impl SeriesReader {
             let filter = self.filter.clone();
             let codec = self.codec.clone();
             let partition_pruner = self.partition_pruner.clone();
-            let file_scan_semaphore = self.file_scan_semaphore.clone();
+            let range_semaphore = self.range_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
             let range = self.range;
             tasks.push(common_runtime::spawn_query(async move {
+                let _permit = range_semaphore.acquire().await.map_err(|error| {
+                    UnexpectedSnafu {
+                        reason: format!("failed to acquire series range permit: {error}"),
+                    }
+                    .build()
+                })?;
                 build_series_partition_range(
                     stream_ctx,
                     part_range,
@@ -305,7 +311,6 @@ impl SeriesReader {
                     filter,
                     codec,
                     partition_pruner,
-                    file_scan_semaphore,
                     part_metrics,
                 )
                 .await
@@ -320,11 +325,13 @@ impl SeriesReader {
             estimated_batch_sizes.push(estimated_batch_size);
         }
 
+        // Every range task above has finished, so all build permits are released
+        // and the final merge can reuse the same semaphore.
         let estimated_batch_size = compute_average_batch_size(estimated_batch_sizes);
         SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             range_streams,
-            Some(self.final_merge_semaphore.clone()),
+            Some(self.range_semaphore.clone()),
             Some(&self.part_metrics),
             true,
             compute_parallel_channel_size(estimated_batch_size),
@@ -333,7 +340,6 @@ impl SeriesReader {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn build_series_partition_range(
     stream_ctx: Arc<StreamContext>,
     part_range: PartitionRange,
@@ -341,7 +347,6 @@ async fn build_series_partition_range(
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
-    file_scan_semaphore: Arc<Semaphore>,
     part_metrics: PartitionMetrics,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
     let cache_key = build_series_range_cache_key(&stream_ctx, &part_range, range);
@@ -355,11 +360,9 @@ async fn build_series_partition_range(
 
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let split_batch_size = should_split_flat_batches_for_merge(&stream_ctx, range_meta);
-    let mut ordered_sources = Vec::with_capacity(range_meta.row_group_indices.len());
-    ordered_sources.resize_with(range_meta.row_group_indices.len(), || None);
-    let mut file_tasks = Vec::new();
+    let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
 
-    for (position, index) in range_meta.row_group_indices.iter().copied().enumerate() {
+    for index in range_meta.row_group_indices.iter().copied() {
         if stream_ctx.is_mem_range_index(index) {
             let stream = Box::pin(scan_flat_mem_ranges(
                 stream_ctx.clone(),
@@ -367,7 +370,7 @@ async fn build_series_partition_range(
                 index,
                 range_meta.time_range,
             ));
-            ordered_sources[position] = Some(filter_flat_stream_by_series(
+            sources.push(filter_flat_stream_by_series(
                 stream,
                 codec.clone(),
                 filter.clone(),
@@ -378,8 +381,7 @@ async fn build_series_partition_range(
         if stream_ctx.is_file_range_index(index) {
             let file = stream_ctx.input.file_from_index(index);
             if matches!(
-                file.meta_ref()
-                    .primary_key_range()
+                file.primary_key_range()
                     .and_then(|(min, max)| { filter.overlaps_encoded_bounds(&codec, &min, &max) }),
                 Some(false)
             ) {
@@ -414,20 +416,13 @@ async fn build_series_partition_range(
                 continue;
             }
 
-            let part_metrics = part_metrics.clone();
-            let filter = filter.clone();
-            let codec = codec.clone();
-            let semaphore = file_scan_semaphore.clone();
-            file_tasks.push(async move {
-                let _permit = semaphore.acquire().await.map_err(|error| {
-                    UnexpectedSnafu {
-                        reason: format!("failed to acquire series file permit: {error}"),
-                    }
-                    .build()
-                })?;
-                let stream = scan_series_file_ranges(part_metrics, ranges, filter, codec);
-                Ok::<_, crate::error::Error>((position, Box::pin(stream) as BoxedRecordBatchStream))
-            });
+            let stream = scan_series_file_ranges(
+                part_metrics.clone(),
+                ranges,
+                filter.clone(),
+                codec.clone(),
+            );
+            sources.push(Box::pin(stream) as BoxedRecordBatchStream);
             continue;
         }
 
@@ -440,11 +435,6 @@ async fn build_series_partition_range(
         .fail();
     }
 
-    for (position, stream) in futures::future::try_join_all(file_tasks).await? {
-        ordered_sources[position] = Some(stream);
-    }
-
-    let mut sources = ordered_sources.into_iter().flatten().collect::<Vec<_>>();
     if split_batch_size.is_some() {
         sources = sources
             .into_iter()
