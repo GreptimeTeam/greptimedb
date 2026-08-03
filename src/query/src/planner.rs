@@ -22,6 +22,7 @@ use arrow_schema::DataType;
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::BoxedError;
+use common_query::promql_annotations::promql_annotation_collector;
 use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::SessionStateBuilder;
@@ -299,7 +300,15 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
+        if let Some(collector) = &promql_annotations {
+            scheduled_state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(collector.clone());
+        }
         let plan_decoder = Arc::new(DefaultPlanDecoder::new(
             scheduled_state.clone(),
             &query_ctx,
@@ -314,10 +323,15 @@ impl DfLogicalPlanner {
                 .sql_parser
                 .enable_ident_normalization,
         );
-        let plan = PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
-            .await
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)?;
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            table_provider,
+            stmt,
+            &self.engine_state,
+            promql_annotations,
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(QueryPlanSnafu)?;
 
         let context = QueryEngineContext::new(scheduled_state, query_ctx);
         Ok(self
