@@ -34,18 +34,22 @@ use crate::load_balance::{LoadBalance, Loadbalancer};
 use crate::{Result, error};
 
 const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Options for a gRPC client.
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     /// Interval for refreshing peer health. `Duration::ZERO` disables background health checks.
     pub health_check_interval: Duration,
+    /// Timeout for checking the health of a peer.
+    pub health_check_timeout: Duration,
 }
 
 impl Default for ClientOptions {
     fn default() -> Self {
         Self {
             health_check_interval: DEFAULT_HEALTH_CHECK_INTERVAL,
+            health_check_timeout: DEFAULT_HEALTH_CHECK_TIMEOUT,
         }
     }
 }
@@ -73,10 +77,10 @@ pub struct Client {
 #[derive(Debug)]
 struct Inner {
     channel_manager: ChannelManager,
-    peers: Arc<[String]>,
-    peer_states: Arc<RwLock<PeerStates>>,
+    peers: RwLock<Peers>,
     load_balance: Loadbalancer,
     health_check_interval: Duration,
+    health_check_timeout: Duration,
     health_check_started: AtomicBool,
 }
 
@@ -86,10 +90,17 @@ impl Default for Inner {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct PeerStates {
     active: Vec<usize>,
     inactive: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct Peers {
+    addresses: Vec<String>,
+    states: PeerStates,
+    generation: u64,
 }
 
 impl Inner {
@@ -101,38 +112,59 @@ impl Inner {
         let peer_count = peers.len();
         Self {
             channel_manager,
-            peers: peers.into(),
-            peer_states: Arc::new(RwLock::new(PeerStates {
-                active: Vec::new(),
-                inactive: (0..peer_count).collect(),
-            })),
+            peers: RwLock::new(Peers {
+                addresses: peers,
+                states: PeerStates {
+                    active: (0..peer_count).collect(),
+                    inactive: Vec::new(),
+                },
+                generation: 0,
+            }),
             load_balance: Loadbalancer::default(),
             health_check_interval: options.health_check_interval,
+            health_check_timeout: options.health_check_timeout,
             health_check_started: AtomicBool::new(false),
         }
     }
 
+    fn set_peers(&self, addresses: Vec<String>) {
+        let peer_count = addresses.len();
+        let mut peers = self.peers.write();
+        peers.addresses = addresses;
+        peers.states = PeerStates {
+            active: (0..peer_count).collect(),
+            inactive: Vec::new(),
+        };
+        peers.generation = peers.generation.wrapping_add(1);
+    }
+
+    fn peer_count(&self) -> usize {
+        self.peers.read().addresses.len()
+    }
+
     fn get_peer(&self) -> Option<String> {
-        let peer_states = self.peer_states.read();
+        let peers = self.peers.read();
         let index = self
             .load_balance
-            .get_index(&peer_states.active)
-            .or_else(|| self.load_balance.get_index(&peer_states.inactive))?;
-        Some(self.peers[*index].clone())
+            .get_index(&peers.states.active)
+            .or_else(|| self.load_balance.get_index(&peers.states.inactive))?;
+        Some(peers.addresses[*index].clone())
     }
 
     async fn refresh_peer_states(&self) {
-        let peers = {
-            let peer_states = self.peer_states.read();
-            peer_states
+        let (generation, peers) = {
+            let peers = self.peers.read();
+            let addresses = peers
+                .states
                 .active
                 .iter()
-                .chain(&peer_states.inactive)
-                .copied()
-                .collect::<Vec<_>>()
+                .chain(&peers.states.inactive)
+                .map(|&index| (index, peers.addresses[index].clone()))
+                .collect::<Vec<_>>();
+            (peers.generation, addresses)
         };
-        let health_checks = peers.into_iter().map(|index| async move {
-            let is_active = self.check_peer_health(&self.peers[index]).await;
+        let health_checks = peers.into_iter().map(|(index, addr)| async move {
+            let is_active = self.check_peer_health(&addr).await;
             (index, is_active)
         });
         let results = futures::future::join_all(health_checks).await;
@@ -148,7 +180,11 @@ impl Inner {
                 (active, inactive)
             },
         );
-        *self.peer_states.write() = PeerStates { active, inactive };
+
+        let mut peers = self.peers.write();
+        if peers.generation == generation {
+            peers.states = PeerStates { active, inactive };
+        }
     }
 
     async fn check_peer_health(&self, addr: &str) -> bool {
@@ -156,8 +192,22 @@ impl Inner {
             return false;
         };
         let mut client = HealthCheckClient::new(channel);
-        client.health_check(HealthCheckRequest {}).await.is_ok()
+        tokio::time::timeout(
+            self.health_check_timeout,
+            client.health_check(HealthCheckRequest {}),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
     }
+}
+
+fn random_initial_delay(max_delay: Duration) -> Duration {
+    let max_nanos = max_delay.as_nanos().min(u64::MAX as u128) as u64;
+    if max_nanos == 0 {
+        return Duration::ZERO;
+    }
+
+    Duration::from_nanos(rand::random_range(0..max_nanos))
 }
 
 impl Client {
@@ -245,8 +295,22 @@ impl Client {
         client
     }
 
+    pub fn start<U, A>(&self, urls: A)
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        let urls = urls
+            .as_ref()
+            .iter()
+            .map(|peer| peer.as_ref().to_string())
+            .collect();
+        self.inner.set_peers(urls);
+        self.start_health_check();
+    }
+
     fn start_health_check(&self) {
-        if self.inner.health_check_interval.is_zero() {
+        if self.inner.health_check_interval.is_zero() || self.inner.peer_count() <= 1 {
             return;
         }
 
@@ -261,6 +325,7 @@ impl Client {
         let inner = Arc::downgrade(&self.inner);
         let health_check_interval = self.inner.health_check_interval;
         common_runtime::spawn_global(async move {
+            tokio::time::sleep(random_initial_delay(health_check_interval)).await;
             let mut interval = tokio::time::interval(health_check_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -269,7 +334,9 @@ impl Client {
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                inner.refresh_peer_states().await;
+                if inner.peer_count() > 1 {
+                    inner.refresh_peer_states().await;
+                }
             }
         });
     }
@@ -365,16 +432,16 @@ impl Client {
     /// Returns peer addresses grouped by active and inactive state for tests.
     #[cfg(feature = "testing")]
     pub fn peer_addresses_by_state(&self) -> (Vec<String>, Vec<String>) {
-        let peer_states = self.inner.peer_states.read();
+        let peers = self.inner.peers.read();
         let addresses = |indices: &[usize]| {
             indices
                 .iter()
-                .map(|&index| self.inner.peers[index].clone())
+                .map(|&index| peers.addresses[index].clone())
                 .collect()
         };
         (
-            addresses(&peer_states.active),
-            addresses(&peer_states.inactive),
+            addresses(&peers.states.active),
+            addresses(&peers.states.inactive),
         )
     }
 }
@@ -382,6 +449,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -389,6 +457,7 @@ mod tests {
     use api::v1::{HealthCheckRequest, HealthCheckResponse};
     use common_grpc::channel_manager::ChannelManager;
     use tokio::net::TcpListener;
+    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
     use tokio::time::{interval, timeout};
     use tokio_stream::wrappers::TcpListenerStream;
@@ -424,6 +493,23 @@ mod tests {
         }
     }
 
+    struct PendingHealthCheck {
+        started: Option<Arc<Notify>>,
+    }
+
+    #[tonic::async_trait]
+    impl HealthCheck for PendingHealthCheck {
+        async fn health_check(
+            &self,
+            _request: Request<HealthCheckRequest>,
+        ) -> Result<Response<HealthCheckResponse>, Status> {
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            std::future::pending().await
+        }
+    }
+
     async fn start_health_check_server<T>(handler: T) -> (String, JoinHandle<()>)
     where
         T: HealthCheck + Send + Sync + 'static,
@@ -451,8 +537,7 @@ mod tests {
         timeout(STATE_REFRESH_TIMEOUT, async {
             loop {
                 poll.tick().await;
-                let states = client.inner.peer_states.read();
-                if states.active == expected.active && states.inactive == expected.inactive {
+                if client.inner.peers.read().states == expected {
                     return;
                 }
             }
@@ -497,7 +582,7 @@ mod tests {
             peers.clone(),
             ClientOptions::default(),
         );
-        *inner.peer_states.write() = PeerStates {
+        inner.peers.write().states = PeerStates {
             active: vec![0],
             inactive: vec![1, 2],
         };
@@ -511,9 +596,31 @@ mod tests {
             mock_peers(),
             ClientOptions {
                 health_check_interval: Duration::ZERO,
+                ..Default::default()
             },
         );
 
+        assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
+        let peers = client.inner.peers.read();
+        assert_eq!(mock_peers(), peers.addresses);
+        assert_eq!(vec![0, 1, 2], peers.states.active);
+        assert!(peers.states.inactive.is_empty());
+    }
+
+    #[test]
+    fn test_single_peer_does_not_start_background_task() {
+        let client = Client::with_urls(["127.0.0.1:3001"]);
+
+        assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_start_initializes_new_client() {
+        let client = Client::new();
+
+        client.start(["127.0.0.1:3001"]);
+
+        assert_eq!(Some("127.0.0.1:3001".to_string()), client.inner.get_peer());
         assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
     }
 
@@ -527,6 +634,7 @@ mod tests {
             [healthy_addr.clone(), unhealthy_addr],
             ClientOptions {
                 health_check_interval: HEALTH_REFRESH_INTERVAL,
+                ..Default::default()
             },
         );
 
@@ -545,5 +653,64 @@ mod tests {
 
         healthy_server.abort();
         unhealthy_server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_health_refresh_times_out_pending_peer() {
+        let (healthy_addr, healthy_server) = start_health_check_server(HealthyHealthCheck).await;
+        let (pending_addr, pending_server) =
+            start_health_check_server(PendingHealthCheck { started: None }).await;
+        let client = Client::with_urls_and_options(
+            [healthy_addr, pending_addr],
+            ClientOptions {
+                health_check_interval: HEALTH_REFRESH_INTERVAL,
+                health_check_timeout: Duration::from_millis(20),
+            },
+        );
+
+        wait_for_peer_states(
+            &client,
+            PeerStates {
+                active: vec![0],
+                inactive: vec![1],
+            },
+        )
+        .await;
+
+        healthy_server.abort();
+        pending_server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_peer_update_ignores_in_flight_health_result() {
+        let started = Arc::new(Notify::new());
+        let (pending_addr, pending_server) = start_health_check_server(PendingHealthCheck {
+            started: Some(started.clone()),
+        })
+        .await;
+        let inner = Arc::new(Inner::with_manager_and_peers(
+            ChannelManager::new(),
+            vec![pending_addr],
+            ClientOptions {
+                health_check_timeout: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ));
+        let refresh_inner = inner.clone();
+        let refresh = tokio::spawn(async move {
+            refresh_inner.refresh_peer_states().await;
+        });
+        timeout(STATE_REFRESH_TIMEOUT, started.notified())
+            .await
+            .expect("pending health check did not start");
+
+        inner.set_peers(vec!["127.0.0.1:3001".to_string()]);
+        refresh.await.unwrap();
+
+        let peers = inner.peers.read();
+        assert_eq!(vec!["127.0.0.1:3001"], peers.addresses);
+        assert_eq!(vec![0], peers.states.active);
+        assert!(peers.states.inactive.is_empty());
+        pending_server.abort();
     }
 }

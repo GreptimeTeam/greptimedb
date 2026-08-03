@@ -740,6 +740,7 @@ mod tests {
             [INACTIVE_ADDR, ACTIVE_ADDR],
             client::ClientOptions {
                 health_check_interval: HEALTH_REFRESH_INTERVAL,
+                ..Default::default()
             },
         );
         (
@@ -798,6 +799,7 @@ mod tests {
             [INACTIVE_ADDR, ACTIVE_ADDR],
             client::ClientOptions {
                 health_check_interval: HEALTH_REFRESH_INTERVAL,
+                ..Default::default()
             },
         );
         (
