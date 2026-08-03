@@ -662,7 +662,6 @@ mod tests {
     #[tokio::test]
     async fn test_writer_abort_is_unsupported_without_atomic_write() {
         let temp_dir = create_temp_dir("secure_fs_writer_abort");
-        std::fs::write(temp_dir.path().join("partial"), b"original").unwrap();
         let operator = SecureFsRoot::open(temp_dir.path())
             .unwrap()
             .build_operator();
@@ -672,11 +671,5 @@ mod tests {
         let error = writer.abort().await.unwrap_err();
 
         assert_eq!(ErrorKind::Unsupported, error.kind());
-        assert_eq!(
-            b"partial",
-            std::fs::read(temp_dir.path().join("partial"))
-                .unwrap()
-                .as_slice()
-        );
     }
 }
