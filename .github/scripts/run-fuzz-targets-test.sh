@@ -71,6 +71,8 @@ run_fixture() {
     "FUZZ_COLLECT_CLUSTER_ARTIFACTS=true"
     "FUZZ_ARTIFACT_ROOT=${artifact_root}"
     "FUZZ_ARTIFACT_COLLECTOR=${fixture}/collector"
+    "GT_FUZZ_BINARY_PATH=${GT_FUZZ_BINARY_PATH:-}"
+    "GT_FUZZ_INSTANCE_ROOT_DIR=${GT_FUZZ_INSTANCE_ROOT_DIR:-}"
     "GITHUB_SHA=deadbeef"
     "GITHUB_STEP_SUMMARY=${fixture}/github-step-summary.md"
   )
@@ -180,7 +182,9 @@ test_fail_fast_stops_after_first_failure() {
 
 test_fail_fast_defaults_to_true() {
   new_fixture
-  run_fixture $'fuzz_create_table\nfuzz_insert\nfuzz_alter_table' unset true "fuzz_insert"
+  GT_FUZZ_BINARY_PATH=./bin/greptime \
+    GT_FUZZ_INSTANCE_ROOT_DIR=/tmp/greptime-fuzz-artifacts/targets/fuzz_insert/service/instance/ \
+    run_fixture $'fuzz_create_table\nfuzz_insert\nfuzz_alter_table' unset true "fuzz_insert"
 
   assert_eq 1 "${fixture_status}" "default fail-fast run status"
   assert_eq 2 "$(wc -l <"${fixture}/cargo.log" | tr -d ' ')" "default fail-fast cargo count"
@@ -189,6 +193,10 @@ test_fail_fast_defaults_to_true() {
     "default fail-fast skipped status"
   grep -q -- '--features=unstable' "${fixture}/artifacts/summary.md" || \
     fail "unstable reproduction argument missing"
+  grep -q -- 'GT_FUZZ_BINARY_PATH=./bin/greptime' \
+    "${fixture}/artifacts/summary.md" || fail "unstable binary path missing from reproduction"
+  grep -q -- 'GT_FUZZ_INSTANCE_ROOT_DIR=/tmp/greptime-fuzz-artifacts/targets/fuzz_insert/service/instance/' \
+    "${fixture}/artifacts/summary.md" || fail "unstable instance root missing from reproduction"
   cleanup_fixture
 }
 

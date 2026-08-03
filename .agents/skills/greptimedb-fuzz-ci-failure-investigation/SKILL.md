@@ -234,7 +234,8 @@ artifacts explicitly; retention is currently short (`retention-days: 3`).
 Evidence for target `<target>` is rooted at
 `artifacts/$ARTIFACT/targets/<target>/`. `result.json` records timestamps, status,
 exit code, fuzz budget, prior-failure provenance, and artifact collection status.
-`fuzz.log` is the complete output of that target's `cargo fuzz run` invocation.
+`fuzz.log` is the complete libFuzzer output from the prebuilt target executable in
+CI; local fallback runs it through `cargo fuzz run`.
 
 Kind logs under `targets/<target>/kind/` come from an immediate failure snapshot
 and usually include Kubernetes state plus container logs. Prioritize:
@@ -409,8 +410,8 @@ the run SHA.
 Useful entry points:
 
 - `tests-fuzz/` — fuzz targets, operation generators, checkers, dump paths.
-- `.github/actions/fuzz-test/action.yaml` — exact `cargo fuzz` invocation.
-- `.github/workflows/develop.yml` — fuzz matrix and artifact upload names.
+- `.github/actions/fuzz-test/action.yaml` — exact CI fuzz runner configuration.
+- `.github/workflows/integration.yml` — fuzz matrix and artifact upload names.
 - `.github/scripts/collect-fuzz-monitor-artifacts.sh` — monitor dump contents.
 - `src/mito2/AGENTS.md` — storage/WAL/region failures.
 - `src/metric-engine/AGENTS.md` — metric/logical table failures.

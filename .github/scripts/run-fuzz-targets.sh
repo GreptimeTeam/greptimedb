@@ -95,7 +95,16 @@ write_summary() {
     if [[ "${failure_count}" -gt 0 ]]; then
       printf '\n### Reproduce failed targets\n\n'
       while IFS= read -r target; do
-        reproduce_args=(cargo fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
+        reproduce_args=()
+        if [[ "${fuzz_unstable}" == true ]]; then
+          if [[ -n "${GT_FUZZ_BINARY_PATH:-}" ]]; then
+            reproduce_args+=("GT_FUZZ_BINARY_PATH=${GT_FUZZ_BINARY_PATH}")
+          fi
+          if [[ -n "${GT_FUZZ_INSTANCE_ROOT_DIR:-}" ]]; then
+            reproduce_args+=("GT_FUZZ_INSTANCE_ROOT_DIR=${GT_FUZZ_INSTANCE_ROOT_DIR}")
+          fi
+        fi
+        reproduce_args+=(cargo fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
         if [[ "${fuzz_unstable}" == true ]]; then
           reproduce_args+=(--features=unstable)
         fi
