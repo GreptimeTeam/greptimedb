@@ -207,7 +207,7 @@ case for issue #7913. It writes 8192 series × 20160 samples through remote-writ
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
 TQL selectors. It is not included in the default `all` case set because ingestion
 cost dominates routine CI validation. Adding the `heavy-regression` PR label runs
-only this case; `query-regression` runs the five routine default cases. Manual
+only this case; `query-regression` runs the six routine default cases. Manual
 workflow dispatch accepts the `heavy` token to select this case.
 
 ## OTLP trace load scenario
@@ -473,7 +473,7 @@ read-bench tool against each target's data directory.
 
 The workflow runs automatically only when `query-regression` or `heavy-regression`
 is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or
-reopen events. `query-regression` runs the five routine default cases, while
+reopen events. `query-regression` runs the six routine default cases, while
 `heavy-regression` runs only the high-cardinality remote-write #7913 case. PR runs
 build base/candidate once and use `--allow-large-fixture`. Manual
 `workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a
