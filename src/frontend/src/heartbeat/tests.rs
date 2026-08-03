@@ -608,6 +608,37 @@ struct OrderingHandler {
     table_key: Vec<u8>,
 }
 
+enum ShortCircuitResult {
+    Done,
+    Error,
+}
+
+struct ShortCircuitHandler {
+    result: ShortCircuitResult,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl HeartbeatResponseHandler for ShortCircuitHandler {
+    fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
+        true
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<HandleControl> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        match self.result {
+            ShortCircuitResult::Done => Ok(HandleControl::Done),
+            ShortCircuitResult::Error => common_meta::error::UnsupportedSnafu {
+                operation: "mock extension response handler",
+            }
+            .fail(),
+        }
+    }
+}
+
 #[async_trait]
 impl HeartbeatResponseHandler for OrderingHandler {
     fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
@@ -690,6 +721,82 @@ async fn test_response_extension_handler_order() {
     );
     assert!(!suspend_state.load(Ordering::Acquire));
     assert!(!cache.inner.lock().unwrap().contains_key(&table_key));
+}
+
+async fn assert_extension_short_circuit_is_isolated(result: ShortCircuitResult) {
+    let table_id = 42;
+    let table_key = TableInfoKey::new(table_id).to_bytes();
+    let cache = Arc::new(MockKvCacheInvalidator {
+        inner: Mutex::new(HashMap::from([(table_key.clone(), 1)])),
+    });
+    let suspend_state = Arc::new(AtomicBool::new(true));
+    let short_circuit_calls = Arc::new(AtomicUsize::new(0));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let extensions = HeartbeatExtensions::default();
+    extensions.register(TestExtension::with_handler(
+        "short-circuit",
+        Arc::new(ShortCircuitHandler {
+            result,
+            calls: short_circuit_calls.clone(),
+        }),
+    ));
+    extensions.register(TestExtension::with_handler(
+        "remaining",
+        Arc::new(OrderingHandler {
+            observations: observations.clone(),
+            suspend_state: suspend_state.clone(),
+            cache: cache.clone(),
+            table_key: table_key.clone(),
+        }),
+    ));
+    let executor =
+        heartbeat_response_handler_executor(&extensions, suspend_state.clone(), cache.clone());
+    let (mailbox_tx, _) = mpsc::channel(1);
+    let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox.clone(),
+            HeartbeatResponse::default(),
+        ))
+        .await
+        .unwrap();
+
+    let invalidate_response = HeartbeatResponse {
+        mailbox_message: Some(MailboxMessage {
+            payload: Some(Payload::Json(
+                serde_json::to_string(&Instruction::InvalidateCaches(vec![CacheIdent::TableId(
+                    table_id,
+                )]))
+                .unwrap(),
+            )),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox,
+            invalidate_response,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(short_circuit_calls.load(Ordering::Acquire), 2);
+    assert_eq!(observations.lock().unwrap().len(), 2);
+    assert!(!suspend_state.load(Ordering::Acquire));
+    assert!(!cache.inner.lock().unwrap().contains_key(&table_key));
+}
+
+#[tokio::test]
+async fn test_response_extension_done_does_not_skip_remaining_handlers() {
+    assert_extension_short_circuit_is_isolated(ShortCircuitResult::Done).await;
+}
+
+#[tokio::test]
+async fn test_response_extension_error_does_not_skip_remaining_handlers() {
+    assert_extension_short_circuit_is_isolated(ShortCircuitResult::Error).await;
 }
 
 #[tokio::test]

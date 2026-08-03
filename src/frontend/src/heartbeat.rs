@@ -71,6 +71,9 @@ pub trait HeartbeatExtension: Send + Sync {
     }
 
     /// Returns a handler to insert into the heartbeat response handler chain.
+    ///
+    /// Errors and [`common_meta::heartbeat::handler::HandleControl::Done`] are isolated to this
+    /// extension so they cannot skip later extensions or mandatory OSS handlers.
     fn response_handler(&self) -> Option<HeartbeatResponseHandlerRef> {
         None
     }
@@ -146,12 +149,39 @@ pub fn heartbeat_response_handler_executor(
     cache_invalidator: CacheInvalidatorRef,
 ) -> HeartbeatResponseHandlerExecutorRef {
     let mut handlers: Vec<HeartbeatResponseHandlerRef> = vec![Arc::new(ParseMailboxMessageHandler)];
-    handlers.extend(extensions.response_handlers());
+    handlers.extend(extensions.response_handlers().into_iter().map(|handler| {
+        Arc::new(IsolatedHeartbeatResponseHandler(handler)) as HeartbeatResponseHandlerRef
+    }));
     handlers.extend([
         Arc::new(SuspendHandler::new(suspend_state)) as HeartbeatResponseHandlerRef,
         Arc::new(InvalidateCacheHandler::new(cache_invalidator)),
     ]);
     Arc::new(HandlerGroupExecutor::new(handlers))
+}
+
+struct IsolatedHeartbeatResponseHandler(HeartbeatResponseHandlerRef);
+
+#[async_trait]
+impl common_meta::heartbeat::handler::HeartbeatResponseHandler
+    for IsolatedHeartbeatResponseHandler
+{
+    fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
+        true
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<common_meta::heartbeat::handler::HandleControl> {
+        use common_meta::heartbeat::handler::HandleControl;
+
+        if self.0.is_acceptable(ctx)
+            && let Err(error) = self.0.handle(ctx).await
+        {
+            error!(error; "Heartbeat extension response handler failed");
+        }
+        Ok(HandleControl::Continue)
+    }
 }
 
 #[async_trait]
