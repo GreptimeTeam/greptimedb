@@ -26,8 +26,8 @@ use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
-use state::{ActiveCompaction, CompactionStatus, PendingCompaction, RequestCancelResult};
-pub(crate) use state::{CompactionExecution, LocalCompactionState};
+pub(crate) use state::CompactionExecution;
+use state::{ActiveCompaction, CompactionStatus, PendingCompaction};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
@@ -43,6 +43,7 @@ use crate::error::{
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::schedule::RequestCancelResult;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
 

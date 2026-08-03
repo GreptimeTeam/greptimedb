@@ -118,7 +118,7 @@ async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) 
 FROM greptime_private.events
 WHERE type = 'repartition'
   AND procedure_id = '{procedure_id}'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND table_name = '{TABLE_NAME}'"#
     );
     let expected = "\
@@ -158,7 +158,7 @@ async fn assert_repartition_group_event(
 FROM greptime_private.events
 WHERE type = 'repartition_group'
   AND procedure_id = '{procedure_id}'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND table_name = '{TABLE_NAME}'
 ORDER BY target_region_id"#
     );
@@ -199,7 +199,7 @@ async fn assert_merge_repartition_group_event(
 FROM greptime_private.events
 WHERE type = 'repartition_group'
   AND procedure_id = '{procedure_id}'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND table_name = '{TABLE_NAME}'
   AND source_partition_expr IS NOT NULL
 ORDER BY source_region_id"#
@@ -226,7 +226,7 @@ async fn find_submitted_procedure_id(
             r#"SELECT procedure_id
 FROM greptime_private.events
 WHERE type = '{event_type}'
-  AND procedure_trigger = 'Submitted'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')
   AND {predicate}
 ORDER BY timestamp DESC
 LIMIT 1"#

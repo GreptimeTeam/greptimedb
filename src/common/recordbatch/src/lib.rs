@@ -22,7 +22,7 @@ pub mod filter;
 pub mod recordbatch;
 pub mod util;
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,10 +36,16 @@ use common_memory_manager::{
 };
 use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::arrow::array::{ArrayRef, AsArray, StringBuilder};
+use datatypes::arrow::array::{Array, ArrayRef, AsArray, StringBuilder};
 use datatypes::arrow::compute::SortOptions;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::arrow::error::ArrowError;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::util::pretty;
+use datatypes::arrow::util::display::{
+    ArrayFormatter, ArrayFormatterFactory, DisplayIndex, FormatOptions, FormatResult,
+};
+use datatypes::arrow::util::pretty::pretty_format_batches_with_options;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
@@ -390,7 +396,10 @@ impl RecordBatches {
             .iter()
             .map(|x| x.df_record_batch().clone())
             .collect::<Vec<_>>();
-        let result = pretty::pretty_format_batches(df_batches).context(error::FormatSnafu)?;
+        let options =
+            FormatOptions::default().with_formatter_factory(Some(&BinaryFormatterFactory));
+        let result =
+            pretty_format_batches_with_options(df_batches, &options).context(error::FormatSnafu)?;
 
         Ok(result.to_string())
     }
@@ -426,6 +435,63 @@ impl RecordBatches {
             },
             index: 0,
         })
+    }
+}
+
+#[derive(Debug)]
+struct BinaryFormatterFactory;
+
+impl ArrayFormatterFactory for BinaryFormatterFactory {
+    fn create_array_formatter<'a>(
+        &self,
+        array: &'a dyn Array,
+        options: &FormatOptions<'a>,
+        field: Option<&'a Field>,
+    ) -> std::result::Result<Option<ArrayFormatter<'a>>, ArrowError> {
+        if !array.data_type().is_binary() {
+            return Ok(None);
+        }
+
+        Ok(Some(ArrayFormatter::new(
+            Box::new(BinaryFormatter {
+                array,
+                is_json: field.is_some_and(is_json_extension_type),
+                default: ArrayFormatter::try_new(array, options)?,
+                null: options.null(),
+            }),
+            options.safe(),
+        )))
+    }
+}
+
+struct BinaryFormatter<'a> {
+    array: &'a dyn Array,
+    is_json: bool,
+    default: ArrayFormatter<'a>,
+    null: &'a str,
+}
+
+impl DisplayIndex for BinaryFormatter<'_> {
+    fn write(&self, idx: usize, f: &mut dyn Write) -> FormatResult {
+        if !self.is_json {
+            self.default.value(idx).write(f)?;
+            return Ok(());
+        }
+
+        if self.array.is_null(idx) {
+            write!(f, "{}", self.null)?;
+        } else {
+            let bytes = match self.array.data_type() {
+                ArrowDataType::Binary => self.array.as_binary::<i32>().value(idx),
+                ArrowDataType::LargeBinary => self.array.as_binary::<i64>().value(idx),
+                ArrowDataType::BinaryView => self.array.as_binary_view().value(idx),
+                _ => unreachable!(),
+            };
+            let value =
+                jsonb_to_string(bytes).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+            write!(f, "{value}")?;
+        }
+        Ok(())
     }
 }
 

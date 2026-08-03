@@ -32,9 +32,7 @@ use common_telemetry::{debug, error};
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
 pub use scheduler::CompactionRequest;
-pub(crate) use scheduler::{
-    CompactionExecution, CompactionPickFinished, CompactionScheduler, LocalCompactionState,
-};
+pub(crate) use scheduler::{CompactionExecution, CompactionPickFinished, CompactionScheduler};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionId;

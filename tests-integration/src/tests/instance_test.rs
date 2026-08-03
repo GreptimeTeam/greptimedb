@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use client::{DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::recordbatch::check_output_stream;
-use common_test_util::temp_dir;
 use datatypes::arrow::array::{
     ArrayRef, AsArray, StringArray, TimestampMillisecondArray, UInt64Array,
 };
@@ -37,9 +37,9 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::tests::test_util::{
     MockInstance, both_instances_cases, both_instances_cases_with_custom_storages,
-    check_unordered_output_stream, distributed, distributed_with_multiple_object_stores,
-    find_testing_resource, prepare_path, standalone, standalone_instance_case,
-    standalone_with_multiple_object_stores,
+    check_unordered_output_stream, create_local_file_test_dir, distributed,
+    distributed_with_multiple_object_stores, find_testing_resource, prepare_path, standalone,
+    standalone_instance_case, standalone_with_multiple_object_stores,
 };
 
 #[apply(both_instances_cases)]
@@ -250,7 +250,7 @@ PARTITION ON COLUMNS (n) (
     check_output_stream(output, expected).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let format = "json";
@@ -277,7 +277,7 @@ async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     ));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -661,11 +661,52 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
-#[apply(both_instances_cases)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_distributed_local_file_access_disabled() {
+    let instance = distributed().await.frontend();
+    execute_sql(
+        &instance,
+        "CREATE TABLE local_file_access_distributed (
+            ts TIMESTAMP TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        );",
+    )
+    .await;
+
+    let statements = [
+        "COPY local_file_access_distributed TO 'local_file_access/table.parquet';",
+        "COPY local_file_access_distributed FROM 'local_file_access/table.parquet';",
+        "COPY (SELECT * FROM local_file_access_distributed) TO 'local_file_access/query.parquet';",
+        "COPY DATABASE public TO 'local_file_access/database/';",
+        "COPY DATABASE public FROM 'local_file_access/database/';",
+        "CREATE EXTERNAL TABLE local_file_access_external WITH (
+            location = 'local_file_access/table.parquet',
+            format = 'parquet'
+        );",
+    ];
+
+    for statement in statements {
+        let error = try_execute_sql(&instance, statement).await.unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+        let message = error.output_msg();
+        assert!(
+            message.contains("SQL access to the local filesystem is disabled"),
+            "{message}"
+        );
+        assert!(
+            message.contains("use S3, OSS, GCS, or AzBlob instead"),
+            "{message}"
+        );
+    }
+}
+
+#[apply(standalone_instance_case)]
 async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create");
+    let tmp_dir = create_local_file_test_dir("test_execute_external_create");
     let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let output = execute_sql(
@@ -700,11 +741,11 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_infer_format");
+    let tmp_dir = create_local_file_test_dir("test_execute_external_create_infer_format");
     let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let output = execute_sql(
@@ -716,11 +757,11 @@ async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstanc
     assert!(matches!(output, OutputData::AffectedRows(0)));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_without_ts");
+    let tmp_dir = create_local_file_test_dir("test_execute_external_create_without_ts");
     let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let result = try_execute_sql(
@@ -741,11 +782,11 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
     ));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_with_invalid_ts");
+    let tmp_dir = create_local_file_test_dir("test_execute_external_create_with_invalid_ts");
     let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let result = try_execute_sql(
@@ -785,7 +826,7 @@ async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInst
     ));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -860,7 +901,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -945,7 +986,7 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -1003,7 +1044,7 @@ async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn Moc
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -1058,7 +1099,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_copy_from_headerless_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let csv_path = find_testing_resource("/tests/data/csv/headerless.csv");
@@ -1183,10 +1224,10 @@ async fn test_execute_copy_from_headerless_csv(instance: Arc<dyn MockInstance>) 
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
-    let tmp_dir = temp_dir::create_temp_dir("test_execute_copy_from_csv_strict_headers");
+    let tmp_dir = create_local_file_test_dir("test_execute_copy_from_csv_strict_headers");
     let matching_path = tmp_dir.path().join("matching.csv");
     let unknown_path = tmp_dir.path().join("unknown.csv");
     let missing_path = tmp_dir.path().join("missing.csv");
@@ -1315,7 +1356,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
     ));
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -1377,7 +1418,7 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -1448,7 +1489,7 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -1523,7 +1564,7 @@ async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn Mock
     check_output_stream(output, expect).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -2584,7 +2625,7 @@ async fn test_execute_copy_from_azblob(instance: Arc<dyn MockInstance>) {
     }
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
@@ -2623,7 +2664,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
@@ -2661,7 +2702,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -2698,7 +2739,7 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_copy_from_csv_skip_bad_records(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -3116,7 +3157,7 @@ WITH(
     }
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_copy_parquet_map_to_json(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
@@ -3183,7 +3224,7 @@ async fn test_copy_parquet_map_to_json(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, &expected).await;
 }
 
-#[apply(both_instances_cases)]
+#[apply(standalone_instance_case)]
 async fn test_copy_parquet_map_to_binary(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

@@ -1,6 +1,6 @@
 # GreptimeDB Compatibility Test Framework
 
-Compatibility tests verify that a newer version of GreptimeDB can read data written by an older version.
+Compatibility tests verify that one GreptimeDB version can restart on state written by another version.
 
 Tests are run via `cargo sqlness compat` and reuse the sqlness-runner infrastructure.
 
@@ -16,6 +16,12 @@ cargo run -p sqlness-runner -- compat --from-version v0.9.5
 # Test between two local binary directories:
 cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/old --to-bins-dir ./bins/new
 
+# Test a downgrade from the current build to a released binary:
+cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/current --to-version v1.1.4
+
+# Run a compatibility case in standalone mode:
+cargo run -p sqlness-runner -- compat --topology standalone --test-filter "downgrade_compatibility"
+
 # Run a specific case:
 cargo run -p sqlness-runner -- compat --test-filter "basic_table"
 
@@ -30,7 +36,7 @@ cargo run -p sqlness-runner -- compat --help
 
 - **Docker** (for etcd): PR1 always uses Docker etcd for distributed metadata. External metadata stores are future work.
 - **From binary**: Either `--from-version <version>` to auto-pull a release, or `--from-bins-dir <path>` to use a local build. The binary `greptime` must exist directly inside the given directory.
-- **To binary**: Defaults to the current debug build (`target/debug/greptime`). Override with `--to-bins-dir <path>`.
+- **To binary**: Defaults to the current debug build (`target/debug/greptime`). Override with `--to-bins-dir <path>` or fetch a release with `--to-version <version>`.
 - **Custom target-dir**: If you use a non-default `CARGO_TARGET_DIR`, the debug binary won't be at `target/debug/greptime`. Pass `--from-bins-dir` / `--to-bins-dir` explicitly pointing to your custom target directory. Alternatively, run `cargo build -p greptime` without a custom target-dir.
 
 ## Case Format
@@ -40,8 +46,8 @@ Each compat case is a directory under `tests/compatibility/cases/` containing th
 ```
 my_case/
   case.toml       # Metadata (required)
-  setup.sql       # SQL to run on old version (required)
-  verify.sql      # SQL to run on new version (required)
+  setup.sql       # SQL to run on the from version (required)
+  verify.sql      # SQL to run on the to version (required)
   verify.result   # Expected output from verify.sql
 ```
 
@@ -51,7 +57,7 @@ my_case/
 name = "my_case"
 reason = "Why this compatibility case exists"
 introduced_by = "PR #1234 or feature name"
-topologies = ["distributed"]  # full distributed topology, including flownode
+topologies = ["distributed", "standalone"]
 from_range = ["*"]
 to_range = ["*"]
 features = ["table"]
@@ -110,17 +116,21 @@ The GitHub Actions workflow delegates the window loading and compat invocation
 to `.github/scripts/run-compat.py`; the workflow YAML should stay as a thin
 wrapper around artifact download/extraction and this script.
 
-### `setup.sql` — Setup Phase (Old Version)
+`downgrade_to_versions` optionally lists releases that CI restarts after the
+PR-built cluster. Those runs select only the `downgrade_compatibility` case in
+both distributed and standalone topologies.
 
-SQL statements executed on the **old** version cluster. These must succeed (any error fails the case). Setup output is NOT compared against any result file.
+### `setup.sql` — Setup Phase (From Version)
+
+SQL statements executed on the **from** version cluster. These must succeed (any error fails the case). Setup output is NOT compared against any result file.
 
 Rules:
 - Statements are semicolon-terminated
 - `--` prefix for ordinary comments
 - `-- SQLNESS ...` interceptor comments follow ordinary sqlness semantics
-### `verify.sql` — Verify Phase (New Version)
+### `verify.sql` — Verify Phase (To Version)
 
-SQL statements executed on the **new** version cluster. Output is compared against `verify.result` in sqlness snapshot style.
+SQL statements executed on the **to** version cluster. Output is compared against `verify.result` in sqlness snapshot style.
 
 ### `verify.result` — Expected Output
 
@@ -142,7 +152,7 @@ If output differs from expected, the run fails and `verify.result` is updated wi
 ## PR1 Limitations
 
 - **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor. For `PROTOCOL POSTGRES`, the namespace prelude uses `SET search_path` instead of `USE`. Avoid unqualified PostgreSQL-protocol table names starting with `pg_`: GreptimeDB's current PostgreSQL compatibility parser rewrites them to `pg_catalog.<table>`.
-- **Full distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode.
+- **Distributed topology**: The compat runner starts 1 metasrv + 3 datanodes + 1 frontend + 1 flownode. Standalone compatibility runs need no external metadata store.
 - **No comment-based compat config**: The compat runner does not define extra compatibility configuration in SQL comments; sqlness comments keep their normal sqlness meaning.
 
 ## Namespace Isolation
@@ -156,7 +166,7 @@ Each case runs in its own database namespace to prevent cross-case interference:
 
 ## Batch Behavior
 
-- All cases in a run share one cluster lifecycle: start old cluster → run all setups → restart with new binary → run all verifies
+- All cases in a run share one cluster lifecycle: start from-version cluster → run all setups → restart with to-version binary → run all verifies
 - Cases run **serially** (no parallelism in PR1). Namespace state is session/protocol state and cannot be shared concurrently.
 - Same namespace across cases is rejected.
 

@@ -47,6 +47,7 @@ colored = "2.1.0"
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
+common-datasource.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true

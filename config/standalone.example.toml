@@ -54,8 +54,11 @@ max_concurrent_queries = 0
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
+## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
+## The maximum number of blocking threads for compact operations.
+## Defaults to max(num_cpus / 2, 1).
+#+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
 [http]
@@ -441,6 +444,15 @@ memory_pool_size = "50%"
 [storage]
 ## The working home directory.
 data_home = "./greptimedb_data"
+
+## Root directory for standalone SQL access to local files.
+## Relative SQL paths are resolved below this directory. Absolute paths are accepted only when
+## they are inside this directory. Defaults to `<data_home>/copy`.
+## Distributed deployments always reject SQL access to local files.
+## Upgrade note: COPY commands and existing external tables that reference paths outside this
+## directory will fail. Move those files below the copy root, set this option to a dedicated
+## directory containing them, or migrate the files to object storage before upgrading.
+#+ copy_root = "./greptimedb_data/copy"
 
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.

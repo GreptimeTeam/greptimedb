@@ -361,7 +361,9 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr = &mut expr_helper::create_external_expr(create_expr, &ctx).await?;
+        let create_expr =
+            &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
+                .await?;
         self.create_table_inner(create_expr, None, ctx).await
     }
 
@@ -2419,11 +2421,7 @@ fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOpti
         .is_some_and(|value| value == "true");
 
     for column in schema.column_schemas() {
-        if column
-            .data_type
-            .as_json()
-            .is_some_and(|json_type| json_type.is_json2())
-        {
+        if column.data_type.is_json2() {
             ensure!(
                 append_mode,
                 InvalidSqlSnafu {

@@ -37,6 +37,7 @@ use catalog::process_manager::ProcessManagerRef;
 use client::RecordBatches;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::{InsertOptions, Inserter};
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
@@ -137,6 +138,7 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    pub(crate) local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
@@ -175,6 +177,7 @@ impl StatementExecutor {
         partition_manager: PartitionRuleManagerRef,
         process_manager: Option<ProcessManagerRef>,
         origin_frontend_addr: String,
+        local_file_access: LocalFileAccess,
     ) -> Self {
         Self {
             catalog_manager,
@@ -188,6 +191,7 @@ impl StatementExecutor {
             inserter,
             process_manager,
             origin_frontend_addr,
+            local_file_access,
             #[cfg(feature = "enterprise")]
             create_database_handler: None,
             #[cfg(feature = "enterprise")]

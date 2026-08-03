@@ -19,7 +19,6 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
-use common_base::cancellation::CancellationHandle;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::TimeToLive;
@@ -35,14 +34,12 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultC
 use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
 use crate::compaction::scheduler::CompactionScheduler;
 use crate::compaction::scheduler::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus, LocalCompactionState,
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionStatus,
 };
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
-use crate::error::{
-    CompactRegionSnafu, Error, JoinSnafu, RemoteCompactionSnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{CompactRegionSnafu, Error, RemoteCompactionSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
 };
@@ -51,10 +48,11 @@ use crate::region::options::RegionOptions;
 use crate::request::{
     BackgroundNotify, OutputTx, SenderDdlRequest, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, UncommittedSsts};
 use crate::sst::version::SstVersion;
 use crate::worker::WorkerListener;
 
@@ -254,16 +252,10 @@ impl CompactionScheduler {
         };
 
         listener.on_compaction_pick_begin(region_id).await;
-        let picker_region = compaction_region.clone();
-        let picker_output = match common_runtime::spawn_blocking_compact(move || {
-            let _pick_timer = COMPACTION_STAGE_ELAPSED
-                .with_label_values(&["pick"])
-                .start_timer();
-            picker.pick(&picker_region)
-        })
-        .await
-        .context(JoinSnafu)
-        {
+        let _pick_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["pick"])
+            .start_timer();
+        let picker_output = match picker.pick(&compaction_region).await {
             Ok(output) => output,
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
@@ -526,9 +518,14 @@ impl CompactionScheduler {
             return Ok(None);
         }
 
-        let cancel_handle = Arc::new(CancellationHandle::default());
-        let state = LocalCompactionState::new(cancel_handle.clone());
+        let state = CancellableTaskState::new();
+        let cancel_handle = state.cancel_handle();
         let execution = CompactionExecution::new(plan_id, files);
+        let uncommitted = UncommittedSsts::new(
+            region_id,
+            compaction_region.access_layer.clone(),
+            Some(compaction_region.cache_manager.clone()),
+        );
         let local_compaction_task = Box::new(CompactionTaskImpl {
             state: state.clone(),
             execution: execution.clone(),
@@ -538,10 +535,14 @@ impl CompactionScheduler {
             listener: self.listener.clone(),
             picker_output,
             compaction_region,
-            compactor: Arc::new(DefaultCompactor::with_cancel_handle(cancel_handle.clone())),
+            compactor: Arc::new(DefaultCompactor::with_cancel_handle(
+                cancel_handle.clone(),
+                uncommitted.clone(),
+            )),
             memory_manager: self.memory_manager.clone(),
             memory_policy: self.memory_policy,
             estimated_memory_bytes: estimated_bytes,
+            uncommitted,
         });
 
         match self.submit_compaction_task(local_compaction_task, region_id) {

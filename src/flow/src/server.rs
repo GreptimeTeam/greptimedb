@@ -22,6 +22,7 @@ use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::key::TableMetadataManagerRef;
@@ -632,6 +633,7 @@ impl FrontendInvoker {
             partition_manager,
             None,
             origin_frontend_addr,
+            LocalFileAccess::Disabled,
         ));
 
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);

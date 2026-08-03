@@ -101,9 +101,9 @@ pub const PROCEDURE_ERROR_COLUMN: EventTableColumn = EventTableColumn::new(
     SemanticType::Field,
 );
 /// The canonical procedure trigger envelope column.
-pub const PROCEDURE_TRIGGER_COLUMN: EventTableColumn = EventTableColumn::new(
+pub const PROCEDURE_TRIGGER_COLUMN: EventTableColumn = EventTableColumn::json_binary(
     "procedure_trigger",
-    ColumnDataType::String,
+    ColumnDataType::Binary,
     SemanticType::Field,
 );
 /// The canonical catalog name dimension.
@@ -137,6 +137,9 @@ pub const PRUNABLE_ENTRY_ID_COLUMN: EventTableColumn = EventTableColumn::new(
 /// The canonical Kafka latest offset, which is an exclusive upper bound.
 pub const LATEST_OFFSET_COLUMN: EventTableColumn =
     EventTableColumn::new("latest_offset", ColumnDataType::Uint64, SemanticType::Field);
+/// The canonical per-region GC report field.
+pub const GC_REPORT_COLUMN: EventTableColumn =
+    EventTableColumn::json_binary("gc_report", ColumnDataType::Binary, SemanticType::Field);
 
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
@@ -273,6 +276,16 @@ where
     nullable_value(value.map(|value| ValueData::StringValue(value.as_ref().to_string())))
 }
 
+/// Builds a nullable API JSONB value.
+pub fn nullable_json(value: Option<&serde_json::Value>) -> Value {
+    nullable_value(value.map(|value| ValueData::BinaryValue(jsonb::Value::from(value).to_vec())))
+}
+
+/// Builds a JSONB API value.
+pub fn jsonb_value(value: &serde_json::Value) -> Value {
+    ValueData::BinaryValue(jsonb::Value::from(value).to_vec()).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,18 +324,35 @@ mod tests {
     fn procedure_envelope_schema_preserves_names_types_semantics_and_order() {
         assert_eq!(
             procedure_event_column_schemas(),
-            [
-                "procedure_id",
-                "procedure_state",
-                "procedure_error",
-                "procedure_trigger",
+            vec![
+                ColumnSchema {
+                    column_name: "procedure_id".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "procedure_state".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "procedure_error".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "procedure_trigger".to_string(),
+                    datatype: ColumnDataType::Binary.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                    }),
+                    ..Default::default()
+                },
             ]
-            .map(|column_name| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
         );
     }
 

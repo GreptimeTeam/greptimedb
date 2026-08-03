@@ -22,6 +22,7 @@ use std::path::Path;
 use std::{fmt, io};
 
 use common_base::secrets::ExposeSecret;
+use common_telemetry::warn;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -327,8 +328,24 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
     let file = File::open(path).context(IoSnafu)?;
     let credential = io::BufReader::new(file)
         .lines()
-        .map_while(std::result::Result::ok)
-        .filter_map(|line| {
+        .enumerate()
+        .map_while(|(idx, line)| match line {
+            Ok(line) => Some((idx, line)),
+            Err(err) => {
+                // A read error (I/O failure or invalid UTF-8) ends the iterator,
+                // so every remaining credential is dropped. Warn instead of
+                // vanishing silently, matching the malformed-line handling below.
+                warn!(
+                    "Failed to read line {} of user provider file {}: {}; \
+                     all remaining credentials are ignored",
+                    idx + 1,
+                    filepath,
+                    err
+                );
+                None
+            }
+        })
+        .filter_map(|(idx, line)| {
             // The line format is:
             // - `username=password` - Basic user with default permissions
             // - `username:permission_mode=password` - User with specific permission mode
@@ -339,7 +356,20 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
                 return None;
             }
 
-            parse_credential_line(line)
+            let parsed = parse_credential_line(line);
+            if parsed.is_none() {
+                // Don't log the line: it carries the password/verifier. A common
+                // cause is a plaintext password containing `=`, which splits the
+                // line into more than two parts.
+                warn!(
+                    "Ignoring malformed credential at line {} of user provider file {}: \
+                     expected `username[:permission]=verifier` with exactly one `=` \
+                     (passwords containing `=` are not supported)",
+                    idx + 1,
+                    filepath
+                );
+            }
+            parsed
         })
         .collect::<HashMap<String, _>>();
 
@@ -351,7 +381,44 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
         }
     );
 
+    warn_if_pg_scram_disabled(&credential);
+
     Ok(credential)
+}
+
+/// Returns the users whose verifier cannot back a Postgres SCRAM handshake.
+///
+/// Only [`PasswordVerifier::PlainText`] and [`PasswordVerifier::PgScramSha256`]
+/// support SCRAM. A `mysql_native_password` verifier is a double-SHA1 digest
+/// unrelated to PBKDF2, and a `pbkdf2_sha256` verifier was derived without
+/// SASLprep and cannot be safely reused as a SCRAM secret without the original
+/// password. Either kind forces the whole Postgres endpoint to fall back to
+/// cleartext (see [`postgres_auth_info_with_credential`]).
+fn pg_scram_unsupported_users(users: &UserInfoMap) -> Vec<&str> {
+    users
+        .iter()
+        .filter(|(_, (verifier, _))| !verifier.supports_pg_scram_sha256())
+        .map(|(username, _)| username.as_str())
+        .collect()
+}
+
+/// Warns once per credential load when the set disables Postgres SCRAM, so
+/// operators don't unknowingly serve cleartext passwords over Postgres while
+/// believing SCRAM is in effect.
+pub(crate) fn warn_if_pg_scram_disabled(users: &UserInfoMap) {
+    let unsupported = pg_scram_unsupported_users(users);
+    if !unsupported.is_empty() {
+        warn!(
+            "Postgres SCRAM authentication is disabled: {} of {} user(s) use a \
+             non-SCRAM password verifier {:?}, so all Postgres password \
+             authentication falls back to cleartext. Ensure TLS is enabled; if you \
+             rely on Postgres SCRAM, generate every user's verifier with the \
+             pg_scram_sha256 format.",
+            unsupported.len(),
+            users.len(),
+            unsupported
+        );
+    }
 }
 
 /// Parse a line of credential in the format of `username=password` or `username:permission_mode=password`.
@@ -901,6 +968,51 @@ mod tests {
         let auth_info =
             postgres_auth_info_with_credential(&users, Identity::UserId("unknown", None)).unwrap();
         assert!(matches!(auth_info, PgAuthInfo::Cleartext));
+    }
+
+    #[test]
+    fn test_pg_scram_unsupported_users() {
+        let scram_verifier =
+            format_pg_scram_sha256_password_verifier(b"password", b"salt", 4096).unwrap();
+        let (_, scram_user) = parse_credential_line(&format!("scram={scram_verifier}")).unwrap();
+
+        let mut hash = [0u8; PBKDF2_SHA256_HASH_LEN];
+        pbkdf2_hmac::<Sha256>(b"password", b"salt", 4096, &mut hash);
+
+        let users = HashMap::from([
+            (
+                "plain".to_string(),
+                (plain("password"), PermissionMode::default()),
+            ),
+            ("scram".to_string(), scram_user),
+            (
+                "pbkdf2".to_string(),
+                (
+                    PasswordVerifier::Pbkdf2Sha256 {
+                        iterations: 4096,
+                        salt: b"salt".to_vec(),
+                        hash: hash.to_vec(),
+                    },
+                    PermissionMode::default(),
+                ),
+            ),
+            (
+                "mysql".to_string(),
+                (
+                    PasswordVerifier::MysqlNativePassword {
+                        hash_stage_2: mysql_native_password_hash(b"password"),
+                    },
+                    PermissionMode::default(),
+                ),
+            ),
+        ]);
+
+        let mut unsupported = pg_scram_unsupported_users(&users);
+        unsupported.sort();
+        // A pbkdf2_sha256 verifier is flagged alongside mysql_native_password:
+        // both force Postgres to fall back to cleartext, while plain and
+        // pg_scram back SCRAM.
+        assert_eq!(unsupported, vec!["mysql", "pbkdf2"]);
     }
 
     #[test]

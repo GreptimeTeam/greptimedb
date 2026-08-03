@@ -228,6 +228,11 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Json(_))
     }
 
+    /// Returns whether this is a JSON2 data type.
+    pub fn is_json2(&self) -> bool {
+        self.as_json().is_some_and(|json_type| json_type.is_json2())
+    }
+
     pub fn is_vector(&self) -> bool {
         matches!(self, ConcreteDataType::Vector(_))
     }

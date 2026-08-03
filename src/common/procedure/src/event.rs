@@ -17,12 +17,13 @@ use std::any::Any;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
-use common_event_recorder::error::Result;
+use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
     PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
-    procedure_event_column_schemas,
+    jsonb_value, procedure_event_column_schemas,
 };
 use common_time::timestamp::{TimeUnit, Timestamp};
+use snafu::ResultExt;
 
 use crate::{EventTrigger, ProcedureId, ProcedureState};
 
@@ -95,7 +96,7 @@ impl Event for ProcedureEvent {
             | ProcedureState::Poisoned { error, .. } => format!("{error:?}"),
             _ => String::new(),
         };
-        let trigger = self.trigger.to_string();
+        let trigger = serde_json::to_value(&self.trigger).context(SerializeEventSnafu)?;
 
         for internal_event_extra_row in internal_event_extra_rows.iter_mut() {
             let mut values = Vec::with_capacity(4 + internal_event_extra_row.values.len());
@@ -103,7 +104,7 @@ impl Event for ProcedureEvent {
                 ValueData::StringValue(procedure_id.clone()).into(),
                 ValueData::StringValue(state.clone()).into(),
                 ValueData::StringValue(error.clone()).into(),
-                ValueData::StringValue(trigger.clone()).into(),
+                jsonb_value(&trigger),
             ]);
             values.append(&mut internal_event_extra_row.values);
             rows.push(Row { values });
@@ -126,8 +127,13 @@ mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_event_recorder::Event;
+    use common_event_recorder::event_table::{PROCEDURE_TRIGGER_COLUMN, jsonb_value};
+    use serde_json::json;
 
-    use crate::{Error, EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
+    use crate::{
+        ChildSubmissionOutcome, Error, EventTrigger, ProcedureEvent, ProcedureId, ProcedureState,
+        RetryPhase,
+    };
 
     #[derive(Debug)]
     struct TestEvent;
@@ -184,7 +190,7 @@ mod tests {
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
-                        ValueData::StringValue("Submitted".to_string()).into(),
+                        jsonb_value(&json!({"type": "Submitted"})),
                         ValueData::StringValue("test_event1".to_string()).into(),
                     ],
                 },
@@ -193,7 +199,7 @@ mod tests {
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
-                        ValueData::StringValue("Submitted".to_string()).into(),
+                        jsonb_value(&json!({"type": "Submitted"})),
                         ValueData::StringValue("test_event2".to_string()).into(),
                     ],
                 },
@@ -202,7 +208,7 @@ mod tests {
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
-                        ValueData::StringValue("Submitted".to_string()).into(),
+                        jsonb_value(&json!({"type": "Submitted"})),
                         Value { value_data: None },
                     ],
                 },
@@ -233,7 +239,7 @@ mod tests {
         );
         assert_eq!(
             procedure_event_extra_rows[0].values[3],
-            ValueData::StringValue("Failed".to_string()).into()
+            jsonb_value(&json!({"type": "Failed"}))
         );
     }
 
@@ -248,44 +254,72 @@ mod tests {
 
         assert_eq!(
             procedure_event.extra_schema(),
-            [
-                "procedure_id",
-                "procedure_state",
-                "procedure_error",
-                "procedure_trigger",
-                "test_event_column",
+            vec![
+                ColumnSchema {
+                    column_name: "procedure_id".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "procedure_state".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "procedure_error".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                PROCEDURE_TRIGGER_COLUMN.column_schema(),
+                ColumnSchema {
+                    column_name: "test_event_column".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
             ]
-            .map(|column_name| ColumnSchema {
-                column_name: column_name.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            })
         );
     }
 
     #[test]
-    fn test_event_trigger_display() {
+    fn test_event_trigger_serialization() {
         let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
-        assert_eq!(EventTrigger::Submitted.to_string(), "Submitted");
-        assert_eq!(EventTrigger::Recovered.to_string(), "Recovered");
+        for (trigger, name) in [
+            (EventTrigger::Submitted, "Submitted"),
+            (EventTrigger::Recovered, "Recovered"),
+            (EventTrigger::RollingBack, "RollingBack"),
+            (EventTrigger::Succeeded, "Succeeded"),
+            (EventTrigger::Failed, "Failed"),
+            (EventTrigger::Poisoned, "Poisoned"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(trigger).unwrap(),
+                json!({"type": name})
+            );
+        }
         assert_eq!(
-            EventTrigger::ChildSubmitted {
+            serde_json::to_value(EventTrigger::ChildSubmitted {
                 procedure_id,
-                outcome: crate::ChildSubmissionOutcome::Accepted,
-            }
-            .to_string(),
-            "ChildSubmitted(procedure_id=00000000-0000-0000-0000-000000000001, outcome=Accepted)"
+                outcome: ChildSubmissionOutcome::Accepted,
+            })
+            .unwrap(),
+            json!({
+                "type": "ChildSubmitted",
+                "procedure_id": "00000000-0000-0000-0000-000000000001",
+                "outcome": "Accepted",
+            })
         );
         assert_eq!(
-            EventTrigger::Retrying {
-                phase: crate::RetryPhase::Execute,
+            serde_json::to_value(EventTrigger::Retrying {
+                phase: RetryPhase::Execute,
                 attempt: 2,
-            }
-            .to_string(),
-            "Retrying(Execute, 2)"
+            })
+            .unwrap(),
+            json!({"type": "Retrying", "phase": "Execute", "attempt": 2})
         );
-        assert_eq!(EventTrigger::RollingBack.to_string(), "RollingBack");
     }
 }

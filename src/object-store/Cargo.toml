@@ -15,10 +15,12 @@ testing = ["derive_builder"]
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-runtime.workspace = true
 common-telemetry.workspace = true
 datafusion_object_store.workspace = true
 derive_builder = { workspace = true, optional = true }

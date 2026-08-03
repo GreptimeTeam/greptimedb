@@ -908,6 +908,8 @@ pub(crate) enum BackgroundNotify {
     IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
     IndexBuildFailed(IndexBuildFailed),
+    /// An index build must be retried against the latest schema generation.
+    IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has been cancelled cooperatively.
@@ -972,6 +974,13 @@ impl OnFailure for FlushFinished {
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+}
+
+impl FlushFailed {
+    /// Returns whether the flush was cancelled cooperatively.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.err.as_ref(), Error::FlushCancelled { .. })
+    }
 }
 
 #[derive(Debug)]

@@ -340,7 +340,7 @@ async fn submitted_procedure_id(
     table_name: &str,
 ) -> String {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{table_name}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{table_name}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
         PROCEDURE_ID_COLUMN.name(),
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
@@ -357,7 +357,7 @@ async fn assert_named_submitted_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1')",
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
         TYPE_COLUMN.name(),
@@ -375,7 +375,7 @@ async fn assert_id_submitted_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1')",
         TYPE_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
@@ -394,7 +394,7 @@ async fn assert_id_terminal_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
         TYPE_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
@@ -418,7 +418,7 @@ async fn assert_logical_terminal_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND {} = {physical_table_id} AND json_is_null({})",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND {} = {physical_table_id} AND json_is_null({})",
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
         TYPE_COLUMN.name(),
@@ -438,7 +438,7 @@ async fn assert_lightweight_terminal_event(
     terminal_trigger: &str,
 ) {
     let query = format!(
-        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),

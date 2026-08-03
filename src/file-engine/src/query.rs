@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_datasource::object_store::build_backend;
+use common_datasource::object_store::{LocalFileAccess, build_backend};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
 use common_recordbatch::{
@@ -41,8 +41,14 @@ use crate::error::{BuildBackendSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsS
 use crate::region::FileRegion;
 
 impl FileRegion {
-    pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
+    pub async fn query(
+        &self,
+        request: ScanRequest,
+        local_file_access: &LocalFileAccess,
+    ) -> Result<SendableRecordBatchStream> {
+        let store = build_backend(&self.url, &self.options, local_file_access)
+            .await
+            .context(BuildBackendSnafu)?;
 
         let projection = request.projection.as_deref();
         let file_projection = self.projection_pushdown_to_file(projection)?;
