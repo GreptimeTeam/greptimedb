@@ -562,6 +562,19 @@ impl<M: SstMerger> DefaultCompactor<M> {
 }
 
 impl DefaultCompactor {
+    /// Creates a new `DefaultCompactor` with the given cancel handle and no
+    /// uncommitted SSTs tracking.
+    ///
+    /// This is the public entry point for external crates that want a
+    /// cancellable compactor without opting into uncommitted-SST tracking.
+    pub fn new_with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
+        Self {
+            merger: DefaultSstMerger,
+            cancel_handle,
+            uncommitted: None,
+        }
+    }
+
     pub(crate) fn with_cancel_handle(
         cancel_handle: Arc<CancellationHandle>,
         uncommitted: UncommittedSsts,
