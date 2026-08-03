@@ -50,7 +50,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let region = match self.regions.writable_non_staging_region(region_id) {
+        let region = match if only_enables_skip_wal(&request.kind) {
+            self.regions
+                .writable_non_staging_region(region_id)
+                .or_else(|_| self.regions.follower_region(region_id))
+        } else {
+            self.regions.writable_non_staging_region(region_id)
+        } {
             Ok(region) => region,
             Err(e) => {
                 sender.send(Err(e));
@@ -279,6 +285,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::SkipWal => {
+                    if !current_options.skip_wal {
+                        info!("Stop writing WAL for region: {}", region.region_id);
+                        current_options.skip_wal = true;
+                    }
+                }
             }
         }
         if all_options_altered {
@@ -292,6 +304,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ))
         }
     }
+}
+
+fn only_enables_skip_wal(kind: &AlterKind) -> bool {
+    matches!(
+        kind,
+        AlterKind::SetRegionOptions { options }
+            if matches!(options.as_slice(), [SetRegionOption::SkipWal])
+    )
 }
 
 /// Returns the new region options if there are updates to the options.
@@ -315,7 +335,8 @@ fn new_region_options_on_empty_memtable(
             SetRegionOption::WriteBufferSize(_)
             | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
-            | SetRegionOption::AutoFlushInterval(_) => (),
+            | SetRegionOption::AutoFlushInterval(_)
+            | SetRegionOption::SkipWal => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();

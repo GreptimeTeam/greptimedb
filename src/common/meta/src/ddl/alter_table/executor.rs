@@ -38,7 +38,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution, TableMetadataManagerRef};
 use crate::node_manager::NodeManagerRef;
-use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
+use crate::rpc::router::{RegionRoute, find_followers, find_leaders, region_distribution};
 
 /// [AlterTableExecutor] performs:
 /// - Alters the metadata of the table.
@@ -169,26 +169,41 @@ impl AlterTableExecutor {
         node_manager: &NodeManagerRef,
         region_routes: &[RegionRoute],
         kind: Option<alter_request::Kind>,
+        alter_follower_regions: bool,
     ) -> Vec<Result<RegionResponse>> {
         let region_distribution = region_distribution(region_routes);
-        let leaders = find_leaders(region_routes)
+        let mut peers = find_leaders(region_routes)
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
+        if alter_follower_regions {
+            peers.extend(find_followers(region_routes).into_iter().map(|p| (p.id, p)));
+        }
         let total_num_region = region_distribution
             .values()
-            .map(|r| r.leader_regions.len())
+            .map(|r| {
+                r.leader_regions.len()
+                    + if alter_follower_regions {
+                        r.follower_regions.len()
+                    } else {
+                        0
+                    }
+            })
             .sum::<usize>();
         let mut alter_region_tasks = Vec::with_capacity(total_num_region);
         for (datanode_id, region_role_set) in region_distribution {
-            if region_role_set.leader_regions.is_empty() {
+            let mut region_ids = region_role_set.leader_regions;
+            if alter_follower_regions {
+                region_ids.extend(region_role_set.follower_regions);
+            }
+            if region_ids.is_empty() {
                 continue;
             }
             // Safety: must exists.
-            let peer = leaders.get(&datanode_id).unwrap();
+            let peer = peers.get(&datanode_id).unwrap();
             let requester = node_manager.datanode(peer).await;
 
-            for region_id in region_role_set.leader_regions {
+            for region_id in region_ids {
                 let region_id = RegionId::new(self.table_id, region_id);
                 let request = make_alter_region_request(region_id, kind.clone());
 

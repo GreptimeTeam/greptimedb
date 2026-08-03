@@ -232,6 +232,9 @@ impl fmt::Display for TableOptions {
         }
 
         for (k, v) in &self.extra_options {
+            if k == SKIP_WAL_KEY {
+                continue;
+            }
             key_vals.push(format!("{}={}", k, v));
         }
 
@@ -612,5 +615,13 @@ mod tests {
             "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=true",
             options.to_string()
         );
+
+        let options = TableOptions {
+            write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), "true".to_string())]),
+            skip_wal: true,
+        };
+        assert_eq!("skip_wal=true", options.to_string());
     }
 }

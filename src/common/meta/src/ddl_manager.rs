@@ -27,12 +27,12 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::TableId;
+use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::alter_table::{AlterTableProcedure, only_enables_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
@@ -405,8 +405,33 @@ impl DdlManager {
                 .await;
         }
 
+        let region_locks = if alter_table_task
+            .alter_table
+            .kind
+            .as_ref()
+            .is_some_and(only_enables_skip_wal)
+        {
+            let (_, route) = self
+                .table_metadata_manager()
+                .table_route_manager()
+                .get_physical_table_route(table_id)
+                .await?;
+            route
+                .region_routes
+                .iter()
+                .map(|route| route.region.id)
+                .collect::<Vec<RegionId>>()
+        } else {
+            vec![]
+        };
+
         let context = self.create_context();
-        let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
+        let procedure = AlterTableProcedure::new_with_region_locks(
+            table_id,
+            alter_table_task,
+            region_locks,
+            context,
+        )?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
