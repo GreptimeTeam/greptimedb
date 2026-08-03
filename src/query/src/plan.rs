@@ -20,6 +20,7 @@ use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_expr::{Expr, LogicalPlan};
 use session::context::QueryContextRef;
 pub use table::metadata::TableType;
+use table::metadata::{TableId, TableVersion};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
@@ -118,6 +119,55 @@ pub fn extract_and_rewrite_full_table_names(
     let mut extractor = TableNamesExtractAndRewriter::new(query_ctx);
     let plan = plan.rewrite_with_subqueries(&mut extractor)?;
     Ok((extractor.table_names, plan.data))
+}
+
+/// A base table referenced by a logical plan, together with the table id and
+/// version the plan was created against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlanTable {
+    /// The fully qualified table name.
+    pub table_name: TableName,
+    /// The table id captured when the plan was created.
+    pub table_id: TableId,
+    /// The table version captured when the plan was created. It is bumped when
+    /// the table metadata (e.g. schema) changes.
+    pub version: TableVersion,
+}
+
+/// Collects the base tables referenced by a logical plan (including subqueries)
+/// together with the (table id, version) captured when the plan was created.
+///
+/// Used to detect whether a cached prepared plan became stale after the
+/// underlying table metadata (e.g. schema) changed.
+pub fn extract_prepared_plan_tables(plan: &LogicalPlan) -> Vec<PreparedPlanTable> {
+    let mut tables = Vec::new();
+    collect_prepared_plan_tables(plan, &mut tables);
+    tables
+}
+
+fn collect_prepared_plan_tables(plan: &LogicalPlan, tables: &mut Vec<PreparedPlanTable>) {
+    if let LogicalPlan::TableScan(scan) = plan
+        && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+        && let Some(provider) = source
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+        && provider.table().table_type() == TableType::Base
+    {
+        let info = provider.table().table_info();
+        tables.push(PreparedPlanTable {
+            table_name: TableName::new(
+                info.catalog_name.clone(),
+                info.schema_name.clone(),
+                info.name.clone(),
+            ),
+            table_id: info.ident.table_id,
+            version: info.ident.version,
+        });
+    }
+    for input in plan.inputs() {
+        collect_prepared_plan_tables(input, tables);
+    }
 }
 
 /// A trait to extract expressions from a logical plan.

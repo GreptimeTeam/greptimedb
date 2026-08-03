@@ -276,6 +276,28 @@ impl MysqlInstanceShim {
 
         let outputs = match sql_plan {
             SqlPlan::Plan(plan, stmt) => {
+                // Re-validate the cached plan against the current catalog: a
+                // schema change (e.g. ALTER TABLE) may have made the cached
+                // table providers stale. When that happens, re-plan and refresh
+                // the cache entry.
+                let plan = match self
+                    .query_handler
+                    .validate_prepared_plan(&plan, stmt.clone(), query_ctx.clone())
+                    .await?
+                {
+                    Some(fresh_plan) => {
+                        self.save_plan(
+                            SqlPlan::Plan(fresh_plan.clone(), stmt.clone()),
+                            stmt_key.clone(),
+                        )
+                        .inspect_err(|e| {
+                            error!(e; "Failed to refresh prepared statement");
+                        })?;
+                        fresh_plan
+                    }
+                    None => plan,
+                };
+
                 let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
                     .context(InferParameterTypesSnafu)?
                     .into_iter()
@@ -926,15 +948,24 @@ fn all_params_have_types(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use common_query::Output;
+    use common_recordbatch::RecordBatch;
+    use datafusion::datasource::DefaultTableSource;
     use datafusion_expr::LogicalPlan;
+    use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+    use datatypes::vectors::{Int64Vector, VectorRef};
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContext;
     use sql::statements::statement::Statement;
+    use table::TableRef;
+    use table::table::adapter::DfTableProviderAdapter;
+    use table::test_util::MemTable;
 
     use super::*;
     use crate::error::Result;
@@ -1190,5 +1221,156 @@ mod tests {
             }
             other => panic!("Expected RecordBatches, got {:?}", other),
         }
+    }
+
+    /// Handler that plans `SELECT * FROM t` against a mutable "current" table,
+    /// so a test can simulate an `ALTER TABLE` schema change between prepare and
+    /// execute. Executed plans are recorded for inspection.
+    struct StaleSchemaHandler {
+        current_table: Arc<RwLock<TableRef>>,
+        executed_plans: Arc<Mutex<Vec<LogicalPlan>>>,
+    }
+
+    impl StaleSchemaHandler {
+        fn plan_for(&self, table: &TableRef) -> LogicalPlan {
+            let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
+            LogicalPlanBuilder::scan("t", Arc::new(DefaultTableSource { table_provider }), None)
+                .unwrap()
+                .build()
+                .unwrap()
+        }
+    }
+
+    /// Returns the greptime schema captured by the table scan of the plan, if any.
+    fn cached_plan_table_schema(plan: &LogicalPlan) -> Option<SchemaRef> {
+        let LogicalPlan::TableScan(scan) = plan else {
+            return None;
+        };
+        let source = scan.source.as_any().downcast_ref::<DefaultTableSource>()?;
+        let provider = source
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()?;
+        Some(provider.table().schema())
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for StaleSchemaHandler {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_exec_plan(
+            &self,
+            plan: LogicalPlan,
+            _: Option<Statement>,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            self.executed_plans.lock().unwrap().push(plan);
+            Ok(Output::new_with_affected_rows(0))
+        }
+
+        async fn do_describe(
+            &self,
+            _: Statement,
+            _: QueryContextRef,
+        ) -> Result<Option<DescribeResult>> {
+            let table = self.current_table.read().clone();
+            Ok(Some(DescribeResult {
+                logical_plan: self.plan_for(&table),
+            }))
+        }
+
+        async fn is_valid_schema(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn validate_prepared_plan(
+            &self,
+            plan: &LogicalPlan,
+            _stmt: Statement,
+            _query_ctx: QueryContextRef,
+        ) -> Result<Option<LogicalPlan>> {
+            // Re-plan when the current table's schema differs from the one the
+            // cached plan was built against.
+            let current = self.current_table.read().clone();
+            let current_schema = current.schema();
+            let stale = cached_plan_table_schema(plan).as_ref() != Some(&current_schema);
+            if stale {
+                Ok(Some(self.plan_for(&current)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn mem_table(name: &str, columns: &[&str], values: &[i64]) -> TableRef {
+        let column_schemas = columns
+            .iter()
+            .map(|c| ColumnSchema::new(*c, ConcreteDataType::int64_datatype(), true))
+            .collect();
+        let schema = Arc::new(Schema::new(column_schemas));
+        let vectors: Vec<VectorRef> = columns
+            .iter()
+            .map(|_| Arc::new(Int64Vector::from_slice(values.to_vec())) as VectorRef)
+            .collect();
+        let recordbatch = RecordBatch::new(schema, vectors).unwrap();
+        MemTable::table(name, recordbatch)
+    }
+
+    #[tokio::test]
+    async fn qp_010_prepared_plan_revalidated_after_schema_change() {
+        let table_v1 = mem_table("t", &["a"], &[1_i64]);
+        let table_v2 = mem_table("t", &["a", "b"], &[1_i64, 2_i64]);
+
+        let current_table = Arc::new(RwLock::new(table_v1));
+        let executed_plans = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(StaleSchemaHandler {
+            current_table: current_table.clone(),
+            executed_plans: executed_plans.clone(),
+        });
+
+        let mut shim =
+            MysqlInstanceShim::create(handler, None, "127.0.0.1:3306".parse().unwrap(), 1, 1024);
+        let query_ctx = QueryContext::arc();
+        let stmt_key = "qp_010".to_string();
+
+        // Prepare against the v1 schema and cache the plan.
+        shim.do_prepare("SELECT * FROM t", query_ctx.clone(), stmt_key.clone())
+            .await
+            .unwrap();
+        assert!(matches!(shim.plan(&stmt_key), Some(SqlPlan::Plan(_, _))));
+
+        // Simulate `ALTER TABLE t ADD COLUMN b` by swapping in a new table.
+        *current_table.write() = table_v2;
+
+        // Executing the prepared statement must reflect the new schema.
+        shim.do_execute(query_ctx, stmt_key, Params::CliParams(vec![]))
+            .await
+            .unwrap();
+
+        let executed = executed_plans
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("prepared plan should have been executed");
+        let names: Vec<String> = executed
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "b"),
+            "executed prepared plan must include the newly added column, got columns: {names:?}"
+        );
     }
 }
