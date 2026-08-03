@@ -108,7 +108,11 @@ impl SeriesCandidateScanner {
         );
         let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
         pruner.add_partition_ranges(&all_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &all_ranges));
+        let partition_pruner = Arc::new(PartitionPruner::new_with_predicate_prefilter(
+            pruner,
+            &all_ranges,
+            false,
+        ));
         Ok(Self {
             stream_ctx,
             partitions,
@@ -253,12 +257,15 @@ impl SeriesCandidateRangeBuilder {
             );
             let filter = build_primary_key_filter(
                 &metadata,
+                None,
                 self.stream_ctx.input.predicate_group().predicate(),
             );
             return Ok(Some(candidate_primary_key_stream(Box::pin(raw), filter)));
         }
 
         if self.stream_ctx.is_file_range_index(index) {
+            let file = self.stream_ctx.input.file_from_index(index);
+            let predicate = self.stream_ctx.input.predicate_for_file(file);
             if self
                 .partition_pruner
                 .try_skip_manifest_pruned_file_range(index, &self.part_metrics)
@@ -277,9 +284,15 @@ impl SeriesCandidateRangeBuilder {
             self.part_metrics
                 .merge_reader_metrics(&reader_metrics, None);
 
-            // Reuse the exact encoded-PK filter selected by the file's reader plan, but
-            // execute it in `candidate_primary_key_stream` after the PK-only read.
-            let filter = ranges.first().and_then(|range| range.primary_key_filter());
+            // Build a fresh encoded-PK filter from this SST's metadata so schema
+            // compatibility is evaluated independently for each file.
+            let filter = ranges.first().and_then(|range| {
+                build_primary_key_filter(
+                    range.region_metadata(),
+                    Some(metadata.as_ref()),
+                    predicate.as_ref(),
+                )
+            });
             let part_metrics = self.part_metrics.clone();
             let raw = Box::pin(try_stream! {
                 let fetch_metrics = part_metrics
@@ -621,7 +634,7 @@ mod tests {
         let predicate = Predicate::new(vec![
             col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
         ]);
-        let filter = build_primary_key_filter(&metadata, Some(&predicate));
+        let filter = build_primary_key_filter(&metadata, None, Some(&predicate));
         let input = Box::pin(futures::stream::iter(vec![Ok(dictionary_batch(
             &[table_1.as_slice(), table_2.as_slice()],
             &[0, 1],

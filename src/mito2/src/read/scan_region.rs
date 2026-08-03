@@ -1269,7 +1269,7 @@ impl ScanInput {
             return Ok(FileRangeBuilder::default());
         }
 
-        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+        self.prune_file_after_manifest_check(file, pre_filter_mode, true, predicate, reader_metrics)
             .await
     }
 
@@ -1284,6 +1284,7 @@ impl ScanInput {
         &self,
         file: &FileHandle,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         predicate: Option<Predicate>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
@@ -1320,6 +1321,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
+            .enable_predicate_prefilter(enable_predicate_prefilter)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;

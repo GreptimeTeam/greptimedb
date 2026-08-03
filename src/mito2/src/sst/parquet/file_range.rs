@@ -53,7 +53,7 @@ use crate::sst::parquet::flat_format::{
     time_index_column_index,
 };
 use crate::sst::parquet::json_align::ProjectedRecordBatchStream;
-use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, primary_key_filter_mask};
+use crate::sst::parquet::prefilter::primary_key_filter_mask;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
@@ -100,9 +100,9 @@ pub struct FileRange {
 }
 
 impl FileRange {
-    /// Builds the encoded-primary-key filter selected for this file.
-    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
-        self.context.reader_builder.primary_key_filter()
+    /// Returns the region metadata stored in this SST.
+    pub(crate) fn region_metadata(&self) -> &RegionMetadataRef {
+        self.context.read_format().metadata()
     }
 
     /// Returns encoded primary-key min/max statistics for this row group.
@@ -300,8 +300,8 @@ impl FileRange {
     /// filter and this range's existing row selection.
     ///
     /// This deliberately bypasses generic predicate prefiltering. The series
-    /// pruner selected the row group independently, and non-tag simple predicates
-    /// are applied after merge and dedup by the series reader.
+    /// pruner selected the row group independently, and simple predicates retained
+    /// by the disabled prefilter plan are applied precisely before merge.
     pub(crate) async fn reader_by_primary_key(
         &self,
         primary_key_filter: &mut dyn mito_codec::row_converter::PrimaryKeyFilter,

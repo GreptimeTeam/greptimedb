@@ -15,23 +15,19 @@
 //! Reads selected metric series from partition ranges.
 
 use std::collections::HashSet;
-use std::ops::BitAnd;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::SemanticType;
 use async_stream::try_stream;
-use datatypes::arrow::array::BooleanArray;
-use datatypes::arrow::buffer::BooleanBuffer;
 use futures::TryStreamExt;
 use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use tokio::sync::Semaphore;
 
-use crate::error::{
-    ComputeArrowSnafu, InvalidRequestSnafu, JoinSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
-};
+#[cfg(feature = "enterprise")]
+use crate::error::InvalidRequestSnafu;
+use crate::error::{JoinSnafu, Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::pruner::PartitionPruner;
 use crate::read::range_cache::{
@@ -48,7 +44,7 @@ use crate::read::series_candidate::{MetricSeriesId, validate_metric_metadata};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::prefilter::prefilter_flat_batch_by_primary_key;
-use crate::sst::parquet::reader::{MaybeFilter, ReaderMetrics, SimpleFilterContext};
+use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 const TSID_DOMAIN_END: u128 = 1u128 << u64::BITS;
@@ -235,101 +231,6 @@ fn filter_flat_stream_by_series(
     })
 }
 
-#[derive(Clone)]
-struct PreparedNonTagFilter {
-    context: SimpleFilterContext,
-    column_name: String,
-}
-
-fn prepare_non_tag_filters(stream_ctx: &StreamContext) -> Result<Arc<[PreparedNonTagFilter]>> {
-    let metadata = stream_ctx.input.region_metadata();
-    let region_id = metadata.region_id;
-    stream_ctx
-        .input
-        .predicate_group()
-        .predicate()
-        .into_iter()
-        .flat_map(|predicate| predicate.exprs())
-        .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
-        .filter(|filter| filter.semantic_type() != SemanticType::Tag)
-        .map(|context| {
-            let column_name = metadata
-                .column_by_id(context.column_id())
-                .with_context(|| InvalidRequestSnafu {
-                    region_id,
-                    reason: format!(
-                        "filter column {} is missing from metadata",
-                        context.column_id()
-                    ),
-                })?
-                .column_schema
-                .name
-                .clone();
-            Ok(PreparedNonTagFilter {
-                context,
-                column_name,
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Arc::from)
-}
-
-/// Applies supported non-tag simple predicates after merge and dedup.
-fn filter_flat_stream_by_non_tag_predicates(
-    mut input: BoxedRecordBatchStream,
-    filters: Arc<[PreparedNonTagFilter]>,
-    region_id: store_api::storage::RegionId,
-) -> BoxedRecordBatchStream {
-    if filters.is_empty() {
-        return input;
-    }
-
-    Box::pin(try_stream! {
-        while let Some(batch) = input.try_next().await? {
-            let mut mask = BooleanBuffer::new_set(batch.num_rows());
-            let mut pruned = false;
-            for prepared in filters.iter() {
-                let filter = match prepared.context.filter() {
-                    MaybeFilter::Filter(filter) => filter,
-                    MaybeFilter::Matched => continue,
-                    MaybeFilter::Pruned => {
-                        pruned = true;
-                        break;
-                    }
-                };
-                let column = batch
-                    .column_by_name(&prepared.column_name)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "column {} required by a non-tag filter is missing from the batch schema",
-                            prepared.column_name
-                        ),
-                    })?;
-                let result = filter
-                    .evaluate_array(column)
-                    .context(RecordBatchSnafu)?;
-                mask = mask.bitand(&result);
-            }
-            if pruned || mask.count_set_bits() == 0 {
-                continue;
-            }
-            if mask.count_set_bits() == batch.num_rows() {
-                yield batch;
-                continue;
-            }
-            let batch = datatypes::arrow::compute::filter_record_batch(
-                &batch,
-                &BooleanArray::from(mask),
-            )
-            .context(ComputeArrowSnafu)?;
-            if batch.num_rows() > 0 {
-                yield batch;
-            }
-        }
-    })
-}
-
 /// Reads all collected metric series assigned to one partition.
 #[allow(dead_code)]
 pub(crate) struct SeriesReader {
@@ -338,7 +239,6 @@ pub(crate) struct SeriesReader {
     range: SeriesRange,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
-    non_tag_filters: Arc<[PreparedNonTagFilter]>,
     partition_pruner: Arc<PartitionPruner>,
     file_scan_semaphore: Arc<Semaphore>,
     final_merge_semaphore: Arc<Semaphore>,
@@ -370,14 +270,12 @@ impl SeriesReader {
         let range = assigned_series.range();
         let filter = MetricSeriesFilter::new(&assigned_series);
         let codec = SparsePrimaryKeyCodec::new(stream_ctx.input.region_metadata());
-        let non_tag_filters = prepare_non_tag_filters(&stream_ctx)?;
         Ok(Self {
             stream_ctx,
             partition_ranges,
             range,
             filter,
             codec,
-            non_tag_filters,
             partition_pruner,
             file_scan_semaphore,
             final_merge_semaphore,
@@ -395,7 +293,6 @@ impl SeriesReader {
             let stream_ctx = self.stream_ctx.clone();
             let filter = self.filter.clone();
             let codec = self.codec.clone();
-            let non_tag_filters = self.non_tag_filters.clone();
             let partition_pruner = self.partition_pruner.clone();
             let file_scan_semaphore = self.file_scan_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
@@ -407,7 +304,6 @@ impl SeriesReader {
                     range,
                     filter,
                     codec,
-                    non_tag_filters,
                     partition_pruner,
                     file_scan_semaphore,
                     part_metrics,
@@ -444,7 +340,6 @@ async fn build_series_partition_range(
     range: SeriesRange,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
-    non_tag_filters: Arc<[PreparedNonTagFilter]>,
     partition_pruner: Arc<PartitionPruner>,
     file_scan_semaphore: Arc<Semaphore>,
     part_metrics: PartitionMetrics,
@@ -566,12 +461,6 @@ async fn build_series_partition_range(
         compute_parallel_channel_size(estimated_batch_size),
     )
     .await?;
-    let stream = filter_flat_stream_by_non_tag_predicates(
-        stream,
-        non_tag_filters,
-        stream_ctx.input.region_metadata().region_id,
-    );
-
     let stream = match cache_key {
         Some(key) => cache_flat_range_stream(
             stream,

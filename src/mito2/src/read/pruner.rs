@@ -41,6 +41,8 @@ const PREFETCH_COUNT: usize = 8;
 /// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
     pruner: Arc<Pruner>,
+    /// Whether FileRanges should execute the reduced-column predicate prefilter.
+    enable_predicate_prefilter: bool,
     /// Files to prune, in the order to scan.
     file_indices: Vec<usize>,
     /// Per-file pre-filter mode lookup indexed by file_index.
@@ -52,6 +54,15 @@ pub struct PartitionPruner {
 impl PartitionPruner {
     /// Creates a new `PartitionPruner` for the given partition ranges.
     pub fn new(pruner: Arc<Pruner>, partition_ranges: &[PartitionRange]) -> Self {
+        Self::new_with_predicate_prefilter(pruner, partition_ranges, true)
+    }
+
+    /// Creates a `PartitionPruner` with explicit predicate-prefilter behavior.
+    pub fn new_with_predicate_prefilter(
+        pruner: Arc<Pruner>,
+        partition_ranges: &[PartitionRange],
+        enable_predicate_prefilter: bool,
+    ) -> Self {
         let num_files = pruner.inner.stream_ctx.input.num_files();
         let mut file_indices = Vec::with_capacity(num_files);
         let mut pre_filter_modes = vec![PreFilterMode::SkipFields; num_files];
@@ -81,6 +92,7 @@ impl PartitionPruner {
 
         Self {
             pruner,
+            enable_predicate_prefilter,
             file_indices,
             pre_filter_modes,
             current_position: AtomicUsize::new(0),
@@ -103,7 +115,13 @@ impl PartitionPruner {
         // Delegate to underlying Pruner
         let ranges = self
             .pruner
-            .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
+            .build_file_ranges(
+                index,
+                pre_filter_mode,
+                self.enable_predicate_prefilter,
+                partition_metrics,
+                reader_metrics,
+            )
             .await?;
 
         // Find position and trigger pre-fetch for upcoming files
@@ -157,6 +175,7 @@ impl PartitionPruner {
             self.pruner.get_file_builder_background(
                 file_index,
                 pre_filter_mode,
+                self.enable_predicate_prefilter,
                 Some(partition_metrics.clone()),
             );
         }
@@ -263,6 +282,8 @@ struct PruneRequest {
     file_index: usize,
     /// Pre-filter mode to use for the file.
     pre_filter_mode: PreFilterMode,
+    /// Whether to execute the reduced-column predicate prefilter.
+    enable_predicate_prefilter: bool,
     /// Oneshot channel to send back the result.
     response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
     /// Partition metrics for merging reader metrics.
@@ -364,6 +385,7 @@ impl Pruner {
         &self,
         index: RowGroupIndex,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
@@ -374,6 +396,7 @@ impl Pruner {
             .get_file_builder(
                 file_index,
                 pre_filter_mode,
+                enable_predicate_prefilter,
                 partition_metrics,
                 reader_metrics,
             )
@@ -407,6 +430,7 @@ impl Pruner {
         &self,
         file_index: usize,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
@@ -429,6 +453,7 @@ impl Pruner {
         let request = PruneRequest {
             file_index,
             pre_filter_mode,
+            enable_predicate_prefilter,
             response_tx: Some(response_tx),
             partition_metrics: Some(partition_metrics.clone()),
         };
@@ -436,8 +461,13 @@ impl Pruner {
         let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
             common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
             // Worker channel closed, falls back to direct pruning
-            self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
-                .await
+            self.prune_file_directly(
+                file_index,
+                pre_filter_mode,
+                enable_predicate_prefilter,
+                reader_metrics,
+            )
+            .await
         } else {
             // Waits for response
             match response_rx.await {
@@ -447,8 +477,13 @@ impl Pruner {
                         "Response channel closed, falling back to direct pruning"
                     );
                     // Channel closed, falls back to direct pruning
-                    self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
-                        .await
+                    self.prune_file_directly(
+                        file_index,
+                        pre_filter_mode,
+                        enable_predicate_prefilter,
+                        reader_metrics,
+                    )
+                    .await
                 }
             }
         };
@@ -461,6 +496,7 @@ impl Pruner {
         &self,
         file_index: usize,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         partition_metrics: Option<PartitionMetrics>,
     ) {
         // Fast path: checks cache
@@ -478,6 +514,7 @@ impl Pruner {
         let request = PruneRequest {
             file_index,
             pre_filter_mode,
+            enable_predicate_prefilter,
             response_tx: None,
             partition_metrics,
         };
@@ -497,6 +534,7 @@ impl Pruner {
         &self,
         file_index: usize,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
         // Check manifest-level prune first (shared cache, no I/O).
@@ -516,7 +554,13 @@ impl Pruner {
             .inner
             .stream_ctx
             .input
-            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .prune_file_after_manifest_check(
+                file,
+                pre_filter_mode,
+                enable_predicate_prefilter,
+                predicate,
+                reader_metrics,
+            )
             .await?;
 
         let arc_builder = Arc::new(builder);
@@ -560,6 +604,7 @@ impl Pruner {
             let PruneRequest {
                 file_index,
                 pre_filter_mode,
+                enable_predicate_prefilter,
                 response_tx,
                 partition_metrics,
             } = request;
@@ -599,7 +644,13 @@ impl Pruner {
                 inner
                     .stream_ctx
                     .input
-                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
+                    .prune_file_after_manifest_check(
+                        file,
+                        pre_filter_mode,
+                        enable_predicate_prefilter,
+                        predicate,
+                        &mut metrics,
+                    )
                     .await
             };
 
@@ -983,6 +1034,7 @@ mod tests {
             .get_file_builder(
                 0,
                 PreFilterMode::SkipFields,
+                true,
                 &partition_metrics,
                 &mut reader_metrics,
             )
@@ -1172,7 +1224,7 @@ mod tests {
 
         let mut reader_metrics = ReaderMetrics::default();
         let builder = pruner
-            .prune_file_directly(0, PreFilterMode::SkipFields, &mut reader_metrics)
+            .prune_file_directly(0, PreFilterMode::SkipFields, true, &mut reader_metrics)
             .await
             .unwrap();
 
