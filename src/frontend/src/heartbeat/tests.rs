@@ -291,6 +291,12 @@ impl MockConnectionHandle {
     fn fail_responses(&self) {
         self.response_tx.send(MockStreamEvent::Error).unwrap();
     }
+
+    fn send_response(&self, response: HeartbeatResponse) {
+        self.response_tx
+            .send(MockStreamEvent::Response(response))
+            .unwrap();
+    }
 }
 
 #[derive(Clone)]
@@ -313,6 +319,7 @@ impl HeartbeatRequestSender for MockSender {
 }
 
 enum MockStreamEvent {
+    Response(HeartbeatResponse),
     Close,
     Error,
 }
@@ -325,6 +332,7 @@ struct MockStream {
 impl HeartbeatResponseStream for MockStream {
     async fn message(&mut self) -> HeartbeatExtensionResult<Option<HeartbeatResponse>> {
         match self.receiver.recv().await {
+            Some(MockStreamEvent::Response(response)) => Ok(Some(response)),
             Some(MockStreamEvent::Close) | None => Ok(None),
             Some(MockStreamEvent::Error) => Err(test_error("mock heartbeat receive failure")),
         }
@@ -473,11 +481,16 @@ fn test_task(
     extensions: HeartbeatExtensions,
     options: FrontendOptions,
 ) -> HeartbeatTask {
+    let executor = heartbeat_response_handler_executor(
+        &extensions,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockKvCacheInvalidator::default()),
+    );
     HeartbeatTask::new_with_connector(
         "127.0.0.1:4001".to_string(),
         &options,
         connector,
-        Arc::new(HandlerGroupExecutor::new(vec![])),
+        executor,
         Arc::new(ResourceStatImpl::default()),
     )
     .with_extensions(extensions)
@@ -616,6 +629,25 @@ enum ShortCircuitResult {
 struct ShortCircuitHandler {
     result: ShortCircuitResult,
     calls: Arc<AtomicUsize>,
+}
+
+struct PendingHandler {
+    started: Arc<Notify>,
+}
+
+#[async_trait]
+impl HeartbeatResponseHandler for PendingHandler {
+    fn is_acceptable(&self, _ctx: &HeartbeatResponseHandlerContext) -> bool {
+        true
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<HandleControl> {
+        self.started.notify_waiters();
+        pending().await
+    }
 }
 
 #[async_trait]
@@ -910,6 +942,39 @@ async fn test_shutdown_cancels_retry_sleep_and_joins_supervisor() {
         .unwrap();
     assert_eq!(connector.calls.load(Ordering::Acquire), 1);
     assert!(!task.has_supervisor().await);
+}
+
+#[tokio::test]
+async fn test_shutdown_cancels_inflight_response_handler() {
+    let started = Arc::new(Notify::new());
+    let extension = TestExtension::with_handler(
+        "pending-response",
+        Arc::new(PendingHandler {
+            started: started.clone(),
+        }),
+    );
+    let extensions = HeartbeatExtensions::default();
+    extensions.register(extension.clone());
+    let (plan, handle) = mock_connection(Duration::from_secs(60), Duration::from_secs(60));
+    let task = test_task(
+        MockConnector::new([ConnectPlan::Ready(plan)]),
+        extensions,
+        FrontendOptions::default(),
+    );
+    task.start().await.unwrap();
+    handle.wait_for_requests(1).await;
+
+    let handler_started = started.notified();
+    handle.send_response(HeartbeatResponse::default());
+    tokio::time::timeout(Duration::from_secs(1), handler_started)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), task.shutdown())
+        .await
+        .unwrap();
+    assert!(!task.has_supervisor().await);
+    assert_eq!(extension.shutdown_calls.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]

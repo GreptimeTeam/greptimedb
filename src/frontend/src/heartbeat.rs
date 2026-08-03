@@ -362,7 +362,11 @@ impl HeartbeatRunner {
                         info!("Received mailbox message: {message:?}");
                     }
                     let context = HeartbeatResponseHandlerContext::new(mailbox.clone(), response);
-                    if let Err(error) = self.handle_response(context).await {
+                    let result = tokio::select! {
+                        _ = self.cancellation.cancelled() => return ConnectionEnd::Shutdown,
+                        result = self.handle_response(context) => result,
+                    };
+                    if let Err(error) = result {
                         error!(error; "Error while handling heartbeat response");
                         HEARTBEAT_RECV_COUNT
                             .with_label_values(&["processing_error"])
