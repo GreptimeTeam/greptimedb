@@ -256,6 +256,9 @@ pub struct LoggingOptions {
     /// Whether to append logs to stdout. Default is true.
     pub append_stdout: bool,
 
+    /// Whether to write logs to files in `dir`. Default is true.
+    pub enable_file_logging: bool,
+
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
 
@@ -359,6 +362,7 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
+            enable_file_logging: true,
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
             otlp_export_protocol: None,
@@ -455,8 +459,10 @@ pub fn init_global_logging(
             None
         };
 
+        let file_logging_enabled = opts.enable_file_logging && !opts.dir.is_empty();
+
         // Configure the file logging layer with rolling policy.
-        let file_logging_layer = if !opts.dir.is_empty() {
+        let file_logging_layer = if file_logging_enabled {
             let rolling_appender = RollingFileAppender::builder()
                 .rotation(Rotation::HOURLY)
                 .filename_prefix("greptimedb")
@@ -487,7 +493,7 @@ pub fn init_global_logging(
         };
 
         // Configure the error file logging layer with rolling policy.
-        let err_file_logging_layer = if !opts.dir.is_empty() {
+        let err_file_logging_layer = if file_logging_enabled {
             let rolling_appender = RollingFileAppender::builder()
                 .rotation(Rotation::HOURLY)
                 .filename_prefix("greptimedb-err")
@@ -712,7 +718,8 @@ where
         + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
     if let Some(slow_query_opts) = slow_query_opts {
-        if !opts.dir.is_empty()
+        if opts.enable_file_logging
+            && !opts.dir.is_empty()
             && slow_query_opts.enable
             && slow_query_opts.record_type == SlowQueriesRecordType::Log
         {
@@ -777,6 +784,15 @@ mod tests {
         assert_eq!(opts.dir, "");
         assert_eq!(opts.level, None);
         assert!(opts.append_stdout);
+        assert!(opts.enable_file_logging);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_enable_file_logging() {
+        let json = r#"{"enable_file_logging": false}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert!(!opts.enable_file_logging);
     }
 
     #[test]
