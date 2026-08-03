@@ -3947,6 +3947,12 @@ impl PromPlanner {
         let input_plan = self.strip_tsid_column(input_plan)?;
         self.ctx.use_tsid = false;
 
+        if let Some(histogram_field) =
+            Self::alternative_sample_columns(input_plan.schema(), &self.ctx.field_columns)
+                .map(|(_, histogram)| histogram.to_string())
+        {
+            self.ctx.field_columns = vec![histogram_field];
+        }
         if self.all_field_columns_are_native_histograms(input_plan.schema()) {
             return self.create_native_histogram_quantile_plan(phi, input_plan);
         }
@@ -8642,6 +8648,26 @@ mod test {
         // The empty-values filter drops NULL quantile results so the output is empty
         // when all native histogram samples are dropped.
         assert!(plan.contains("IS NOT NULL"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn mixed_native_histogram_quantile_uses_histogram_field() {
+        let table_provider = build_test_mixed_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt("histogram_quantile(0.9, some_metric)"),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap()
+        .display_indent_schema()
+        .to_string();
+
+        assert!(
+            plan.contains("prom_native_histogram_quantile(greptime_native_histogram"),
+            "{plan}"
+        );
+        assert!(!plan.contains("EmptyRelation"), "{plan}");
     }
 
     #[tokio::test]
