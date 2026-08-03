@@ -14,7 +14,6 @@
 
 //! Native histogram PromQL helpers.
 
-use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -170,10 +169,6 @@ impl Hash for NativeHistogramAnnotationUdf {
 }
 
 impl ScalarUDFImpl for NativeHistogramAnnotationUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.name
     }
