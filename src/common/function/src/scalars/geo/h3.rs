@@ -19,8 +19,8 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error;
 use datafusion::arrow::array::{
-    Array, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringViewArray,
-    StringViewBuilder, UInt8Builder, UInt64Builder,
+    Array, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, PrimitiveArray,
+    StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
 };
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Float64Type, Int64Type, UInt8Type, UInt64Type};
@@ -52,12 +52,6 @@ const INTEGER_TYPES: &[DataType] = &[
     DataType::UInt64,
 ];
 
-static RESOLUTION_TYPES: &[DataType] = INTEGER_TYPES;
-
-static DISTANCE_TYPES: &[DataType] = INTEGER_TYPES;
-
-static POSITION_TYPES: &[DataType] = INTEGER_TYPES;
-
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///
 /// [h3]: https://h3geo.org/
@@ -69,21 +63,8 @@ pub(crate) struct H3LatLngToCell {
 
 impl Default for H3LatLngToCell {
     fn default() -> Self {
-        let mut signatures = Vec::new();
-        for coord_type in COORDINATE_TYPES.as_slice() {
-            for resolution_type in RESOLUTION_TYPES {
-                signatures.push(TypeSignature::Exact(vec![
-                    // latitude
-                    coord_type.clone(),
-                    // longitude
-                    coord_type.clone(),
-                    // resolution
-                    resolution_type.clone(),
-                ]));
-            }
-        }
         Self {
-            signature: Signature::one_of(signatures, Volatility::Stable),
+            signature: signature_of_coordinates_and_resolution(),
         }
     }
 }
@@ -105,14 +86,8 @@ impl Function for H3LatLngToCell {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let [lat_vec, lon_vec, resolution_vec] = extract_args(self.name(), &args)?;
-
-        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
-        let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
-        let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
-        let resolution_vec = resolutions.as_primitive::<UInt8Type>();
+        let (lat_vec, lon_vec, resolution_vec) =
+            extract_coordinate_resolution_args(self.name(), &args)?;
 
         let size = lat_vec.len();
         let mut builder = UInt64Builder::with_capacity(size);
@@ -120,10 +95,7 @@ impl Function for H3LatLngToCell {
         for i in 0..size {
             let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
             let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
-            let r = resolution_vec
-                .is_valid(i)
-                .then(|| value_to_resolution(resolution_vec.value(i)))
-                .transpose()?;
+            let r = resolution_at(&resolution_vec, i)?;
 
             let result = match (lat, lon, r) {
                 (Some(lat), Some(lon), Some(r)) => {
@@ -160,21 +132,8 @@ pub(crate) struct H3LatLngToCellString {
 
 impl Default for H3LatLngToCellString {
     fn default() -> Self {
-        let mut signatures = Vec::new();
-        for coord_type in COORDINATE_TYPES.as_slice() {
-            for resolution_type in RESOLUTION_TYPES {
-                signatures.push(TypeSignature::Exact(vec![
-                    // latitude
-                    coord_type.clone(),
-                    // longitude
-                    coord_type.clone(),
-                    // resolution
-                    resolution_type.clone(),
-                ]));
-            }
-        }
         Self {
-            signature: Signature::one_of(signatures, Volatility::Stable),
+            signature: signature_of_coordinates_and_resolution(),
         }
     }
 }
@@ -196,14 +155,8 @@ impl Function for H3LatLngToCellString {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let [lat_vec, lon_vec, resolution_vec] = extract_args(self.name(), &args)?;
-
-        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
-        let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
-        let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
-        let resolution_vec = resolutions.as_primitive::<UInt8Type>();
+        let (lat_vec, lon_vec, resolution_vec) =
+            extract_coordinate_resolution_args(self.name(), &args)?;
 
         let size = lat_vec.len();
         let mut builder = StringViewBuilder::with_capacity(size);
@@ -211,10 +164,7 @@ impl Function for H3LatLngToCellString {
         for i in 0..size {
             let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
             let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
-            let r = resolution_vec
-                .is_valid(i)
-                .then(|| value_to_resolution(resolution_vec.value(i)))
-                .transpose()?;
+            let r = resolution_at(&resolution_vec, i)?;
 
             let result = match (lat, lon, r) {
                 (Some(lat), Some(lon), Some(r)) => {
@@ -665,10 +615,7 @@ impl Function for H3CellToChildren {
 
         for i in 0..size {
             let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
-            let resolution = resolutions
-                .is_valid(i)
-                .then(|| value_to_resolution(resolutions.value(i)))
-                .transpose()?;
+            let resolution = resolution_at(resolutions, i)?;
 
             match (cell, resolution) {
                 (Some(c), Some(r)) => {
@@ -776,10 +723,7 @@ where
     let mut builder = UInt64Builder::with_capacity(cells.len());
     for i in 0..cells.len() {
         let cell = ScalarValue::try_from_array(&cells, i).and_then(cell_from_value)?;
-        let resolution = resolutions
-            .is_valid(i)
-            .then(|| value_to_resolution(resolutions.value(i)))
-            .transpose()?;
+        let resolution = resolution_at(resolutions, i)?;
         let v = match (cell, resolution) {
             (Some(c), Some(r)) => calculator(c, r),
             _ => None,
@@ -800,10 +744,10 @@ pub(crate) struct H3ChildPosToCell {
 impl Default for H3ChildPosToCell {
     fn default() -> Self {
         let mut signatures =
-            Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
-        for position_type in POSITION_TYPES {
+            Vec::with_capacity(INTEGER_TYPES.len() * CELL_TYPES.len() * INTEGER_TYPES.len());
+        for position_type in INTEGER_TYPES {
             for cell_type in CELL_TYPES.as_slice() {
-                for resolution_type in RESOLUTION_TYPES {
+                for resolution_type in INTEGER_TYPES {
                     signatures.push(TypeSignature::Exact(vec![
                         position_type.clone(),
                         cell_type.clone(),
@@ -845,10 +789,7 @@ impl Function for H3ChildPosToCell {
         for i in 0..size {
             let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
             let pos = ScalarValue::try_from_array(&pos_vec, i).and_then(value_to_position)?;
-            let resolution = resolutions
-                .is_valid(i)
-                .then(|| value_to_resolution(resolutions.value(i)))
-                .transpose()?;
+            let resolution = resolution_at(resolutions, i)?;
             let result = match (cell, resolution) {
                 (Some(c), Some(r)) => c.child_at(pos, r).map(u64::from),
                 _ => None,
@@ -1314,6 +1255,36 @@ impl Function for H3CellDistanceEuclideanDegree {
     }
 }
 
+fn extract_coordinate_resolution_args(
+    name: &str,
+    args: &ScalarFunctionArgs,
+) -> datafusion_common::Result<(
+    PrimitiveArray<Float64Type>,
+    PrimitiveArray<Float64Type>,
+    PrimitiveArray<UInt8Type>,
+)> {
+    let [lat_vec, lon_vec, resolution_vec] = extract_args(name, args)?;
+
+    let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
+    let lat_vec = lat_vec.as_primitive::<Float64Type>().clone();
+    let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
+    let lon_vec = lon_vec.as_primitive::<Float64Type>().clone();
+    let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
+    let resolution_vec = resolutions.as_primitive::<UInt8Type>().clone();
+
+    Ok((lat_vec, lon_vec, resolution_vec))
+}
+
+fn resolution_at(
+    resolutions: &PrimitiveArray<UInt8Type>,
+    i: usize,
+) -> datafusion_common::Result<Option<Resolution>> {
+    resolutions
+        .is_valid(i)
+        .then(|| value_to_resolution(resolutions.value(i)))
+        .transpose()
+}
+
 fn value_to_resolution(r: u8) -> datafusion_common::Result<Resolution> {
     Resolution::try_from(r).map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
 }
@@ -1357,6 +1328,23 @@ fn value_to_distance(v: ScalarValue) -> datafusion_common::Result<u32> {
     }
 }
 
+fn signature_of_coordinates_and_resolution() -> Signature {
+    let mut signatures = Vec::with_capacity(COORDINATE_TYPES.len() * INTEGER_TYPES.len());
+    for coord_type in COORDINATE_TYPES.as_slice() {
+        for resolution_type in INTEGER_TYPES {
+            signatures.push(TypeSignature::Exact(vec![
+                // latitude
+                coord_type.clone(),
+                // longitude
+                coord_type.clone(),
+                // resolution
+                resolution_type.clone(),
+            ]));
+        }
+    }
+    Signature::one_of(signatures, Volatility::Stable)
+}
+
 fn signature_of_cell() -> Signature {
     let mut signatures = Vec::with_capacity(CELL_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
@@ -1381,9 +1369,9 @@ fn signature_of_double_cells() -> Signature {
 }
 
 fn signature_of_cell_and_resolution() -> Signature {
-    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * RESOLUTION_TYPES.len());
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * INTEGER_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for resolution_type in RESOLUTION_TYPES {
+        for resolution_type in INTEGER_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 resolution_type.clone(),
@@ -1394,9 +1382,9 @@ fn signature_of_cell_and_resolution() -> Signature {
 }
 
 fn signature_of_cell_and_distance() -> Signature {
-    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * DISTANCE_TYPES.len());
+    let mut signatures = Vec::with_capacity(CELL_TYPES.len() * INTEGER_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for distance_type in DISTANCE_TYPES {
+        for distance_type in INTEGER_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 distance_type.clone(),
