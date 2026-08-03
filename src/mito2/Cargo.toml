@@ -11,7 +11,7 @@ testing = ["test"]
 test-shared-fs-region-migration = []
 enterprise = []
 vector_index = ["dep:roaring", "index/vector_index"]
-experimental-json2-variant = ["parquet/variant_experimental"]
+experimental-json2-variant = []
 
 [lints]
 workspace = true
@@ -66,7 +66,7 @@ log-store = { workspace = true }
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store = { workspace = true, features = ["testing"] }
-parquet = { workspace = true, features = ["async"] }
+parquet = { workspace = true, features = ["async", "variant_experimental"] }
 paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true

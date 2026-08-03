@@ -17,8 +17,14 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType as ArrowDataType, FieldRef};
 use datatypes::arrow::datatypes::Schema;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{
+    JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout, is_json2_extension_type,
+    json2_remainder_field,
+};
+use snafu::ResultExt;
 use store_api::storage::NestedPath;
+
+use crate::error::{DataTypeMismatchSnafu, Result};
 
 /// Aligns nested struct fields according to the requested nested paths.
 ///
@@ -33,7 +39,10 @@ use store_api::storage::NestedPath;
 /// For example, if the schema has `j: struct<a: struct<x: Int64, y: Utf8>>`
 /// and `nested_paths` requests `j.a.x` and `j.a.z`, the result is
 /// `j: struct<a: struct<x: Int64, z: Binary>>`.
-pub(crate) fn align_schema_by_nested_paths<'a, I>(schema: &mut Schema, nested_paths: I)
+pub(crate) fn align_schema_by_nested_paths<'a, I>(
+    schema: &mut Schema,
+    nested_paths: I,
+) -> Result<()>
 where
     I: IntoIterator<Item = &'a [NestedPath]>,
 {
@@ -53,13 +62,73 @@ where
                         }
                     })
                     .collect::<Vec<_>>();
-                rebuild_field_by_nested_paths(field, &child_paths)
+                let layout =
+                    Json2PhysicalLayout::try_from_root(field).context(DataTypeMismatchSnafu)?;
+                if layout.is_version_2() {
+                    rebuild_v2_field_by_nested_paths(field, &child_paths)
+                } else {
+                    Ok(rebuild_field_by_nested_paths(field, &child_paths))
+                }
             } else {
-                field.clone()
+                Ok(field.clone())
             }
         })
-        .collect::<Vec<_>>();
-    schema.fields = fields.into()
+        .collect::<Result<Vec<_>>>()?;
+    schema.fields = fields.into();
+    Ok(())
+}
+
+fn rebuild_v2_field_by_nested_paths(
+    field: &FieldRef,
+    nested_paths: &[&[String]],
+) -> Result<FieldRef> {
+    if nested_paths.iter().any(|path| path.is_empty()) {
+        return Ok(field.clone());
+    }
+
+    let mut fields = group_child_paths(
+        &nested_paths
+            .iter()
+            .copied()
+            .filter(|path| has_explicit_path(field, path))
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .map(|(name, paths)| {
+        let existing = find_struct_child(field, &name);
+        build_field_from_nested_paths(&name, existing, &paths)
+    })
+    .collect::<Vec<_>>();
+    fields.push(
+        json2_remainder_field(field)
+            .context(DataTypeMismatchSnafu)?
+            .clone(),
+    );
+    fields.sort_unstable_by(|x, y| x.name().cmp(y.name()));
+
+    Ok(Arc::new(
+        field
+            .as_ref()
+            .clone()
+            .with_data_type(ArrowDataType::Struct(fields.into())),
+    ))
+}
+
+fn has_explicit_path(field: &FieldRef, path: &[String]) -> bool {
+    let mut field = field;
+    for (i, name) in path.iter().enumerate() {
+        if name == JSON2_REMAINDER_FIELD_NAME {
+            return false;
+        }
+        let Some(child) = find_struct_child(field, name) else {
+            return false;
+        };
+        if i + 1 == path.len() || child.data_type().is_binary() {
+            return true;
+        }
+        field = child;
+    }
+    false
 }
 
 fn rebuild_field_by_nested_paths(field: &FieldRef, nested_paths: &[&[String]]) -> FieldRef {
@@ -131,12 +200,14 @@ fn new_jsonb_field(name: &str) -> FieldRef {
 #[cfg(test)]
 mod tests {
     use arrow_schema::Field;
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
+    use datatypes::vectors::json::variant::variant_field;
 
     use super::*;
 
     #[test]
-    fn test_align_schema_by_nested_paths() {
+    fn test_align_schema_by_nested_paths() -> Result<()> {
         fn new_field(name: &str, data_type: ArrowDataType) -> FieldRef {
             Arc::new(Field::new(name, data_type, true))
         }
@@ -210,7 +281,7 @@ mod tests {
         align_schema_by_nested_paths(
             &mut schema,
             nested_paths.iter().map(|paths| paths.as_slice()),
-        );
+        )?;
 
         let expected = Schema::new([
             json_struct_field(
@@ -246,5 +317,46 @@ mod tests {
         ]);
 
         assert_eq!(schema, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_align_v2_schema_keeps_remainder_for_missing_paths() -> Result<()> {
+        let remainder = Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true));
+        let root = Arc::new(
+            Field::new(
+                "j",
+                ArrowDataType::Struct(
+                    vec![
+                        remainder.clone(),
+                        Arc::new(Field::new("hot", ArrowDataType::Int64, true)),
+                    ]
+                    .into(),
+                ),
+                true,
+            )
+            .with_extension_type(JsonExtensionType::new(Arc::new(
+                JsonMetadata::new_v2(Some(JsonSettings::default())),
+            ))),
+        );
+        let mut schema = Schema::new([root.clone()]);
+        let paths = [vec![
+            vec!["j".to_string(), "hot".to_string()],
+            vec!["j".to_string(), "cold".to_string()],
+        ]];
+
+        align_schema_by_nested_paths(&mut schema, paths.iter().map(Vec::as_slice))?;
+
+        assert_eq!(root.as_ref(), schema.field(0));
+
+        let mut missing_only = Schema::new([root]);
+        let paths = [vec![vec!["j".to_string(), "cold".to_string()]]];
+        align_schema_by_nested_paths(&mut missing_only, paths.iter().map(Vec::as_slice))?;
+        let ArrowDataType::Struct(fields) = missing_only.field(0).data_type() else {
+            panic!("expected v2 JSON2 struct");
+        };
+        assert_eq!(1, fields.len());
+        assert_eq!(remainder, fields[0]);
+        Ok(())
     }
 }

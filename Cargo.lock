@@ -4545,6 +4545,8 @@ dependencies = [
  "num",
  "num-traits",
  "ordered-float 4.6.0",
+ "parquet-variant-compute",
+ "parquet-variant-json",
  "paste",
  "regex",
  "serde",

@@ -262,6 +262,7 @@ impl FlatCompatBatch {
     /// Make columns of the `batch` compatible.
     pub(crate) fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
         let len = batch.num_rows();
+        let schema = batch.schema();
         let columns = self
             .index_or_defaults
             .iter()
@@ -274,7 +275,7 @@ impl FlatCompatBatch {
                             && json_type.is_json2()
                         {
                             JsonArray::from(old_column)
-                                .project_to(&json_type.as_arrow_type())
+                                .project_json2(schema.field(*pos), &json_type.as_arrow_type())
                                 .context(ConvertValueSnafu)?
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())

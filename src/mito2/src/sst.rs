@@ -505,15 +505,31 @@ impl SeriesEstimator {
 mod tests {
     use std::sync::Arc;
 
+    use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use ::parquet::variant::VariantArray;
     use common_query::prelude::greptime_native_histogram;
     use datatypes::arrow::array::{
-        BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array,
-        UInt64Array,
+        ArrayRef, BinaryArray, DictionaryArray, StructArray, TimestampMillisecondArray, UInt8Array,
+        UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::extension::json::Json2PhysicalLayout;
+    use datatypes::vectors::json::array::JsonArray;
+    use serde_json::json;
 
     use super::*;
+
+    fn json2_v2_test_type() -> ArrowDataType {
+        ArrowDataType::Struct(
+            vec![
+                Arc::new(Field::new("active", ArrowDataType::Boolean, true)),
+                Arc::new(Field::new("hot", ArrowDataType::Int64, true)),
+                Arc::new(Field::new("name", ArrowDataType::Utf8, true)),
+            ]
+            .into(),
+        )
+    }
 
     fn new_flat_record_batch(timestamps: &[i64]) -> RecordBatch {
         // Flat format has: [fields..., time_index, __primary_key, __sequence, __op_type]
@@ -1017,10 +1033,11 @@ mod tests {
     async fn test_nested_variant_survives_sst_writer_schema_roundtrip()
     -> Result<(), Box<dyn std::error::Error>> {
         use ::parquet::arrow::AsyncArrowWriter;
-        use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use ::parquet::basic::LogicalType;
-        use ::parquet::variant::{VariantArray, VariantType, json_to_variant};
-        use datatypes::arrow::array::{ArrayRef, StringArray, StructArray};
+        use ::parquet::variant::{VariantType, json_to_variant};
+        use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
+        use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+        use datatypes::json::JsonSettings;
 
         let json: ArrayRef = Arc::new(StringArray::from(vec![
             Some(r#"{}"#),
@@ -1032,16 +1049,29 @@ mod tests {
         let remainder = json_to_variant(&json)?;
         let remainder_field = remainder.field("!__remainder__!");
         let remainder_array = ArrayRef::from(remainder);
+        let hot_field = Field::new("hot", ArrowDataType::Int64, true);
         let data_array = Arc::new(StructArray::new(
-            vec![remainder_field.clone()].into(),
-            vec![remainder_array],
+            vec![remainder_field.clone(), hot_field.clone()].into(),
+            vec![
+                remainder_array,
+                Arc::new(Int64Array::from(vec![
+                    Some(1),
+                    Some(2),
+                    Some(3),
+                    Some(4),
+                    None,
+                ])),
+            ],
             None,
         ));
         let data_field = Field::new(
             "data",
-            ArrowDataType::Struct(vec![remainder_field].into()),
+            ArrowDataType::Struct(vec![remainder_field, hot_field].into()),
             true,
-        );
+        )
+        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
+            Some(JsonSettings::default()),
+        ))));
         let schema = Arc::new(Schema::new(vec![data_field]));
         let source = RecordBatch::try_new(schema.clone(), vec![data_array])?;
 
@@ -1073,12 +1103,44 @@ mod tests {
         let mut reader = builder.build()?;
         let result = reader.next().unwrap()?;
         assert_eq!(source, result);
+        let result_field = result.schema().field(0).clone();
         let result = result
             .column(0)
             .as_any()
             .downcast_ref::<StructArray>()
             .unwrap();
         VariantArray::try_new(result.column(0))?;
+        let result: ArrayRef = Arc::new(result.clone());
+        let result =
+            JsonArray::from(&result).project_json2(&result_field, &json2_v2_test_type())?;
+        assert_eq!(
+            json!({"active": true, "hot": 2, "name": "Alice"}),
+            JsonArray::from(&result).try_get_value(1)?
+        );
+        Ok(())
+    }
+
+    /// Ensures future readers retain compatibility with the first JSON2 v2 layout.
+    #[test]
+    fn test_read_json2_v2_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = bytes::Bytes::from_static(include_bytes!("../test-data/json2-v2.parquet"));
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)?;
+        let field = builder.schema().field(0).clone();
+        assert!(Json2PhysicalLayout::try_from_root(&field)?.is_version_2());
+
+        let batch = builder.build()?.next().unwrap()?;
+        let data = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        VariantArray::try_new(data.column(0))?;
+        let data: ArrayRef = Arc::new(data.clone());
+        let data = JsonArray::from(&data).project_json2(&field, &json2_v2_test_type())?;
+        assert_eq!(
+            json!({"active": true, "hot": 2, "name": "Alice"}),
+            JsonArray::from(&data).try_get_value(1)?
+        );
         Ok(())
     }
 }

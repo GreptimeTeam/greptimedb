@@ -19,7 +19,7 @@ use arrow::compute::{can_cast_types, cast};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
-use arrow_schema::{DataType, FieldRef};
+use arrow_schema::{DataType, Field, FieldRef};
 use common_telemetry::trace;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -29,9 +29,11 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
+use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout};
 use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::{DataType as _, Value as GreptimeValue};
 use crate::value::{ListValue, StructValue};
+use crate::vectors::json::variant::variant_to_json_values;
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -90,6 +92,64 @@ impl JsonArray<'_> {
             }
         };
         Ok(value)
+    }
+
+    /// Projects a physical JSON2 array to a logical query type.
+    pub fn project_json2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
+        let layout = Json2PhysicalLayout::try_from_root(field)?;
+        if !layout.is_version_2() {
+            return self.project_to(target);
+        }
+
+        project_json_values(self.json2_values()?, target)
+    }
+
+    fn json2_values(&self) -> Result<Vec<Value>> {
+        let structs = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
+            reason: "JSON2 layout v2 root array must be a struct",
+        })?;
+        let remainder =
+            structs
+                .column_by_name(JSON2_REMAINDER_FIELD_NAME)
+                .context(AlignJsonArraySnafu {
+                    reason: "JSON2 layout v2 root array is missing its remainder column",
+                })?;
+        let mut remainders = variant_to_json_values(remainder)?;
+        let mut values = Vec::with_capacity(structs.len());
+
+        for (i, remainder) in remainders.iter_mut().enumerate() {
+            if structs.is_null(i) {
+                values.push(Value::Null);
+                continue;
+            }
+
+            let mut object = match remainder.take() {
+                None => serde_json::Map::new(),
+                Some(Value::Object(object)) => object,
+                Some(value) => {
+                    return InvalidJsonSnafu {
+                        value: format!("JSON2 layout v2 remainder must be an object, got {value}"),
+                    }
+                    .fail();
+                }
+            };
+
+            for (child, column) in structs.fields().iter().zip(structs.columns()) {
+                if child.name() == JSON2_REMAINDER_FIELD_NAME {
+                    continue;
+                }
+                let value = JsonArray::from(column).try_get_value(i)?;
+                merge_explicit_value(
+                    &mut object,
+                    child.name().clone(),
+                    value,
+                    child.name().clone(),
+                )?;
+            }
+            values.push(Value::Object(object));
+        }
+
+        Ok(values)
     }
 
     /// Normalizes a JSON2 array to the wider `expect` data type without losing
@@ -326,6 +386,33 @@ impl JsonArray<'_> {
     }
 }
 
+fn merge_explicit_value(
+    remainder: &mut serde_json::Map<String, Value>,
+    key: String,
+    explicit: Value,
+    path: String,
+) -> Result<()> {
+    let Some(existing) = remainder.get_mut(&key) else {
+        remainder.insert(key, explicit);
+        return Ok(());
+    };
+
+    let (Value::Object(remainder), Value::Object(explicit)) = (existing, explicit) else {
+        return InvalidJsonSnafu {
+            value: format!(
+                "cannot merge '{}' in explicit fields and remainder: not both objects",
+                path,
+            ),
+        }
+        .fail();
+    };
+    for (key, value) in explicit {
+        let child_path = format!("{path}.{key}");
+        merge_explicit_value(remainder, key, value, child_path)?;
+    }
+    Ok(())
+}
+
 /// Returns whether Arrow can cast between the types without JSON-aware projection.
 /// Binary and nested types require JSONB decoding or recursive projection.
 fn can_fast_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
@@ -451,6 +538,8 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use arrow_array::types::Int64Type;
     use arrow_array::{
         BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
@@ -460,6 +549,9 @@ mod test {
     use serde_json::json;
 
     use super::*;
+    use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, JsonExtensionType, JsonMetadata};
+    use crate::json::JsonSettings;
+    use crate::vectors::json::variant::{json_values_to_variant, variant_field};
 
     #[test]
     fn test_try_get_value() -> Result<()> {
@@ -913,6 +1005,99 @@ mod test {
             JsonArray::from(&aligned).try_get_value(1)?
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruct_json2_v2_value() -> Result<()> {
+        let remainders = json_values_to_variant(&[
+            Some(json!({"cold": 1, "nested": {"right": true}})),
+            Some(json!({"!__remainder__!": "user value"})),
+        ])?;
+        let remainder = Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true));
+        let nested = Arc::new(Field::new_struct(
+            "nested",
+            [Arc::new(Field::new("left", DataType::Utf8, true))],
+            true,
+        ));
+        let nested_values: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("left", DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![Some("value"), None])) as ArrayRef,
+        )]));
+        let fields = Fields::from(vec![
+            remainder,
+            Arc::new(Field::new("count", DataType::Int64, true)),
+            nested,
+        ]);
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields.clone(),
+            vec![
+                remainders,
+                Arc::new(Int64Array::from(vec![Some(42), None])),
+                nested_values,
+            ],
+            None,
+        ));
+        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
+            JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
+                Some(JsonSettings::default()),
+            ))),
+        );
+
+        assert_eq!(
+            json!({
+                "cold": 1,
+                "count": 42,
+                "nested": {"left": "value", "right": true}
+            }),
+            JsonArray::from(&array).json2_values()?[0]
+        );
+        assert_eq!(
+            json!({
+                "!__remainder__!": "user value",
+                "count": null,
+                "nested": {"left": null}
+            }),
+            JsonArray::from(&array).json2_values()?[1]
+        );
+
+        let target = DataType::Struct(
+            vec![
+                Arc::new(Field::new("cold", DataType::UInt64, true)),
+                Arc::new(Field::new("count", DataType::Int64, true)),
+            ]
+            .into(),
+        );
+        let projected = JsonArray::from(&array).project_json2(&field, &target)?;
+        assert_eq!(
+            json!({"cold": 1, "count": 42}),
+            JsonArray::from(&projected).try_get_value(0)?
+        );
+        assert_eq!(
+            json!({"cold": null, "count": null}),
+            JsonArray::from(&projected).try_get_value(1)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_conflict_json2_v2_path() -> Result<()> {
+        let remainders = json_values_to_variant(&[Some(json!({"count": 1}))])?;
+        let fields = Fields::from(vec![
+            Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
+            Arc::new(Field::new("count", DataType::Int64, true)),
+        ]);
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields,
+            vec![remainders, Arc::new(Int64Array::from(vec![2]))],
+            None,
+        ));
+        let error = JsonArray::from(&array).json2_values().unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "cannot merge 'count' in explicit fields and remainder: not both objects"
+            )
+        );
         Ok(())
     }
 }

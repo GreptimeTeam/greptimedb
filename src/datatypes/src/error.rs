@@ -196,6 +196,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON2 physical layout: {reason}"))]
+    InvalidJson2Layout {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid Vector: {}", msg))]
     InvalidVector {
         msg: String,
@@ -342,7 +349,8 @@ impl ErrorExt for Error {
             | InconsistentStructFieldsAndItems { .. }
             | ArrowMetadata { .. }
             | AlignJsonValue { .. }
-            | AlignJsonArray { .. } => StatusCode::Internal,
+            | AlignJsonArray { .. }
+            | InvalidJson2Layout { .. } => StatusCode::Internal,
 
             Unexpected { .. } => StatusCode::Unexpected,
         }

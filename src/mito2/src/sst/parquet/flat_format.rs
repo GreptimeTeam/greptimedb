@@ -305,7 +305,7 @@ impl FlatReadFormat {
         if read_columns.has_nested() {
             debug_assert_eq!(schema.fields().len(), read_columns.columns().len());
             let nested_paths = read_columns.columns().iter().map(|x| x.nested_paths());
-            align_schema_by_nested_paths(&mut schema, nested_paths);
+            align_schema_by_nested_paths(&mut schema, nested_paths)?;
         }
         Ok(Arc::new(schema))
     }
