@@ -25,3 +25,6 @@ trigger_flush_threshold = 100
 
 [stats_persistence]
 ttl = "0s"
+
+[event_recorder]
+event_types = []

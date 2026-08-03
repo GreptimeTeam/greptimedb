@@ -1900,7 +1900,7 @@ mod tests {
             })),
         };
         assert_eq!(
-            JsonNativeType::Array(Box::new(JsonNativeType::f64())),
+            JsonNativeType::Array(Box::new(JsonNativeType::Variant)),
             decode_json_value_parts(&proto).1
         );
 

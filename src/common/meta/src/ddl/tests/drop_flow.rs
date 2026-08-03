@@ -29,7 +29,11 @@ use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropFlowTask;
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
-fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> DropFlowTask {
+pub(crate) fn test_drop_flow_task(
+    flow_name: &str,
+    flow_id: u32,
+    drop_if_exists: bool,
+) -> DropFlowTask {
     DropFlowTask {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         flow_name: flow_name.to_string(),

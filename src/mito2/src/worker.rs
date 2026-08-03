@@ -73,8 +73,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, SenderBulkRequest, SenderDdlRequest,
-    SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
+    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
@@ -1148,8 +1148,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(req) => {
-                    self.handle_drop_request(ddl.region_id, req.partial_drop)
-                        .await
+                    self.handle_drop_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
                 }
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
@@ -1235,6 +1236,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
+            BackgroundNotify::CompactionPickFinished(req) => {
+                self.handle_compaction_pick_finished(region_id, req).await
+            }
             BackgroundNotify::FlushFinished(req) => {
                 self.handle_flush_finished(region_id, req).await
             }
@@ -1247,6 +1251,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::IndexBuildFailed(req) => {
                 self.handle_index_build_failed(region_id, req).await
+            }
+            BackgroundNotify::IndexBuildRetry(req) => {
+                self.handle_rebuild_index(req, OptionOutputTx::new(None))
+                    .await
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
@@ -1362,6 +1370,20 @@ impl WorkerListener {
         let _ = region_id;
     }
 
+    pub(crate) async fn on_flush_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_commit_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) fn on_flush_cancel_requested(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_cancel_requested(_region_id);
+        }
+    }
+
     pub(crate) fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
@@ -1415,6 +1437,34 @@ impl WorkerListener {
         }
     }
 
+    pub(crate) async fn on_compaction_pick_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_pick_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) async fn on_compaction_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_commit_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) async fn on_compaction_result_notified(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_result_notified(_region_id).await;
+        }
+    }
+
+    pub(crate) fn on_compaction_cancel_requested(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_cancel_requested(_region_id);
+        }
+    }
+
     pub(crate) async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
@@ -1449,6 +1499,27 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_index_build_abort(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_before_manifest_commit(
+        &self,
+        _region_file_id: RegionFileId,
+    ) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_index_build_before_manifest_commit(_region_file_id)
+                .await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_manifest_committed(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_index_build_manifest_committed(_region_file_id)
+                .await;
         }
     }
 }

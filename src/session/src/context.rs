@@ -33,7 +33,8 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub use crate::hints::{
-    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    LIVE_ANALYZE_METRICS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
@@ -377,6 +378,18 @@ impl QueryContext {
     pub fn remote_query_id_value(&self) -> Option<QueryId> {
         self.remote_query_id()
             .and_then(|query_id| query_id.parse().ok())
+    }
+
+    pub fn enable_live_analyze_metrics(&mut self) {
+        if let Some(remote_query_id) = self.remote_query_id().map(str::to_string) {
+            self.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, remote_query_id);
+        }
+    }
+
+    pub fn live_analyze_metrics_enabled(&self) -> bool {
+        self.remote_query_id()
+            .zip(self.extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY))
+            .is_some_and(|(remote_query_id, value)| value == remote_query_id)
     }
 
     pub fn extensions(&self) -> HashMap<String, String> {
@@ -854,5 +867,20 @@ mod test {
             restored.remote_query_id_value().unwrap().to_string(),
             query_id
         );
+    }
+
+    #[test]
+    fn test_live_analyze_metrics_requires_matching_remote_query_id() {
+        let mut ctx = QueryContext::arc().as_ref().clone();
+        assert!(!ctx.live_analyze_metrics_enabled());
+
+        ctx.enable_live_analyze_metrics();
+        assert!(ctx.live_analyze_metrics_enabled());
+
+        ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "true");
+        assert!(!ctx.live_analyze_metrics_enabled());
+
+        ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "another-query-id");
+        assert!(!ctx.live_analyze_metrics_enabled());
     }
 }

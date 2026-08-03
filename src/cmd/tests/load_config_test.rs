@@ -20,6 +20,7 @@ use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
+use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_test_util::temp_dir::create_named_temp_file;
 use common_wal::config::DatanodeWalConfig;
@@ -46,6 +47,7 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         [runtime]
         global_rt_size = 8
         compact_rt_size = 4
+        compact_rt_max_blocking_threads = 6
         ingest_rt_size = 8
         query_rt_size = 7
     "#;
@@ -54,8 +56,27 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
 
     assert_eq!(8, options.runtime.global_rt_size);
     assert_eq!(4, options.runtime.compact_rt_size);
+    assert_eq!(6, options.runtime.compact_rt_max_blocking_threads);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
+}
+
+#[test]
+fn test_load_runtime_options_without_max_blocking_threads() {
+    let toml = r#"
+        [runtime]
+        global_rt_size = 8
+        compact_rt_size = 4
+        ingest_rt_size = 8
+        query_rt_size = 7
+    "#;
+
+    let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
+
+    assert_eq!(
+        RuntimeOptions::default().compact_rt_max_blocking_threads,
+        options.runtime.compact_rt_max_blocking_threads
+    );
 }
 
 #[allow(deprecated)]
@@ -216,6 +237,7 @@ fn test_load_metasrv_example_config() {
                     timeout: Duration::from_secs(10),
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
+                    ..Default::default()
                 },
             },
             backend_tls: Some(TlsOption {

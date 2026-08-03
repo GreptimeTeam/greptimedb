@@ -16,8 +16,10 @@ mod aggr_over_time;
 mod changes;
 mod deriv;
 mod double_exponential_smoothing;
+mod edge_count;
 mod extrapolate_rate;
 mod idelta;
+mod native_histogram;
 mod predict_linear;
 mod quantile;
 mod quantile_aggr;
@@ -37,11 +39,23 @@ use datafusion::arrow::array::{
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
-use datatypes::arrow::datatypes::Int64Type;
+use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub use native_histogram::{
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
+    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
+    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
+    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
+    NativeHistogramToString,
+};
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
@@ -58,6 +72,36 @@ pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, 
         ColumnarValue::Array(array) => Ok(array.clone()),
         ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
     }
+}
+
+/// Extracts and validates a range dictionary with the expected value type.
+pub(crate) fn extract_range_dict(
+    columnar_value: &ColumnarValue,
+    func_name: &str,
+    arg_name: &str,
+    expected_value_type: &DataType,
+) -> Result<DictionaryArray<Int64Type>, DataFusionError> {
+    let array = extract_array(columnar_value)?;
+    let dict = array
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int64Type>>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "{func_name}: expect {arg_name} as DictionaryArray<Int64>, found {}",
+                array.data_type()
+            ))
+        })?
+        .clone();
+
+    if &dict.value_type() != expected_value_type {
+        return Err(DataFusionError::Execution(format!(
+            "{func_name}: expect {arg_name} values of type {expected_value_type}, found {}",
+            dict.value_type()
+        )));
+    }
+
+    RangeArray::try_new(dict.clone()).map_err(DataFusionError::from)?;
+    Ok(dict)
 }
 
 /// Extracts a validated [RangeArray] from a [ColumnarValue].

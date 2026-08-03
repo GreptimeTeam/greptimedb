@@ -34,7 +34,9 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{MismatchedSchemaSnafu, Result};
-use crate::event_table::{PAYLOAD_COLUMN, TIMESTAMP_COLUMN, TYPE_COLUMN, base_column_schemas};
+use crate::event_table::{
+    PAYLOAD_COLUMN, TIMESTAMP_COLUMN, TYPE_COLUMN, base_column_schemas, jsonb_value,
+};
 
 /// The default table name for storing the events.
 pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
@@ -194,7 +196,7 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
             let mut values = Vec::with_capacity(3 + extra_row.values.len());
             values.extend([
                 ValueData::StringValue(event.event_type().to_string()).into(),
-                ValueData::BinaryValue(jsonb::Value::from(&event.json_payload()?).to_vec()).into(),
+                jsonb_value(&event.json_payload()?),
                 ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
             ]);
             values.extend(extra_row.values);

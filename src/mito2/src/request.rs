@@ -46,6 +46,7 @@ use store_api::region_request::{
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
+use crate::compaction::{CompactionExecution, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
     Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
@@ -895,6 +896,8 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
+    /// Compaction planning has finished.
+    CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.
     FlushFinished(FlushFinished),
     /// Flush has failed.
@@ -905,6 +908,8 @@ pub(crate) enum BackgroundNotify {
     IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
     IndexBuildFailed(IndexBuildFailed),
+    /// An index build must be retried against the latest schema generation.
+    IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has been cancelled cooperatively.
@@ -971,18 +976,22 @@ pub(crate) struct FlushFailed {
     pub(crate) err: Arc<Error>,
 }
 
+impl FlushFailed {
+    /// Returns whether the flush was cancelled cooperatively.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.err.as_ref(), Error::FlushCancelled { .. })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
-    pub(crate) edit: RegionEdit,
+    pub(crate) manifest_version: ManifestVersion,
+    pub(crate) file_meta: FileMeta,
 }
 
 /// Notifies an index build job has been stopped.
 #[derive(Debug)]
 pub(crate) struct IndexBuildStopped {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
     pub(crate) file_id: FileId,
 }
 
@@ -997,6 +1006,8 @@ pub(crate) struct IndexBuildFailed {
 pub(crate) struct CompactionFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Compaction result senders.
     pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
@@ -1010,6 +1021,8 @@ pub(crate) struct CompactionFinished {
 pub(crate) struct CompactionCancelled {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Waiters to wake once the cancellation has been observed by the worker.
     pub(crate) senders: Vec<OutputTx>,
 }
@@ -1051,6 +1064,8 @@ impl OnFailure for CompactionFinished {
 #[derive(Debug)]
 pub(crate) struct CompactionFailed {
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }
@@ -1344,6 +1359,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let request = CompactionCancelled {
             region_id: RegionId::new(1, 1),
+            execution: crate::compaction::CompactionExecution::for_test(0),
             senders: vec![OutputTx::new(tx)],
         };
 

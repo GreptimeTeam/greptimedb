@@ -45,6 +45,16 @@ impl SstVersion {
         &self.levels
     }
 
+    /// Returns the current handle matching the selected file's identity in its immutable level.
+    pub(crate) fn file_for_compaction(&self, selected: &FileHandle) -> Option<&FileHandle> {
+        let current = self
+            .levels
+            .get(selected.level() as usize)?
+            .files
+            .get(&selected.file_id().file_id())?;
+        (current.file_id() == selected.file_id()).then_some(current)
+    }
+
     /// Add files to the version. If a file with the same `file_id` already exists,
     /// it will be overwritten with the new file.
     ///
@@ -268,6 +278,37 @@ mod tests {
         files.iter().for_each(|f| {
             assert!(added_files.contains_key(&f.file_id));
         });
+    }
+
+    #[test]
+    fn test_file_for_compaction_uses_selected_level() {
+        let purger = new_noop_file_purger();
+        let file_id = FileId::random();
+        let selected = FileHandle::new(
+            FileMeta {
+                file_id,
+                level: 1,
+                ..Default::default()
+            },
+            purger.clone(),
+        );
+        let mut version = SstVersion::new();
+        version.add_files(
+            purger,
+            [
+                FileMeta {
+                    file_id,
+                    level: 0,
+                    ..Default::default()
+                },
+                selected.meta_ref().clone(),
+            ]
+            .into_iter(),
+        );
+
+        let current = version.file_for_compaction(&selected).unwrap();
+        assert_eq!(selected.file_id(), current.file_id());
+        assert_eq!(selected.level(), current.level());
     }
 
     #[test]

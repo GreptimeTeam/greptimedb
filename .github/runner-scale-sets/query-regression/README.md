@@ -31,7 +31,7 @@ kubectl -n arc-runners create secret generic greptimedb-arc-github-app \
 The values files here reference that secret by name.
 
 A maintainer applying the `query-regression` or `heavy-regression` label is
-**trust admission for that exact PR revision**. `query-regression` runs the five
+**trust admission for that exact PR revision**. `query-regression` runs the six
 routine default cases; `heavy-regression` runs only the high-cardinality
 `prom_remote_write_7913` remote-write case. The admitted job may use this scale
 set's dedicated, writable persistent cache. `pull_request: labeled` is the only

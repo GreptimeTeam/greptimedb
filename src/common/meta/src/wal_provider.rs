@@ -144,15 +144,31 @@ where
         .collect()
 }
 
+fn serialize_region_wal_options<S>(
+    value: &RegionWalOptions,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let values = value
+        .iter()
+        .map(|(region_number, wal_options)| {
+            serde_json::to_string(wal_options).map(|encoded| (*region_number, encoded))
+        })
+        .collect::<std::result::Result<HashMap<_, _>, _>>()
+        .map_err(serde::ser::Error::custom)?;
+    values.serialize(serializer)
+}
+
 /// Serde helpers for [`RegionWalOptions`] persisted in metadata.
 ///
-/// New metadata stores WAL options as structured JSON objects. The deserializer
-/// also accepts the legacy format whose map values are JSON strings encoded from
-/// [`WalOptions`].
+/// Metadata writes WAL options as JSON strings encoded from [`WalOptions`] for
+/// compatibility. The deserializer also accepts structured JSON objects.
 pub mod region_wal_options_serde {
     use super::*;
 
-    /// Serializes region WAL options in structured form.
+    /// Serializes region WAL options as encoded JSON strings.
     pub fn serialize<S>(
         value: &RegionWalOptions,
         serializer: S,
@@ -160,7 +176,7 @@ pub mod region_wal_options_serde {
     where
         S: Serializer,
     {
-        value.serialize(serializer)
+        serialize_region_wal_options(value, serializer)
     }
 
     /// Deserializes region WAL options from either structured or legacy encoded form.
@@ -177,7 +193,7 @@ pub mod region_wal_options_serde {
 pub mod optional_region_wal_options_serde {
     use super::*;
 
-    /// Serializes optional region WAL options in structured form.
+    /// Serializes optional region WAL options as encoded JSON strings.
     pub fn serialize<S>(
         value: &Option<RegionWalOptions>,
         serializer: S,
@@ -185,7 +201,10 @@ pub mod optional_region_wal_options_serde {
     where
         S: Serializer,
     {
-        value.serialize(serializer)
+        match value {
+            Some(value) => serialize_region_wal_options(value, serializer),
+            None => serializer.serialize_none(),
+        }
     }
 
     /// Deserializes optional region WAL options from structured or legacy encoded form.
@@ -417,6 +436,12 @@ mod tests {
         region_wal_options: RegionWalOptions,
     }
 
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct OptionalRegionWalOptionsWrapper {
+        #[serde(with = "optional_region_wal_options_serde")]
+        region_wal_options: Option<RegionWalOptions>,
+    }
+
     #[test]
     fn test_deserialize_legacy_region_wal_options_from_encoded_map() {
         let legacy_region_wal_options = HashMap::from([
@@ -470,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_structured_region_wal_options() {
+    fn test_serialize_legacy_region_wal_options() {
         let wrapper = RegionWalOptionsWrapper {
             region_wal_options: HashMap::from([(1, WalOptions::RaftEngine)]),
         };
@@ -479,7 +504,33 @@ mod tests {
 
         assert_eq!(
             encoded,
-            r#"{"region_wal_options":{"1":{"wal.provider":"raft_engine"}}}"#
+            r#"{"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}"}}"#
+        );
+    }
+
+    #[test]
+    fn test_serialize_optional_region_wal_options() {
+        let wrapper = OptionalRegionWalOptionsWrapper {
+            region_wal_options: Some(HashMap::from([(1, WalOptions::RaftEngine)])),
+        };
+
+        let encoded = serde_json::to_string(&wrapper).unwrap();
+
+        assert_eq!(
+            encoded,
+            r#"{"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<OptionalRegionWalOptionsWrapper>(&encoded).unwrap(),
+            wrapper
+        );
+
+        let none = OptionalRegionWalOptionsWrapper {
+            region_wal_options: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&none).unwrap(),
+            r#"{"region_wal_options":null}"#
         );
     }
 

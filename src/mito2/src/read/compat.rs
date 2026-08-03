@@ -274,7 +274,7 @@ impl FlatCompatBatch {
                             && json_type.is_json2()
                         {
                             JsonArray::from(old_column)
-                                .try_align(&json_type.as_arrow_type())
+                                .project_to(&json_type.as_arrow_type())
                                 .context(ConvertValueSnafu)?
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())

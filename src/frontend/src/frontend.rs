@@ -198,6 +198,15 @@ mod tests {
         let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
     }
 
+    #[test]
+    fn test_http_api_server_defaults_on_when_absent() {
+        // When `[http]` is not present in the config, the dedicated API server is
+        // disabled by default (its port/host defaults are still 4006 / 127.0.0.1).
+        let parsed: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!parsed.http.enable_api_server);
+        assert_eq!(parsed.http.api_server_addr, "127.0.0.1:4006");
+    }
+
     struct SuspendableHeartbeatServer {
         suspend: Arc<AtomicBool>,
     }

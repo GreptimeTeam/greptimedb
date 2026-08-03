@@ -25,7 +25,7 @@ on:
       - 'Makefile'
   workflow_dispatch:
 
-name: CI
+name: Docs CI
 
 # To pass the required status check, see:
 # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks
@@ -49,49 +49,21 @@ jobs:
           persist-credentials: false
       - uses: korandoru/hawkeye@v5
 
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  check-udeps:
-    name: Unused Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: 'echo "No action required"'
-
-  sqlness:
-    name: Sqlness Test (${{ matrix.mode.name }})
-    runs-on: ${{ matrix.os }}
+  required-checks:
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-slim
     strategy:
       matrix:
-        os: [ ubuntu-latest ]
-        mode:
-          - name: "Basic"
-          - name: "Remote WAL"
-          - name: "Flat format"
+        check:
+          - Check
+          - Rustfmt
+          - Clippy
+          - Unused Dependencies
+          - Sqlness Test (Basic)
+          - Sqlness Test (Remote WAL)
+          - test
+          - coverage
+          - Sqlness Test (Flat format)
+          - Compatibility Test (recent releases)
     steps:
       - run: 'echo "No action required"'

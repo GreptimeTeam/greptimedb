@@ -22,7 +22,7 @@ use store_api::storage::RegionId;
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
-use crate::request::{OptionOutputTx, TruncateResult};
+use crate::request::{DdlRequest, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -38,6 +38,32 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender.send(Err(e));
                 return;
             }
+        };
+
+        let (sender, req) = match self.flush_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            req,
+            DdlRequest::Truncate,
+        ) {
+            Ok(()) => {
+                self.listener.on_flush_cancel_requested(region_id);
+                return;
+            }
+            Err(request) => request,
+        };
+
+        let (sender, req) = match self.compaction_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            req,
+            DdlRequest::Truncate,
+        ) {
+            Ok(()) => {
+                self.listener.on_compaction_cancel_requested(region_id);
+                return;
+            }
+            Err(request) => request,
         };
 
         let version_data = region.version_control.current();

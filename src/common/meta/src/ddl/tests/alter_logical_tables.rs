@@ -47,7 +47,7 @@ use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
-fn make_alter_logical_table_add_column_task(
+pub(crate) fn make_alter_logical_table_add_column_task(
     schema: Option<&str>,
     table: &str,
     add_columns: Vec<String>,

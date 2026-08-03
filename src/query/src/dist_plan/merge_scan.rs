@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
-use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
+use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
@@ -41,6 +41,7 @@ use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
+use datatypes::extension::json::is_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -253,10 +254,7 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
-        // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
-        // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
-        // Reconsider if it's possible to remove it.
-        let arrow_schema = Arc::new(arrow_schema.clone());
+        let arrow_schema = maybe_amend_json2_field(arrow_schema);
 
         // States the output ordering of the plan.
         //
@@ -358,6 +356,7 @@ impl MergeScanExec {
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
+        let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
@@ -398,7 +397,7 @@ impl MergeScanExec {
                     remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
-                if explain_verbose {
+                if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
                         region_query_ctx.set_extension(
@@ -452,7 +451,7 @@ impl MergeScanExec {
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
                 loop {
-                    let batch = if explain_verbose {
+                    let batch = if live_analyze_metrics {
                         match time::timeout(
                             FLIGHT_METRICS_HEARTBEAT_INTERVAL,
                             stream.next().instrument(region_span.clone()),
@@ -702,6 +701,37 @@ impl MergeScanExec {
             .cloned()
             .collect()
     }
+}
+
+// If the schema has JSON2 field, AND the field is of empty Struct datatype, amend it with Binary
+// datatype.
+// This is a very hacky way to make it possible to query the whole JSON2 column. Because when
+// querying a whole JSON2 column, like in the SQL `select * from ...`, we can't concretize the JSON2
+// datatype from the query. Hence, the JSON2 datatype remains what in the column schema, i.e., empty
+// Struct. An empty Struct is not alignable like any other concretized JSON2 datatypes, so to make
+// the query work, we amend(rewrite) it to Binary datatype.
+// Why the Binary datatype? Because underlying the scan and projection stage, the JSON2 data are
+// variant shape, will be all converted to bytes.
+// Anyway, this is not clean nor elegant. TODO(LFC) Maybe make it into some plan analyzer rule?
+fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
+    let schema = schema.clone();
+    let mut new_fields = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields().iter() {
+        let new_field = if is_json_extension_type(field)
+            && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
+        {
+            let mut new_field = field.as_ref().clone();
+            new_field.set_data_type(DataType::Binary);
+            Arc::new(new_field)
+        } else {
+            field.clone()
+        };
+        new_fields.push(new_field);
+    }
+    Arc::new(ArrowSchema::new_with_metadata(
+        new_fields,
+        schema.metadata().clone(),
+    ))
 }
 
 #[cfg(test)]

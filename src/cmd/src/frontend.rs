@@ -31,7 +31,6 @@ use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_error::ext::BoxedError;
-use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
@@ -435,12 +434,8 @@ impl StartCommand {
 
         // frontend to datanode need not timeout.
         // Some queries are expected to take long time.
-        let mut channel_config = ChannelConfig {
-            timeout: None,
-            tcp_nodelay: opts.datanode.client.tcp_nodelay,
-            connect_timeout: Some(opts.datanode.client.connect_timeout),
-            ..Default::default()
-        };
+        let mut channel_config = opts.datanode.client.channel_config();
+        channel_config.timeout = None;
         if opts.grpc.flight_compression.transport_compression() {
             channel_config.accept_compression = true;
             channel_config.send_compression = true;

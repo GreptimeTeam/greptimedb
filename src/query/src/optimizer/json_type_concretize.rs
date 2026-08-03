@@ -127,7 +127,7 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
 
     let mut split = path.rsplit(".");
-    let Some(leaf) = split.next() else {
+    let Some(leaf) = split.next().filter(|&x| !x.is_empty() && x != "$") else {
         return Ok(Some((column.name.clone(), JsonNativeType::String)));
     };
 
@@ -148,16 +148,21 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
     use common_function::scalars::udf::create_udf;
     use datafusion::datasource::provider_as_source;
+    use datafusion::functions_aggregate::expr_fn::count;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{LogicalPlanBuilder, col};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
-    use store_api::storage::RegionId;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
-    use crate::optimizer::test_util::mock_table_provider;
+    use crate::optimizer::test_util::{MetaRegionEngine, mock_table_provider};
 
     fn json_get_expr(base: Expr, path: Expr, with_type: Option<DataType>) -> Result<Expr> {
         let json_get = Arc::new(create_udf(Arc::new(JsonGetWithType::default())));
@@ -180,6 +185,45 @@ mod tests {
         let plan = LogicalPlanBuilder::scan("t", provider_as_source(provider.clone()), None)?
             .project(exprs)?
             .build()?;
+        Ok((provider, plan))
+    }
+
+    fn build_json2_scan() -> Result<(Arc<DummyTableProvider>, LogicalPlanBuilder)> {
+        let region_id = RegionId::new(1024, 2);
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        let mut json_column = ColumnSchema::new(
+            "j",
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata::default())))
+            .unwrap();
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column,
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+        let metadata = Arc::new(builder.build().unwrap());
+        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+        let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
+        let plan = LogicalPlanBuilder::scan("t", provider_as_source(provider.clone()), None)?;
+        Ok((provider, plan))
+    }
+
+    fn build_json2_plan(exprs: Vec<Expr>) -> Result<(Arc<DummyTableProvider>, LogicalPlan)> {
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan.project(exprs)?.build()?;
         Ok((provider, plan))
     }
 
@@ -250,6 +294,62 @@ mod tests {
                 .transformed
         );
         assert!(provider.scan_request().json_type_hint.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_path_use_in_intermediate_plan() -> Result<()> {
+        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan
+            .aggregate(vec![json_get], Vec::<Expr>::new())?
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_passthrough_for_later_projection() -> Result<()> {
+        let json_get = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_scan()?;
+        let plan = plan
+            .project(vec![json_get.alias("__common_expr"), col("j")])?
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])?
+            .build()?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert!(provider.scan_request().json_type_hint.contains_key("j"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_allow_json2_projection_by_path() -> Result<()> {
+        let expr = json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?;
+        let (provider, plan) = build_json2_plan(vec![expr])?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Object(JsonObjectType::from([(
+                "a".to_string(),
+                JsonNativeType::i64(),
+            )]))),
+            provider.scan_request().json_type_hint.get("j")
+        );
         Ok(())
     }
 

@@ -30,8 +30,11 @@ pub use common::{
     static_user_provider_from_option, user_provider_from_option, userinfo_by_name,
 };
 pub use permission::{
-    DefaultPermissionChecker, PermissionChecker, PermissionReq, PermissionResp,
-    PermissionTableTarget, PermissionTableTargets,
+    ALL_ACTIONS, AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,
+    DefaultPermissionChecker, INFLUXDB_WRITE, JAEGER_QUERY, LOG_QUERY, LOG_WRITE, OPENTSDB_WRITE,
+    OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
+    PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
+    PermissionResp, PermissionTableTarget, PermissionTableTargets,
 };
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;

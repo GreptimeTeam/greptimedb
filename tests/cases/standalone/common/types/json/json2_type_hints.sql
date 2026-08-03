@@ -48,6 +48,24 @@ CREATE TABLE json2_type_hints_timestamp (
     )
 );
 
+CREATE TABLE json2_default_null_ok (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        a BIGINT NULL DEFAULT NULL
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+DROP TABLE json2_default_null_ok;
+
+CREATE TABLE json2_default_null_check (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        a BIGINT NOT NULL DEFAULT NULL
+    )
+);
+
 -- A type hint at the maximum supported depth is accepted.
 CREATE TABLE json2_type_hint_depth_50 (
     ts TIMESTAMP TIME INDEX,

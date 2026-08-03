@@ -25,9 +25,10 @@ use common_recordbatch::error::{
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::{is_json_extension_type, is_structured_json_field};
 use datatypes::prelude::{ConcreteDataType, DataType};
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::types::JsonType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
@@ -114,17 +115,7 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            if let Some(concretized) = json_type_hint
-                .and_then(|x| x.get(&schema.name))
-                .cloned()
-                .map(ConcreteDataType::json2)
-                && schema
-                    .data_type
-                    .as_json()
-                    .is_some_and(|json_type| json_type.is_json2())
-            {
-                schema.data_type = concretized;
-            }
+            maybe_concretize_json2_datatype(&mut schema, json_type_hint);
             col_schemas.push(schema);
         }
 
@@ -141,19 +132,21 @@ impl FlatProjectionMapper {
 
         let mut batch_schema = flat_projected_columns(metadata, &format_projection);
 
-        if let Some(json_type_hint) = json_type_hint
-            && !json_type_hint.is_empty()
-        {
-            for (column_id, data_type) in batch_schema.iter_mut() {
-                if data_type
-                    .as_json()
-                    .is_some_and(|json_type| json_type.is_json2())
-                    && let Some(concretized) = metadata
-                        .column_by_id(*column_id)
-                        .and_then(|x| json_type_hint.get(&x.column_schema.name).cloned())
-                        .map(ConcreteDataType::json2)
+        for (column_id, data_type) in batch_schema.iter_mut() {
+            if let Some(json_type) = data_type.as_json()
+                && json_type.is_json2()
+            {
+                if let Some(concretized) = metadata
+                    .column_by_id(*column_id)
+                    .and_then(|metadata| {
+                        json_type_hint.and_then(|x| x.get(&metadata.column_schema.name).cloned())
+                    })
+                    .map(ConcreteDataType::json2)
                 {
                     *data_type = concretized;
+                } else if is_empty_json2_type(json_type) {
+                    // see `merge_scan::maybe_amend_json2_field`
+                    *data_type = ConcreteDataType::json2(JsonNativeType::Variant);
                 }
             }
         }
@@ -365,9 +358,9 @@ impl FlatProjectionMapper {
             }
 
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_structured_json_field(field) {
+            if is_json_extension_type(field) {
                 array = JsonArray::from(&array)
-                    .try_align(field.data_type())
+                    .project_to(field.data_type())
                     .context(DataTypesSnafu)?;
             }
 
@@ -405,6 +398,34 @@ impl FlatProjectionMapper {
             columns.push(vector);
         }
         Ok(columns)
+    }
+}
+
+fn maybe_concretize_json2_datatype(
+    schema: &mut ColumnSchema,
+    json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+) {
+    if let Some(json_type) = schema.data_type.as_json()
+        && json_type.is_json2()
+    {
+        if let Some(concretized) = json_type_hint
+            .and_then(|x| x.get(&schema.name))
+            .cloned()
+            .map(ConcreteDataType::json2)
+        {
+            schema.data_type = concretized;
+        } else if is_empty_json2_type(json_type) {
+            // see `merge_scan::maybe_amend_json2_field`
+            schema.data_type = ConcreteDataType::json2(JsonNativeType::Variant);
+        }
+    }
+}
+
+fn is_empty_json2_type(json_type: &JsonType) -> bool {
+    match json_type.native_type() {
+        JsonNativeType::Null => true,
+        JsonNativeType::Object(fields) if fields.is_empty() => true,
+        _ => false,
     }
 }
 

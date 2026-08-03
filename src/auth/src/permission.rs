@@ -93,18 +93,91 @@ impl PermissionTableTargets {
     }
 }
 
+/// The access mode of a named permission action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    Read,
+    Write,
+}
+
+/// A named permission action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionAction {
+    name: &'static str,
+    access_mode: AccessMode,
+}
+
+impl PermissionAction {
+    /// Creates a read action with a stable name.
+    pub const fn read(name: &'static str) -> Self {
+        Self {
+            name,
+            access_mode: AccessMode::Read,
+        }
+    }
+
+    /// Creates a write action with a stable name.
+    pub const fn write(name: &'static str) -> Self {
+        Self {
+            name,
+            access_mode: AccessMode::Write,
+        }
+    }
+
+    /// Returns the stable action name.
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// Returns the action's access mode.
+    pub const fn access_mode(self) -> AccessMode {
+        self.access_mode
+    }
+}
+
+pub const PROMQL_QUERY: PermissionAction = PermissionAction::read("promql.query");
+pub const LOG_QUERY: PermissionAction = PermissionAction::read("log.query");
+pub const OPENTSDB_WRITE: PermissionAction = PermissionAction::write("opentsdb.write");
+pub const INFLUXDB_WRITE: PermissionAction = PermissionAction::write("influxdb.write");
+pub const PROM_STORE_WRITE: PermissionAction = PermissionAction::write("prom_store.write");
+pub const PROM_STORE_READ: PermissionAction = PermissionAction::read("prom_store.read");
+pub const OTLP_WRITE: PermissionAction = PermissionAction::write("otlp.write");
+pub const LOG_WRITE: PermissionAction = PermissionAction::write("log.write");
+pub const JAEGER_QUERY: PermissionAction = PermissionAction::read("jaeger.query");
+pub const PIPELINE_QUERY: PermissionAction = PermissionAction::read("pipeline.query");
+pub const PIPELINE_INSERT: PermissionAction = PermissionAction::write("pipeline.insert");
+pub const PIPELINE_DELETE: PermissionAction = PermissionAction::write("pipeline.delete");
+pub const DASHBOARD_QUERY: PermissionAction = PermissionAction::read("dashboard.query");
+pub const DASHBOARD_SAVE: PermissionAction = PermissionAction::write("dashboard.save");
+pub const DASHBOARD_DELETE: PermissionAction = PermissionAction::write("dashboard.delete");
+
+/// All permission actions built into GreptimeDB.
+///
+/// Downstream crates may define additional actions with [`PermissionAction::read`] and
+/// [`PermissionAction::write`].
+pub const ALL_ACTIONS: &[PermissionAction] = &[
+    PROMQL_QUERY,
+    LOG_QUERY,
+    OPENTSDB_WRITE,
+    INFLUXDB_WRITE,
+    PROM_STORE_WRITE,
+    PROM_STORE_READ,
+    OTLP_WRITE,
+    LOG_WRITE,
+    JAEGER_QUERY,
+    PIPELINE_QUERY,
+    PIPELINE_INSERT,
+    PIPELINE_DELETE,
+    DASHBOARD_QUERY,
+    DASHBOARD_SAVE,
+    DASHBOARD_DELETE,
+];
+
 #[derive(Debug, Clone)]
 pub enum PermissionReq<'a> {
     GrpcRequest(&'a Request),
     SqlStatement(&'a Statement),
-    PromQuery,
-    LogQuery,
-    Opentsdb,
-    LineProtocol,
-    PromStoreWrite,
-    PromStoreRead,
-    Otlp,
-    LogWrite,
+    Action(PermissionAction),
     BulkInsert {
         catalog: &'a str,
         schema: &'a str,
@@ -119,18 +192,10 @@ impl<'a> PermissionReq<'a> {
             PermissionReq::GrpcRequest(Request::Query(query_request)) => {
                 !matches!(query_request.query, Some(Query::InsertIntoPlan(_)))
             }
-            PermissionReq::PromQuery | PermissionReq::LogQuery | PermissionReq::PromStoreRead => {
-                true
-            }
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
+            PermissionReq::Action(action) => action.access_mode() == AccessMode::Read,
 
-            PermissionReq::GrpcRequest(_)
-            | PermissionReq::Opentsdb
-            | PermissionReq::LineProtocol
-            | PermissionReq::PromStoreWrite
-            | PermissionReq::Otlp
-            | PermissionReq::LogWrite
-            | PermissionReq::BulkInsert { .. } => false,
+            PermissionReq::GrpcRequest(_) | PermissionReq::BulkInsert { .. } => false,
         }
     }
 
@@ -299,6 +364,8 @@ impl PermissionChecker for DefaultPermissionChecker {
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::error::{Error, InternalStateSnafu};
     use crate::user_info::PermissionMode;
@@ -320,7 +387,7 @@ mod tests {
             req: PermissionReq,
             targets: PermissionTableTargets,
         ) -> Result<PermissionResp> {
-            if !matches!(req, PermissionReq::PromStoreRead) {
+            if !matches!(req, PermissionReq::Action(PROM_STORE_READ)) {
                 return Ok(PermissionResp::Reject);
             }
             let PermissionTableTargets::Resolved(targets) = targets else {
@@ -420,8 +487,8 @@ mod tests {
         let user_info =
             DefaultUserInfo::with_name_and_permission("test_user", PermissionMode::ReadWrite);
 
-        let read_req = PermissionReq::PromQuery;
-        let write_req = PermissionReq::PromStoreWrite;
+        let read_req = PermissionReq::Action(PROMQL_QUERY);
+        let write_req = PermissionReq::Action(PROM_STORE_WRITE);
 
         let read_result = checker
             .check_permission(user_info.clone(), read_req)
@@ -438,8 +505,8 @@ mod tests {
         let user_info =
             DefaultUserInfo::with_name_and_permission("readonly_user", PermissionMode::ReadOnly);
 
-        let read_req = PermissionReq::PromQuery;
-        let write_req = PermissionReq::PromStoreWrite;
+        let read_req = PermissionReq::Action(PROMQL_QUERY);
+        let write_req = PermissionReq::Action(PROM_STORE_WRITE);
 
         let read_result = checker
             .check_permission(user_info.clone(), read_req)
@@ -456,8 +523,8 @@ mod tests {
         let user_info =
             DefaultUserInfo::with_name_and_permission("writeonly_user", PermissionMode::WriteOnly);
 
-        let read_req = PermissionReq::LogQuery;
-        let write_req = PermissionReq::LogWrite;
+        let read_req = PermissionReq::Action(LOG_QUERY);
+        let write_req = PermissionReq::Action(LOG_WRITE);
 
         let read_result = checker
             .check_permission(user_info.clone(), read_req)
@@ -490,6 +557,43 @@ mod tests {
     }
 
     #[test]
+    fn test_action_access_modes() {
+        let checker = DefaultPermissionChecker;
+        let mut names = HashSet::new();
+
+        for &action in ALL_ACTIONS {
+            assert!(
+                names.insert(action.name()),
+                "duplicate permission action: {}",
+                action.name()
+            );
+            let access_mode = action.access_mode();
+            let req = PermissionReq::Action(action);
+            assert_eq!(
+                access_mode == AccessMode::Read,
+                req.is_readonly(),
+                "{}",
+                action.name()
+            );
+
+            for (permission_mode, allowed) in [
+                (PermissionMode::ReadOnly, access_mode == AccessMode::Read),
+                (PermissionMode::WriteOnly, access_mode == AccessMode::Write),
+                (PermissionMode::ReadWrite, true),
+            ] {
+                let user = DefaultUserInfo::with_name_and_permission("test_user", permission_mode);
+                let result = checker.check_permission(user, req.clone()).unwrap();
+                assert_eq!(
+                    allowed,
+                    matches!(result, PermissionResp::Allow),
+                    "{permission_mode:?}: {}",
+                    action.name()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_table_target_permission_forwarding() {
         let checker: PermissionCheckerRef = Arc::new(TargetAwarePermissionChecker);
         let checker = Some(&checker);
@@ -498,7 +602,7 @@ mod tests {
         let allowed = checker
             .check_permission_with_table_targets(
                 crate::userinfo_by_name(None),
-                PermissionReq::PromStoreRead,
+                PermissionReq::Action(PROM_STORE_READ),
                 resolved_targets("allowed"),
             )
             .unwrap();
@@ -507,7 +611,7 @@ mod tests {
         let empty = checker
             .check_permission_with_table_targets(
                 crate::userinfo_by_name(None),
-                PermissionReq::PromStoreRead,
+                PermissionReq::Action(PROM_STORE_READ),
                 PermissionTableTargets::resolved(Vec::new()),
             )
             .unwrap();
@@ -515,7 +619,7 @@ mod tests {
 
         let rejected_operation = checker.check_permission_with_table_targets(
             crate::userinfo_by_name(None),
-            PermissionReq::PromStoreWrite,
+            PermissionReq::Action(PROM_STORE_WRITE),
             PermissionTableTargets::resolved(Vec::new()),
         );
         assert!(matches!(
@@ -525,14 +629,14 @@ mod tests {
 
         let rejected = checker.check_permission_with_table_targets(
             crate::userinfo_by_name(None),
-            PermissionReq::PromStoreRead,
+            PermissionReq::Action(PROM_STORE_READ),
             resolved_targets("denied"),
         );
         assert!(matches!(rejected, Err(Error::PermissionDenied { .. })));
 
         let mixed = checker.check_permission_with_table_targets(
             crate::userinfo_by_name(None),
-            PermissionReq::PromStoreRead,
+            PermissionReq::Action(PROM_STORE_READ),
             PermissionTableTargets::resolved(vec![
                 PermissionTableTarget::new("greptime", "public", "allowed"),
                 PermissionTableTarget::new("greptime", "public", "denied"),
@@ -542,7 +646,7 @@ mod tests {
 
         let error = checker.check_permission_with_table_targets(
             crate::userinfo_by_name(None),
-            PermissionReq::PromStoreRead,
+            PermissionReq::Action(PROM_STORE_READ),
             resolved_targets("error"),
         );
         assert!(matches!(error, Err(Error::InternalState { msg }) if msg == "testing"));
@@ -552,7 +656,7 @@ mod tests {
         let allowed = no_checker
             .check_permission_with_table_targets(
                 crate::userinfo_by_name(None),
-                PermissionReq::PromStoreRead,
+                PermissionReq::Action(PROM_STORE_READ),
                 PermissionTableTargets::Unresolved,
             )
             .unwrap();
@@ -565,10 +669,22 @@ mod tests {
         assert!(!checker.uses_table_targets());
 
         for (permission, req) in [
-            (PermissionMode::ReadOnly, PermissionReq::PromQuery),
-            (PermissionMode::ReadOnly, PermissionReq::PromStoreWrite),
-            (PermissionMode::WriteOnly, PermissionReq::PromQuery),
-            (PermissionMode::WriteOnly, PermissionReq::PromStoreWrite),
+            (
+                PermissionMode::ReadOnly,
+                PermissionReq::Action(PROMQL_QUERY),
+            ),
+            (
+                PermissionMode::ReadOnly,
+                PermissionReq::Action(PROM_STORE_WRITE),
+            ),
+            (
+                PermissionMode::WriteOnly,
+                PermissionReq::Action(PROMQL_QUERY),
+            ),
+            (
+                PermissionMode::WriteOnly,
+                PermissionReq::Action(PROM_STORE_WRITE),
+            ),
         ] {
             let user = DefaultUserInfo::with_name_and_permission("test_user", permission);
             let direct = checker.check_permission(user.clone(), req.clone()).unwrap();

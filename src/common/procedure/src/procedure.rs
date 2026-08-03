@@ -255,9 +255,12 @@ pub struct EventContext<'a> {
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It is recorded as a tagged JSON object in the `procedure_trigger` event envelope column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
 pub enum EventTrigger {
-    /// The root procedure was submitted to the manager.
+    /// The procedure was submitted to the manager.
     Submitted,
     /// The root procedure was recovered from persisted state.
     Recovered,
@@ -286,7 +289,7 @@ pub enum EventTrigger {
 }
 
 /// Phase of a procedure retry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RetryPhase {
     /// Retrying procedure execution.
     Execute,
@@ -295,53 +298,12 @@ pub enum RetryPhase {
 }
 
 /// Outcome of submitting a child procedure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ChildSubmissionOutcome {
     Accepted,
     AlreadyAccepted,
     ManagerStopped,
     SpawnFailed,
-}
-
-impl Display for EventTrigger {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Submitted => write!(f, "Submitted"),
-            Self::Recovered => write!(f, "Recovered"),
-            Self::ChildSubmitted {
-                procedure_id,
-                outcome,
-            } => write!(
-                f,
-                "ChildSubmitted(procedure_id={procedure_id}, outcome={outcome})"
-            ),
-            Self::Retrying { phase, attempt } => write!(f, "Retrying({phase}, {attempt})"),
-            Self::RollingBack => write!(f, "RollingBack"),
-            Self::Succeeded => write!(f, "Succeeded"),
-            Self::Failed => write!(f, "Failed"),
-            Self::Poisoned => write!(f, "Poisoned"),
-        }
-    }
-}
-
-impl Display for RetryPhase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Execute => write!(f, "Execute"),
-            Self::Rollback => write!(f, "Rollback"),
-        }
-    }
-}
-
-impl Display for ChildSubmissionOutcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Accepted => write!(f, "Accepted"),
-            Self::AlreadyAccepted => write!(f, "AlreadyAccepted"),
-            Self::ManagerStopped => write!(f, "ManagerStopped"),
-            Self::SpawnFailed => write!(f, "SpawnFailed"),
-        }
-    }
 }
 
 #[async_trait]
@@ -701,6 +663,11 @@ pub trait ProcedureManager: Send + Sync + 'static {
 
     /// Returns the details of the procedure.
     async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>>;
+
+    /// Returns whether persisted unfinished procedures contain any requested type.
+    ///
+    /// This inspects durable state without submitting procedures for execution.
+    async fn has_unfinished_procedure(&self, type_names: &[&str]) -> Result<bool>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].

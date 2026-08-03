@@ -362,6 +362,7 @@ pub(crate) fn create_datanode_opts(
         require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
+            copy_root: None,
             providers,
             store: default_store,
         },

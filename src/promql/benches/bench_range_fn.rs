@@ -17,13 +17,28 @@
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
-use datafusion::physical_plan::ColumnarValue;
+use datafusion::arrow::array::{
+    Array, ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
+};
+use datafusion::arrow::datatypes::{
+    DataType as ArrowDataType, Field as ArrowField, Int64Type, Schema,
+};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ToDFSchema;
+use datafusion::datasource::memory::MemorySourceConfig;
+use datafusion::datasource::source::DataSourceExec;
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+use datafusion::physical_plan::{ColumnarValue, ExecutionPlan};
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::{DataType, Field};
-use promql::functions::{Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate};
+use futures::StreamExt;
+use promql::extension_plan::RangeManipulate;
+use promql::functions::{
+    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets,
+};
 use promql::range_array::RangeArray;
 
 fn build_sliding_ranges(
@@ -91,6 +106,18 @@ fn build_default_values(num_points: usize) -> Vec<f64> {
     (0..num_points).map(|i| i as f64 * 1.5 + 0.1).collect()
 }
 
+fn build_changing_values(num_points: usize) -> Vec<f64> {
+    (0..num_points)
+        .map(|i| match i % 48 {
+            0..=7 => 42.0,
+            8..=15 => 43.5,
+            16..=17 => f64::NAN,
+            18..=35 => 41.0,
+            _ => 44.0,
+        })
+        .collect()
+}
+
 fn make_extrapolated_rate_input(
     num_points: usize,
     window_size: u32,
@@ -114,6 +141,34 @@ fn make_idelta_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> 
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
+    ]
+}
+
+fn make_edge_count_input(
+    num_points: usize,
+    window_size: u32,
+    values: Vec<f64>,
+) -> Vec<ColumnarValue> {
+    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, values, 0);
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+    ]
+}
+
+fn make_edge_count_input_with_ranges(
+    values: Vec<f64>,
+    ranges: Vec<(u32, u32)>,
+) -> Vec<ColumnarValue> {
+    let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (0..values.len()).map(|index| index as i64 * 1_000),
+    ));
+    let values = Arc::new(Float64Array::from(values));
+    let timestamp_ranges = RangeArray::from_ranges(timestamps, ranges.clone()).unwrap();
+    let value_ranges = RangeArray::from_ranges(values, ranges).unwrap();
+    vec![
+        ColumnarValue::Array(Arc::new(timestamp_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(value_ranges.into_dict())),
     ]
 }
 
@@ -170,7 +225,10 @@ impl PreparedUdfCall {
     }
 }
 
-fn invoke_prepared(udf: &datafusion::logical_expr::ScalarUDF, prepared: &PreparedUdfCall) {
+fn invoke_prepared_output(
+    udf: &datafusion::logical_expr::ScalarUDF,
+    prepared: &PreparedUdfCall,
+) -> ColumnarValue {
     udf.invoke_with_args(ScalarFunctionArgs {
         args: prepared.args.clone(),
         arg_fields: prepared.arg_fields.clone(),
@@ -178,7 +236,50 @@ fn invoke_prepared(udf: &datafusion::logical_expr::ScalarUDF, prepared: &Prepare
         return_field: prepared.return_field.clone(),
         config_options: prepared.config_options.clone(),
     })
-    .unwrap();
+    .unwrap()
+}
+
+fn invoke_prepared(udf: &datafusion::logical_expr::ScalarUDF, prepared: &PreparedUdfCall) {
+    let _ = invoke_prepared_output(udf, prepared);
+}
+
+fn edge_count_oracle(
+    values: &[f64],
+    ranges: &[(u32, u32)],
+    predicate: impl Fn(f64, f64) -> bool,
+) -> Vec<Option<f64>> {
+    ranges
+        .iter()
+        .map(|(offset, length)| {
+            let window = &values[*offset as usize..(*offset + *length) as usize];
+            if window.is_empty() {
+                None
+            } else if window.len() == 1 {
+                Some(0.0)
+            } else {
+                Some(
+                    window
+                        .windows(2)
+                        .filter(|pair| predicate(pair[0], pair[1]))
+                        .count() as f64,
+                )
+            }
+        })
+        .collect()
+}
+
+fn assert_edge_count_output(
+    udf: &datafusion::logical_expr::ScalarUDF,
+    prepared: &PreparedUdfCall,
+    expected: &[Option<f64>],
+) {
+    let output = invoke_prepared_output(udf, prepared);
+    let ColumnarValue::Array(output) = output else {
+        panic!("edge-count range UDF must return an array");
+    };
+    let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+    let actual = output.iter().collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 fn bench_range_functions(c: &mut Criterion) {
@@ -352,4 +453,334 @@ fn bench_range_functions(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_range_functions);
+fn bench_edge_count_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("edge_count_fn");
+    let num_points = 4_096;
+    let window_sizes = [4u32, 20, 240];
+    let changing_values = build_changing_values(num_points);
+    let resetting_values = build_resetting_counter_values(num_points);
+    let changes_udf = Changes::scalar_udf();
+    let resets_udf = Resets::scalar_udf();
+
+    for window_size in window_sizes {
+        let ranges = (0..=num_points - window_size as usize)
+            .map(|offset| (offset as u32, window_size))
+            .collect::<Vec<_>>();
+
+        let changes_prepared = PreparedUdfCall::new(make_edge_count_input(
+            num_points,
+            window_size,
+            changing_values.clone(),
+        ));
+        let changes_expected = edge_count_oracle(&changing_values, &ranges, |a, b| {
+            a != b && !(a.is_nan() && b.is_nan())
+        });
+        assert_edge_count_output(&changes_udf, &changes_prepared, &changes_expected);
+        group.bench_with_input(
+            BenchmarkId::new(
+                "changes_prebuilt_range_array",
+                format!("N{num_points}_w{window_size}"),
+            ),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&changes_udf, &changes_prepared)),
+        );
+
+        let resets_prepared = PreparedUdfCall::new(make_edge_count_input(
+            num_points,
+            window_size,
+            resetting_values.clone(),
+        ));
+        let resets_expected = edge_count_oracle(&resetting_values, &ranges, |a, b| b < a);
+        assert_edge_count_output(&resets_udf, &resets_prepared, &resets_expected);
+        group.bench_with_input(
+            BenchmarkId::new(
+                "resets_prebuilt_range_array",
+                format!("N{num_points}_w{window_size}"),
+            ),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&resets_udf, &resets_prepared)),
+        );
+    }
+
+    // Keep the backing arrays at N=4096 while evaluating only eight four-sample windows.
+    // This isolates implementations that scan a global backing prefix instead of each range.
+    let low_coverage_ranges = vec![
+        (0, 4),
+        (512, 4),
+        (1_024, 4),
+        (1_536, 4),
+        (2_048, 4),
+        (2_560, 4),
+        (3_584, 4),
+        (4_092, 4),
+    ];
+    assert_eq!(low_coverage_ranges.len(), 8);
+
+    let low_coverage_changes = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        changing_values.clone(),
+        low_coverage_ranges.clone(),
+    ));
+    let low_coverage_changes_expected =
+        edge_count_oracle(&changing_values, &low_coverage_ranges, |a, b| {
+            a != b && !(a.is_nan() && b.is_nan())
+        });
+    assert_edge_count_output(
+        &changes_udf,
+        &low_coverage_changes,
+        &low_coverage_changes_expected,
+    );
+    group.bench_with_input(
+        BenchmarkId::new("changes_low_coverage_full_backing", "N4096_windows8_w4"),
+        &(),
+        |b, _| b.iter(|| invoke_prepared(&changes_udf, &low_coverage_changes)),
+    );
+
+    let low_coverage_resets = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        resetting_values.clone(),
+        low_coverage_ranges.clone(),
+    ));
+    let low_coverage_resets_expected =
+        edge_count_oracle(&resetting_values, &low_coverage_ranges, |a, b| b < a);
+    assert_edge_count_output(
+        &resets_udf,
+        &low_coverage_resets,
+        &low_coverage_resets_expected,
+    );
+    group.bench_with_input(
+        BenchmarkId::new("resets_low_coverage_full_backing", "N4096_windows8_w4"),
+        &(),
+        |b, _| b.iter(|| invoke_prepared(&resets_udf, &low_coverage_resets)),
+    );
+
+    group.finish();
+}
+
+const RANGE_MANIPULATE_CADENCE_MS: i64 = 15_000;
+
+fn make_range_manipulate_batch(timestamps: Vec<i64>, field_count: usize) -> RecordBatch {
+    let mut fields = Vec::with_capacity(field_count + 1);
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(field_count + 1);
+    fields.push(ArrowField::new(
+        "timestamp",
+        ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+        false,
+    ));
+    columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)) as _);
+
+    for field_index in 0..field_count {
+        fields.push(ArrowField::new(
+            format!("value_{field_index}"),
+            ArrowDataType::Float64,
+            false,
+        ));
+        let values = (0..columns[0].len())
+            .map(|row| row as f64 + field_index as f64 * 0.01)
+            .collect::<Vec<_>>();
+        columns.push(Arc::new(Float64Array::from(values)) as _);
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+async fn execute_and_drain(
+    plan: Arc<dyn ExecutionPlan>,
+    task_ctx: Arc<TaskContext>,
+) -> Vec<RecordBatch> {
+    let mut stream = plan.execute(0, task_ctx).unwrap();
+    let mut output = Vec::new();
+    while let Some(batch) = stream.next().await {
+        output.push(batch.unwrap());
+    }
+    output
+}
+
+fn range_keys(batch: &RecordBatch, index: usize) -> Vec<(u32, u32)> {
+    let ranges = batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int64Type>>()
+        .unwrap()
+        .clone();
+    RangeArray::try_new(ranges)
+        .unwrap()
+        .ranges()
+        .map(Option::unwrap)
+        .collect()
+}
+
+fn brute_force_range_keys(
+    timestamps: &[i64],
+    evaluations: usize,
+    window_points: usize,
+) -> Vec<(u32, u32)> {
+    let range = window_points as i64 * RANGE_MANIPULATE_CADENCE_MS;
+    (0..evaluations)
+        .map(|evaluation| {
+            let current = evaluation as i64 * RANGE_MANIPULATE_CADENCE_MS;
+            let mut offset = None;
+            let mut length = 0;
+            for (index, timestamp) in timestamps.iter().enumerate() {
+                if *timestamp > current - range && *timestamp <= current {
+                    offset.get_or_insert(index as u32);
+                    length += 1;
+                }
+            }
+            (offset.unwrap_or(0), length)
+        })
+        .collect()
+}
+
+fn validate_range_manipulate_output(
+    output: &[RecordBatch],
+    field_count: usize,
+    expected_range_keys: Option<&[(u32, u32)]>,
+) {
+    let Some(expected_range_keys) = expected_range_keys else {
+        assert!(output.is_empty());
+        return;
+    };
+
+    assert_eq!(output.len(), 1);
+    let batch = &output[0];
+    assert_eq!(batch.num_rows(), expected_range_keys.len());
+
+    let timestamp_range_keys = range_keys(batch, field_count + 1);
+    assert_eq!(timestamp_range_keys, expected_range_keys);
+
+    for field_index in 0..field_count {
+        assert_eq!(range_keys(batch, field_index + 1), expected_range_keys);
+    }
+}
+
+fn bench_range_manipulate_wall_time(c: &mut Criterion) {
+    let mut group = c.benchmark_group("range_manipulate_wall_time");
+    let primary_points = 4_096;
+    let sparse_evaluations = primary_points - 1;
+    let mut cases = vec![
+        (
+            "one_field",
+            (0..primary_points)
+                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
+                .collect::<Vec<_>>(),
+            primary_points,
+            4,
+            1,
+            false,
+        ),
+        (
+            "one_field",
+            (0..primary_points)
+                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
+                .collect::<Vec<_>>(),
+            primary_points,
+            20,
+            1,
+            false,
+        ),
+        (
+            "one_field",
+            (0..primary_points)
+                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
+                .collect::<Vec<_>>(),
+            primary_points,
+            240,
+            1,
+            false,
+        ),
+        (
+            "regular_sparse",
+            (0..sparse_evaluations)
+                .step_by(2)
+                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
+                .collect::<Vec<_>>(),
+            sparse_evaluations,
+            20,
+            1,
+            false,
+        ),
+        (
+            "all_empty_pathological",
+            (0..primary_points)
+                .map(|point| {
+                    (primary_points as i64 + 21 + point as i64) * RANGE_MANIPULATE_CADENCE_MS
+                })
+                .collect::<Vec<_>>(),
+            primary_points,
+            20,
+            1,
+            true,
+        ),
+        (
+            "multi_field_control",
+            (0..primary_points)
+                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
+                .collect::<Vec<_>>(),
+            primary_points,
+            20,
+            4,
+            false,
+        ),
+    ];
+
+    for (case_name, timestamps, evaluations, window_points, field_count, expect_empty) in
+        cases.drain(..)
+    {
+        let expected_range_keys = (!expect_empty)
+            .then(|| brute_force_range_keys(&timestamps, evaluations, window_points));
+        let input_batch = make_range_manipulate_batch(timestamps, field_count);
+        let input_rows = input_batch.num_rows();
+        let input_schema = input_batch.schema();
+        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: input_schema.clone().to_dfschema_ref().unwrap(),
+        });
+        let field_columns = (0..field_count)
+            .map(|field_index| format!("value_{field_index}"))
+            .collect::<Vec<_>>();
+        let logical_plan = RangeManipulate::new(
+            0,
+            (evaluations as i64 - 1) * RANGE_MANIPULATE_CADENCE_MS,
+            RANGE_MANIPULATE_CADENCE_MS,
+            window_points as i64 * RANGE_MANIPULATE_CADENCE_MS,
+            "timestamp".to_string(),
+            field_columns,
+            logical_input,
+        )
+        .unwrap();
+        let physical_input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![input_batch]], input_schema, None).unwrap(),
+        )));
+        let execution_plan = logical_plan.to_execution_plan(physical_input);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let task_ctx = datafusion::prelude::SessionContext::new().task_ctx();
+
+        // Validate the public operator output and RangeArray keys before timing.
+        let output = runtime.block_on(execute_and_drain(execution_plan.clone(), task_ctx.clone()));
+        validate_range_manipulate_output(&output, field_count, expected_range_keys.as_deref());
+
+        // This measures public RangeManipulate execution wall time, including stream draining.
+        group.bench_with_input(
+            BenchmarkId::new(
+                case_name,
+                format!("N{input_rows}_eval{evaluations}_window{window_points}x15s"),
+            ),
+            &(),
+            |b, _| {
+                b.iter(|| {
+                    let output = runtime
+                        .block_on(execute_and_drain(execution_plan.clone(), task_ctx.clone()));
+                    std::hint::black_box(output);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_range_functions,
+    bench_edge_count_functions,
+    bench_range_manipulate_wall_time
+);

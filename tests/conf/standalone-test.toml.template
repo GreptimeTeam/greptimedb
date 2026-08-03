@@ -24,6 +24,7 @@ broker_endpoints = {kafka_wal_broker_endpoints | unescaped}
 [storage]
 type = 'File'
 data_home = '{data_home}'
+copy_root = '{copy_root}'
 
 [grpc]
 bind_addr = '{addrs.grpc_addr}'
@@ -46,3 +47,6 @@ runtime_size = 2
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
+
+[event_recorder]
+event_types = []

@@ -28,6 +28,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
+use common_datasource::object_store::{LocalFileAccess, configured_local_path};
 use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
 use common_meta::cache::{LayeredCacheRegistryBuilder, LayeredCacheRegistryRef};
@@ -51,7 +52,7 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
-use datanode::config::DatanodeOptions;
+use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
@@ -69,7 +70,7 @@ use plugins::frontend::context::{
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
 use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -79,6 +80,58 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
+
+fn standalone_local_file_access(
+    storage: &StorageConfig,
+) -> common_datasource::error::Result<LocalFileAccess> {
+    let data_home = configured_local_path(&storage.data_home)?;
+    let copy_root = match &storage.copy_root {
+        Some(root) => configured_local_path(root)?.with_context(|| {
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: root.clone(),
+                reason: "copy_root must be a local path or file URL".to_string(),
+            }
+        })?,
+        None => {
+            let Some(data_home) = &data_home else {
+                info!(
+                    "SQL access to local files is disabled because storage.data_home is not a local path and storage.copy_root is unset"
+                );
+                return Ok(LocalFileAccess::Disabled);
+            };
+            data_home.join("copy")
+        }
+    };
+
+    let access = LocalFileAccess::sandboxed(&copy_root)?;
+    if let Some(data_home) = data_home {
+        let canonical_data_home = data_home.canonicalize().with_context(|_| {
+            common_datasource::error::InvalidLocalFileRootSnafu {
+                root: data_home.display().to_string(),
+            }
+        })?;
+        let canonical_copy_root = access.sandbox_root().with_context(|| {
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: copy_root.display().to_string(),
+                reason: "sandboxed local file access has no root".to_string(),
+            }
+        })?;
+        let default_copy_root = canonical_data_home.join("copy");
+        let exposes_internal_files = canonical_data_home.starts_with(canonical_copy_root)
+            || (canonical_copy_root.starts_with(&canonical_data_home)
+                && !canonical_copy_root.starts_with(default_copy_root));
+        if exposes_internal_files {
+            return common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: copy_root.display().to_string(),
+                reason: "copy_root must not expose files in data_home outside data_home/copy"
+                    .to_string(),
+            }
+            .fail();
+        }
+    }
+
+    Ok(access)
+}
 
 #[derive(Parser)]
 pub struct Command {
@@ -396,6 +449,9 @@ impl StartCommand {
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(data_home))
             .context(error::CreateDirSnafu { dir: data_home })?;
+        let local_file_access = standalone_local_file_access(&dn_opts.storage)
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
 
         let metadata_dir = metadata_store_dir(data_home);
         let kv_backend = creator
@@ -427,6 +483,7 @@ impl StartCommand {
 
         let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
         builder.with_cache_registry(layered_cache_registry.clone());
+        builder.with_local_file_access(local_file_access.clone());
         if let Some(writable) = creator.open_regions_writable_override {
             builder.with_open_regions_writable_override(writable);
         }
@@ -595,7 +652,8 @@ impl StartCommand {
             node_manager.clone(),
             procedure_executor.clone(),
             process_manager,
-        );
+        )
+        .with_local_file_access(local_file_access);
 
         plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &fe_instance)
             .await
@@ -966,7 +1024,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_options::plugin_options::StandaloneFlag;
-    use common_test_util::temp_dir::create_named_temp_file;
+    use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
@@ -974,6 +1032,73 @@ mod tests {
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    #[test]
+    fn test_standalone_local_file_access_config() {
+        let data_home = create_temp_dir("standalone_copy_root");
+        let storage = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            ..Default::default()
+        };
+        let access = standalone_local_file_access(&storage).unwrap();
+        assert_eq!(
+            access.sandbox_root().unwrap(),
+            data_home.path().join("copy").canonicalize().unwrap()
+        );
+
+        let remote_data_home = StorageConfig {
+            data_home: "s3://bucket/data".to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&remote_data_home).unwrap(),
+            LocalFileAccess::Disabled
+        ));
+
+        let explicit_root = create_temp_dir("standalone_explicit_copy_root");
+        let remote_with_explicit_root = StorageConfig {
+            data_home: "s3://bucket/data".to_string(),
+            copy_root: Some(explicit_root.path().display().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            standalone_local_file_access(&remote_with_explicit_root)
+                .unwrap()
+                .sandbox_root()
+                .unwrap(),
+            explicit_root.path().canonicalize().unwrap()
+        );
+
+        let remote_copy_root = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some("s3://bucket/copy".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&remote_copy_root),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+
+        let exposes_internal = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some(data_home.path().join("data").display().to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&exposes_internal),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+
+        let exposes_data_home = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some(data_home.path().parent().unwrap().display().to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&exposes_data_home),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {

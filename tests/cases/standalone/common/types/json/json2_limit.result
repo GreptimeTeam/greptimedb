@@ -1,0 +1,126 @@
+create table json2_disable_non_object_insert (
+    ts timestamp time index,
+    j json2
+)
+with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+insert into json2_disable_non_object_insert values (1, '[1, 2, 3]');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_disable_non_object_insert values (2, '"hello"');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_disable_non_object_insert values (3, '42');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_disable_non_object_insert values (4, 'true');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_disable_non_object_insert values (5, 'null');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_disable_non_object_insert values (6, '{}');
+
+Error: 1004(InvalidArguments), Invalid InsertRequest, reason: empty json object is not supported, consider adding a dummy field
+
+drop table json2_disable_non_object_insert;
+
+Affected Rows: 0
+
+create table json2_disable_whole_column_read (
+    ts timestamp time index,
+    j json2
+)
+with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+insert into json2_disable_whole_column_read values
+    (1, '{"a": {"b": 1}}'),
+    (2, '{"a": {"b": 2}}');
+
+Affected Rows: 2
+
+-- JSON2 field projection remains supported (case 5): use in an intermediate plan node.
+select json_get(j, 'a.b'), count(*)
+from json2_disable_whole_column_read
+group by json_get(j, 'a.b')
+order by json_get(j, 'a.b');
+
++---------------------------------------------------------+----------+
+| json_get(json2_disable_whole_column_read.j,Utf8("a.b")) | count(*) |
++---------------------------------------------------------+----------+
+| 1                                                       | 1        |
+| 2                                                       | 1        |
++---------------------------------------------------------+----------+
+
+select j, j.a from json2_disable_whole_column_read;
+
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Binary but found Struct("a": Utf8View) at column index 0
+
+select j from json2_disable_whole_column_read where j.a.b = 1;
+
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Binary but found Struct("a": Struct("b": Int64)) at column index 0
+
+drop table json2_disable_whole_column_read;
+
+Affected Rows: 0
+
+create table json2_without_append_mode (
+    ts timestamp time index,
+    j json2
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+create table json2_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'false'
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+create table json2_alter_non_append (
+    ts timestamp time index
+);
+
+Affected Rows: 0
+
+alter table json2_alter_non_append add column j json2;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+drop table json2_alter_non_append;
+
+Affected Rows: 0
+
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+drop table json2_set_append_mode_false;
+
+Affected Rows: 0
+
