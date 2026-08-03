@@ -284,15 +284,13 @@ impl Client {
             .iter()
             .map(|peer| peer.as_ref().to_string())
             .collect();
-        let client = Self {
+        Self {
             inner: Arc::new(Inner::with_manager_and_peers(
                 channel_manager,
                 urls,
                 options,
             )),
-        };
-        client.start_health_check();
-        client
+        }
     }
 
     pub fn start<U, A>(&self, urls: A)
@@ -306,10 +304,9 @@ impl Client {
             .map(|peer| peer.as_ref().to_string())
             .collect();
         self.inner.set_peers(urls);
-        self.start_health_check();
     }
 
-    fn start_health_check(&self) {
+    fn trigger_health_check(&self) {
         if self.inner.health_check_interval.is_zero() || self.inner.peer_count() <= 1 {
             return;
         }
@@ -342,6 +339,8 @@ impl Client {
     }
 
     pub fn find_channel(&self) -> Result<(String, Channel)> {
+        self.trigger_health_check();
+
         let addr = self
             .inner
             .get_peer()
@@ -608,19 +607,29 @@ mod tests {
     }
 
     #[test]
-    fn test_single_peer_does_not_start_background_task() {
+    fn test_multi_peer_constructor_defers_background_task() {
+        let client = Client::with_urls(mock_peers());
+
+        assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_single_peer_does_not_start_background_task() {
         let client = Client::with_urls(["127.0.0.1:3001"]);
+
+        client.find_channel().unwrap();
 
         assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn test_start_initializes_new_client() {
+    fn test_start_initializes_new_client_without_starting_background_task() {
         let client = Client::new();
+        let peers = mock_peers();
 
-        client.start(["127.0.0.1:3001"]);
+        client.start(peers.clone());
 
-        assert_eq!(Some("127.0.0.1:3001".to_string()), client.inner.get_peer());
+        assert!(peers.contains(&client.inner.get_peer().unwrap()));
         assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
     }
 
@@ -637,8 +646,11 @@ mod tests {
                 ..Default::default()
             },
         );
+        assert!(!client.inner.health_check_started.load(Ordering::Relaxed));
 
-        // Act: poll with a bounded timeout until the background health refresh completes.
+        // Act: trigger lazy health checks, then poll until the background refresh completes.
+        client.find_channel().unwrap();
+        assert!(client.inner.health_check_started.load(Ordering::Relaxed));
         wait_for_peer_states(
             &client,
             PeerStates {
@@ -668,6 +680,7 @@ mod tests {
             },
         );
 
+        client.find_channel().unwrap();
         wait_for_peer_states(
             &client,
             PeerStates {

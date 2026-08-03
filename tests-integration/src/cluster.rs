@@ -673,6 +673,7 @@ mod tests {
     const HEALTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
     async fn wait_for_active_route(client: &Client, active_addr: &str) {
+        client.find_channel().unwrap();
         tokio::time::timeout(HEALTH_REFRESH_TIMEOUT, async {
             let mut interval = tokio::time::interval(HEALTH_REFRESH_INTERVAL);
             loop {
