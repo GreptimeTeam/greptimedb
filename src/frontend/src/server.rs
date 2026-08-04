@@ -150,6 +150,8 @@ where
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.http.prom_validation_mode,
+                    opts.prom_store
+                        .experimental_enable_prometheus_native_histogram,
                     pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());

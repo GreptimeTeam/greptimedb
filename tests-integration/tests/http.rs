@@ -2080,7 +2080,6 @@ addr = "127.0.0.1:4000"
 timeout = "0s"
 body_limit = "64MiB"
 prom_validation_mode = "strict"
-experimental_enable_prometheus_native_histogram = false
 cors_allowed_origins = []
 enable_cors = true
 experimental_enable_explain_analyze_stream = true
@@ -2144,6 +2143,7 @@ enable = true
 [prom_store]
 enable = true
 with_metric_engine = true
+experimental_enable_prometheus_native_histogram = false
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256

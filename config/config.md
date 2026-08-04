@@ -33,7 +33,6 @@
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
@@ -80,6 +79,7 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
@@ -262,7 +262,6 @@
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
@@ -321,6 +320,7 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |

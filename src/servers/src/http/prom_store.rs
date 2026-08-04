@@ -240,7 +240,7 @@ async fn remote_write_v2(
     if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
         return Ok(remote_write_v2_error_response(
             error::InvalidPromRemoteRequestSnafu {
-                msg: "prometheus remote write v2 native histogram ingestion is experimental; set http.experimental_enable_prometheus_native_histogram = true to enable it"
+                msg: "prometheus remote write v2 native histogram ingestion is experimental; set prom_store.experimental_enable_prometheus_native_histogram = true to enable it"
                     .to_string(),
             }
             .build(),

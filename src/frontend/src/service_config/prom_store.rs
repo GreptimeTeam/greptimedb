@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 pub struct PromStoreOptions {
     pub enable: bool,
     pub with_metric_engine: bool,
+    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
+    #[serde(default)]
+    pub experimental_enable_prometheus_native_histogram: bool,
     #[serde(default, with = "humantime_serde")]
     pub pending_rows_flush_interval: Duration,
     #[serde(default = "default_max_batch_rows")]
@@ -77,6 +80,7 @@ impl Default for PromStoreOptions {
         Self {
             enable: true,
             with_metric_engine: true,
+            experimental_enable_prometheus_native_histogram: false,
             pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
@@ -103,6 +107,7 @@ mod tests {
         let default = PromStoreOptions::default();
         assert!(default.enable);
         assert!(default.with_metric_engine);
+        assert!(!default.experimental_enable_prometheus_native_histogram);
         assert_eq!(default.pending_rows_flush_interval, Duration::ZERO);
         assert_eq!(default.max_batch_rows, default_max_batch_rows());
         assert_eq!(
