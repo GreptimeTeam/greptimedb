@@ -27,6 +27,7 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+#[cfg(feature = "enterprise")]
 use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
+#[cfg(feature = "enterprise")]
 use uuid::Uuid;
 
 use self::executor::DropTableExecutor;
@@ -49,6 +51,7 @@ use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
+#[cfg(feature = "enterprise")]
 fn ensure_retry_later(err: error::Error) -> error::Error {
     if err.is_retry_later() {
         err
@@ -87,7 +90,10 @@ impl DropTableProcedure {
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
-        let mut data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        #[cfg(feature = "enterprise")]
+        let mut data = data;
+        #[cfg(feature = "enterprise")]
         if data.state == DropTableState::Prepare
             && data.soft_drop_enabled
             && data.dropped_at.is_none()
@@ -107,11 +113,8 @@ impl DropTableProcedure {
         })
     }
 
-    pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        if self.executor.on_prepare(&self.context).await?.stop() {
-            return Ok(Status::done());
-        }
-        self.fill_table_metadata().await?;
+    #[cfg(feature = "enterprise")]
+    async fn prepare_soft_drop(&mut self) -> Result<()> {
         self.executor
             .check_tombstone_conflict(&self.context, self.data.soft_drop_enabled)
             .await?;
@@ -136,6 +139,16 @@ impl DropTableProcedure {
         if self.data.soft_drop_enabled && self.data.drop_generation.is_none() {
             self.data.drop_generation = Some(Uuid::new_v4().to_string());
         }
+        Ok(())
+    }
+
+    pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
+        if self.executor.on_prepare(&self.context).await?.stop() {
+            return Ok(Status::done());
+        }
+        self.fill_table_metadata().await?;
+        #[cfg(feature = "enterprise")]
+        self.prepare_soft_drop().await?;
         self.data.state = DropTableState::DeleteMetadata;
 
         Ok(Status::executing(true))
@@ -167,47 +180,68 @@ impl DropTableProcedure {
         Ok(())
     }
 
-    /// Closes soft-drop regions before removing the table metadata.
-    ///
-    /// Both operations stay in this procedure state so retries always close and flush regions
-    /// before moving their live metadata to tombstones.
-    pub(crate) async fn on_delete_metadata(&mut self) -> Result<Status> {
-        self.register_dropping_regions()?;
-        if self.data.soft_drop_enabled {
-            let storage = self
-                .context
-                .table_metadata_manager
-                .table_route_manager()
-                .table_route_storage();
-            storage
-                .remap_region_routes(&mut self.data.physical_region_routes)
-                .await
-                .map_err(ensure_retry_later)?;
-            self.executor
-                .on_close_regions(
-                    &self.context.node_manager,
-                    &self.context.leader_region_registry,
-                    &self.data.physical_region_routes,
-                    true,
-                )
-                .await
-                .map_err(ensure_retry_later)?;
-        }
-        // Hard drop still relies on regions being closed automatically if metasrv crashes after
-        // metadata removal. Soft drop has already closed them above.
-
-        // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
-        let table_id = self.data.table_id();
+    #[cfg(not(feature = "enterprise"))]
+    async fn delete_metadata(&mut self) -> Result<()> {
         let table_route_value = &TableRouteValue::new(
             self.data.task.table_id,
             // Safety: checked
             self.data.physical_table_id.unwrap(),
             self.data.physical_region_routes.clone(),
         );
-        // Deletes table metadata logically.
-        let result = self
-            .executor
+        self.executor
             .on_delete_metadata(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
+            .await
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn delete_metadata(&mut self) -> Result<()> {
+        if !self.data.soft_drop_enabled {
+            let table_route_value = &TableRouteValue::new(
+                self.data.task.table_id,
+                // Safety: checked
+                self.data.physical_table_id.unwrap(),
+                self.data.physical_region_routes.clone(),
+            );
+            return self
+                .executor
+                .on_delete_metadata(
+                    &self.context,
+                    table_route_value,
+                    &self.data.region_wal_options,
+                )
+                .await;
+        }
+
+        let storage = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage();
+        storage
+            .remap_region_routes(&mut self.data.physical_region_routes)
+            .await
+            .map_err(ensure_retry_later)?;
+        let table_route_value = &TableRouteValue::new(
+            self.data.task.table_id,
+            // Safety: checked
+            self.data.physical_table_id.unwrap(),
+            self.data.physical_region_routes.clone(),
+        );
+        self.executor
+            .on_close_regions(
+                &self.context.node_manager,
+                &self.context.leader_region_registry,
+                &self.data.physical_region_routes,
+                true,
+            )
+            .await
+            .map_err(ensure_retry_later)?;
+        self.executor
+            .on_soft_delete_metadata(
                 &self.context,
                 table_route_value,
                 &self.data.region_wal_options,
@@ -215,13 +249,17 @@ impl DropTableProcedure {
                 self.data.retention_expires_at,
                 self.data.drop_generation.as_deref(),
             )
-            .await;
-        if self.data.soft_drop_enabled {
-            result.map_err(ensure_retry_later)?;
-            self.data.allow_rollback = false;
-        } else {
-            result?;
-        }
+            .await
+            .map_err(ensure_retry_later)?;
+        self.data.allow_rollback = false;
+        Ok(())
+    }
+
+    pub(crate) async fn on_delete_metadata(&mut self) -> Result<Status> {
+        self.register_dropping_regions()?;
+        // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
+        let table_id = self.data.table_id();
+        self.delete_metadata().await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
         Ok(Status::executing(true))
@@ -230,11 +268,14 @@ impl DropTableProcedure {
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
         let result = self.executor.invalidate_table_cache(&self.context).await;
+        #[cfg(feature = "enterprise")]
         if self.data.soft_drop_enabled {
             result.map_err(ensure_retry_later)?;
         } else {
             result?;
         }
+        #[cfg(not(feature = "enterprise"))]
+        result?;
 
         self.data.state = DropTableState::DatanodeDropRegions;
 
@@ -259,6 +300,7 @@ impl DropTableProcedure {
                 .await?;
         }
 
+        #[cfg(feature = "enterprise")]
         if self.data.soft_drop_enabled {
             self.context
                 .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
@@ -456,8 +498,7 @@ impl DropTableData {
             soft_drop_enabled,
             dropped_at: None,
             retention_expires_at: None,
-            soft_drop_retention_millis: soft_drop_retention
-                .and_then(|retention| i64::try_from(retention.as_millis()).ok()),
+            soft_drop_retention_millis: soft_drop_retention_millis(soft_drop_retention),
             drop_generation: None,
         }
     }
@@ -477,6 +518,16 @@ impl DropTableData {
             self.task.drop_if_exists,
         )
     }
+}
+
+#[cfg(feature = "enterprise")]
+fn soft_drop_retention_millis(soft_drop_retention: Option<std::time::Duration>) -> Option<i64> {
+    soft_drop_retention.and_then(|retention| i64::try_from(retention.as_millis()).ok())
+}
+
+#[cfg(not(feature = "enterprise"))]
+fn soft_drop_retention_millis(_: Option<std::time::Duration>) -> Option<i64> {
+    None
 }
 
 /// The state of drop table.

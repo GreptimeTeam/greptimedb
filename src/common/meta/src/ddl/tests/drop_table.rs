@@ -270,6 +270,7 @@ async fn test_recovered_soft_drop_preserves_persisted_mode() {
     assert_matches!(request.body, Some(region_request::Body::Close(_)));
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_legacy_soft_drop_prepare_preserves_persisted_mode() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
