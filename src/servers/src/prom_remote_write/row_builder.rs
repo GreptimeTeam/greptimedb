@@ -168,20 +168,21 @@ impl<'a> TableBuilder<'a> {
             });
         }
 
-        if samples.len() == 1 {
-            let sample = &samples[0];
-            row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
-            row[1].value_data = Some(ValueData::F64Value(sample.value));
-            self.rows.push(Row { values: row });
+        let Some((last_sample, preceding_samples)) = samples.split_last() else {
             return Ok(());
-        }
-        for sample in samples {
+        };
+
+        for sample in preceding_samples {
             row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
             row[1].value_data = Some(ValueData::F64Value(sample.value));
             self.rows.push(Row {
                 values: row.clone(),
             });
         }
+
+        row[0].value_data = Some(ValueData::TimestampMillisecondValue(last_sample.timestamp));
+        row[1].value_data = Some(ValueData::F64Value(last_sample.value));
+        self.rows.push(Row { values: row });
 
         Ok(())
     }
@@ -216,6 +217,98 @@ mod tests {
     use prost::DecodeError;
 
     use super::*;
+
+    fn assert_sample(row: &Row, timestamp: i64, value: f64) {
+        assert_eq!(
+            Some(&ValueData::TimestampMillisecondValue(timestamp)),
+            row.values[0].value_data.as_ref()
+        );
+        assert_eq!(
+            Some(&ValueData::F64Value(value)),
+            row.values[1].value_data.as_ref()
+        );
+    }
+
+    #[test]
+    fn test_add_labels_and_samples() {
+        let mut builder = TableBuilder::default();
+        builder
+            .add_labels_and_samples(
+                &[PromLabel {
+                    name: b"tag0",
+                    value: b"v0",
+                }],
+                &[],
+                PromValidationMode::Strict,
+            )
+            .unwrap();
+        assert!(builder.rows.is_empty());
+
+        builder
+            .add_labels_and_samples(
+                &[PromLabel {
+                    name: b"tag0",
+                    value: b"v0",
+                }],
+                &[Sample {
+                    value: 1.0,
+                    timestamp: 1,
+                }],
+                PromValidationMode::Strict,
+            )
+            .unwrap();
+
+        builder
+            .add_labels_and_samples(
+                &[
+                    PromLabel {
+                        name: b"tag0",
+                        value: b"v1",
+                    },
+                    PromLabel {
+                        name: b"tag1",
+                        value: b"v2",
+                    },
+                ],
+                &[
+                    Sample {
+                        value: 2.0,
+                        timestamp: 2,
+                    },
+                    Sample {
+                        value: 3.0,
+                        timestamp: 3,
+                    },
+                ],
+                PromValidationMode::Strict,
+            )
+            .unwrap();
+
+        let request = builder.as_row_insert_request("test".to_string());
+        let rows = request.rows.unwrap().rows;
+        assert_eq!(3, rows.len());
+        assert!(rows.iter().all(|row| row.values.len() == 4));
+
+        assert_sample(&rows[0], 1, 1.0);
+        assert_eq!(
+            Some(&ValueData::StringValue("v0".to_string())),
+            rows[0].values[2].value_data.as_ref()
+        );
+        assert!(rows[0].values[3].value_data.is_none());
+
+        assert_sample(&rows[1], 2, 2.0);
+        assert_sample(&rows[2], 3, 3.0);
+        for row in &rows[1..] {
+            assert_eq!(
+                Some(&ValueData::StringValue("v1".to_string())),
+                row.values[2].value_data.as_ref()
+            );
+            assert_eq!(
+                Some(&ValueData::StringValue("v2".to_string())),
+                row.values[3].value_data.as_ref()
+            );
+        }
+    }
 
     #[test]
     fn test_table_builder() {
