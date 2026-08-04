@@ -19,11 +19,17 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 </h3>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&label=stable&color=brightgreen" alt="Stable"/>
 </a>
-<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=latest&color=blueviolet" alt="Latest"/>
 </a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/>
+</a>
+
+<sub><b>stable</b> for production &nbsp;·&nbsp; <b>latest</b> includes pre-releases &nbsp;·&nbsp; <b>nightly</b> is a weekly snapshot of <code>main</code></sub>
+
 <a href="https://hub.docker.com/r/greptime/greptimedb/">
 <img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
 </a>
