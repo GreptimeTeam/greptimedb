@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -112,6 +113,41 @@ impl Display for JsonNumber {
             Self::NegInt(x) => write!(f, "{x}"),
             Self::Float(x) => write!(f, "{x}"),
         }
+    }
+}
+
+impl PartialOrd for JsonNumber {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsonNumber {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare by the lossy f64 value first to keep the order roughly
+        // numeric, then break ties by the exact variant/value. This is a
+        // total order that is consistent with `PartialEq`, which treats the
+        // three variants as distinct (e.g. `PosInt(0) != NegInt(0)`).
+        let ordering = self.as_f64().total_cmp(&other.as_f64());
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+        fn rank(n: &JsonNumber) -> u8 {
+            match n {
+                JsonNumber::PosInt(_) => 0,
+                JsonNumber::NegInt(_) => 1,
+                JsonNumber::Float(_) => 2,
+            }
+        }
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| match (self, other) {
+                (JsonNumber::PosInt(a), JsonNumber::PosInt(b)) => a.cmp(b),
+                (JsonNumber::NegInt(a), JsonNumber::NegInt(b)) => a.cmp(b),
+                (JsonNumber::Float(a), JsonNumber::Float(b)) => a.cmp(b),
+                // Unreachable when both ranks are equal.
+                _ => Ordering::Equal,
+            })
     }
 }
 
@@ -293,6 +329,43 @@ impl Display for JsonVariant {
                 Ok(v) => write!(f, "{v}"),
                 Err(_) => write!(f, "{x:?}"),
             },
+        }
+    }
+}
+
+impl PartialOrd for JsonVariant {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsonVariant {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (JsonVariant::Null, JsonVariant::Null) => Ordering::Equal,
+            (JsonVariant::Bool(a), JsonVariant::Bool(b)) => a.cmp(b),
+            (JsonVariant::Number(a), JsonVariant::Number(b)) => a.cmp(b),
+            (JsonVariant::String(a), JsonVariant::String(b)) => a.cmp(b),
+            (JsonVariant::Array(a), JsonVariant::Array(b)) => a.cmp(b),
+            (JsonVariant::Object(a), JsonVariant::Object(b)) => a.cmp(b),
+            (JsonVariant::Variant(a), JsonVariant::Variant(b)) => a.cmp(b),
+            _ => {
+                // A deterministic total order across different variants,
+                // consistent with `PartialEq` (which never equates two
+                // different variants).
+                fn rank(v: &JsonVariant) -> u8 {
+                    match v {
+                        JsonVariant::Null => 0,
+                        JsonVariant::Bool(_) => 1,
+                        JsonVariant::Number(_) => 2,
+                        JsonVariant::String(_) => 3,
+                        JsonVariant::Array(_) => 4,
+                        JsonVariant::Object(_) => 5,
+                        JsonVariant::Variant(_) => 6,
+                    }
+                }
+                rank(self).cmp(&rank(other))
+            }
         }
     }
 }
@@ -661,6 +734,19 @@ impl Hash for JsonValue {
     }
 }
 
+impl PartialOrd for JsonValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsonValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Consistent with `PartialEq`, which compares `json_variant` only.
+        self.json_variant.cmp(&other.json_variant)
+    }
+}
+
 impl Display for JsonValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.json_variant)
@@ -900,6 +986,20 @@ impl PartialEq for JsonValueRef<'_> {
 }
 
 impl Eq for JsonValueRef<'_> {}
+
+impl PartialOrd for JsonValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsonValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `JsonValue` by converting into an owned value
+        // before comparison.
+        JsonValue::from(self.clone()).cmp(&JsonValue::from(other.clone()))
+    }
+}
 
 impl Clone for JsonValueRef<'_> {
     fn clone(&self) -> Self {

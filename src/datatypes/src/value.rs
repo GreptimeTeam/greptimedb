@@ -47,7 +47,10 @@ pub type OrderedF64 = OrderedFloat<f64>;
 
 /// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
 ///
-/// Comparison between values with different types (expect Null) is not allowed.
+/// `Value` has a total order: same-type values compare by their payload
+/// (including `Json`, `Decimal128` and `Struct`), values of different types
+/// compare by their data type, and `Null` compares less than any non-null
+/// value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     Null,
@@ -734,10 +737,32 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::IntervalMonthDayNano(v1), $Type::IntervalMonthDayNano(v2)) => v1.cmp(v2),
                 ($Type::Duration(v1), $Type::Duration(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
-                _ => panic!(
-                    "Cannot compare different values {:?} and {:?}",
-                    $left, $right
-                ),
+                ($Type::Decimal128(v1), $Type::Decimal128(v2)) => {
+                    // `Decimal128` only implements a partial order (values with
+                    // different precision/scale are incomparable), so fall back
+                    // to comparing the metadata to make the order total. This
+                    // is consistent with `Eq`, which also distinguishes
+                    // decimals by precision/scale/value.
+                    match v1.partial_cmp(v2) {
+                        Some(ordering) => ordering,
+                        None => (v1.precision(), v1.scale(), v1.val()).cmp(&(
+                            v2.precision(),
+                            v2.scale(),
+                            v2.val(),
+                        )),
+                    }
+                }
+                ($Type::Struct(v1), $Type::Struct(v2)) => v1.cmp(v2),
+                ($Type::Json(v1), $Type::Json(v2)) => v1.cmp(v2),
+                _ => {
+                    // Fall back to comparing the data types so that values of
+                    // different types still have a deterministic total order.
+                    // Same-type values are handled by the arms above and two
+                    // different variants never share a `data_type()`, so this
+                    // never returns `Equal` for non-equal values and stays
+                    // consistent with `Eq`.
+                    $left.data_type().cmp(&$right.data_type())
+                }
             }
         }
     };
@@ -1105,6 +1130,23 @@ impl StructValue {
 impl Default for StructValue {
     fn default() -> StructValue {
         StructValue::try_new(vec![], StructType::new(Arc::new(vec![]))).unwrap()
+    }
+}
+
+impl PartialOrd for StructValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StructValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // A total order: compare the schema first, then the field values.
+        // Consistent with `Eq`, which requires both fields and items to be
+        // equal.
+        self.fields
+            .cmp(&other.fields)
+            .then_with(|| self.items.cmp(&other.items))
     }
 }
 
@@ -1785,6 +1827,87 @@ pub(crate) mod tests {
             Value::Timestamp(Timestamp::new_nanosecond(5)).try_negative(),
             Some(Value::Timestamp(Timestamp::new_nanosecond(-5)))
         );
+    }
+
+    #[test]
+    fn test_value_ordering_is_total() {
+        // Null vs non-null: null is ordered, regardless of the other type.
+        assert_eq!(Value::Null.cmp(&Value::Int32(1)), Ordering::Less);
+        assert_eq!(Value::Int32(1).cmp(&Value::Null), Ordering::Greater);
+        assert_eq!(Value::Null.cmp(&Value::Null), Ordering::Equal);
+
+        // Json null counts as null too.
+        let json_null = Value::Json(Box::new(JsonValue::null()));
+        assert_eq!(json_null.cmp(&Value::Int64(1)), Ordering::Less);
+        assert_eq!(Value::Int64(1).cmp(&json_null), Ordering::Greater);
+        assert_eq!(json_null.cmp(&json_null), Ordering::Equal);
+        // `Null` and `Json(null)` are different variants, so they are ordered
+        // (deterministically) rather than equal.
+        assert_ne!(json_null.cmp(&Value::Null), Ordering::Equal);
+
+        // Same-type Decimal128: numeric within the same precision/scale.
+        let d1 = Value::Decimal128(Decimal128::new(1, 10, 2));
+        let d2 = Value::Decimal128(Decimal128::new(2, 10, 2));
+        assert_eq!(d1.cmp(&d2), Ordering::Less);
+        assert_eq!(d2.cmp(&d1), Ordering::Greater);
+        assert_eq!(d1.cmp(&d1), Ordering::Equal);
+        // Different precision/scale: deterministic total order, never Equal.
+        let d3 = Value::Decimal128(Decimal128::new(1, 5, 1));
+        assert_ne!(d1.cmp(&d3), Ordering::Equal);
+
+        // Same-type Json.
+        let j1 = Value::Json(Box::new(JsonValue::from(1i64)));
+        let j2 = Value::Json(Box::new(JsonValue::from(2i64)));
+        assert_eq!(j1.cmp(&j2), Ordering::Less);
+        assert_eq!(j2.cmp(&j1), Ordering::Greater);
+        assert_eq!(j1.cmp(&j1), Ordering::Equal);
+        let j_str1 = Value::Json(Box::new(JsonValue::from("a")));
+        let j_str2 = Value::Json(Box::new(JsonValue::from("b")));
+        assert_eq!(j_str1.cmp(&j_str2), Ordering::Less);
+        // Json objects compare deterministically (BTreeMap key order).
+        let j_obj1 = Value::Json(Box::new(JsonValue::from([("a", 1i64), ("b", 2i64)])));
+        let j_obj2 = Value::Json(Box::new(JsonValue::from([("a", 1i64), ("b", 3i64)])));
+        assert_eq!(j_obj1.cmp(&j_obj2), Ordering::Less);
+
+        // Same-type Struct: equal schemas and items compare equal.
+        let s1 = build_struct_value();
+        let s2 = build_struct_value();
+        assert_eq!(s1.cmp(&s2), Ordering::Equal);
+        let struct_type = s1.struct_type().clone();
+        let mut items = s1.items().to_vec();
+        items[0] = Value::Int32(2);
+        let s3 = StructValue::new(items, struct_type);
+        assert_eq!(s1.cmp(&s3), Ordering::Less);
+
+        // Cross-type comparisons never panic and are deterministic.
+        let pairs = [
+            (Value::Int32(1), Value::String("x".into())),
+            (d1.clone(), Value::Float64(1.0.into())),
+            (j1.clone(), Value::Int64(1)),
+            (Value::Struct(s1.clone()), Value::Boolean(true)),
+            (d1.clone(), j2.clone()),
+        ];
+        for (a, b) in pairs {
+            let ab = a.cmp(&b);
+            assert_eq!(b.cmp(&a), ab.reverse());
+            assert_ne!(ab, Ordering::Equal);
+            // partial_cmp is consistent with cmp.
+            assert_eq!(a.partial_cmp(&b), Some(ab));
+            assert_eq!(b.partial_cmp(&a), Some(ab.reverse()));
+        }
+
+        // ValueRef shares the same ordering logic.
+        let vr1 = ValueRef::Decimal128(Decimal128::new(1, 10, 2));
+        let vr2 = ValueRef::Decimal128(Decimal128::new(2, 10, 2));
+        assert_eq!(vr1.cmp(&vr2), Ordering::Less);
+        assert_eq!(vr1.cmp(&vr1), Ordering::Equal);
+        let vr_cross = vr1.cmp(&ValueRef::String("x"));
+        assert_ne!(vr_cross, Ordering::Equal);
+        assert_eq!(ValueRef::String("x").cmp(&vr1), vr_cross.reverse());
+        let jr = ValueRef::Json(Box::new(JsonValueRef::null()));
+        assert_eq!(jr.cmp(&ValueRef::Int64(1)), Ordering::Less);
+        assert_ne!(jr.cmp(&ValueRef::Null), Ordering::Equal);
+        assert_eq!(jr.cmp(&jr), Ordering::Equal);
     }
 
     pub(crate) fn build_struct_type() -> StructType {
