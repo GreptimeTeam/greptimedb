@@ -498,41 +498,71 @@ impl DdlManager {
     }
 
     /// Submits and executes an undrop table task.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     #[tracing::instrument(skip_all)]
     pub async fn submit_undrop_table_task(
         &self,
         undrop_table_task: UndropTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
-        let original_table_name = context
-            .table_metadata_manager
-            .get_dropped_table_by_id(undrop_table_task.table_id)
-            .await?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: undrop_table_task.table_id.to_string(),
-            })?
-            .table_name;
-        let procedure = UndropTableProcedure::new_with_original_table_name(
-            undrop_table_task,
-            context,
-            Some(original_table_name),
-        );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        // Soft drop is enterprise-only. The procedure loaders stay registered for
+        // crash recovery, but fresh submissions are rejected at this boundary.
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use crate::error::UnsupportedSnafu;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            return UnsupportedSnafu {
+                operation: "undrop table is only available in GreptimeDB Enterprise Edition",
+            }
+            .fail();
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let context = self.create_context();
+            let original_table_name = context
+                .table_metadata_manager
+                .get_dropped_table_by_id(undrop_table_task.table_id)
+                .await?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: undrop_table_task.table_id.to_string(),
+                })?
+                .table_name;
+            let procedure = UndropTableProcedure::new_with_original_table_name(
+                undrop_table_task,
+                context,
+                Some(original_table_name),
+            );
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+            self.execute_procedure_and_wait(procedure_with_id).await
+        }
     }
 
     /// Submits and executes a purge dropped table task.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     #[tracing::instrument(skip_all)]
     pub async fn submit_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
-        let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        // Soft drop is enterprise-only. The procedure loaders stay registered for
+        // crash recovery, but fresh submissions are rejected at this boundary.
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use crate::error::UnsupportedSnafu;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            return UnsupportedSnafu {
+                operation: "purge dropped table is only available in GreptimeDB Enterprise Edition",
+            }
+            .fail();
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let context = self.create_context();
+            let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+            self.execute_procedure_and_wait(procedure_with_id).await
+        }
     }
 
     /// Submits and executes a purge task that first rechecks the tombstone deadline.
@@ -1263,7 +1293,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_error::ext::{BoxedError, ErrorExt};
+    use common_error::ext::BoxedError;
+    #[cfg(feature = "enterprise")]
+    use common_error::ext::ErrorExt;
+    #[cfg(feature = "enterprise")]
     use common_error::status_code::StatusCode;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
@@ -1291,6 +1324,8 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
+    #[cfg(not(feature = "enterprise"))]
+    use crate::rpc::ddl::PurgeDroppedTableTask;
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
@@ -1439,8 +1474,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+    fn build_soft_drop_test_ddl_manager() -> DdlManager {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
@@ -1462,7 +1496,7 @@ mod tests {
             None,
         ));
 
-        let ddl_manager = DdlManager::new(
+        DdlManager::new(
             DdlContext {
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
@@ -1479,7 +1513,13 @@ mod tests {
             },
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
-        );
+        )
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+        let ddl_manager = build_soft_drop_test_ddl_manager();
 
         let err = ddl_manager
             .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
@@ -1488,5 +1528,23 @@ mod tests {
 
         assert_eq!(err.status_code(), StatusCode::TableNotFound);
         assert!(matches!(err, crate::error::Error::TableNotFound { .. }));
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_submit_undrop_and_purge_rejected_in_non_enterprise_build() {
+        let ddl_manager = build_soft_drop_test_ddl_manager();
+
+        let err = ddl_manager
+            .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Unsupported { .. }));
+
+        let err = ddl_manager
+            .submit_purge_dropped_table_task(PurgeDroppedTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Unsupported { .. }));
     }
 }
