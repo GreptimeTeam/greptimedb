@@ -974,8 +974,9 @@
         "label": "Catalog",
         "multi": true,
         "name": "catalog",
-        "query": "SELECT DISTINCT catalog_name FROM information_schema.schemata ORDER BY catalog_name",
-        "type": "query"
+        "query": "SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM greptime_private.events WHERE $__timeFilter(timestamp)) catalogs ORDER BY catalog_name",
+        "type": "query",
+        "refresh": 2
       },
       {
         "allValue": "'__greptime_all__'",
