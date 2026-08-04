@@ -698,8 +698,11 @@ fn build_procedure_manager(
 }
 
 /// Resolves if soft-drop is enabled from metasrv options.
+///
+/// Soft drop is an enterprise-only feature; it is always disabled in
+/// non-enterprise builds regardless of the configuration.
 fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
-    options.gc.experimental_soft_drop.enable
+    cfg!(feature = "enterprise") && options.gc.experimental_soft_drop.enable
 }
 
 /// Returns soft-drop retention for recovering persisted procedures.
@@ -723,6 +726,7 @@ pub struct DdlManagerConfigureContext {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_ddl_soft_drop_gate_preserves_retention_for_recovery() {
         let mut options = MetasrvOptions::default();
@@ -731,6 +735,22 @@ mod tests {
         options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
 
         assert!(ddl_soft_drop_enabled(&options));
+        assert_eq!(
+            Some(Duration::from_secs(123)),
+            ddl_soft_drop_retention(&options)
+        );
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_ddl_soft_drop_is_always_disabled_in_non_enterprise_build() {
+        let mut options = MetasrvOptions::default();
+        options.gc.enable = true;
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
+
+        assert!(!ddl_soft_drop_enabled(&options));
+        // Retention is preserved for recovering persisted procedures.
         assert_eq!(
             Some(Duration::from_secs(123)),
             ddl_soft_drop_retention(&options)
