@@ -438,7 +438,7 @@ impl TestEnv {
                 .display()
                 .to_string();
             let builder = Fs::default();
-            let object_store = ObjectStore::new(builder.root(&data_path)).unwrap().finish();
+            let object_store = ObjectStore::new(builder.root(&data_path)).unwrap();
             object_store_manager.add(storage_name, object_store);
         }
         let object_store_manager = Arc::new(object_store_manager);
@@ -609,19 +609,16 @@ impl TestEnv {
 
         let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
             debug!("create object store with mock layer");
-            ObjectStore::new(builder)
-                .unwrap()
-                .layer(mock_layer.clone())
-                .finish()
+            ObjectStore::new(builder).unwrap().layer(mock_layer.clone())
         } else {
-            ObjectStore::new(builder).unwrap().finish()
+            ObjectStore::new(builder).unwrap()
         };
         ObjectStoreManager::new("default", object_store)
     }
 
     pub(crate) fn create_in_memory_object_store_manager(&self) -> ObjectStoreManager {
         let builder = object_store::services::Memory::default();
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         ObjectStoreManager::new("memory", object_store)
     }
 
@@ -641,11 +638,8 @@ impl TestEnv {
             ObjectStore::new(builder.root(&manifest_dir))
                 .unwrap()
                 .layer(mock_layer.clone())
-                .finish()
         } else {
-            ObjectStore::new(builder.root(&manifest_dir))
-                .unwrap()
-                .finish()
+            ObjectStore::new(builder.root(&manifest_dir)).unwrap()
         };
 
         // The "manifest_dir" here should be the relative path from the `object_store`'s root.

@@ -436,7 +436,7 @@ mod tests {
     async fn test_plan_for_sst() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let mut predicates = BTreeMap::new();
@@ -468,7 +468,7 @@ mod tests {
     async fn test_plan_for_sst_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let mut predicates = BTreeMap::new();
@@ -502,7 +502,7 @@ mod tests {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_index_applier_apply_invalid_blob_type_")
                 .await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_id = RegionFileId::new(0.into(), FileId::random());
         let index_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();

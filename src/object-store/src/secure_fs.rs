@@ -23,7 +23,8 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirEntry, OpenOptions, ReadDir};
 use opendal::raw::*;
 use opendal::{
-    Buffer, Capability, EntryMode, Error, ErrorKind, Metadata, Operator, OperatorBuilder, Result,
+    Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, OperationContext,
+    Operator, Result,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -102,7 +103,10 @@ impl SecureFsRoot {
 
     /// Builds an OpenDAL operator confined to this root.
     pub fn build_operator(&self) -> Operator {
-        OperatorBuilder::new(SecureFsBackend::new(self.clone())).finish()
+        Operator::from_parts(
+            OperationContext::default(),
+            Arc::new(SecureFsBackend::new(self.clone())) as Servicer,
+        )
     }
 }
 
@@ -163,48 +167,57 @@ fn metadata_from_fs(metadata: cap_std::fs::Metadata) -> Result<Metadata> {
 #[derive(Clone, Debug)]
 struct SecureFsBackend {
     root: SecureFsRoot,
-    info: Arc<AccessorInfo>,
+    info: ServiceInfo,
+    capability: Capability,
 }
 
 impl SecureFsBackend {
     fn new(root: SecureFsRoot) -> Self {
-        let info = AccessorInfo::default();
-        info.set_scheme("fs")
-            .set_root(&root.path().to_string_lossy())
-            .set_native_capability(Capability {
-                stat: true,
-                read: true,
-                write: true,
-                write_can_empty: true,
-                write_can_append: true,
-                write_can_multi: true,
-                write_with_if_not_exists: true,
-                create_dir: true,
-                delete: true,
-                delete_with_recursive: true,
-                list: true,
-                shared: true,
-                ..Default::default()
-            });
+        let info = ServiceInfo::new("fs", root.path().to_string_lossy(), "");
+        let capability = Capability {
+            stat: true,
+            read: true,
+            write: true,
+            write_can_empty: true,
+            write_can_append: true,
+            write_can_multi: true,
+            write_with_if_not_exists: true,
+            create_dir: true,
+            delete: true,
+            delete_with_recursive: true,
+            list: true,
+            shared: true,
+            ..Default::default()
+        };
         Self {
             root,
-            info: info.into(),
+            info,
+            capability,
         }
     }
 }
 
-impl Access for SecureFsBackend {
-    type Reader = SecureFsReader;
+impl Service for SecureFsBackend {
+    type Reader = oio::StreamReader<SecureFsReader>;
     type Writer = SecureFsWriter;
-    type Lister = Option<SecureFsLister>;
+    type Lister = SecureFsLister;
     type Deleter = oio::OneShotDeleter<SecureFsDeleter>;
     type Copier = ();
 
-    fn info(&self) -> Arc<AccessorInfo> {
+    fn info(&self) -> ServiceInfo {
         self.info.clone()
     }
 
-    async fn create_dir(&self, path: &str, _: OpCreateDir) -> Result<RpCreateDir> {
+    fn capability(&self) -> Capability {
+        self.capability
+    }
+
+    async fn create_dir(
+        &self,
+        _: &OperationContext,
+        path: &str,
+        _: OpCreateDir,
+    ) -> Result<RpCreateDir> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
         common_runtime::spawn_blocking_global(move || root.dir.create_dir_all(path))
@@ -214,7 +227,7 @@ impl Access for SecureFsBackend {
         Ok(RpCreateDir::default())
     }
 
-    async fn stat(&self, path: &str, _: OpStat) -> Result<RpStat> {
+    async fn stat(&self, _: &OperationContext, path: &str, _: OpStat) -> Result<RpStat> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let root = self.root.clone();
         let metadata = common_runtime::spawn_blocking_global(move || {
@@ -230,139 +243,118 @@ impl Access for SecureFsBackend {
         Ok(RpStat::new(metadata_from_fs(metadata)?))
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+    fn read(&self, _: &OperationContext, path: &str, _: OpRead) -> Result<Self::Reader> {
         let path = backend_path(path).map_err(new_std_io_error)?;
-        let root = self.root.clone();
-        let file = common_runtime::spawn_blocking_global(move || root.dir.open(path))
-            .await
-            .map_err(new_task_join_error)?
-            .map_err(new_std_io_error)?;
-        let mut file = tokio::fs::File::from_std(file.into_std());
-        if args.range().offset() != 0 {
-            file.seek(io::SeekFrom::Start(args.range().offset()))
-                .await
-                .map_err(new_std_io_error)?;
-        }
-        Ok((
-            RpRead::default(),
-            SecureFsReader {
-                file,
-                remaining: args.range().size().unwrap_or(u64::MAX),
-            },
-        ))
+        Ok(oio::StreamReader::new(SecureFsReader {
+            root: self.root.clone(),
+            path,
+        }))
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    fn write(&self, _: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         let path = backend_path(path).map_err(new_std_io_error)?;
-        let root = self.root.clone();
-        let if_not_exists = args.if_not_exists();
-        let file = common_runtime::spawn_blocking_global(move || {
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                root.dir.create_dir_all(parent).map_err(new_std_io_error)?;
-            }
-
-            let mut options = OpenOptions::new();
-            options.write(true);
-            if args.if_not_exists() {
-                options.create_new(true);
-            } else {
-                options.create(true);
-            }
-            if args.append() {
-                options.append(true);
-            } else {
-                options.truncate(true);
-            }
-            root.dir
-                .open_with(path, &options)
-                .map_err(|error| parse_write_error(error, if_not_exists))
+        Ok(SecureFsWriter {
+            root: self.root.clone(),
+            path,
+            args,
+            file: None,
         })
-        .await
-        .map_err(new_task_join_error)??;
-
-        Ok((
-            RpWrite::default(),
-            SecureFsWriter {
-                file: tokio::fs::File::from_std(file.into_std()),
-            },
-        ))
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        Ok((
-            RpDelete::default(),
-            oio::OneShotDeleter::new(SecureFsDeleter {
-                root: self.root.clone(),
-            }),
-        ))
+    fn delete(&self, _: &OperationContext) -> Result<Self::Deleter> {
+        Ok(oio::OneShotDeleter::new(SecureFsDeleter {
+            root: self.root.clone(),
+        }))
     }
 
-    async fn list(&self, path: &str, _: OpList) -> Result<(RpList, Self::Lister)> {
+    fn list(&self, _: &OperationContext, path: &str, _: OpList) -> Result<Self::Lister> {
         let path = backend_path(path).map_err(new_std_io_error)?;
         let display_prefix = if path.as_os_str().is_empty() {
             String::new()
         } else {
             format!("{}/", path.to_string_lossy().replace('\\', "/"))
         };
-        let root = self.root.clone();
-        let read_dir = common_runtime::spawn_blocking_global(move || {
-            let result = (|| {
-                let dir = if path.as_os_str().is_empty() {
-                    root.dir.open_dir(".")?
-                } else {
-                    root.dir.open_dir(&path)?
-                };
-                dir.entries()
-            })();
-
-            match result {
-                Ok(read_dir) => Ok(Some(read_dir)),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                    ) =>
-                {
-                    Ok(None)
-                }
-                Err(error) => Err(error),
-            }
+        Ok(SecureFsLister {
+            root: self.root.clone(),
+            path,
+            display_prefix,
+            read_dir: None,
+            entries: vec![].into_iter(),
+            seeded: false,
+            done: false,
         })
-        .await
-        .map_err(new_task_join_error)?
-        .map_err(new_std_io_error)?;
+    }
 
-        let Some(read_dir) = read_dir else {
-            return Ok((RpList::default(), None));
-        };
-        let current_path = oio::Entry::new(
-            if display_prefix.is_empty() {
-                "/"
-            } else {
-                &display_prefix
-            },
-            Metadata::new(EntryMode::DIR),
-        );
-        Ok((
-            RpList::default(),
-            Some(SecureFsLister {
-                read_dir: Arc::new(Mutex::new(read_dir)),
-                display_prefix,
-                entries: vec![current_path].into_iter(),
-                done: false,
-            }),
+    fn copy(
+        &self,
+        _: &OperationContext,
+        _: &str,
+        _: &str,
+        _: OpCopy,
+        _: OpCopier,
+    ) -> Result<Self::Copier> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "operation is not supported",
+        ))
+    }
+
+    async fn rename(
+        &self,
+        _: &OperationContext,
+        _: &str,
+        _: &str,
+        _: OpRename,
+    ) -> Result<RpRename> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "operation is not supported",
+        ))
+    }
+
+    async fn presign(&self, _: &OperationContext, _: &str, _: OpPresign) -> Result<RpPresign> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "operation is not supported",
         ))
     }
 }
 
 struct SecureFsReader {
+    root: SecureFsRoot,
+    path: PathBuf,
+}
+
+impl oio::StreamRead for SecureFsReader {
+    async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        let path = self.path.clone();
+        let root = self.root.clone();
+        let file = common_runtime::spawn_blocking_global(move || root.dir.open(path))
+            .await
+            .map_err(new_task_join_error)?
+            .map_err(new_std_io_error)?;
+        let mut file = tokio::fs::File::from_std(file.into_std());
+        if range.offset() != 0 {
+            file.seek(io::SeekFrom::Start(range.offset()))
+                .await
+                .map_err(new_std_io_error)?;
+        }
+        Ok((
+            RpRead::default(),
+            Box::new(SecureFsReadStream {
+                file,
+                remaining: range.size().unwrap_or(u64::MAX),
+            }),
+        ))
+    }
+}
+
+struct SecureFsReadStream {
     file: tokio::fs::File,
     remaining: u64,
 }
 
-impl oio::Read for SecureFsReader {
+impl oio::ReadStream for SecureFsReadStream {
     async fn read(&mut self) -> Result<Buffer> {
         if self.remaining == 0 {
             return Ok(Buffer::new());
@@ -382,21 +374,65 @@ impl oio::Read for SecureFsReader {
 }
 
 struct SecureFsWriter {
-    file: tokio::fs::File,
+    root: SecureFsRoot,
+    path: PathBuf,
+    args: OpWrite,
+    file: Option<tokio::fs::File>,
+}
+
+impl SecureFsWriter {
+    async fn ensure_file(&mut self) -> Result<&mut tokio::fs::File> {
+        if self.file.is_none() {
+            let path = self.path.clone();
+            let root = self.root.clone();
+            let if_not_exists = self.args.if_not_exists();
+            let append = self.args.append();
+            let file = common_runtime::spawn_blocking_global(move || {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    root.dir.create_dir_all(parent).map_err(new_std_io_error)?;
+                }
+
+                let mut options = OpenOptions::new();
+                options.write(true);
+                if if_not_exists {
+                    options.create_new(true);
+                } else {
+                    options.create(true);
+                }
+                if append {
+                    options.append(true);
+                } else {
+                    options.truncate(true);
+                }
+                root.dir
+                    .open_with(path, &options)
+                    .map_err(|error| parse_write_error(error, if_not_exists))
+            })
+            .await
+            .map_err(new_task_join_error)??;
+
+            self.file = Some(tokio::fs::File::from_std(file.into_std()));
+        }
+        Ok(self.file.as_mut().expect("file must be initialized"))
+    }
 }
 
 impl oio::Write for SecureFsWriter {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
-        self.file
+        self.ensure_file()
+            .await?
             .write_all(&buffer.to_bytes())
             .await
             .map_err(new_std_io_error)
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.file.flush().await.map_err(new_std_io_error)?;
-        self.file.sync_all().await.map_err(new_std_io_error)?;
-        let metadata = self.file.metadata().await.map_err(new_std_io_error)?;
+        let file = self.ensure_file().await?;
+        file.flush().await.map_err(new_std_io_error)?;
+        file.sync_all().await.map_err(new_std_io_error)?;
+        let metadata = file.metadata().await.map_err(new_std_io_error)?;
         Ok(Metadata::new(EntryMode::FILE)
             .with_content_length(metadata.len())
             .with_last_modified(Timestamp::try_from(
@@ -413,14 +449,65 @@ impl oio::Write for SecureFsWriter {
 }
 
 struct SecureFsLister {
-    read_dir: Arc<Mutex<ReadDir>>,
+    root: SecureFsRoot,
+    path: PathBuf,
     display_prefix: String,
+    read_dir: Option<Arc<Mutex<ReadDir>>>,
     entries: IntoIter<oio::Entry>,
+    seeded: bool,
     done: bool,
 }
 
 impl oio::List for SecureFsLister {
     async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        if !self.seeded {
+            self.seeded = true;
+            let path = self.path.clone();
+            let root = self.root.clone();
+            let display_prefix = self.display_prefix.clone();
+            let read_dir = common_runtime::spawn_blocking_global(move || {
+                let result = (|| {
+                    let dir = if path.as_os_str().is_empty() {
+                        root.dir.open_dir(".")?
+                    } else {
+                        root.dir.open_dir(&path)?
+                    };
+                    dir.entries()
+                })();
+
+                match result {
+                    Ok(read_dir) => Ok(Some(read_dir)),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+            .map_err(new_task_join_error)?
+            .map_err(new_std_io_error)?;
+
+            let Some(read_dir) = read_dir else {
+                self.done = true;
+                return Ok(None);
+            };
+            self.read_dir = Some(Arc::new(Mutex::new(read_dir)));
+            let current_path = oio::Entry::new(
+                if display_prefix.is_empty() {
+                    "/"
+                } else {
+                    &display_prefix
+                },
+                Metadata::new(EntryMode::DIR),
+            );
+            self.entries = vec![current_path].into_iter();
+        }
+
         if let Some(entry) = self.entries.next() {
             return Ok(Some(entry));
         }
@@ -428,7 +515,10 @@ impl oio::List for SecureFsLister {
             return Ok(None);
         }
 
-        let read_dir = self.read_dir.clone();
+        let Some(read_dir) = self.read_dir.clone() else {
+            self.done = true;
+            return Ok(None);
+        };
         let display_prefix = self.display_prefix.clone();
         let (entries, done) = common_runtime::spawn_blocking_global(move || {
             let mut read_dir = read_dir
@@ -539,9 +629,9 @@ impl oio::OneShotDelete for SecureFsDeleter {
 mod tests {
     use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
-    use opendal::ErrorKind;
     use opendal::raw::oio::List;
-    use opendal::raw::{Access, OpList};
+    use opendal::raw::{OpList, Service};
+    use opendal::{ErrorKind, OperationContext};
 
     use super::{LIST_BATCH_SIZE, SecureFsBackend, SecureFsRoot, read_list_entry};
 
@@ -554,10 +644,8 @@ mod tests {
 
         let root = SecureFsRoot::open(temp_dir.path()).unwrap();
         let backend = SecureFsBackend::new(root);
-        let (_, lister) = backend.list("/", OpList::new()).await.unwrap();
-        let mut lister = lister.unwrap();
-
-        assert_eq!(1, lister.entries.len());
+        let ctx = OperationContext::default();
+        let mut lister = backend.list(&ctx, "/", OpList::new()).unwrap();
 
         let mut paths = Vec::new();
         while let Some(entry) = lister.next().await.unwrap() {

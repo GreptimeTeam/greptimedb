@@ -2475,7 +2475,7 @@ mod tests {
         let temp_dir = create_temp_dir("");
         let path_str = temp_dir.path().display().to_string();
         let fs_builder = Fs::default().root(&path_str);
-        let object_store = ObjectStore::new(fs_builder).unwrap().finish();
+        let object_store = ObjectStore::new(fs_builder).unwrap();
 
         let index_aux_path = temp_dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)

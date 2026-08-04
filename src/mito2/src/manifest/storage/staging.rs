@@ -258,7 +258,7 @@ mod tests {
 
         let tmp_dir = create_temp_dir("test_staging_storage_clear");
         let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let manifest_path = "/data/table/region_0001/manifest/";
         let mut storage = StagingStorage::new(
             manifest_path.to_string(),

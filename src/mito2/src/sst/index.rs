@@ -1640,7 +1640,7 @@ mod tests {
     }
 
     fn mock_object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     async fn mock_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {

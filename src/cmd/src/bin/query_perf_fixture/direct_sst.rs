@@ -440,8 +440,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
     fs::create_dir_all(&obj_store_dir).expect("failed to create fixture object-store directory");
     fs::create_dir_all(&manifest_dir).expect("failed to create fixture manifest directory");
     let ostorage = ObjectStore::new(FsBuilder::default().root(&obj_store_dir.to_string_lossy()))
-        .expect("failed to create filesystem object store for fixture output")
-        .finish();
+        .expect("failed to create filesystem object store for fixture output");
     let metadata: RegionMetadataRef = Arc::new(build_region_metadata(table, region_id));
     let mut files = HashMap::with_capacity(scenario.layout.sst_count);
     let mut next_file_index = 1;

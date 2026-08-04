@@ -471,7 +471,7 @@ mod tests {
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     fn mock_object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {

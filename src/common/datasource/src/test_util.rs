@@ -50,14 +50,14 @@ pub fn format_schema(schema: Schema) -> Vec<String> {
 
 pub fn test_store(root: &str) -> ObjectStore {
     let builder = Fs::default();
-    ObjectStore::new(builder.root(root)).unwrap().finish()
+    ObjectStore::new(builder.root(root)).unwrap()
 }
 
 pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
     let dir = create_temp_dir(root);
 
     let builder = Fs::default();
-    (ObjectStore::new(builder.root("/")).unwrap().finish(), dir)
+    (ObjectStore::new(builder.root("/")).unwrap(), dir)
 }
 
 pub fn test_basic_schema() -> SchemaRef {
