@@ -399,7 +399,7 @@ mod tests {
         let temp_path = temp_dir.path();
         let data_path = temp_path.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let manager = MetadataSnapshotManager::new(kv_backend.clone(), object_store);
         (temp_dir, kv_backend, manager)
     }

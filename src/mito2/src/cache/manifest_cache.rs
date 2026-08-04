@@ -481,7 +481,7 @@ mod tests {
 
     fn new_fs_store(path: &str) -> ObjectStore {
         let builder = Fs::default().root(path);
-        ObjectStore::new(builder).unwrap().finish()
+        ObjectStore::new(builder).unwrap()
     }
 
     #[tokio::test]

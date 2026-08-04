@@ -182,7 +182,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
@@ -200,7 +200,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
@@ -217,7 +217,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
@@ -231,7 +231,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
+            let store = ObjectStore::new(builder).unwrap();
             (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
         }
         StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),

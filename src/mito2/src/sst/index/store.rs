@@ -358,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn test_instrumented_store_read_write() {
         let instrumented_store =
-            InstrumentedStore::new(ObjectStore::new(Memory::default()).unwrap().finish());
+            InstrumentedStore::new(ObjectStore::new(Memory::default()).unwrap());
 
         let read_byte_count = IntCounter::new("read_byte_count", "read_byte_count").unwrap();
         let read_count = IntCounter::new("read_count", "read_count").unwrap();

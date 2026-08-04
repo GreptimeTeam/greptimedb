@@ -66,7 +66,7 @@ impl SchedulerEnv {
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let access_layer = Arc::new(AccessLayer::new(
             "",
             PathType::Bare,
