@@ -70,7 +70,7 @@ use sql::statements::{
 };
 use sql::util::extract_tables_from_query;
 use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
-use table::requests::{FILE_TABLE_META_KEY, TableOptions};
+use table::requests::{FILE_TABLE_META_KEY, SKIP_WAL_KEY, TableOptions};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
 pub use trigger::to_create_trigger_task_expr;
@@ -215,12 +215,15 @@ pub fn create_to_expr(
             .context(ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(
-        &TableOptions::try_from_iter(create.options.to_str_map())
-            .context(UnrecognizedTableOptionSnafu)?,
+    let raw_table_options = create.options.to_str_map();
+    let mut table_options = HashMap::from(
+        &TableOptions::try_from_iter(&raw_table_options).context(UnrecognizedTableOptionSnafu)?,
     );
+    // Keep an explicitly specified false so it can override a schema-level true.
+    if let Some(skip_wal) = raw_table_options.get(SKIP_WAL_KEY) {
+        table_options.insert(SKIP_WAL_KEY.to_string(), skip_wal.to_string());
+    }
 
-    let mut table_options = table_options;
     if table_options.contains_key(COMPACTION_TYPE) {
         table_options.insert(COMPACTION_OVERRIDE.to_string(), "true".to_string());
     }
@@ -1494,6 +1497,21 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!(
             "1.0MiB",
             expr.table_options.get("write_buffer_size").unwrap()
+        );
+
+        let sql = "CREATE TABLE monitor (ts TIMESTAMP TIME INDEX) WITH(skip_wal='false');";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            Some("false"),
+            expr.table_options.get(SKIP_WAL_KEY).map(String::as_str)
         );
     }
 

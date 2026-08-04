@@ -39,7 +39,8 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -66,6 +67,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
+    let schema_skip_wal = schema_options
+        .as_ref()
+        .and_then(|options| options.extra_options.get(SKIP_WAL_KEY))
+        .is_some_and(|value| value == "true");
+    if table_opts.skip_wal || schema_skip_wal {
+        options.insert(SKIP_WAL_KEY.to_string(), table_opts.skip_wal.to_string());
+    }
 
     for (k, v) in table_opts
         .extra_options
@@ -373,6 +381,7 @@ mod tests {
 
         let mut options = table::requests::TableOptions {
             ttl: Some(Duration::from_secs(30).into()),
+            skip_wal: true,
             ..Default::default()
         };
 
@@ -424,9 +433,27 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
 ENGINE=mito
 WITH(
   'compaction.type' = 'twcs',
+  skip_wal = 'true',
   ttl = '30s'
 )"#,
             sql
+        );
+
+        let mut table_meta = info.meta.clone();
+        table_meta.options.skip_wal = false;
+        assert!(
+            create_sql_options(&table_meta, None)
+                .get(SKIP_WAL_KEY)
+                .is_none()
+        );
+
+        let mut schema_options = SchemaOptions::default();
+        schema_options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, Some(schema_options)).get(SKIP_WAL_KEY)
         );
     }
 
