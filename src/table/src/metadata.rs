@@ -403,9 +403,7 @@ impl TableMeta {
                 }
                 SetRegionOption::SkipWal => {
                     new_options.skip_wal = true;
-                    new_options
-                        .extra_options
-                        .insert(SKIP_WAL_KEY.to_string(), true.to_string());
+                    new_options.extra_options.remove(SKIP_WAL_KEY);
                 }
             }
         }
@@ -1694,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_skip_wal_updates_typed_and_extra_options() {
+    fn test_set_skip_wal_updates_typed_option() {
         let meta = TableMetaBuilder::empty()
             .schema(Arc::new(new_test_schema()))
             .primary_key_indices(vec![0])
@@ -1713,14 +1711,7 @@ mod tests {
             .unwrap();
 
         assert!(new_meta.options.skip_wal);
-        assert_eq!(
-            Some("true"),
-            new_meta
-                .options
-                .extra_options
-                .get(SKIP_WAL_KEY)
-                .map(String::as_str)
-        );
+        assert!(!new_meta.options.extra_options.contains_key(SKIP_WAL_KEY));
     }
 
     #[test]

@@ -169,21 +169,42 @@ impl AlterTableExecutor {
         node_manager: &NodeManagerRef,
         region_routes: &[RegionRoute],
         kind: Option<alter_request::Kind>,
-        alter_follower_regions: bool,
+    ) -> Vec<Result<RegionResponse>> {
+        self.dispatch_alter_region_requests(node_manager, region_routes, kind, false)
+            .await
+    }
+
+    /// Alters all replicas for the irreversible skip-WAL flow.
+    pub(crate) async fn on_alter_skip_wal_regions(
+        &self,
+        node_manager: &NodeManagerRef,
+        region_routes: &[RegionRoute],
+        kind: Option<alter_request::Kind>,
+    ) -> Vec<Result<RegionResponse>> {
+        self.dispatch_alter_region_requests(node_manager, region_routes, kind, true)
+            .await
+    }
+
+    async fn dispatch_alter_region_requests(
+        &self,
+        node_manager: &NodeManagerRef,
+        region_routes: &[RegionRoute],
+        kind: Option<alter_request::Kind>,
+        include_followers: bool,
     ) -> Vec<Result<RegionResponse>> {
         let region_distribution = region_distribution(region_routes);
         let mut peers = find_leaders(region_routes)
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
-        if alter_follower_regions {
+        if include_followers {
             peers.extend(find_followers(region_routes).into_iter().map(|p| (p.id, p)));
         }
         let total_num_region = region_distribution
             .values()
             .map(|r| {
                 r.leader_regions.len()
-                    + if alter_follower_regions {
+                    + if include_followers {
                         r.follower_regions.len()
                     } else {
                         0
@@ -193,7 +214,7 @@ impl AlterTableExecutor {
         let mut alter_region_tasks = Vec::with_capacity(total_num_region);
         for (datanode_id, region_role_set) in region_distribution {
             let mut region_ids = region_role_set.leader_regions;
-            if alter_follower_regions {
+            if include_followers {
                 region_ids.extend(region_role_set.follower_regions);
             }
             if region_ids.is_empty() {

@@ -864,7 +864,7 @@ async fn test_skip_wal_updates_metadata_before_all_replicas() {
     procedure.on_prepare().await.unwrap();
     let persisted: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     assert_eq!("UpdateMetadata", persisted["state"]);
-    assert_eq!(true, persisted["alter_regions_after_metadata"]);
+    assert!(persisted.get("alter_regions_after_metadata").is_none());
 
     procedure.on_update_metadata().await.unwrap();
     // A crash can happen after the metadata transaction commits but before

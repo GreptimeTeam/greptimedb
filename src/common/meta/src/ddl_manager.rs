@@ -78,6 +78,8 @@ use crate::rpc::ddl::{
     TruncateTableTask, UndropTableTask,
 };
 
+const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
+
 /// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
 pub trait DdlManagerConfigurator<C>: Send + Sync {
@@ -411,7 +413,10 @@ impl DdlManager {
             .as_ref()
             .is_some_and(only_enables_skip_wal);
 
+        let mut route_change_retries = 0;
         loop {
+            // Hold the same physical region locks as migration while validating that
+            // this route snapshot is still the one the procedure will mutate.
             let region_locks = if lock_regions {
                 let (_, route) = self
                     .table_metadata_manager()
@@ -442,6 +447,16 @@ impl DdlManager {
                 .as_ref()
                 .is_some_and(|output| output.is::<RegionRouteChanged>())
             {
+                if route_change_retries == MAX_REGION_ROUTE_CHANGE_RETRIES {
+                    let source = error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Region route kept changing while altering table {table_id}"
+                        ),
+                    }
+                    .build();
+                    return Err(error::Error::retry_later(source));
+                }
+                route_change_retries += 1;
                 continue;
             }
             return Ok(result);

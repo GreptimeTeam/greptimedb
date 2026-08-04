@@ -209,7 +209,7 @@ impl TableOptions {
 
         options.extra_options = HashMap::from_iter(
             kvs.into_iter()
-                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY),
+                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != SKIP_WAL_KEY),
         );
 
         Ok(options)
@@ -244,7 +244,7 @@ impl fmt::Display for TableOptions {
 
 impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
-        let mut res = HashMap::with_capacity(2 + opts.extra_options.len());
+        let mut res = HashMap::with_capacity(3 + opts.extra_options.len());
         if let Some(write_buffer_size) = opts.write_buffer_size {
             let _ = res.insert(
                 WRITE_BUFFER_SIZE_KEY.to_string(),
@@ -254,9 +254,13 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
+        if opts.skip_wal {
+            let _ = res.insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        }
         res.extend(
             opts.extra_options
                 .iter()
+                .filter(|(key, _)| key.as_str() != SKIP_WAL_KEY)
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
         res
@@ -555,6 +559,20 @@ mod tests {
             skip_wal: false,
         };
         let serialized_map = HashMap::from(&options);
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
+        assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::new(),
+            skip_wal: true,
+        };
+        let serialized_map = HashMap::from(&options);
+        assert_eq!(
+            Some("true"),
+            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
+        );
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
 

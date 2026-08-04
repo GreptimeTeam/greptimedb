@@ -50,12 +50,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let region = match if only_enables_skip_wal(&request.kind) {
+        let skip_wal_only = only_enables_skip_wal(&request.kind);
+        let (region, is_follower) = match if skip_wal_only {
+            match self.regions.writable_non_staging_region(region_id) {
+                Ok(region) => Ok((region, false)),
+                Err(_) => self
+                    .regions
+                    .follower_region(region_id)
+                    .map(|region| (region, true)),
+            }
+        } else {
             self.regions
                 .writable_non_staging_region(region_id)
-                .or_else(|_| self.regions.follower_region(region_id))
-        } else {
-            self.regions.writable_non_staging_region(region_id)
+                .map(|region| (region, false))
         } {
             Ok(region) => region,
             Err(e) => {
@@ -65,6 +72,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
+
+        // Followers only accept skip-WAL, which is an in-memory option change and must
+        // never enter the leader path that may flush memtables.
+        if is_follower {
+            let mut options = region.version().options.clone();
+            if !options.skip_wal {
+                info!("Stop writing WAL for follower region: {}", region_id);
+                options.skip_wal = true;
+                region.version_control.alter_options(options);
+            }
+            sender.send(Ok(0));
+            return;
+        }
 
         // Gets the version before alter.
         let version = region.version();

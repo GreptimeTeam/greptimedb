@@ -194,13 +194,8 @@ impl AlterTableProcedure {
             }
             self.data.region_distribution =
                 Some(region_distribution(&physical_table_route.region_routes));
-            self.data.alter_regions_after_metadata = true;
-            self.data.state = AlterTableState::UpdateMetadata;
-        } else if is_metadata_only_alter(alter_kind) {
-            self.data.state = AlterTableState::UpdateMetadata;
-        } else {
-            self.data.state = AlterTableState::SubmitAlterRegionRequests;
-        };
+        }
+        self.data.state = self.data.flow().after_prepare();
         Ok(Status::executing(true))
     }
 
@@ -248,15 +243,24 @@ impl AlterTableProcedure {
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
         // Puts the poison before submitting alter region requests to datanodes.
         self.put_poison(ctx_provider, procedure_id).await?;
-        let results = self
-            .executor
-            .on_alter_regions(
-                &self.context.node_manager,
-                &physical_table_route.region_routes,
-                alter_kind,
-                self.data.alter_regions_after_metadata,
-            )
-            .await;
+        let flow = self.data.flow();
+        let results = if flow == AlterTableFlow::MetadataFirst {
+            self.executor
+                .on_alter_skip_wal_regions(
+                    &self.context.node_manager,
+                    &physical_table_route.region_routes,
+                    alter_kind,
+                )
+                .await
+        } else {
+            self.executor
+                .on_alter_regions(
+                    &self.context.node_manager,
+                    &physical_table_route.region_routes,
+                    alter_kind,
+                )
+                .await
+        };
 
         match handle_multiple_results(results) {
             MultipleResults::PartialRetryable(error) => {
@@ -264,7 +268,7 @@ impl AlterTableProcedure {
                 Err(error)
             }
             MultipleResults::PartialNonRetryable(error) => {
-                if self.data.alter_regions_after_metadata {
+                if flow == AlterTableFlow::MetadataFirst {
                     return Err(BoxedError::new(error)).context(RetryLaterSnafu {
                         clean_poisons: true,
                     });
@@ -284,7 +288,7 @@ impl AlterTableProcedure {
                 })
             }
             MultipleResults::Ok(results) => {
-                if !self.data.alter_regions_after_metadata {
+                if flow != AlterTableFlow::MetadataFirst {
                     self.submit_sync_region_requests(&results, &physical_table_route.region_routes)
                         .await;
                 }
@@ -292,7 +296,7 @@ impl AlterTableProcedure {
                 Ok(Status::executing_with_clean_poisons(true))
             }
             MultipleResults::AllNonRetryable(error) => {
-                if self.data.alter_regions_after_metadata {
+                if flow == AlterTableFlow::MetadataFirst {
                     return Err(BoxedError::new(error)).context(RetryLaterSnafu {
                         clean_poisons: true,
                     });
@@ -319,11 +323,7 @@ impl AlterTableProcedure {
                 "altering table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged"
             );
         }
-        self.data.state = if self.data.alter_regions_after_metadata {
-            AlterTableState::InvalidateTableCache
-        } else {
-            AlterTableState::UpdateMetadata
-        };
+        self.data.state = self.data.flow().after_regions();
         Ok(())
     }
 
@@ -355,7 +355,8 @@ impl AlterTableProcedure {
         let table_info_value = self.data.table_info_value.as_ref().unwrap();
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
-        let metadata_only_alter = is_metadata_only_alter(alter_kind);
+        let flow = self.data.flow();
+        let metadata_only_alter = flow == AlterTableFlow::MetadataOnly;
 
         // Gets the table info from the cache or builds it.
         let  new_info = match &self.new_table_info {
@@ -385,11 +386,7 @@ impl AlterTableProcedure {
         info!(
             "Updated table metadata for table {table_ref}, table_id: {table_id}, kind: {alter_kind:?}"
         );
-        self.data.state = if self.data.alter_regions_after_metadata {
-            AlterTableState::SubmitAlterRegionRequests
-        } else {
-            AlterTableState::InvalidateTableCache
-        };
+        self.data.state = flow.after_metadata();
         Ok(Status::executing(true))
     }
 
@@ -465,6 +462,46 @@ fn is_metadata_only_alter(alter_kind: &Kind) -> bool {
             keys.len() == 1 && keys[0].as_str() == REPARTITION_COLUMN_HINT_KEY
         }
         _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlterTableFlow {
+    RegionFirst,
+    MetadataFirst,
+    MetadataOnly,
+}
+
+impl AlterTableFlow {
+    fn from_kind(kind: &Kind) -> Self {
+        if only_enables_skip_wal(kind) {
+            Self::MetadataFirst
+        } else if is_metadata_only_alter(kind) {
+            Self::MetadataOnly
+        } else {
+            Self::RegionFirst
+        }
+    }
+
+    fn after_prepare(self) -> AlterTableState {
+        match self {
+            Self::RegionFirst => AlterTableState::SubmitAlterRegionRequests,
+            Self::MetadataFirst | Self::MetadataOnly => AlterTableState::UpdateMetadata,
+        }
+    }
+
+    fn after_regions(self) -> AlterTableState {
+        match self {
+            Self::RegionFirst => AlterTableState::UpdateMetadata,
+            Self::MetadataFirst | Self::MetadataOnly => AlterTableState::InvalidateTableCache,
+        }
+    }
+
+    fn after_metadata(self) -> AlterTableState {
+        match self {
+            Self::MetadataFirst => AlterTableState::SubmitAlterRegionRequests,
+            Self::RegionFirst | Self::MetadataOnly => AlterTableState::InvalidateTableCache,
+        }
     }
 }
 
@@ -562,9 +599,6 @@ pub struct AlterTableData {
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
     /// Region distribution for table in case we need to update region options.
     region_distribution: Option<RegionDistribution>,
-    /// Whether this irreversible alter persists metadata before mutating regions.
-    #[serde(default)]
-    alter_regions_after_metadata: bool,
     /// Region locks held by irreversible region-option alters.
     #[serde(default)]
     region_locks: Vec<RegionId>,
@@ -579,7 +613,6 @@ impl AlterTableData {
             column_metadatas: vec![],
             table_info_value: None,
             region_distribution: None,
-            alter_regions_after_metadata: false,
             region_locks,
         }
     }
@@ -596,6 +629,11 @@ impl AlterTableData {
         self.table_info_value
             .as_ref()
             .map(|value| &value.table_info)
+    }
+
+    fn flow(&self) -> AlterTableFlow {
+        // Safety: Checked in `AlterTableProcedure::new`.
+        AlterTableFlow::from_kind(self.task.alter_table.kind.as_ref().unwrap())
     }
 
     #[cfg(test)]
