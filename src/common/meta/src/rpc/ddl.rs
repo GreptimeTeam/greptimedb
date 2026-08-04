@@ -49,6 +49,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{OptionExt, ResultExt};
+use strum::{AsRefStr, EnumString};
 use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
@@ -66,6 +67,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+/// Reserved query-context extension key for the trigger reason supplied by frontend.
+pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
 
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
@@ -334,6 +337,7 @@ impl TryFrom<Task> for DdlTask {
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
     pub query_context: QueryContext,
+    pub trigger_context: TriggerContext,
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
@@ -344,6 +348,7 @@ impl SubmitDdlTaskRequest {
     pub fn new(query_context: QueryContext, task: DdlTask) -> Self {
         Self {
             query_context,
+            trigger_context: TriggerContext::default(),
             wait: Self::default_wait(),
             timeout: Self::default_timeout(),
             task,
@@ -375,6 +380,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let SubmitDdlTaskRequest {
             mut query_context,
+            trigger_context: _,
             wait,
             timeout,
             task,
@@ -1663,6 +1669,69 @@ pub struct QueryContext {
     /// Maps region id -> minimal SST sequence allowed for that region.
     #[serde(default)]
     pub sst_min_sequences: HashMap<u64, u64>,
+}
+
+/// The stable context recorded for a procedure trigger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerContext {
+    pub reason: TriggerReason,
+    pub protocol: String,
+    #[serde(default)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+impl TriggerContext {
+    /// Creates a trigger context with no additional extensions.
+    pub fn new(reason: TriggerReason, protocol: impl Into<String>) -> Self {
+        Self {
+            reason,
+            protocol: protocol.into(),
+            extensions: Default::default(),
+        }
+    }
+
+    /// Builds a trigger context from frontend query context metadata.
+    pub fn from_query_context(
+        query_context: &mut QueryContext,
+        protocol: impl Into<String>,
+    ) -> Self {
+        let reason = query_context
+            .extensions
+            .remove(TRIGGER_REASON_EXTENSION_KEY)
+            .map(|reason| TriggerReason::from_extension(&reason))
+            .unwrap_or_default();
+        Self::new(reason, protocol)
+    }
+}
+
+impl Default for TriggerContext {
+    fn default() -> Self {
+        Self::new(TriggerReason::default(), "unknown")
+    }
+}
+
+/// The stable classification of a procedure trigger.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, AsRefStr, EnumString,
+)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum TriggerReason {
+    #[default]
+    Unknown,
+    Manual,
+    AutoCreate,
+    AutoAlter,
+    AutoRepartition,
+    AutoRebalance,
+    RegionFailover,
+    ScheduledGc,
+}
+
+impl TriggerReason {
+    pub fn from_extension(value: &str) -> Self {
+        value.parse().unwrap_or_default()
+    }
 }
 
 impl QueryContext {

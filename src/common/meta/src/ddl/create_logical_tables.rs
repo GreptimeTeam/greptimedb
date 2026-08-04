@@ -48,7 +48,7 @@ use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::ddl::{CreateTableTask, TriggerContext};
 use crate::rpc::router::{RegionRoute, find_leaders};
 
 pub struct CreateLogicalTablesProcedure {
@@ -64,6 +64,15 @@ impl CreateLogicalTablesProcedure {
         physical_table_id: TableId,
         context: DdlContext,
     ) -> Self {
+        Self::new_with_trigger_context(tasks, physical_table_id, TriggerContext::default(), context)
+    }
+
+    pub fn new_with_trigger_context(
+        tasks: Vec<CreateTableTask>,
+        physical_table_id: TableId,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateTablesData {
@@ -74,6 +83,7 @@ impl CreateLogicalTablesProcedure {
                 physical_region_numbers: vec![],
                 physical_columns: vec![],
                 physical_partition_columns: vec![],
+                trigger_context,
             },
         }
     }
@@ -275,7 +285,11 @@ impl Procedure for CreateLogicalTablesProcedure {
                     )
                     .with_physical_table_id(self.data.physical_table_id)
                 });
-                TableDdlEvent::create_logical_tables_submitted(locators, self.data.tasks.len())
+                TableDdlEvent::create_logical_tables_submitted(
+                    locators,
+                    self.data.tasks.len(),
+                    self.data.trigger_context.clone(),
+                )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
                 ProcedureState::Done {
@@ -321,6 +335,8 @@ pub struct CreateTablesData {
     physical_region_numbers: Vec<RegionNumber>,
     physical_columns: Vec<ColumnMetadata>,
     physical_partition_columns: Vec<String>,
+    #[serde(default)]
+    trigger_context: TriggerContext,
 }
 
 impl CreateTablesData {

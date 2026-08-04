@@ -20,7 +20,7 @@ use api::v1::{ColumnDataType, Repartition, SemanticType, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
-    TABLE_NAME_COLUMN,
+    TABLE_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, jsonb_value,
 };
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
@@ -52,9 +52,9 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
-use crate::rpc::ddl::{DropTableTask, TruncateTableTask};
-#[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
+use crate::rpc::ddl::{
+    DropTableTask, PurgeDroppedTableTask, TriggerContext, TruncateTableTask, UndropTableTask,
+};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 struct EventCase {
@@ -234,13 +234,14 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "create"),
                 true,
                 "mito2",
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "create_if_not_exists": true,
                 "engine": "mito2",
             }),
-            rows: vec![table_locator_values(Some("create"), None)],
+            rows: vec![submitted_table_locator_values(Some("create"), None)],
         },
         EventCase {
             event_type: TableDdlEventType::CreateLogicalTables,
@@ -252,14 +253,15 @@ fn event_cases() -> Vec<EventCase> {
                         .with_physical_table_id(10),
                 ],
                 2,
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "table_count": 2,
             }),
             rows: vec![
-                logical_locator_values("logical1", None, 10),
-                logical_locator_values("logical2", None, 10),
+                submitted_logical_locator_values("logical1", None, 10),
+                submitted_logical_locator_values("logical2", None, 10),
             ],
         },
         EventCase {
@@ -268,12 +270,13 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "alter")
                     .with_table_id(11),
                 Some("drop_columns"),
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "kind": "drop_columns",
             }),
-            rows: vec![table_locator_values(Some("alter"), Some(11))],
+            rows: vec![submitted_table_locator_values(Some("alter"), Some(11))],
         },
         EventCase {
             event_type: TableDdlEventType::AlterLogicalTables,
@@ -286,6 +289,7 @@ fn event_cases() -> Vec<EventCase> {
                 ],
                 2,
                 ["rename_table", "add_columns", "add_columns"],
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
@@ -293,8 +297,8 @@ fn event_cases() -> Vec<EventCase> {
                 "kinds": ["add_columns", "rename_table"],
             }),
             rows: vec![
-                logical_locator_values("logical1", None, 10),
-                logical_locator_values("logical2", None, 10),
+                submitted_logical_locator_values("logical1", None, 10),
+                submitted_logical_locator_values("logical2", None, 10),
             ],
         },
         EventCase {
@@ -404,7 +408,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "create_if_not_exists": false,
                 "engine": "mito2",
             }),
-            rows: vec![table_locator_values(Some("create"), None)],
+            rows: vec![submitted_table_locator_values(Some("create"), None)],
         },
         ProcedureCase {
             procedure: Box::new(create_logical_tables),
@@ -414,8 +418,8 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "table_count": 2,
             }),
             rows: vec![
-                logical_locator_values("logical1", None, 41),
-                logical_locator_values("logical2", None, 41),
+                submitted_logical_locator_values("logical1", None, 41),
+                submitted_logical_locator_values("logical2", None, 41),
             ],
         },
         ProcedureCase {
@@ -425,7 +429,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "kind": "drop_columns",
             }),
-            rows: vec![table_locator_values(Some("alter"), Some(42))],
+            rows: vec![submitted_table_locator_values(Some("alter"), Some(42))],
         },
         ProcedureCase {
             procedure: Box::new(alter_logical_tables),
@@ -436,8 +440,8 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "kinds": ["add_columns"],
             }),
             rows: vec![
-                logical_locator_values("logical1", None, 43),
-                logical_locator_values("logical2", None, 43),
+                submitted_logical_locator_values("logical1", None, 43),
+                submitted_logical_locator_values("logical2", None, 43),
             ],
         },
         ProcedureCase {
@@ -491,6 +495,7 @@ fn expected_schema(event_type: TableDdlEventType) -> Vec<(&'static str, i32)> {
             ColumnDataType::Uint32 as i32,
         ));
     }
+    schema.push((TRIGGER_CONTEXT_COLUMN.name(), ColumnDataType::Binary as i32));
     schema
 }
 
@@ -503,12 +508,14 @@ fn table_locator_values(table_name: Option<&str>, table_id: Option<u32>) -> Vec<
     } else {
         (Value::default(), Value::default())
     };
-    vec![
+    let mut values = vec![
         catalog_name,
         schema_name,
         table_name.map(string_value).unwrap_or_default(),
         table_id.map(table_id_value).unwrap_or_default(),
-    ]
+    ];
+    values.push(Value::default());
+    values
 }
 
 fn logical_locator_values(
@@ -517,8 +524,30 @@ fn logical_locator_values(
     physical_table_id: u32,
 ) -> Vec<Value> {
     let mut values = table_locator_values(Some(table_name), table_id);
+    let trigger_context = values.pop().unwrap();
     values.push(table_id_value(physical_table_id));
+    values.push(trigger_context);
     values
+}
+
+fn submitted_table_locator_values(table_name: Option<&str>, table_id: Option<u32>) -> Vec<Value> {
+    let mut values = table_locator_values(table_name, table_id);
+    *values.last_mut().unwrap() = trigger_context_value();
+    values
+}
+
+fn submitted_logical_locator_values(
+    table_name: &str,
+    table_id: Option<u32>,
+    physical_table_id: u32,
+) -> Vec<Value> {
+    let mut values = logical_locator_values(table_name, table_id, physical_table_id);
+    *values.last_mut().unwrap() = trigger_context_value();
+    values
+}
+
+fn trigger_context_value() -> Value {
+    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
 }
 
 fn string_value(value: &str) -> Value {

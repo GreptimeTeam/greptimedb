@@ -77,7 +77,7 @@ use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CommentOnTask, CreateDatabaseTask, CreateFlowTask,
     CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TruncateTableTask, UndropTableTask,
+    TriggerContext, TruncateTableTask, UndropTableTask,
 };
 
 const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
@@ -177,6 +177,7 @@ pub enum RepartitionSource {
 
 #[async_trait::async_trait]
 pub trait RepartitionProcedureFactory: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         ddl_ctx: &DdlContext,
@@ -185,6 +186,7 @@ pub trait RepartitionProcedureFactory: Send + Sync {
         source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
+        trigger_context: TriggerContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError>;
 
     fn register_loaders(
@@ -338,6 +340,7 @@ impl DdlManager {
         repartition: Repartition,
         wait: bool,
         timeout: Duration,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -373,6 +376,7 @@ impl DdlManager {
                 source,
                 into_partition_exprs,
                 Some(timeout),
+                trigger_context,
             )
             .context(CreateRepartitionProcedureSnafu)?;
         self.repartition_procedure_factory
@@ -395,6 +399,7 @@ impl DdlManager {
         &self,
         table_id: TableId,
         alter_table_task: AlterTableTask,
+        trigger_context: TriggerContext,
         ddl_options: DdlOptions,
     ) -> Result<(ProcedureId, Option<Output>)> {
         // make alter_table_task mutable so we can call .take() on its field
@@ -415,6 +420,7 @@ impl DdlManager {
                     repartition,
                     ddl_options.wait,
                     ddl_options.timeout,
+                    trigger_context,
                 )
                 .await;
         }
@@ -448,6 +454,7 @@ impl DdlManager {
             let procedure = AlterTableProcedure::new_with_region_locks(
                 table_id,
                 alter_table_task.clone(),
+                trigger_context.clone(),
                 region_ids_to_lock,
                 context,
             )?;
@@ -481,12 +488,14 @@ impl DdlManager {
         &self,
         create_table_task: CreateTableTask,
         query_context: QueryContext,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = CreateTableProcedure::new_with_query_context(
             create_table_task,
             query_context,
+            trigger_context,
             context,
         )?;
 
@@ -516,11 +525,16 @@ impl DdlManager {
         &self,
         create_table_tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            CreateLogicalTablesProcedure::new(create_table_tasks, physical_table_id, context);
+        let procedure = CreateLogicalTablesProcedure::new_with_trigger_context(
+            create_table_tasks,
+            physical_table_id,
+            trigger_context,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -533,11 +547,16 @@ impl DdlManager {
         &self,
         alter_table_tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            AlterLogicalTablesProcedure::new(alter_table_tasks, physical_table_id, context);
+        let procedure = AlterLogicalTablesProcedure::new_with_trigger_context(
+            alter_table_tasks,
+            physical_table_id,
+            trigger_context,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -830,7 +849,13 @@ impl DdlManager {
             debug!("Submitting Ddl task: {:?}", request.task);
             match request.task {
                 CreateTable(create_table_task) => {
-                    handle_create_table_task(self, create_table_task, request.query_context).await
+                    handle_create_table_task(
+                        self,
+                        create_table_task,
+                        request.query_context,
+                        request.trigger_context,
+                    )
+                    .await
                 }
                 DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
                 UndropTable(undrop_table_task) => {
@@ -840,16 +865,32 @@ impl DdlManager {
                     handle_purge_dropped_table_task(self, purge_dropped_table_task).await
                 }
                 AlterTable(alter_table_task) => {
-                    handle_alter_table_task(self, alter_table_task, ddl_options).await
+                    handle_alter_table_task(
+                        self,
+                        alter_table_task,
+                        ddl_options,
+                        request.trigger_context,
+                    )
+                    .await
                 }
                 TruncateTable(truncate_table_task) => {
                     handle_truncate_table_task(self, truncate_table_task).await
                 }
                 CreateLogicalTables(create_table_tasks) => {
-                    handle_create_logical_table_tasks(self, create_table_tasks).await
+                    handle_create_logical_table_tasks(
+                        self,
+                        create_table_tasks,
+                        request.trigger_context,
+                    )
+                    .await
                 }
                 AlterLogicalTables(alter_table_tasks) => {
-                    handle_alter_logical_table_tasks(self, alter_table_tasks).await
+                    handle_alter_logical_table_tasks(
+                        self,
+                        alter_table_tasks,
+                        request.trigger_context,
+                    )
+                    .await
                 }
                 DropLogicalTables(_) => todo!(),
                 CreateDatabase(create_database_task) => {
@@ -928,6 +969,7 @@ async fn handle_alter_table_task(
     ddl_manager: &DdlManager,
     alter_table_task: AlterTableTask,
     ddl_options: DdlOptions,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_ref = alter_table_task.table_ref();
 
@@ -960,7 +1002,7 @@ async fn handle_alter_table_task(
     );
 
     let (id, _) = ddl_manager
-        .submit_alter_table_task(table_id, alter_table_task, ddl_options)
+        .submit_alter_table_task(table_id, alter_table_task, trigger_context, ddl_options)
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");
@@ -1023,9 +1065,10 @@ async fn handle_create_table_task(
     ddl_manager: &DdlManager,
     create_table_task: CreateTableTask,
     query_context: QueryContext,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_table_task(create_table_task, query_context)
+        .submit_create_table_task(create_table_task, query_context, trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1048,6 +1091,7 @@ async fn handle_create_table_task(
 async fn handle_create_logical_table_tasks(
     ddl_manager: &DdlManager,
     create_table_tasks: Vec<CreateTableTask>,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !create_table_tasks.is_empty(),
@@ -1063,7 +1107,7 @@ async fn handle_create_logical_table_tasks(
     let num_logical_tables = create_table_tasks.len();
 
     let (id, output) = ddl_manager
-        .submit_create_logical_table_tasks(create_table_tasks, physical_table_id)
+        .submit_create_logical_table_tasks(create_table_tasks, physical_table_id, trigger_context)
         .await?;
 
     info!(
@@ -1280,6 +1324,7 @@ async fn handle_create_trigger_task(
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     alter_table_tasks: Vec<AlterTableTask>,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !alter_table_tasks.is_empty(),
@@ -1299,7 +1344,7 @@ async fn handle_alter_logical_table_tasks(
     let num_logical_tables = alter_table_tasks.len();
 
     let (id, _) = ddl_manager
-        .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id)
+        .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id, trigger_context)
         .await?;
 
     info!(
@@ -1398,9 +1443,10 @@ mod tests {
     use crate::procedure_executor::ExecutorContext;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
-    use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
-    #[cfg(not(feature = "enterprise"))]
-    use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
+use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
+#[cfg(not(feature = "enterprise"))]
+use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
+    use crate::rpc::ddl::TriggerContext;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -1435,6 +1481,7 @@ mod tests {
             _source: RepartitionSource,
             _to_exprs: Vec<String>,
             _timeout: Option<Duration>,
+            _trigger_context: TriggerContext,
         ) -> std::result::Result<BoxedProcedure, BoxedError> {
             unimplemented!()
         }

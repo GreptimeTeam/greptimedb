@@ -58,7 +58,7 @@ use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::poison_key::table_poison_key;
-use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::ddl::{AlterTableTask, TriggerContext};
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// The alter table procedure
@@ -98,17 +98,18 @@ impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
     pub fn new(table_id: TableId, task: AlterTableTask, context: DdlContext) -> Result<Self> {
-        Self::new_with_region_locks(table_id, task, vec![], context)
+        Self::new_with_region_locks(table_id, task, TriggerContext::default(), vec![], context)
     }
 
     pub(crate) fn new_with_region_locks(
         table_id: TableId,
         task: AlterTableTask,
+        trigger_context: TriggerContext,
         region_locks: Vec<RegionId>,
         context: DdlContext,
     ) -> Result<Self> {
         task.validate()?;
-        let data = AlterTableData::new(task, table_id, region_locks);
+        let data = AlterTableData::new(task, table_id, trigger_context, region_locks);
         let executor = build_executor_from_alter_expr(&data);
         Ok(Self {
             context,
@@ -578,7 +579,11 @@ impl Procedure for AlterTableProcedure {
                     .kind
                     .as_ref()
                     .and_then(alter_table_kind_name);
-                TableDdlEvent::alter_table_submitted(locator, kind)
+                TableDdlEvent::alter_table_submitted(
+                    locator,
+                    kind,
+                    self.data.trigger_context.clone(),
+                )
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable),
         };
@@ -606,6 +611,8 @@ pub struct AlterTableData {
     task: AlterTableTask,
     table_id: TableId,
     #[serde(default)]
+    trigger_context: TriggerContext,
+    #[serde(default)]
     column_metadatas: Vec<ColumnMetadata>,
     /// Table info value before alteration.
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
@@ -617,11 +624,17 @@ pub struct AlterTableData {
 }
 
 impl AlterTableData {
-    pub fn new(task: AlterTableTask, table_id: TableId, region_locks: Vec<RegionId>) -> Self {
+    pub fn new(
+        task: AlterTableTask,
+        table_id: TableId,
+        trigger_context: TriggerContext,
+        region_locks: Vec<RegionId>,
+    ) -> Self {
         Self {
             state: AlterTableState::Prepare,
             task,
             table_id,
+            trigger_context,
             column_metadatas: vec![],
             table_info_value: None,
             region_distribution: None,

@@ -18,6 +18,7 @@ use std::time::Instant;
 use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
@@ -327,6 +328,7 @@ impl GcScheduler {
                         false,
                         self.config.mailbox_timeout,
                         region_routes_override.clone(),
+                        TriggerContext::new(TriggerReason::ScheduledGc, "unknown"),
                     )
                     .instrument(common_telemetry::tracing::info_span!(
                         "meta_gc_call_datanode",
@@ -359,6 +361,7 @@ impl GcScheduler {
                         true,
                         self.config.mailbox_timeout,
                         region_routes_override,
+                        TriggerContext::new(TriggerReason::ScheduledGc, "unknown"),
                     )
                     .instrument(common_telemetry::tracing::info_span!(
                         "meta_gc_call_datanode",

@@ -53,7 +53,7 @@ use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
     CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
-    SubmitDdlTaskResponse,
+    SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY, TriggerReason,
 };
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -142,6 +142,12 @@ fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     let batches =
         RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
     Ok(Output::new_with_record_batches(batches))
+}
+
+fn with_manual_trigger_reason(ctx: QueryContextRef) -> QueryContextRef {
+    let mut ctx = ctx.as_ref().clone();
+    ctx.set_extension(TRIGGER_REASON_EXTENSION_KEY, TriggerReason::Manual.as_ref());
+    Arc::new(ctx)
 }
 
 fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
@@ -270,6 +276,7 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
+        let ctx = with_manual_trigger_reason(ctx);
         let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
@@ -310,6 +317,7 @@ impl StatementExecutor {
         stmt: CreateTableLike,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        let ctx = with_manual_trigger_reason(ctx);
         let (catalog, schema, table) = table_idents_to_full_name(&stmt.source_name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
@@ -366,6 +374,7 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        let ctx = with_manual_trigger_reason(ctx);
         let create_expr =
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;
@@ -1518,6 +1527,7 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        let query_context = with_manual_trigger_reason(query_context);
         if matches!(
             alter_table.alter_operation(),
             AlterTableOperation::Repartition { .. } | AlterTableOperation::Partition { .. }

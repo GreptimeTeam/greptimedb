@@ -21,9 +21,10 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    GC_REPORT_COLUMN, REGION_ID_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
-    nullable_json,
+    GC_REPORT_COLUMN, REGION_ID_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN,
+    TRIGGER_CONTEXT_COLUMN, column_schemas, nullable_json,
 };
+use common_meta::rpc::ddl::TriggerContext;
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::{GcReport, IndexVersion, RegionId};
@@ -66,6 +67,7 @@ struct BatchGcRegionRow {
 #[derive(Debug)]
 pub(crate) struct BatchGcEvent {
     payload: Option<BatchGcPayload>,
+    trigger_context: Option<TriggerContext>,
     // None emits a procedure-level lifecycle row with null Region dimensions.
     regions: Option<Vec<BatchGcRegionRow>>,
 }
@@ -75,6 +77,7 @@ impl BatchGcEvent {
         regions: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
+        trigger_context: Option<TriggerContext>,
     ) -> Self {
         Self {
             payload: Some(BatchGcPayload {
@@ -83,6 +86,7 @@ impl BatchGcEvent {
                 full_file_listing,
                 timeout,
             }),
+            trigger_context,
             regions: None,
         }
     }
@@ -107,6 +111,7 @@ impl BatchGcEvent {
 
         (!regions.is_empty()).then_some(Self {
             payload: None,
+            trigger_context: None,
             regions: Some(regions),
         })
     }
@@ -131,8 +136,22 @@ impl Event for BatchGcEvent {
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
+        let trigger_context = self
+            .trigger_context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .context(SerializeEventSnafu)?;
         let Some(regions) = &self.regions else {
-            return Ok(vec![null_row()]);
+            return Ok(vec![Row {
+                values: vec![
+                    Value { value_data: None },
+                    Value { value_data: None },
+                    Value { value_data: None },
+                    Value { value_data: None },
+                    nullable_json(trigger_context.as_ref()),
+                ],
+            }]);
         };
 
         regions
@@ -145,6 +164,7 @@ impl Event for BatchGcEvent {
                         ValueData::U32Value(region.region_id.table_id()).into(),
                         ValueData::U32Value(region.region_id.region_number()).into(),
                         nullable_json(Some(&report)),
+                        nullable_json(None),
                     ],
                 })
             })
@@ -162,9 +182,11 @@ fn schema() -> Vec<ColumnSchema> {
         &TABLE_ID_COLUMN,
         &REGION_NUMBER_COLUMN,
         &GC_REPORT_COLUMN,
+        &TRIGGER_CONTEXT_COLUMN,
     ])
 }
 
+#[cfg(test)]
 fn null_row() -> Row {
     Row {
         values: (0..schema().len())
@@ -234,8 +256,12 @@ mod tests {
     fn test_batch_gc_lifecycle_event_contract() {
         let first = RegionId::new(1024, 1);
         let second = RegionId::new(1024, 2);
-        let event =
-            BatchGcEvent::with_config(&[second, first, second], true, Duration::from_secs(10));
+        let event = BatchGcEvent::with_config(
+            &[second, first, second],
+            true,
+            Duration::from_secs(10),
+            None,
+        );
 
         assert_event_contract(&event, BATCH_GC_EVENT_TYPE, &schema(), &[null_row()]);
         assert_eq!(

@@ -30,6 +30,7 @@ use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::TriggerContext;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::debug;
 use ordered_float::OrderedFloat;
@@ -212,6 +213,7 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
+        _trigger_context: TriggerContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
 

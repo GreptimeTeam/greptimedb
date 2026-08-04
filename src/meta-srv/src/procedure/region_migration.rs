@@ -45,11 +45,12 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{
-    Context as ProcedureContext, EventContext, LockKey, Procedure, Status, StringKey,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
@@ -124,6 +125,8 @@ pub struct PersistentContext {
     /// The trigger reason of region migration.
     #[serde(default)]
     pub(crate) trigger_reason: RegionMigrationTriggerReason,
+    #[serde(default)]
+    pub(crate) trigger_context: TriggerContext,
 }
 
 impl PersistentContext {
@@ -145,6 +148,15 @@ impl PersistentContext {
             region_ids,
             timeout,
             trigger_reason,
+            trigger_context: TriggerContext::new(
+                match trigger_reason {
+                    RegionMigrationTriggerReason::Manual => TriggerReason::Manual,
+                    RegionMigrationTriggerReason::AutoRebalance => TriggerReason::AutoRebalance,
+                    RegionMigrationTriggerReason::Failover => TriggerReason::RegionFailover,
+                    RegionMigrationTriggerReason::Unknown => TriggerReason::Unknown,
+                },
+                "unknown",
+            ),
         }
     }
 }
@@ -971,6 +983,7 @@ impl Procedure for RegionMigrationProcedure {
 
         Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
             &self.context.persistent_ctx,
+            matches!(ctx.trigger, EventTrigger::Submitted),
         )))
     }
 }
@@ -1076,6 +1089,7 @@ mod tests {
             region_ids: vec![RegionId::new(1024, 1)],
             timeout: Duration::from_secs(10),
             trigger_reason: RegionMigrationTriggerReason::default(),
+            trigger_context: TriggerContext::default(),
         };
         // NOTES: Changes it will break backward compatibility.
         let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;

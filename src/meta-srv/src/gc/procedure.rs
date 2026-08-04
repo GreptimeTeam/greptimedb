@@ -24,6 +24,7 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
@@ -199,6 +200,8 @@ pub struct BatchGcData {
     /// mailbox timeout duration
     timeout: Duration,
     gc_report: Option<GcReport>,
+    #[serde(default)]
+    trigger_context: TriggerContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -225,6 +228,29 @@ impl BatchGcProcedure {
         timeout: Duration,
         region_routes_override: Region2Peers,
     ) -> Self {
+        Self::new_with_trigger_context(
+            mailbox,
+            table_metadata_manager,
+            server_addr,
+            regions,
+            full_file_listing,
+            timeout,
+            region_routes_override,
+            TriggerContext::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_trigger_context(
+        mailbox: MailboxRef,
+        table_metadata_manager: TableMetadataManagerRef,
+        server_addr: String,
+        regions: Vec<RegionId>,
+        full_file_listing: bool,
+        timeout: Duration,
+        region_routes_override: Region2Peers,
+        trigger_context: TriggerContext,
+    ) -> Self {
         Self {
             mailbox,
             table_metadata_manager,
@@ -239,6 +265,7 @@ impl BatchGcProcedure {
                 related_regions: HashMap::new(),
                 file_refs: FileRefsManifest::default(),
                 gc_report: None,
+                trigger_context,
             },
         }
     }
@@ -269,6 +296,7 @@ impl BatchGcProcedure {
                 related_regions: HashMap::new(),
                 file_refs,
                 gc_report: Some(GcReport::default()),
+                trigger_context: TriggerContext::default(),
             },
         }
     }
@@ -1071,10 +1099,17 @@ impl Procedure for BatchGcProcedure {
         }
 
         let event = match &ctx.trigger {
-            // Keep normal GC low-noise; only terminal events with meaningful reports are recorded.
-            EventTrigger::Submitted
-            | EventTrigger::Recovered
-            | EventTrigger::ChildSubmitted { .. } => return None,
+            // Keep scheduled GC low-noise; record submitted manual requests for auditability.
+            EventTrigger::Submitted => (self.data.trigger_context.reason == TriggerReason::Manual)
+                .then(|| {
+                    BatchGcEvent::with_config(
+                        &self.data.regions,
+                        self.data.full_file_listing,
+                        self.data.timeout,
+                        Some(self.data.trigger_context.clone()),
+                    )
+                })?,
+            EventTrigger::Recovered | EventTrigger::ChildSubmitted { .. } => return None,
             EventTrigger::Succeeded => {
                 let ProcedureState::Done {
                     output: Some(output),
@@ -1089,6 +1124,7 @@ impl Procedure for BatchGcProcedure {
                 &self.data.regions,
                 self.data.full_file_listing,
                 self.data.timeout,
+                None,
             ),
             EventTrigger::Failed | EventTrigger::Poisoned => self
                 .data
@@ -1100,6 +1136,7 @@ impl Procedure for BatchGcProcedure {
                         &self.data.regions,
                         self.data.full_file_listing,
                         self.data.timeout,
+                        None,
                     )
                 }),
         };

@@ -44,6 +44,7 @@ use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::rpc::ddl::TriggerContext;
 use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -103,6 +104,8 @@ pub struct PersistentContext {
     #[serde(default)]
     /// Records table-level partition metadata updated by this repartition.
     pub partition_metadata_update: Option<PartitionMetadataUpdate>,
+    #[serde(default)]
+    pub trigger_context: TriggerContext,
 }
 
 fn default_timeout() -> Duration {
@@ -113,7 +116,11 @@ impl PersistentContext {
     /// Creates a new [PersistentContext] with the given table name, table id and timeout.
     ///
     /// If the timeout is not provided, the default timeout will be used.
-    pub fn new(
+    pub fn new(table_name: TableName, table_id: TableId, timeout: Option<Duration>) -> Self {
+        Self::new_with_trigger_context(table_name, table_id, timeout, TriggerContext::default())
+    }
+
+    pub fn new_with_trigger_context(
         TableName {
             catalog_name,
             schema_name,
@@ -121,6 +128,7 @@ impl PersistentContext {
         }: TableName,
         table_id: TableId,
         timeout: Option<Duration>,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self {
             catalog_name,
@@ -132,6 +140,7 @@ impl PersistentContext {
             unknown_procedures: vec![],
             timeout: timeout.unwrap_or_else(default_timeout),
             partition_metadata_update: None,
+            trigger_context,
         }
     }
 
@@ -861,6 +870,7 @@ impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
         _source: RepartitionSource,
         _to_exprs: Vec<String>,
         _timeout: Option<Duration>,
+        _trigger_context: TriggerContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         Err(BoxedError::new(
             error::InvalidArgumentsSnafu {
@@ -899,8 +909,14 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
+        trigger_context: TriggerContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout);
+        let persistent_ctx = PersistentContext::new_with_trigger_context(
+            table_name,
+            table_id,
+            timeout,
+            trigger_context,
+        );
         let from = match source {
             RepartitionSource::Partitioned {
                 exprs,
@@ -1164,6 +1180,7 @@ mod tests {
                 },
                 vec![],
                 None,
+                TriggerContext::default(),
             )
             .err()
             .expect("GC-disabled factory must reject repartition");

@@ -27,12 +27,13 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
-    CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
+    CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest, TriggerContext,
 };
 use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
 };
+use session::context::Channel;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
@@ -102,6 +103,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
         restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
+        let protocol = Channel::from(query_context.channel as u32).to_string();
+        let trigger_context = TriggerContext::from_query_context(&mut query_context, protocol);
 
         let resp = self
             .ddl_manager()
@@ -111,6 +114,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 },
                 SubmitDdlTaskRequest {
                     query_context,
+                    trigger_context,
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
                     task,

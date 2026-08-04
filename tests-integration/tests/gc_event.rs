@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_procedure::{ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
@@ -24,7 +25,7 @@ use session::context::QueryContext;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{StorageType, get_test_store_config};
 
-use crate::event_recorder_test_util::find_eventually_string;
+use crate::event_recorder_test_util::{find_eventually_bool, find_eventually_string};
 
 const TABLE_NAME: &str = "batch_gc_events";
 const MAX_ATTEMPTS: usize = 60;
@@ -120,7 +121,7 @@ async fn test_batch_gc_event() {
         .collect::<Vec<_>>();
     assert_eq!(regions.len(), 1);
 
-    let procedure = BatchGcProcedure::new(
+    let procedure = BatchGcProcedure::new_with_trigger_context(
         cluster.metasrv.mailbox().clone(),
         cluster.metasrv.table_metadata_manager().clone(),
         cluster.metasrv.options().grpc.server_addr.clone(),
@@ -128,6 +129,7 @@ async fn test_batch_gc_event() {
         false,
         Duration::from_secs(10),
         Default::default(),
+        TriggerContext::new(TriggerReason::Manual, "unknown"),
     );
     let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-00000000bac0").unwrap();
     let mut watcher = cluster
@@ -142,6 +144,16 @@ async fn test_batch_gc_event() {
     watcher::wait(&mut watcher).await.unwrap();
     assert_sst_count(&cluster, 1).await;
 
+    let submitted = format!(
+        r#"SELECT json_path_match(trigger_context, '$.reason.type == "manual"') AS manual_trigger_reason
+FROM greptime_private.events
+WHERE type = 'batch_gc'
+  AND procedure_id = '{procedure_id}'
+  AND procedure_state = 'Running'
+  AND json_path_match(procedure_trigger, '$.type == "Submitted"')"#,
+    );
+    assert!(find_eventually_bool(instance, &submitted, "manual_trigger_reason").await);
+
     let succeeded = format!(
         r#"SELECT json_to_string(gc_report) AS gc_report
 FROM greptime_private.events
@@ -149,7 +161,8 @@ WHERE type = 'batch_gc'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND json_is_null(payload)"#,
+  AND json_is_null(payload)
+  AND trigger_context IS NULL"#,
     );
     let actual_report: serde_json::Value =
         serde_json::from_str(&find_eventually_string(instance, &succeeded, "gc_report").await)

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
@@ -347,6 +348,7 @@ impl GcScheduler {
                     full_listing,
                     gc_timeout,
                     Region2Peers::new(),
+                    TriggerContext::new(TriggerReason::Manual, "unknown"),
                 )
                 .await?;
             combined_report.merge(report);
@@ -355,7 +357,13 @@ impl GcScheduler {
         if !dropped_regions.is_empty() {
             let report = self
                 .ctx
-                .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
+                .gc_regions(
+                    &dropped_regions,
+                    true,
+                    gc_timeout,
+                    dropped_routes_override,
+                    TriggerContext::new(TriggerReason::Manual, "unknown"),
+                )
                 .await?;
             combined_report.merge(report);
         }
@@ -477,6 +485,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _trigger_context: TriggerContext,
         ) -> Result<GcReport> {
             self.gc_regions_calls.fetch_add(1, Ordering::Relaxed);
             panic!("gc_regions should not be called in maintenance mode")
@@ -550,6 +559,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _trigger_context: TriggerContext,
         ) -> Result<GcReport> {
             Ok(GcReport::default())
         }
@@ -883,6 +893,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _trigger_context: TriggerContext,
         ) -> Result<GcReport> {
             crate::error::UnexpectedSnafu {
                 violated: "mock gc failure".to_string(),

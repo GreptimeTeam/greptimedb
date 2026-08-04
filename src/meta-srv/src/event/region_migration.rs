@@ -22,7 +22,8 @@ use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
     REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
     REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
-    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
+    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN,
+    TRIGGER_CONTEXT_COLUMN, column_schemas, nullable_json,
 };
 use serde::Serialize;
 use snafu::ResultExt;
@@ -49,6 +50,7 @@ pub(crate) struct RegionMigrationEvent {
     dst_peer_addr: String,
     // The timeout of the region migration.
     timeout: Duration,
+    trigger_context: Option<common_meta::rpc::ddl::TriggerContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,7 +60,7 @@ struct Payload {
 }
 
 impl RegionMigrationEvent {
-    pub fn from_persistent_ctx(ctx: &PersistentContext) -> Self {
+    pub fn from_persistent_ctx(ctx: &PersistentContext, include_trigger_context: bool) -> Self {
         Self {
             region_ids: ctx.region_ids.clone(),
             trigger_reason: ctx.trigger_reason,
@@ -67,6 +69,7 @@ impl RegionMigrationEvent {
             dst_node_id: ctx.to_peer.id,
             dst_peer_addr: ctx.to_peer.addr.clone(),
             timeout: ctx.timeout,
+            trigger_context: include_trigger_context.then(|| ctx.trigger_context.clone()),
         }
     }
 }
@@ -86,6 +89,7 @@ impl Event for RegionMigrationEvent {
             &REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
             &REGION_MIGRATION_DST_NODE_ID_COLUMN,
             &REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+            &TRIGGER_CONTEXT_COLUMN,
         ])
     }
 
@@ -102,6 +106,12 @@ impl Event for RegionMigrationEvent {
                     ValueData::StringValue(self.src_peer_addr.clone()).into(),
                     ValueData::U64Value(self.dst_node_id).into(),
                     ValueData::StringValue(self.dst_peer_addr.clone()).into(),
+                    self.trigger_context
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .context(SerializeEventSnafu)
+                        .map(|value| nullable_json(value.as_ref()))?,
                 ],
             });
         }

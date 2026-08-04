@@ -16,6 +16,8 @@ use std::sync::Arc;
 #[cfg(feature = "enterprise")]
 use std::time::Duration;
 
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, Row, RowInsertRequest, RowInsertRequests, SemanticType};
 use client::OutputData;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
@@ -26,7 +28,7 @@ use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 
 use crate::event_recorder_test_util::{
@@ -37,6 +39,8 @@ const EVENTS_TABLE: &str = "greptime_private.events";
 const TABLE: &str = "table_ddl_events";
 const PHYSICAL_TABLE: &str = "table_ddl_events_phy";
 const LOGICAL_TABLE: &str = "table_ddl_events_logical";
+const AUTO_TABLE: &str = "table_ddl_events_auto";
+const AUTO_INFLUX_TABLE: &str = "table_ddl_events_auto_influx";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_ddl_procedure_events() {
@@ -70,17 +74,150 @@ async fn test_table_ddl_procedure_events() {
         .await;
     let frontend = cluster.fe_instance().clone();
 
+    frontend
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: AUTO_TABLE.to_string(),
+                    rows: Some(api::v1::Rows {
+                        schema: vec![
+                            api::v1::ColumnSchema {
+                                column_name: "host".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "ts".to_string(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "val".to_string(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                ValueData::StringValue("host".to_string()).into(),
+                                ValueData::TimestampMillisecondValue(0).into(),
+                                ValueData::F64Value(1.0).into(),
+                            ],
+                        }],
+                    }),
+                }],
+            },
+            Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Prometheus,
+            )),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let auto_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", AUTO_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "create_table",
+        &auto_create_procedure_id,
+        "auto_create",
+        "prometheus",
+    )
+    .await;
+
+    frontend
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: AUTO_INFLUX_TABLE.to_string(),
+                    rows: Some(api::v1::Rows {
+                        schema: vec![
+                            api::v1::ColumnSchema {
+                                column_name: "host".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "ts".to_string(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "val".to_string(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                ValueData::StringValue("host".to_string()).into(),
+                                ValueData::TimestampMillisecondValue(0).into(),
+                                ValueData::F64Value(1.0).into(),
+                            ],
+                        }],
+                    }),
+                }],
+            },
+            Arc::new(QueryContext::with_channel(
+                "greptime",
+                "public",
+                Channel::Influx,
+            )),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let auto_influx_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", AUTO_INFLUX_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "create_table",
+        &auto_influx_create_procedure_id,
+        "auto_create",
+        "influx",
+    )
+    .await;
+
     // Act / Assert: Create Table retains its rich submitted row and records the
     // created table ID when it completes.
-    run_sql(
+    run_sql_with_context(
         &frontend,
         &format!(
             "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
         ),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let table_id = find_table_id(&frontend, TABLE).await;
     let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "create_table",
+        &create_table_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "create_table",
@@ -327,12 +464,36 @@ async fn test_table_ddl_procedure_events() {
 }
 
 async fn run_sql(instance: &Arc<Instance>, sql: &str) {
+    run_sql_with_context(instance, sql, QueryContext::arc()).await;
+}
+
+async fn run_sql_with_context(
+    instance: &Arc<Instance>,
+    sql: &str,
+    query_context: Arc<QueryContext>,
+) {
     let output = instance
-        .do_query(sql, QueryContext::arc())
+        .do_query(sql, query_context)
         .await
         .remove(0)
         .unwrap();
     assert!(matches!(output.data, OutputData::AffectedRows(_)), "{sql}");
+}
+
+async fn assert_trigger_context(
+    instance: &Arc<Instance>,
+    event_type: &str,
+    procedure_id: &str,
+    reason: &str,
+    protocol: &str,
+) {
+    let query = format!(
+        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match(trigger_context, '$.reason.type == \"{reason}\"') AND json_path_match(trigger_context, '$.protocol == \"{protocol}\"')",
+        TYPE_COLUMN.name(),
+        PROCEDURE_ID_COLUMN.name(),
+        PROCEDURE_TRIGGER_COLUMN.name(),
+    );
+    assert_single_event(instance, &query).await;
 }
 
 async fn find_table_id(instance: &Arc<Instance>, table_name: &str) -> u32 {

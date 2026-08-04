@@ -31,6 +31,7 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::PurgeDroppedTableTask;
+use common_meta::rpc::ddl::TriggerContext;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
@@ -67,6 +68,7 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        trigger_context: TriggerContext,
     ) -> Result<GcReport>;
 
     #[cfg(feature = "enterprise")]
@@ -254,12 +256,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        trigger_context: TriggerContext,
     ) -> Result<GcReport> {
         self.gc_regions_inner(
             region_ids,
             full_file_listing,
             timeout,
             region_routes_override,
+            trigger_context,
         )
         .await
     }
@@ -306,6 +310,7 @@ impl DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        trigger_context: TriggerContext,
     ) -> Result<GcReport> {
         debug!(
             "Sending GC instruction for {} regions (full_file_listing: {})",
@@ -313,7 +318,7 @@ impl DefaultGcSchedulerCtx {
             full_file_listing
         );
 
-        let procedure = BatchGcProcedure::new(
+        let procedure = BatchGcProcedure::new_with_trigger_context(
             self.mailbox.clone(),
             self.table_metadata_manager.clone(),
             self.server_addr.clone(),
@@ -321,6 +326,7 @@ impl DefaultGcSchedulerCtx {
             full_file_listing,
             timeout,
             region_routes_override,
+            trigger_context,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
