@@ -22,7 +22,7 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 <img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&label=stable&color=brightgreen" alt="Stable"/>
 </a>
 <a href="https://github.com/GreptimeTeam/greptimedb/releases">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=latest&color=blueviolet" alt="Latest"/>
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=canary&color=blueviolet" alt="Canary"/>
 </a>
 <a href="https://github.com/GreptimeTeam/greptimedb/releases">
 <img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/>
