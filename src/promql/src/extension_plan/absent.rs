@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::array::Array;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult};
+use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{
@@ -233,7 +234,24 @@ impl Absent {
         "prom_absent"
     }
 
-    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    pub fn to_execution_plan(
+        &self,
+        exec_input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        // `try_new` only builds the output schema and does not validate the input
+        // columns. Validate the time index column against the *physical* input
+        // schema here so a missing column fails with an error instead of panicking
+        // later in `execute` or `required_input_ordering`.
+        let input_schema = exec_input.schema();
+        input_schema
+            .index_of(&self.time_index_column)
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Absent: time index column {} not found in input schema: {e}",
+                    self.time_index_column
+                ))
+            })?;
+
         let output_schema = Arc::new(self.output_schema.as_arrow().clone());
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
@@ -241,7 +259,7 @@ impl Absent {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
-        Arc::new(AbsentExec {
+        Ok(Arc::new(AbsentExec {
             start: self.start,
             end: self.end,
             step: self.step,
@@ -252,7 +270,7 @@ impl Absent {
             input: exec_input,
             properties,
             metric: ExecutionPlanMetricsSet::new(),
-        })
+        }))
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -390,16 +408,24 @@ impl ExecutionPlan for AbsentExec {
         let batch_size = context.session_config().batch_size();
         let input = self.input.execute(partition, context)?;
 
+        let time_index_column_index = self
+            .input
+            .schema()
+            .column_with_name(&self.time_index_column)
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "time index column {} not found in input schema {:?}",
+                    self.time_index_column,
+                    self.input.schema()
+                ))
+            })?;
+
         Ok(Box::pin(AbsentStream {
             end: self.end,
             step: self.step,
             batch_size,
-            time_index_column_index: self
-                .input
-                .schema()
-                .column_with_name(&self.time_index_column)
-                .unwrap() // Safety: we have checked the column name in `try_new`
-                .0,
+            time_index_column_index,
             output_schema: self.output_schema.clone(),
             fake_labels: self.fake_labels.clone(),
             input,
@@ -612,6 +638,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::catalog::memory::DataSourceExec;
+    use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::prelude::{SessionConfig, SessionContext};
     use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
@@ -690,6 +717,88 @@ mod tests {
         // Should output absent timestamps: 1000, 3000, 5000
         // (0, 2000, 4000 exist in input, so 1000, 3000, 5000 are absent)
         assert_eq!(output_timestamps, vec![1000, 3000, 5000]);
+    }
+
+    #[test]
+    fn to_execution_plan_errors_on_missing_time_index() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let df_schema = schema.clone().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = Absent::try_new(
+            0,
+            5000,
+            1000,
+            "timestamp".to_string(),
+            "value".to_string(),
+            vec![],
+            input,
+        )
+        .unwrap();
+
+        // Malformed physical child: missing the time index column.
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_time_index() {
+        // Bypass `to_execution_plan` validation and feed a malformed child directly
+        // to `execute`: it must return an error instead of panicking.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let value_array = Arc::new(Float64Array::from(vec![1.0, 2.0]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![value_array]).unwrap();
+        let memory_exec = DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        ));
+
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let absent_exec = AbsentExec {
+            start: 0,
+            end: 5000,
+            step: 1000,
+            time_index_column: "timestamp".to_string(),
+            value_column: "value".to_string(),
+            fake_labels: vec![],
+            output_schema: output_schema.clone(),
+            input: Arc::new(memory_exec),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+            metric: ExecutionPlanMetricsSet::new(),
+        };
+
+        let session_ctx = SessionContext::new();
+        let task_ctx = session_ctx.task_ctx();
+        let result = datafusion::physical_plan::collect(
+            Arc::new(absent_exec) as Arc<dyn ExecutionPlan>,
+            task_ctx,
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

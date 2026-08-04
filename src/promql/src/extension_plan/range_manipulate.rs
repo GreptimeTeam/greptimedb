@@ -167,7 +167,30 @@ impl RangeManipulate {
         )?))
     }
 
-    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    pub fn to_execution_plan(
+        &self,
+        exec_input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        // The physical input schema can differ from the logical one (e.g. after
+        // column pruning). Validate the required columns here so a missing column
+        // fails with an error instead of panicking in `execute`.
+        let input_schema = exec_input.schema();
+        input_schema
+            .column_with_name(&self.time_index)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "RangeManipulate: time index column {} not found in input schema {:?}",
+                    self.time_index, input_schema
+                ))
+            })?;
+        for value_col in &self.field_columns {
+            input_schema.column_with_name(value_col).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "RangeManipulate: value column {value_col} not found in input schema {input_schema:?}"
+                ))
+            })?;
+        }
+
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = exec_input.properties();
         let properties = Arc::new(PlanProperties::new(
@@ -176,7 +199,7 @@ impl RangeManipulate {
             properties.emission_type,
             properties.boundedness,
         ));
-        Arc::new(RangeManipulateExec {
+        Ok(Arc::new(RangeManipulateExec {
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -188,7 +211,7 @@ impl RangeManipulate {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-        })
+        }))
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -503,7 +526,12 @@ impl ExecutionPlan for RangeManipulateExec {
         let schema = input.schema();
         let time_index = schema
             .column_with_name(&self.time_index_column)
-            .unwrap_or_else(|| panic!("time index column {} not found", self.time_index_column))
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "time index column {} not found in input schema {:?}",
+                    self.time_index_column, schema
+                ))
+            })?
             .0;
         let field_columns = self
             .field_columns
@@ -511,10 +539,14 @@ impl ExecutionPlan for RangeManipulateExec {
             .map(|value_col| {
                 schema
                     .column_with_name(value_col)
-                    .unwrap_or_else(|| panic!("value column {value_col} not found",))
-                    .0
+                    .map(|(idx, _)| idx)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "value column {value_col} not found in input schema {schema:?}"
+                        ))
+                    })
             })
-            .collect();
+            .collect::<DataFusionResult<Vec<usize>>>()?;
         let aligned_ts_array =
             RangeManipulateStream::build_aligned_ts_array(self.start, self.end, self.interval);
         Ok(Box::pin(RangeManipulateStream {
@@ -769,7 +801,6 @@ mod test {
     use datafusion::physical_plan::memory::MemoryStream;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
-    use futures::FutureExt;
 
     use super::*;
 
@@ -941,7 +972,7 @@ mod test {
         let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![projected]], projected_schema, None).unwrap(),
         )));
-        let range_exec = plan.to_execution_plan(memory_exec);
+        let range_exec = plan.to_execution_plan(memory_exec).unwrap();
         let session_context = SessionContext::default();
         let output_batches =
             datafusion::physical_plan::collect(range_exec, session_context.task_ctx())
@@ -964,14 +995,50 @@ mod test {
         let broken_exec = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![broken]], broken_schema, None).unwrap(),
         )));
-        let broken_range_exec = plan.to_execution_plan(broken_exec);
-        let session_context = SessionContext::default();
-        let broken_result = std::panic::AssertUnwindSafe(async {
-            datafusion::physical_plan::collect(broken_range_exec, session_context.task_ctx()).await
-        })
-        .catch_unwind()
-        .await;
+        // A missing time index/value column must fail with an error instead of panicking.
+        let broken_result = plan.to_execution_plan(broken_exec);
         assert!(broken_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_required_columns() {
+        // Construct the exec directly (bypassing `to_execution_plan` validation) with a
+        // malformed physical child that lacks the time index and value columns. The
+        // `execute` path must return an error instead of panicking.
+        let schema = Arc::new(Schema::new(vec![Field::new("path", DataType::Utf8, true)]));
+        let path_column = Arc::new(StringArray::from(vec!["foo"; 2])) as _;
+        let batch = RecordBatch::try_new(schema.clone(), vec![path_column]).unwrap();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value_1", DataType::Float64, true),
+        ]));
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        let exec = Arc::new(RangeManipulateExec {
+            start: 0,
+            end: 10_000,
+            interval: 1_000,
+            range: 1_000,
+            field_columns: vec!["value_1".to_string()],
+            output_schema,
+            time_range_column: RangeManipulate::build_timestamp_range_name(TIME_INDEX_COLUMN),
+            time_index_column: TIME_INDEX_COLUMN.to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+            properties,
+        });
+
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(exec, session_context.task_ctx()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

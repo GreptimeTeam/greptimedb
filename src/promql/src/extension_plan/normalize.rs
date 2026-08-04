@@ -200,15 +200,38 @@ impl SeriesNormalize {
         "SeriesNormalize"
     }
 
-    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        Arc::new(SeriesNormalizeExec {
+    pub fn to_execution_plan(
+        &self,
+        exec_input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        // Validate the required columns against the *physical* input schema so a
+        // missing time index/tag column fails with an error instead of panicking
+        // later in `execute` or `required_input_distribution`.
+        let input_schema = exec_input.schema();
+        input_schema
+            .index_of(&self.time_index_column_name)
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "SeriesNormalize: time index column {} not found in input schema: {e}",
+                    self.time_index_column_name
+                ))
+            })?;
+        for tag in &self.tag_columns {
+            input_schema.index_of(tag).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "SeriesNormalize: tag column {tag} not found in input schema: {e}"
+                ))
+            })?;
+        }
+
+        Ok(Arc::new(SeriesNormalizeExec {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
             filter_stale_markers: self.filter_stale_markers,
             input: exec_input,
             tag_columns: self.tag_columns.clone(),
             metric: ExecutionPlanMetricsSet::new(),
-        })
+        }))
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -331,8 +354,13 @@ impl ExecutionPlan for SeriesNormalizeExec {
         let schema = input.schema();
         let time_index = schema
             .column_with_name(&self.time_index_column_name)
-            .expect("time index column not found")
-            .0;
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "time index column {} not found in input schema {schema:?}",
+                    self.time_index_column_name
+                ))
+            })?;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
             time_index,
@@ -566,6 +594,68 @@ mod test {
         let required = plan.necessary_children_exprs(&output_columns).unwrap();
         let required = &required[0];
         assert_eq!(required.as_slice(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn to_execution_plan_errors_on_missing_required_columns() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan =
+            SeriesNormalize::new(0, TIME_INDEX_COLUMN, true, vec!["path".to_string()], input);
+
+        // Malformed physical child: missing the tag column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], broken_schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+
+        // Malformed physical child: missing the time index column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], broken_schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_time_index() {
+        // Bypass `to_execution_plan` validation and feed a malformed child directly
+        // to `execute`: it must return an error instead of panicking.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let value_column = Arc::new(Float64Array::from(vec![1.0, 2.0])) as _;
+        let path_column = Arc::new(StringArray::from(vec!["foo", "foo"])) as _;
+        let batch =
+            RecordBatch::try_new(broken_schema.clone(), vec![value_column, path_column]).unwrap();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], broken_schema, None).unwrap(),
+        )));
+        let normalize_exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: true,
+            input: memory_exec,
+            tag_columns: vec!["path".to_string()],
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let session_context = SessionContext::default();
+        let result =
+            datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

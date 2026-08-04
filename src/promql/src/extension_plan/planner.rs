@@ -39,26 +39,26 @@ impl ExtensionPlanner for PromExtensionPlanner {
         session_state: &SessionState,
     ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(node) = node.as_any().downcast_ref::<SeriesNormalize>() {
-            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<InstantManipulate>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<RangeManipulate>() {
-            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<SeriesDivide>() {
-            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<EmptyMetric>() {
             Ok(Some(node.to_execution_plan(session_state, planner)?))
         } else if let Some(node) = node.as_any().downcast_ref::<ScalarCalculate>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<HistogramFold>() {
-            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<UnionDistinctOn>() {
             Ok(Some(node.to_execution_plan(
                 physical_inputs[0].clone(),
                 physical_inputs[1].clone(),
             )))
         } else if let Some(node) = node.as_any().downcast_ref::<Absent>() {
-            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else {
             Ok(None)
         }

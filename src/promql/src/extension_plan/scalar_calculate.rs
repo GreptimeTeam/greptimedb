@@ -138,6 +138,13 @@ impl ScalarCalculate {
         let val_index = input_schema
             .index_of(&self.field_column)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        // Validate the tag columns too: `execute` needs their indices and a
+        // missing tag column must fail with an error instead of panicking.
+        for tag in &self.tag_columns {
+            input_schema
+                .index_of(tag)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        }
         let schema = Arc::new(Schema::new(fields));
         let properties = exec_input.properties();
         let properties = Arc::new(PlanProperties::new(
@@ -444,10 +451,14 @@ impl ExecutionPlan for ScalarCalculateExec {
             .map(|tag| {
                 schema
                     .column_with_name(tag)
-                    .unwrap_or_else(|| panic!("tag column not found {tag}"))
-                    .0
+                    .map(|(idx, _)| idx)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "tag column {tag} not found in input schema {schema:?}"
+                        ))
+                    })
             })
-            .collect();
+            .collect::<DataFusionResult<Vec<usize>>>()?;
 
         Ok(Box::pin(ScalarCalculateStream {
             start: self.start,
@@ -749,6 +760,69 @@ mod test {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(values.values(), &[1.0f64, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn to_execution_plan_errors_on_missing_required_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let df_schema = Arc::new(DFSchema::try_from(schema.clone()).unwrap());
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let tag_columns = vec!["tag1".to_string(), "tag2".to_string()];
+        let plan =
+            ScalarCalculate::new(0, 15_000, 5000, input, "ts", &tag_columns, "val", None).unwrap();
+
+        // Malformed physical child: missing the tag columns.
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_tag_columns() {
+        // Bypass `to_execution_plan` validation and feed a malformed child directly
+        // to `execute`: it must return an error instead of panicking.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 5_000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let memory_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+        )));
+        let exec = Arc::new(ScalarCalculateExec {
+            start: 0,
+            end: 15_000,
+            interval: 5_000,
+            schema: schema.clone(),
+            project_index: (0, 1),
+            tag_columns: vec!["tag1".to_string(), "tag2".to_string()],
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(schema),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(exec, session_context.task_ctx()).await;
+        assert!(result.is_err());
     }
 
     fn prepare_test_data(series: Vec<RecordBatch>) -> DataSourceExec {
