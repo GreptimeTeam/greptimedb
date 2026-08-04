@@ -423,7 +423,14 @@ impl DataFusionExprConverter {
                 Ok(Operand::Column(column_name))
             }
             Expr::Literal(scalar_value, _) => {
-                let value = Value::try_from(scalar_value.clone()).unwrap();
+                // Never panic on exotic literals: propagate the conversion failure so
+                // the caller falls back to no partition pruning (all regions).
+                let value = Value::try_from(scalar_value.clone()).map_err(|e| {
+                    datafusion_common::DataFusionError::Plan(format!(
+                        "Literal value {:?} cannot be converted for partition pruning: {}",
+                        scalar_value, e
+                    ))
+                })?;
                 Ok(Operand::Value(value))
             }
             Expr::Alias(alias_expr) => {
