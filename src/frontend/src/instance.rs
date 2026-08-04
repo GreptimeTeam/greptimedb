@@ -3271,4 +3271,89 @@ mod tests {
             assert_eq!(result.is_ok(), is_ok);
         }
     }
+
+    /// A `DropView` DDL sent through the direct gRPC ingress must return an error
+    /// (e.g. table not found) instead of panicking on `todo!()`.
+    #[tokio::test]
+    async fn qx_152_drop_view_via_grpc_ddl_returns_error_not_panic() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "non_existent_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: false,
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "DropView DDL request must return an error instead of panicking"
+        );
+        Ok(())
+    }
+
+    /// A direct gRPC `CreateTable` whose time index column is not a timestamp must
+    /// be rejected with `InvalidArguments` instead of panicking while building the schema.
+    #[tokio::test]
+    async fn qx_153_create_table_with_non_timestamp_time_index_via_grpc_returns_error()
+    -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    table_name: "demo".to_string(),
+                    desc: String::new(),
+                    column_defs: vec![api::v1::ColumnDef {
+                        name: "host".to_string(),
+                        data_type: api::v1::ColumnDataType::String as i32,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                        semantic_type: 0,
+                        comment: String::new(),
+                        datatype_extension: None,
+                        options: None,
+                    }],
+                    time_index: "host".to_string(),
+                    primary_keys: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::new(),
+                    table_id: None,
+                    engine: "mito".to_string(),
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("CreateTable with a non-timestamp time index must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+        Ok(())
+    }
 }
