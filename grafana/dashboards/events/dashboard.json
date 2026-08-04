@@ -974,7 +974,7 @@
         "label": "Catalog",
         "multi": true,
         "name": "catalog",
-        "query": "WITH events AS (SELECT timestamp, ${event_columns:raw} FROM greptime_private.events WHERE $__timeFilter(timestamp)) SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM events) catalogs ORDER BY catalog_name",
+        "query": "WITH events AS (SELECT timestamp, ${event_columns:raw} FROM greptime_private.events WHERE $__timeFilter(timestamp)) SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM events WHERE procedure_trigger_type = 'Submitted') catalogs ORDER BY catalog_name",
         "type": "query",
         "refresh": 2
       },
