@@ -38,6 +38,7 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::{CompactionListener, EventListener};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
@@ -381,6 +382,105 @@ impl EventListener for CompactionPlanningGate {
             self.cancel_requested.notify_one();
         }
     }
+}
+
+#[tokio::test]
+async fn test_planning_followup_updates_schedule_time() {
+    assert_automatic_followup_updates_schedule_time(0).await;
+}
+
+#[tokio::test]
+async fn test_execution_followup_updates_schedule_time() {
+    assert_automatic_followup_updates_schedule_time(4).await;
+}
+
+async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: usize) {
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let interval = Duration::from_secs(60 * 60);
+    let initial_time = 1_000;
+    let time_provider = Arc::new(MockTimeProvider::new(initial_time));
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                min_compaction_interval: interval,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            time_provider.clone(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "automatic_followup_interval",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let column_schemas = create
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+
+    for offset in 0..preexisting_flushes {
+        put_and_flush(
+            &engine,
+            region_id,
+            &column_schemas,
+            offset * 10..offset * 10 + 10,
+        )
+        .await;
+    }
+
+    let first_schedule_time = initial_time + interval.as_millis() as i64;
+    time_provider.set_now(first_schedule_time);
+    let gate_guard = gate.arm();
+    let first_start = preexisting_flushes * 10;
+    put_and_flush(
+        &engine,
+        region_id,
+        &column_schemas,
+        first_start..first_start + 10,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("initial automatic planning did not reach the gate");
+
+    let trigger_time = first_schedule_time + interval.as_millis() as i64;
+    time_provider.set_now(trigger_time);
+    put_and_flush(
+        &engine,
+        region_id,
+        &column_schemas,
+        first_start + 10..first_start + 20,
+    )
+    .await;
+    let followup_schedule_time = trigger_time + 1;
+    time_provider.set_now(followup_schedule_time);
+    gate_guard.release();
+
+    let region = engine.get_region(region_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while region.last_schedule_compaction_millis() != followup_schedule_time {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("automatic follow-up did not update its schedule time");
 }
 
 #[tokio::test]
