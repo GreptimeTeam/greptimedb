@@ -25,7 +25,7 @@ use common_recordbatch::error::{
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
-use datatypes::extension::json::{is_json_extension_type, is_structured_json_field};
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::JsonType;
@@ -292,7 +292,7 @@ impl FlatProjectionMapper {
                 .input_arrow_schema
                 .fields()
                 .iter()
-                .filter(|&field| is_structured_json_field(field))
+                .filter(|&field| is_json2_extension_type(field))
                 .map(|field| (field.name().clone(), field.data_type().clone()))
                 .collect();
             to_flat_sst_arrow_schema(&self.metadata, &options)
@@ -358,7 +358,7 @@ impl FlatProjectionMapper {
             }
 
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_json_extension_type(field) {
+            if is_json2_extension_type(field) {
                 array = JsonArray::from(&array)
                     .project_to(field.data_type())
                     .context(DataTypesSnafu)?;

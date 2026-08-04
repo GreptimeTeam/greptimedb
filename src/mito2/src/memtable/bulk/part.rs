@@ -37,7 +37,7 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -446,7 +446,7 @@ impl UnorderedPart {
 
         // Get the schema from the first part
         let schema = self.parts[0].batch.schema();
-        let concatenated = if schema.fields().iter().any(is_structured_json_field) {
+        let concatenated = if schema.fields().iter().any(is_json2_extension_type) {
             let aligner = Json2Aligner::try_new(self.parts.iter().map(|part| part.batch.schema()))?;
             let aligned_batches =
                 aligner.align_batches(self.parts.iter().map(|part| part.batch.clone()))?;
@@ -722,13 +722,13 @@ impl BulkPartConverter {
 }
 
 fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
-    if schema.fields().iter().all(|f| !is_structured_json_field(f)) {
+    if schema.fields().iter().all(|f| !is_json2_extension_type(f)) {
         return schema;
     }
 
     let mut fields = Vec::with_capacity(schema.fields().len());
     for (field, array) in schema.fields().iter().zip(columns) {
-        if !is_structured_json_field(field) {
+        if !is_json2_extension_type(field) {
             fields.push(field.clone());
             continue;
         }

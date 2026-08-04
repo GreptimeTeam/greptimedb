@@ -32,7 +32,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -278,17 +278,12 @@ where
     ) -> Result<SstInfoArray> {
         let mut options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
 
-        if source
-            .schema()
-            .fields()
-            .iter()
-            .any(is_structured_json_field)
-        {
+        if source.schema().fields().iter().any(is_json2_extension_type) {
             options.concretized_json_types = source
                 .schema()
                 .fields()
                 .iter()
-                .filter(|&field| is_structured_json_field(field))
+                .filter(|&field| is_json2_extension_type(field))
                 .map(|field| (field.name().clone(), field.data_type().clone()))
                 .collect::<HashMap<_, _>>();
         }

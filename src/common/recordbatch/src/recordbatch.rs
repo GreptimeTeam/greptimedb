@@ -378,7 +378,7 @@ mod tests {
     use datatypes::arrow::array::{AsArray, StringArray, StringViewArray, UInt32Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::JsonExtensionType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BinaryVector, StringVector, UInt32Vector};
 
@@ -594,8 +594,7 @@ mod tests {
 
     #[test]
     fn test_legacy_json_with_extension_does_not_align_as_structured_json() {
-        let field = Field::new("j", DataType::Binary, true)
-            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+        let field = Field::new("j", DataType::Binary, true).with_extension_type(JsonExtensionType);
         let arrow_schema = Arc::new(ArrowSchema::new(vec![field]));
         let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
         let columns: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(

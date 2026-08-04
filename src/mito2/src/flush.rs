@@ -24,7 +24,7 @@ use bytes::Bytes;
 use common_base::cancellation::CancellableFuture;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -951,7 +951,7 @@ fn memtable_flat_sources(
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
 
-        let has_json2 = schema.fields().iter().any(is_structured_json_field);
+        let has_json2 = schema.fields().iter().any(is_json2_extension_type);
         let mut json_align_schemas = if has_json2 {
             Some(Vec::with_capacity(num_ranges))
         } else {

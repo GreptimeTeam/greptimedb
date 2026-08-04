@@ -15,7 +15,6 @@
 use std::sync::{Arc, LazyLock};
 
 use arrow_schema::Field;
-use arrow_schema::extension::ExtensionType;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use common_function::scalars::udf::create_udf;
 use datafusion_common::arrow::datatypes::DataType;
@@ -23,7 +22,7 @@ use datafusion_common::{Column, DFSchema, Result, ScalarValue, TableReference};
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
 use datafusion_expr::planner::{ExprPlanner, PlannerResult, RawBinaryExpr};
 use datafusion_expr::{Expr, ExprSchemable, Operator, ScalarUDF};
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::is_json2_extension_type;
 use either::Either;
 use sqlparser::ast::BinaryOperator;
 
@@ -83,7 +82,7 @@ impl ExprPlanner for JsonExprPlanner {
         qualifier: Option<&TableReference>,
         nested_names: &[String],
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        if field.extension_type_name() != Some(JsonExtensionType::NAME) {
+        if !is_json2_extension_type(field) {
             return Ok(PlannerResult::Original(Vec::new()));
         }
 
@@ -154,7 +153,7 @@ fn parse_sql_op(op: &BinaryOperator) -> Option<Operator> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::Fields;
-    use datatypes::extension::json::JsonMetadata;
+    use datatypes::extension::json::Json2ExtensionType;
 
     use super::*;
 
@@ -167,11 +166,6 @@ mod tests {
                 Expr::Literal(ScalarValue::Utf8(Some(path.to_string())), None),
             ],
         ))
-    }
-
-    fn json_field(name: &str) -> Field {
-        Field::new(name, DataType::Binary, true)
-            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))
     }
 
     #[test]
@@ -249,7 +243,8 @@ mod tests {
         let nested_names = vec!["payload".to_string(), "cpu".to_string()];
 
         let planned = planner.plan_compound_identifier(
-            &json_field("labels"),
+            &Field::new("labels", DataType::Struct(Fields::empty()), true)
+                .with_extension_type(Json2ExtensionType::default()),
             Some(&qualifier),
             &nested_names,
         )?;

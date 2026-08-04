@@ -404,7 +404,6 @@ impl Function for JsonGetWithType {
         let result = match arg0.data_type() {
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
-                let jsons = arg0.as_binary_view();
 
                 if args.arg_fields.first().is_some_and(is_json2_extension_type) {
                     // Query concretization projects nested JSON2 paths as Struct arrays. A binary
@@ -414,6 +413,7 @@ impl Function for JsonGetWithType {
                         .project_to(&with_type)
                         .map_err(|e| exec_datafusion_err!("{e:?}"))?
                 } else {
+                    let jsons = arg0.as_binary_view();
                     let mut builder = result_builder(len, &with_type)?;
                     jsonb_get(jsons, path, builder.as_mut())?;
                     builder.build()
