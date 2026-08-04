@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::SequenceNumber;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
@@ -64,6 +64,11 @@ impl VersionControl {
                 is_dropped: false,
             }),
         }
+    }
+
+    /// Returns the id of the region controlled by this instance.
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.data.read().unwrap().version.metadata.region_id
     }
 
     /// Returns current copy of data.
