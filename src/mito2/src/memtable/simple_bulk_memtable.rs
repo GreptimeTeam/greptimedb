@@ -410,8 +410,10 @@ mod tests {
     use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_recordbatch::DfRecordBatch;
     use common_time::Timestamp;
-    use datatypes::arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
-    use datatypes::arrow_array::StringArray;
+    use datatypes::arrow::array::{
+        ArrayRef, Float64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
+        TimestampMillisecondArray,
+    };
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::schema::ColumnSchema;
@@ -712,6 +714,60 @@ mod tests {
                 .map(|t| { t.unwrap().0.value() })
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_write_bulk_supports_string_field_representations() {
+        let string_fields: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![Some("a"), None])),
+            Arc::new(LargeStringArray::from(vec![Some("a"), None])),
+            Arc::new(StringViewArray::from(vec![Some("a"), None])),
+        ];
+
+        for string_field in string_fields {
+            let memtable = new_test_memtable(false, MergeMode::LastRow);
+            let arrow_schema = Arc::new(datatypes::arrow::datatypes::Schema::new(vec![
+                memtable.schema().schema.arrow_schema().field(0).clone(),
+                memtable.schema().schema.arrow_schema().field(1).clone(),
+                datatypes::arrow::datatypes::Field::new(
+                    "f2",
+                    string_field.data_type().clone(),
+                    true,
+                ),
+            ]));
+            let batch = RecordBatch::try_new(
+                arrow_schema,
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    string_field,
+                ],
+            )
+            .unwrap();
+
+            memtable
+                .write_bulk(BulkPart {
+                    batch,
+                    sequence: 1,
+                    min_timestamp: 1,
+                    max_timestamp: 2,
+                    timestamp_index: 0,
+                    raw_data: None,
+                })
+                .unwrap();
+
+            let mut iter = memtable
+                .ranges(None, RangesOptions::default())
+                .unwrap()
+                .build(None)
+                .unwrap();
+            let batch = iter.next().unwrap().unwrap();
+            assert_eq!(
+                batch.fields()[1].data.get(0).as_string().as_deref(),
+                Some("a")
+            );
+            assert!(batch.fields()[1].data.get(1).is_null());
+        }
     }
 
     #[test]
