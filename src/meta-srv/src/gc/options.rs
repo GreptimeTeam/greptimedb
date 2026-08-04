@@ -121,7 +121,7 @@ impl GcSchedulerOptions {
         ensure!(
             !self.experimental_soft_drop.enable,
             error::InvalidArgumentsSnafu {
-                err_msg: "soft drop table is only available in GreptimeDB Enterprise Edition",
+                err_msg: "gc.experimental_soft_drop.enable is only available in GreptimeDB Enterprise Edition",
             }
         );
 
