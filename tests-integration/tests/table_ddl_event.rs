@@ -45,7 +45,7 @@ async fn test_table_ddl_procedure_events() {
     // Arrange: use a distributed cluster to submit Undrop and Purge directly
     // through the metasrv DDL manager and exercise logical-table task grouping.
     let home_dir = create_temp_dir("table_ddl_procedure_events");
-    #[allow(unused_mut)]
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
     let mut gc_options = GcSchedulerOptions {
         enable: true,
         ..Default::default()
