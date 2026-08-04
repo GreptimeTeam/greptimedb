@@ -72,7 +72,11 @@ impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
     pub fn new(task: DropTableTask, context: DdlContext) -> Self {
-        let data = DropTableData::new(task, context.soft_drop_enabled, context.soft_drop_retention);
+        let data = DropTableData::new(
+            task,
+            cfg!(feature = "enterprise") && context.soft_drop_enabled,
+            context.soft_drop_retention,
+        );
         let executor = data.build_executor();
         Self {
             context,
