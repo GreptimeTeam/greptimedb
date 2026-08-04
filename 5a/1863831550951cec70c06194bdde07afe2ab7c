@@ -1,0 +1,24 @@
+src/meta-srv/src/procedure/region_migration.rs
+  s_835b1096366e91::t_2edc49ef4016c7 1043
+src/meta-srv/src/event/repartition.rs
+  s_835b1096366e91::t_23ef11277ed06c 110-115,326,439-443,698-702,714
+  s_835b1096366e91::t_28027b394704a0 719
+src/meta-srv/src/event/gc.rs
+  s_835b1096366e91::t_98dd286854d371 592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "5a1863831550951cec70c06194bdde07afe2ab7c",
+  "prompts": {},
+  "sessions": {
+    "s_835b1096366e91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fc7bb-ad39-7652-be9c-ff4dd6686809",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
