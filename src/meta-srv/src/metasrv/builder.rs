@@ -530,6 +530,7 @@ impl MetasrvBuilder {
             let gc_scheduler_ctx = DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
+                #[cfg(feature = "enterprise")]
                 ddl_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
