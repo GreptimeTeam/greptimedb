@@ -130,8 +130,11 @@ pub struct Frontend {
 
 impl Frontend {
     pub async fn start(&mut self) -> Result<()> {
-        if let Some(t) = &self.heartbeat_task {
-            t.start().await?;
+        if let Some(t) = &self.heartbeat_task
+            && let Err(error) = t.start().await
+        {
+            t.shutdown().await;
+            return Err(error);
         }
 
         if let Err(source) = self.servers.start_all().await {
@@ -162,7 +165,7 @@ impl Frontend {
 mod tests {
     use std::any::Any;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::HeartbeatServer;
@@ -197,6 +200,7 @@ mod tests {
     use tonic::{Request, Response, Status, Streaming};
 
     use super::*;
+    use crate::heartbeat::{HeartbeatExtension, HeartbeatExtensionResult, HeartbeatExtensions};
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
 
@@ -218,9 +222,26 @@ mod tests {
 
     struct SuspendableHeartbeatServer {
         suspend: Arc<AtomicBool>,
+        fail_heartbeat: bool,
     }
 
     struct FailingServer;
+
+    struct ShutdownTrackingExtension {
+        shutdown_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HeartbeatExtension for ShutdownTrackingExtension {
+        fn name(&self) -> &str {
+            "shutdown-tracking"
+        }
+
+        async fn shutdown(&self) -> HeartbeatExtensionResult<()> {
+            self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl Server for FailingServer {
@@ -251,6 +272,10 @@ mod tests {
             &self,
             request: Request<Streaming<HeartbeatRequest>>,
         ) -> std::result::Result<Response<Self::HeartbeatStream>, Status> {
+            if self.fail_heartbeat {
+                return Err(Status::unavailable("mock initial heartbeat failure"));
+            }
+
             let (tx, rx) = mpsc::channel(4);
 
             common_runtime::spawn_global({
@@ -402,6 +427,7 @@ mod tests {
         };
         let heartbeat_server = Arc::new(SuspendableHeartbeatServer {
             suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: false,
         });
         let meta_client = create_meta_client(&meta_client_options, heartbeat_server).await;
         let instance = Arc::new(
@@ -428,6 +454,52 @@ mod tests {
 
         assert!(frontend.start().await.is_err());
         assert!(heartbeat_probe.is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_start_failure_shuts_down_extensions() {
+        let meta_client_options = MetaClientOptions {
+            metasrv_addrs: vec!["localhost:0".to_string()],
+            ..Default::default()
+        };
+        let options = FrontendOptions {
+            meta_client: Some(meta_client_options.clone()),
+            ..Default::default()
+        };
+        let heartbeat_server = Arc::new(SuspendableHeartbeatServer {
+            suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: true,
+        });
+        let meta_client = create_meta_client(&meta_client_options, heartbeat_server).await;
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client.clone())
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let extension = Arc::new(ShutdownTrackingExtension {
+            shutdown_calls: AtomicUsize::new(0),
+        });
+        let extensions = HeartbeatExtensions::default();
+        assert!(extensions.register(extension.clone()));
+        let heartbeat_task = HeartbeatTask::new(
+            instance.frontend_peer_addr().to_string(),
+            &options,
+            meta_client,
+            Arc::new(HandlerGroupExecutor::new(vec![])),
+            Arc::new(ResourceStatImpl::default()),
+        )
+        .with_extensions(extensions);
+        let heartbeat_probe = heartbeat_task.clone();
+        let mut frontend = Frontend {
+            instance,
+            servers: ServerHandlers::default(),
+            heartbeat_task: Some(heartbeat_task),
+        };
+
+        assert!(frontend.start().await.is_err());
+        assert!(heartbeat_probe.is_shutdown());
+        assert_eq!(extension.shutdown_calls.load(Ordering::Acquire), 1);
     }
 
     async fn verify_suspend_state_by_http(
@@ -526,6 +598,7 @@ mod tests {
 
         let server = Arc::new(SuspendableHeartbeatServer {
             suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: false,
         });
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
