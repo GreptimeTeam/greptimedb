@@ -113,21 +113,28 @@ pub(crate) fn register_dyn_filter_subscribers_for_region(
     region_id: RegionId,
     target: RegionQueryTarget,
     captured_dyn_filters: &[CapturedDynFilter],
-) {
+) -> Vec<(FilterId, Subscriber)> {
+    let mut added = Vec::new();
     for captured_dyn_filter in captured_dyn_filters {
-        let registration = registry.register_subscriber(
-            &captured_dyn_filter.filter_id,
-            Subscriber::new(region_id, target.clone()),
-        );
-        if registration == SubscriberRegistration::MissingFilter {
-            common_telemetry::warn!(
-                "Remote dynamic filter {} missing when registering subscriber for region {} at target {:?}",
-                captured_dyn_filter.filter_id,
-                region_id,
-                target
-            );
+        let subscriber = Subscriber::new(region_id, target.clone());
+        let registration =
+            registry.register_subscriber(&captured_dyn_filter.filter_id, subscriber.clone());
+        match registration {
+            SubscriberRegistration::Added => {
+                added.push((captured_dyn_filter.filter_id.clone(), subscriber))
+            }
+            SubscriberRegistration::Duplicate => {}
+            SubscriberRegistration::MissingFilter => {
+                common_telemetry::warn!(
+                    "Remote dynamic filter {} missing when registering subscriber for region {} at target {:?}",
+                    captured_dyn_filter.filter_id,
+                    region_id,
+                    target
+                );
+            }
         }
     }
+    added
 }
 
 fn build_captured_dyn_filter(
@@ -224,28 +231,79 @@ pub(crate) fn query_context_with_initial_dyn_filter_regs(
     region_id: RegionId,
     captured_dyn_filters: &[CapturedDynFilter],
 ) -> QueryContext {
-    let mut region_query_ctx = query_ctx.as_ref().clone();
     let regs = build_initial_dyn_filter_regs_for_region(captured_dyn_filters);
+    query_context_with_initial_dyn_filter_regs_value(query_ctx, region_id, &regs)
+}
+
+pub(crate) fn query_context_with_refreshed_initial_dyn_filter_regs(
+    query_ctx: &QueryContextRef,
+    _region_id: RegionId,
+    captured_dyn_filters: &[CapturedDynFilter],
+) -> QueryContext {
+    let refreshed = InitialDynFilterRegs::new(
+        captured_dyn_filters
+            .iter()
+            .map(|captured| {
+                attach_initial_snapshot(
+                    captured.initial_registration.clone(),
+                    &captured.alive_dyn_filter,
+                )
+            })
+            .collect(),
+    );
+    let serialized = match serialize_initial_dyn_filter_regs(&refreshed) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            common_telemetry::warn!(error; "Failed to refresh remote dynamic filter initial registrations; using optimization-time snapshots");
+            return query_context_with_initial_dyn_filter_regs(
+                query_ctx,
+                _region_id,
+                captured_dyn_filters,
+            );
+        }
+    };
+    query_context_with_serialized_initial_dyn_filter_regs(query_ctx, serialized)
+}
+
+fn query_context_with_initial_dyn_filter_regs_value(
+    query_ctx: &QueryContextRef,
+    region_id: RegionId,
+    regs: &InitialDynFilterRegs,
+) -> QueryContext {
+    let region_query_ctx = query_ctx.as_ref().clone();
     if regs.is_empty() {
         return region_query_ctx;
     }
 
-    if let Err(error) = regs.validate_default_bounds() {
-        common_telemetry::warn!(error; "Dropping initial remote dyn filter registrations for region {} that exceed configured bounds", region_id);
-        return region_query_ctx;
-    }
-
-    match regs.to_extension_value() {
-        Ok(serialized) => region_query_ctx.set_extension(
-            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
-            serialized,
-        ),
+    match serialize_initial_dyn_filter_regs(regs) {
+        Ok(serialized) => {
+            return query_context_with_serialized_initial_dyn_filter_regs(query_ctx, serialized);
+        }
         Err(error) => {
-            common_telemetry::warn!(error; "Failed to serialize initial remote dyn filter registrations");
+            common_telemetry::warn!(error; "Failed to serialize initial remote dyn filter registrations for region {}", region_id)
         }
     }
 
     region_query_ctx
+}
+
+fn query_context_with_serialized_initial_dyn_filter_regs(
+    query_ctx: &QueryContextRef,
+    serialized: String,
+) -> QueryContext {
+    let mut region_query_ctx = query_ctx.as_ref().clone();
+    region_query_ctx.set_extension(
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+        serialized,
+    );
+    region_query_ctx
+}
+
+fn serialize_initial_dyn_filter_regs(
+    regs: &InitialDynFilterRegs,
+) -> std::result::Result<String, String> {
+    regs.validate_default_bounds()?;
+    regs.to_extension_value().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -374,6 +432,37 @@ mod tests {
             .update(lit(ScalarValue::Utf8(Some("x".repeat(payload_bytes)))) as _)
             .unwrap();
         dyn_filter
+    }
+
+    fn refreshed_regs(captured: &[CapturedDynFilter]) -> InitialDynFilterRegs {
+        let query_ctx = QueryContext::arc();
+        let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
+            &query_ctx,
+            RegionId::new(1024, 7),
+            captured,
+        );
+        InitialDynFilterRegs::from_extension_value(
+            region_query_ctx
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn decode_snapshot(snapshot: &InitialDynFilterSnapshot, column_name: &str) -> String {
+        snapshot
+            .payload
+            .decode_datafusion_expr(
+                &TaskContext::default(),
+                &arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                    column_name,
+                    arrow_schema::DataType::Utf8,
+                    false,
+                )]),
+                REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
+            )
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -678,6 +767,118 @@ mod tests {
         );
         assert_eq!(decoded_children.len(), 1);
         assert!(decoded_children[0].as_any().is::<Column>());
+    }
+
+    #[test]
+    fn refreshed_initial_regs_use_live_filter_snapshot_without_mutating_capture() {
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            lit(true) as _,
+        ));
+        let captured = vec![
+            build_captured_dyn_filter(
+                test_remote_dyn_filter_producer_id(42),
+                0,
+                dyn_filter.clone(),
+            )
+            .unwrap(),
+        ];
+        let original_generation = captured[0]
+            .initial_registration
+            .initial_snapshot
+            .as_ref()
+            .unwrap()
+            .generation;
+        dyn_filter.update(lit(false) as _).unwrap();
+        dyn_filter.mark_complete();
+
+        let regs = refreshed_regs(&captured);
+
+        let snapshot = regs.regs[0].initial_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.generation, 2);
+        assert!(!snapshot.is_complete);
+        assert_ne!(decode_snapshot(snapshot, "host"), "true");
+        assert_eq!(
+            captured[0]
+                .initial_registration
+                .initial_snapshot
+                .as_ref()
+                .unwrap()
+                .generation,
+            original_generation
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_old_snapshot_when_one_live_filter_cannot_encode() {
+        let good = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("good", 0)) as Arc<_>],
+            lit(true) as _,
+        ));
+        let bad = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("bad", 0)) as Arc<_>],
+            lit(true) as _,
+        ));
+        let captured = vec![
+            build_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 0, good.clone())
+                .unwrap(),
+            build_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 1, bad.clone())
+                .unwrap(),
+        ];
+        let old_bad_generation = captured[1]
+            .initial_registration
+            .initial_snapshot
+            .as_ref()
+            .unwrap()
+            .generation;
+        good.update(lit(false) as _).unwrap();
+        bad.update(Arc::new(UnserializableExpr) as _).unwrap();
+
+        let regs = refreshed_regs(&captured);
+        assert_eq!(
+            regs.regs[0].initial_snapshot.as_ref().unwrap().generation,
+            2
+        );
+        assert_eq!(
+            regs.regs[1].initial_snapshot.as_ref().unwrap().generation,
+            old_bad_generation
+        );
+    }
+
+    #[test]
+    fn refresh_aggregate_overflow_falls_back_to_original_snapshots() {
+        let payload_bytes = REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES * 3 / 5;
+        let first = test_dyn_filter_with_snapshot_payload("first", 0, 1);
+        let second = test_dyn_filter_with_snapshot_payload("second", 0, 1);
+        let captured = vec![
+            build_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 0, first.clone())
+                .unwrap(),
+            build_captured_dyn_filter(test_remote_dyn_filter_producer_id(42), 1, second.clone())
+                .unwrap(),
+        ];
+        let original = captured
+            .iter()
+            .map(|captured| {
+                captured
+                    .initial_registration
+                    .initial_snapshot
+                    .clone()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        first
+            .update(lit(ScalarValue::Utf8(Some("x".repeat(payload_bytes)))) as _)
+            .unwrap();
+        second
+            .update(lit(ScalarValue::Utf8(Some("y".repeat(payload_bytes)))) as _)
+            .unwrap();
+
+        let regs = refreshed_regs(&captured);
+        for (refreshed, original) in regs.regs.iter().zip(original) {
+            let refreshed = refreshed.initial_snapshot.as_ref().unwrap();
+            assert_eq!(refreshed.generation, original.generation);
+            assert_eq!(refreshed.payload, original.payload);
+        }
     }
 
     #[test]

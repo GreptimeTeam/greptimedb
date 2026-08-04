@@ -247,6 +247,16 @@ impl QueryDynFilterRegistry {
         }
     }
 
+    /// Removes one exact subscriber without changing producer or fanout state.
+    pub(crate) fn remove_subscriber(&self, filter_id: &FilterId, subscriber: &Subscriber) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .entries
+            .get(filter_id)
+            .is_some_and(|entry| entry.subscribers.write().unwrap().remove(subscriber))
+    }
+
     /// Starts missing producer fanout watchers for the registry's entries.
     ///
     /// Watchers do not hold the registry alive; dropping the registry closes their lifecycle channel.
@@ -680,6 +690,11 @@ impl RemoteDynFilterRegistryLease {
             other.registry.as_ref().unwrap(),
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn registry_arc_for_test(&self) -> Arc<QueryDynFilterRegistry> {
+        self.registry.as_ref().unwrap().clone()
+    }
 }
 
 impl Drop for RemoteDynFilterRegistryLease {
@@ -912,11 +927,19 @@ mod tests {
 
     #[async_trait]
     impl RegionQueryHandler for RecordingRegionQueryHandler {
-        async fn do_get(
+        async fn select_target(
             &self,
             _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> QueryResult<RegionQueryTarget> {
+            unreachable!("remote dyn filter registry tests should not execute remote queries")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &RegionQueryTarget,
             _request: QueryRequest,
-        ) -> QueryResult<crate::region_query::RoutedRegionQueryStream> {
+        ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
             unreachable!("remote dyn filter registry tests should not execute remote queries")
         }
 
@@ -1203,6 +1226,32 @@ mod tests {
             SubscriberRegistration::Duplicate
         );
         assert_eq!(entry.subscribers().len(), 1);
+    }
+
+    #[test]
+    fn remove_subscriber_removes_only_exact_key() {
+        let registry = QueryDynFilterRegistry::new(test_query_id(1));
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let entry = match registry.register_remote_dyn_filter(filter_id.clone(), filter) {
+            EntryRegistration::Inserted(entry) => entry,
+            other => panic!("unexpected registration result: {other:?}"),
+        };
+        let first = Subscriber::new(RegionId::new(1024, 1), test_target(1));
+        let second = Subscriber::new(RegionId::new(1024, 1), test_target(2));
+        assert_eq!(
+            registry.register_subscriber(&filter_id, first.clone()),
+            SubscriberRegistration::Added
+        );
+        assert_eq!(
+            registry.register_subscriber(&filter_id, second.clone()),
+            SubscriberRegistration::Added
+        );
+
+        assert!(registry.remove_subscriber(&filter_id, &first));
+        assert!(!registry.remove_subscriber(&filter_id, &first));
+        assert_eq!(entry.subscribers(), vec![second]);
+        assert!(!entry.fanout_started_for_test());
     }
 
     #[test]

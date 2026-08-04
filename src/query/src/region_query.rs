@@ -42,12 +42,6 @@ impl RegionQueryTarget {
     }
 }
 
-/// The result of a region query together with its frozen target.
-pub struct RoutedRegionQueryStream {
-    pub stream: SendableRecordBatchStream,
-    pub target: RegionQueryTarget,
-}
-
 /// A factory to create a [`RegionQueryHandler`].
 pub trait RegionQueryHandlerFactory: Send + Sync {
     /// Build a [`RegionQueryHandler`] with the given partition manager and node manager.
@@ -62,11 +56,17 @@ pub type RegionQueryHandlerFactoryRef = Arc<dyn RegionQueryHandlerFactory>;
 
 #[async_trait]
 pub trait RegionQueryHandler: Send + Sync {
-    async fn do_get(
+    async fn select_target(
         &self,
         read_preference: ReadPreference,
+        region_id: store_api::storage::RegionId,
+    ) -> Result<RegionQueryTarget>;
+
+    async fn do_get(
+        &self,
+        target: &RegionQueryTarget,
         request: QueryRequest,
-    ) -> Result<RoutedRegionQueryStream>;
+    ) -> Result<SendableRecordBatchStream>;
 
     async fn handle_remote_dyn_filter_update(
         &self,

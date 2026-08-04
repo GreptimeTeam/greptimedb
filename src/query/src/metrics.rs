@@ -430,11 +430,19 @@ mod tests {
 
     #[async_trait]
     impl RegionQueryHandler for NoopRegionQueryHandler {
-        async fn do_get(
+        async fn select_target(
             &self,
             _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> Result<crate::region_query::RegionQueryTarget> {
+            unreachable!("metrics tests should not execute remote queries")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
             _request: common_query::request::QueryRequest,
-        ) -> Result<crate::region_query::RoutedRegionQueryStream> {
+        ) -> Result<SendableRecordBatchStream> {
             unreachable!("metrics tests should not execute remote queries")
         }
 
