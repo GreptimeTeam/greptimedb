@@ -58,7 +58,7 @@ impl AdminFunction {
     }
 
     /// Register functions that must only be resolved by an ADMIN statement.
-    #[allow(unused_variables)]
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub fn register_admin_only(registry: &FunctionRegistry) {
         #[cfg(feature = "enterprise")]
         registry.register(PurgeTableFunction::factory());
