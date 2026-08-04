@@ -87,12 +87,16 @@ impl CountWildcardToTimeIndexRule {
 
         // The resolved time index must be present and non-nullable in the
         // immediate input schema. Schema-changing nodes can otherwise expose
-        // a nullable field with the same name as the source time index.
+        // a nullable field with the same name as the source time index, and
+        // `count(<col>)` would then count fewer rows than `count(*)`.
         if let Some(col) = &col {
             // if more than one input, we give up and just use `count(1)`
             if plan.inputs().len() > 1 {
                 return None;
             }
+            // The guard above guarantees exactly one input here, so checking
+            // the first input is equivalent to checking all inputs as the rule
+            // used to: a plan with zero inputs also falls back to `count(1)`.
             let input = plan.inputs().first().copied()?;
             let Ok((_, field)) = input.schema().qualified_field_from_column(col) else {
                 return None;
@@ -139,19 +143,12 @@ impl CountWildcardToTimeIndexRule {
 struct TimeIndexFinder {
     time_index_col: Option<String>,
     table_alias: Option<TableReference>,
-    has_projection: bool,
 }
 
 impl TreeNodeVisitor<'_> for TimeIndexFinder {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
-        // A projection may rename or replace the time index. We only know the
-        // source metadata, so do not rewrite through an unproven projection.
-        if matches!(node, LogicalPlan::Projection(_)) {
-            self.has_projection = true;
-        }
-
         if let LogicalPlan::SubqueryAlias(subquery_alias) = node {
             self.table_alias
                 .get_or_insert_with(|| subquery_alias.alias.clone());
@@ -194,12 +191,8 @@ impl TreeNodeVisitor<'_> for TimeIndexFinder {
 
 impl TimeIndexFinder {
     fn into_column(self) -> Option<Column> {
-        (!self.has_projection)
-            .then(|| {
-                self.time_index_col
-                    .map(|c| Column::new(self.table_alias, c))
-            })
-            .flatten()
+        self.time_index_col
+            .map(|c| Column::new(self.table_alias, c))
     }
 }
 
@@ -334,16 +327,16 @@ mod test {
     }
 
     #[test]
-    fn qp_026_count_wildcard_shape_matrix() {
+    fn count_wildcard_shape_matrix() {
         let config = datafusion::config::ConfigOptions::default();
 
         let direct = CountWildcardToTimeIndexRule
-            .analyze(count_star(qp_026_source_plan("source")), &config)
+            .analyze(count_star(source_plan("source")), &config)
             .unwrap();
         assert_count_argument_column(&direct, "source", "ts");
 
         let simple_alias = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .alias("projected")
                 .unwrap()
                 .build()
@@ -355,7 +348,7 @@ mod test {
         assert_count_argument_column(&simple_alias, "projected", "ts");
 
         let nested_alias = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .alias("inner")
                 .unwrap()
                 .alias("outer")
@@ -369,7 +362,7 @@ mod test {
         assert_count_argument_column(&nested_alias, "outer", "ts");
 
         let nested_rename = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .project(vec![col("ts").alias("renamed")])
                 .unwrap()
                 .alias("projected")
@@ -383,7 +376,7 @@ mod test {
         assert_count_argument_literal_one(&nested_rename);
 
         let nested_rename_with_payload_reorder = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .project(vec![col("payload"), col("ts").alias("renamed")])
                 .unwrap()
                 .alias("projected")
@@ -397,8 +390,8 @@ mod test {
         assert_count_argument_literal_one(&nested_rename_with_payload_reorder);
 
         let multi_input = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("left"))
-                .cross_join(qp_026_source_plan("right"))
+            LogicalPlanBuilder::from(source_plan("left"))
+                .cross_join(source_plan("right"))
                 .unwrap()
                 .build()
                 .unwrap(),
@@ -410,9 +403,9 @@ mod test {
     }
 
     #[test]
-    fn qp_026_projection_name_collision_falls_back_to_literal_one() {
+    fn projection_name_collision_falls_back_to_literal_one() {
         let before = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .project(vec![col("payload").alias("ts")])
                 .unwrap()
                 .alias("projected")
@@ -436,9 +429,9 @@ mod test {
     }
 
     #[test]
-    fn qp_026_inner_aggregate_nullable_time_index_name_falls_back_to_literal_one() {
+    fn inner_aggregate_nullable_time_index_name_falls_back_to_literal_one() {
         let before = count_star(
-            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+            LogicalPlanBuilder::from(source_plan("source"))
                 .aggregate(Vec::<Expr>::new(), vec![max(col("payload")).alias("ts")])
                 .unwrap()
                 .alias("aggregated")
@@ -461,7 +454,7 @@ mod test {
         assert_count_argument_literal_one(&after);
     }
 
-    fn qp_026_source_plan(table_name: &str) -> LogicalPlan {
+    fn source_plan(table_name: &str) -> LogicalPlan {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "ts",
@@ -477,7 +470,7 @@ mod test {
         ];
         let table = MemTable::table(
             table_name,
-            RecordBatch::new(schema, columns).expect("QP-026 test record batch must be valid"),
+            RecordBatch::new(schema, columns).expect("test record batch must be valid"),
         );
         let source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(table),
