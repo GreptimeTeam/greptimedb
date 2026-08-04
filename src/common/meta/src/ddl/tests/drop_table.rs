@@ -23,7 +23,9 @@ use std::time::Duration;
 use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
+#[cfg(feature = "enterprise")]
+use common_catalog::consts::FILE_ENGINE;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Procedure, StringKey};
@@ -1339,6 +1341,7 @@ async fn test_undrop_logical_table_skips_datanode_open() {
     assert!(rx.try_recv().is_err());
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1415,6 +1418,7 @@ async fn test_soft_drop_metric_physical_table_remains_enabled() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1447,6 +1451,7 @@ async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     assert!(!recovered.data.soft_drop_enabled);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
