@@ -1,3 +1,14 @@
+--- json_object_keys ---
+SELECT json_object_keys(parse_json('{"a": 1, "b": {"c": 2}}'));
+
+SELECT json_object_keys(parse_json('{}'));
+
+SELECT json_object_keys(parse_json('[1, 2]'));
+
+SELECT json_object_keys(parse_json('null'));
+
+SELECT json_object_keys(NULL);
+
 --- json_path_exists ---
 SELECT json_path_exists(parse_json('{"a": 1, "b": 2}'), '$.a');
 
