@@ -589,6 +589,7 @@ mod tests {
                 ValueData::U32Value(region_id.table_id()).into(),
                 ValueData::U32Value(region_id.region_number()).into(),
                 nullable_json(report.as_ref()),
+                nullable_json(None),
             ],
         }
     }

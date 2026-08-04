@@ -107,12 +107,17 @@ impl RepartitionEvent {
     }
 
     fn schema() -> Vec<ColumnSchema> {
+        let mut schema = Self::base_schema();
+        schema.push(TRIGGER_CONTEXT_COLUMN.column_schema());
+        schema
+    }
+
+    fn base_schema() -> Vec<ColumnSchema> {
         column_schemas([
             &CATALOG_NAME_COLUMN,
             &SCHEMA_NAME_COLUMN,
             &TABLE_NAME_COLUMN,
             &TABLE_ID_COLUMN,
-            &TRIGGER_CONTEXT_COLUMN,
         ])
     }
 }
@@ -318,7 +323,7 @@ impl RepartitionGroupEvent {
     }
 
     fn schema() -> Vec<ColumnSchema> {
-        let mut schema = RepartitionEvent::schema();
+        let mut schema = RepartitionEvent::base_schema();
         schema.extend(column_schemas([
             &PARENT_PROCEDURE_ID_COLUMN,
             &REPARTITION_GROUP_ID_COLUMN,
@@ -431,6 +436,11 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    jsonb_value(&serde_json::json!({
+                        "reason": {"type": "unknown"},
+                        "protocol": "unknown",
+                        "extensions": {},
+                    })),
                 ],
             }],
         );
@@ -685,6 +695,11 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    jsonb_value(&serde_json::json!({
+                        "reason": {"type": "unknown"},
+                        "protocol": "unknown",
+                        "extensions": {},
+                    })),
                 ],
             }],
         );
@@ -696,11 +711,12 @@ mod tests {
             &SCHEMA_NAME_COLUMN,
             &TABLE_NAME_COLUMN,
             &TABLE_ID_COLUMN,
+            &TRIGGER_CONTEXT_COLUMN,
         ])
     }
 
     fn group_schema() -> Vec<ColumnSchema> {
-        let mut schema = parent_schema();
+        let mut schema = RepartitionEvent::base_schema();
         schema.extend(column_schemas([
             &PARENT_PROCEDURE_ID_COLUMN,
             &REPARTITION_GROUP_ID_COLUMN,
