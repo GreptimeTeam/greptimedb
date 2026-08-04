@@ -697,7 +697,13 @@ impl HistogramFoldStream {
     ) -> DataFusionResult<Vec<Box<dyn MutableVector>>> {
         let mut builders = Vec::with_capacity(schema.fields().len() + 1);
         for field in schema.fields() {
-            let concrete_datatype = ConcreteDataType::try_from(field.data_type()).unwrap();
+            let concrete_datatype = ConcreteDataType::try_from(field.data_type()).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Unsupported Arrow field type {:?} while building output buffer: {}",
+                    field.data_type(),
+                    e
+                ))
+            })?;
             let mutable_vector = concrete_datatype.create_mutable_vector(0);
             builders.push(mutable_vector);
         }
