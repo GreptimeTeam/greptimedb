@@ -32,7 +32,7 @@ use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::alter_table::{AlterTableProcedure, only_enables_skip_wal};
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_enables_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
@@ -405,37 +405,47 @@ impl DdlManager {
                 .await;
         }
 
-        let region_locks = if alter_table_task
+        let lock_regions = alter_table_task
             .alter_table
             .kind
             .as_ref()
-            .is_some_and(only_enables_skip_wal)
-        {
-            let (_, route) = self
-                .table_metadata_manager()
-                .table_route_manager()
-                .get_physical_table_route(table_id)
-                .await?;
-            route
-                .region_routes
-                .iter()
-                .map(|route| route.region.id)
-                .collect::<Vec<RegionId>>()
-        } else {
-            vec![]
-        };
+            .is_some_and(only_enables_skip_wal);
 
-        let context = self.create_context();
-        let procedure = AlterTableProcedure::new_with_region_locks(
-            table_id,
-            alter_table_task,
-            region_locks,
-            context,
-        )?;
+        loop {
+            let region_locks = if lock_regions {
+                let (_, route) = self
+                    .table_metadata_manager()
+                    .table_route_manager()
+                    .get_physical_table_route(table_id)
+                    .await?;
+                route
+                    .region_routes
+                    .iter()
+                    .map(|route| route.region.id)
+                    .collect::<Vec<RegionId>>()
+            } else {
+                vec![]
+            };
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+            let context = self.create_context();
+            let procedure = AlterTableProcedure::new_with_region_locks(
+                table_id,
+                alter_table_task.clone(),
+                region_locks,
+                context,
+            )?;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+            let result = self.execute_procedure_and_wait(procedure_with_id).await?;
+            if result
+                .1
+                .as_ref()
+                .is_some_and(|output| output.is::<RegionRouteChanged>())
+            {
+                continue;
+            }
+            return Ok(result);
+        }
     }
 
     /// Submits and executes a create table task.

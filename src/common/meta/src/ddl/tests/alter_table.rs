@@ -41,7 +41,7 @@ use store_api::storage::RegionId;
 use table::requests::{SKIP_WAL_KEY, TTL_KEY};
 use tokio::sync::mpsc::{self};
 
-use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged};
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{
@@ -765,6 +765,58 @@ fn test_skip_wal_holds_region_locks() {
 }
 
 #[tokio::test]
+async fn test_skip_wal_detects_region_route_change() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+    let stale_region_locks = vec![RegionId::new(table_id, 4)];
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        stale_region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    let status = procedure.on_prepare().await.unwrap();
+    assert!(status.downcast_output_ref::<RegionRouteChanged>().is_some());
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
 async fn test_skip_wal_updates_metadata_before_all_replicas() {
     let (tx, mut rx) = mpsc::channel(8);
     let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
@@ -796,8 +848,19 @@ async fn test_skip_wal_updates_metadata_before_all_replicas() {
         },
     };
 
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_task, ddl_context.clone()).unwrap();
+    let region_locks = prepare_table_route(table_id)
+        .region_routes()
+        .unwrap()
+        .iter()
+        .map(|route| route.region.id)
+        .collect();
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let persisted: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     assert_eq!("UpdateMetadata", persisted["state"]);

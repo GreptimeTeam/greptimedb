@@ -16,6 +16,7 @@ mod executor;
 mod metadata;
 mod region_request;
 
+use std::collections::HashSet;
 use std::vec;
 
 use api::region::RegionResponse;
@@ -73,6 +74,9 @@ pub struct AlterTableProcedure {
     /// The alter table executor.
     executor: AlterTableExecutor,
 }
+
+#[derive(Debug)]
+pub(crate) struct RegionRouteChanged;
 
 /// Builds the executor from the [`AlterTableData`].
 ///
@@ -170,6 +174,24 @@ impl AlterTableProcedure {
                     operation: "setting skip_wal on logical tables".to_string()
                 }
             );
+            let current_region_ids = physical_table_route
+                .region_routes
+                .iter()
+                .map(|route| route.region.id)
+                .collect::<HashSet<_>>();
+            let locked_region_ids = self
+                .data
+                .region_locks
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            if physical_table_route.region_routes.len() != self.data.region_locks.len()
+                || current_region_ids != locked_region_ids
+            {
+                // Procedure lock keys are fixed at submission. Finish this attempt so the
+                // DDL manager can submit another procedure with locks for the current route.
+                return Ok(Status::done_with_output(RegionRouteChanged));
+            }
             self.data.region_distribution =
                 Some(region_distribution(&physical_table_route.region_routes));
             self.data.alter_regions_after_metadata = true;
