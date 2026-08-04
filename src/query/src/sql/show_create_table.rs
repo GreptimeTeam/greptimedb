@@ -78,7 +78,7 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     for (k, v) in table_opts
         .extra_options
         .iter()
-        .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
+        .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_KEY)
     {
         options.insert(k.clone(), v.clone());
     }
@@ -441,6 +441,10 @@ WITH(
 
         let mut table_meta = info.meta.clone();
         table_meta.options.skip_wal = false;
+        table_meta
+            .options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), true.to_string());
         assert!(
             create_sql_options(&table_meta, None)
                 .get(SKIP_WAL_KEY)
