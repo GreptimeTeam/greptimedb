@@ -622,6 +622,14 @@ mod tests {
         assert!(operator.list("file/").await.unwrap().is_empty());
     }
 
+    // On Windows, `std::fs::DirEntry` is a snapshot taken by
+    // `FindFirstFileW`: `file_type()` and `metadata()` keep returning the
+    // cached data even after the file is removed, so `read_list_entry`
+    // cannot observe the deletion and returns `Some` instead of `None`.
+    // This test only applies to platforms where metadata is fetched from
+    // the live filesystem (e.g. Unix `lstat` returns `ENOENT` after
+    // removal, which `read_list_entry` turns into `None`).
+    #[cfg(not(windows))]
     #[test]
     fn test_lister_skips_entry_removed_during_iteration() {
         let temp_dir = create_temp_dir("secure_fs_lister_removed_entry");
