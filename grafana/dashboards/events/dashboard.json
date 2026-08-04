@@ -479,7 +479,7 @@
                   {
                     "targetBlank": false,
                     "title": "Show lifecycle trace",
-                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}"
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}"
                   }
                 ]
               }
@@ -534,7 +534,7 @@
                   {
                     "targetBlank": false,
                     "title": "Show lifecycle trace",
-                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}"
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}"
                   }
                 ]
               }
@@ -625,7 +625,7 @@
                   {
                     "targetBlank": false,
                     "title": "Show lifecycle trace",
-                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}"
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}"
                   }
                 ]
               }
@@ -643,7 +643,7 @@
                   {
                     "targetBlank": false,
                     "title": "Show repartition topology",
-                    "url": "/d/greptimedb-events/greptimedb-events?var-repartition_parent_id=${__value.raw}&var-information_schema=${information_schema}"
+                    "url": "/d/greptimedb-events/greptimedb-events?var-repartition_parent_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}"
                   }
                 ]
               }
@@ -974,7 +974,7 @@
         "label": "Catalog",
         "multi": true,
         "name": "catalog",
-        "query": "SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM greptime_private.events WHERE $__timeFilter(timestamp)) catalogs ORDER BY catalog_name",
+        "query": "WITH events AS (SELECT timestamp, ${event_columns:raw} FROM greptime_private.events WHERE $__timeFilter(timestamp)) SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM events) catalogs ORDER BY catalog_name",
         "type": "query",
         "refresh": 2
       },
