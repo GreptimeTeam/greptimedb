@@ -258,6 +258,12 @@ impl PrometheusJsonResponse {
                     tag_column_indices.push(i);
                     num_label_columns += 1;
                 }
+                ConcreteDataType::Dictionary(ref dictionary)
+                    if dictionary.value_type().is_string() =>
+                {
+                    tag_column_indices.push(i);
+                    num_label_columns += 1;
+                }
                 _ => {}
             }
         }
@@ -281,7 +287,7 @@ impl PrometheusJsonResponse {
             // prepare things...
             let tag_columns = tag_column_indices
                 .iter()
-                .map(|i| batch.column(*i).as_string::<i32>())
+                .map(|i| batch.column(*i))
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
@@ -344,9 +350,10 @@ impl PrometheusJsonResponse {
                     tags.push((METRIC_NAME, metric_name.as_str()));
                 }
                 for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    // TODO(ruihang): add test for NULL tag
-                    if tag_column.is_valid(row_index) {
-                        tags.push((tag_name, tag_column.value(row_index)));
+                    if let Some(tag_value) =
+                        datatypes::arrow_array::string_array_value_at_index(tag_column, row_index)
+                    {
+                        tags.push((tag_name, tag_value));
                     }
                 }
 
@@ -439,6 +446,10 @@ impl PrometheusJsonResponse {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{
+        DictionaryArray, LargeStringArray, StringArray, StringViewArray, UInt32Array,
+    };
+    use arrow::datatypes::UInt32Type;
     use common_query::native_histogram::{
         CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, Span, build_histogram_array,
         native_histogram_value_type,
@@ -448,7 +459,8 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{
-        Float64Vector, StringVector, StructVector, TimestampMillisecondVector, VectorRef,
+        DictionaryVector, Float64Vector, StringVector, StructVector, TimestampMillisecondVector,
+        VectorRef,
     };
 
     use super::*;
@@ -484,6 +496,68 @@ mod tests {
             unreachable!("native histogram type must be a struct")
         };
         Arc::new(StructVector::try_new(histogram_type, histogram_array).unwrap())
+    }
+
+    #[test]
+    fn record_batches_to_data_supports_string_label_representations() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host_view", ConcreteDataType::utf8_view_datatype(), false),
+            ColumnSchema::new(
+                "host_large",
+                ConcreteDataType::large_string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "host_dictionary",
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::uint32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let dictionary = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0]),
+            Arc::new(StringArray::from(vec!["server-dictionary"])),
+        );
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000])) as _,
+                Arc::new(StringVector::from(StringViewArray::from(vec![
+                    "server-view",
+                ]))) as _,
+                Arc::new(StringVector::from(LargeStringArray::from(vec![
+                    "server-large",
+                ]))) as _,
+                Arc::new(DictionaryVector::<UInt32Type>::try_from(dictionary).unwrap()) as _,
+                Arc::new(Float64Vector::from_values([1.0])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Vector)
+                .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].metric["host_view"], "server-view");
+        assert_eq!(series[0].metric["host_large"], "server-large");
+        assert_eq!(series[0].metric["host_dictionary"], "server-dictionary");
     }
 
     #[test]
