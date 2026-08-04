@@ -24,6 +24,7 @@ includes = [
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
     "src/common/function/src/admin/purge_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin.rs",
 ]
 
 [properties]
