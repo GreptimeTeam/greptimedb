@@ -380,6 +380,17 @@ pub fn recordbatches_to_timeseries(
 
     timeseries
         .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
+
+    // Samples accumulated from multiple RecordBatches (which may arrive in any
+    // order from parallel scan partitions) must be ordered by timestamp
+    // ascending, as required by the Prometheus remote read protocol. A stable
+    // sort keeps insertion order for equal timestamps.
+    for series in &mut timeseries {
+        series
+            .samples
+            .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+    }
+
     Ok(timeseries)
 }
 
@@ -1377,6 +1388,66 @@ mod tests {
                 Sample {
                     value: 5.0,
                     timestamp: 3000,
+                },
+            ],
+            timeseries[0].samples
+        );
+    }
+
+    #[test]
+    fn recordbatches_to_timeseries_sorts_merged_samples_by_timestamp() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+        ]));
+
+        // Parallel scan partitions may reach the merge point in any order: here
+        // the newer batch (ts = 2000) arrives before the older batch
+        // (ts = 1000). The merged TimeSeries must still list samples in
+        // ascending timestamp order as required by the remote read protocol.
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![2000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![4.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
+
+        // Merged into a single series with samples sorted by timestamp.
+        assert_eq!(1, timeseries.len());
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 3.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 4.0,
+                    timestamp: 2000,
                 },
             ],
             timeseries[0].samples
