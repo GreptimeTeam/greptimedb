@@ -17,6 +17,7 @@ mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::query_request::Query;
@@ -130,13 +131,14 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_flight_do_put() {
+    async fn test_distributed_frontend_database_and_flight_health() {
         common_telemetry::init_default_ut_logging();
 
-        let db = GreptimeDbClusterBuilder::new("test_distributed_flight_do_put")
-            .await
-            .build(false)
-            .await;
+        let db =
+            GreptimeDbClusterBuilder::new("test_distributed_frontend_database_and_flight_health")
+                .await
+                .build(false)
+                .await;
 
         let runtime = common_runtime::global_runtime().clone();
         let greptime_request_handler = GreptimeRequestHandler::new(
@@ -146,6 +148,7 @@ mod test {
             FlightCompression::default(),
         );
         let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .database_handler(greptime_request_handler.clone())
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
         grpc_server
@@ -155,6 +158,7 @@ mod test {
         let addr = grpc_server.bind_addr().unwrap().to_string();
 
         let client = Client::with_urls(vec![addr]);
+        wait_for_client_health(&client).await;
         let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         client.set_auth(AuthScheme::Basic(Basic {
             username: "greptime_user".to_string(),
@@ -280,6 +284,19 @@ mod test {
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))
         );
+    }
+
+    async fn wait_for_client_health(client: &Client) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if client.health_check().await.is_ok() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cluster frontend did not become healthy within 10 seconds");
     }
 
     #[tokio::test(flavor = "multi_thread")]

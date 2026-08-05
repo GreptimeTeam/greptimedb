@@ -17,7 +17,7 @@ use rand::seq::IndexedRandom;
 
 #[enum_dispatch]
 pub trait LoadBalance {
-    fn get_peer<'a>(&self, peers: &'a [String]) -> Option<&'a String>;
+    fn get_index<'a>(&self, candidates: &'a [usize]) -> Option<&'a usize>;
 }
 
 #[enum_dispatch(LoadBalance)]
@@ -36,8 +36,8 @@ impl Default for Loadbalancer {
 pub struct Random;
 
 impl LoadBalance for Random {
-    fn get_peer<'a>(&self, peers: &'a [String]) -> Option<&'a String> {
-        peers.choose(&mut rand::rng())
+    fn get_index<'a>(&self, candidates: &'a [usize]) -> Option<&'a usize> {
+        candidates.choose(&mut rand::rng())
     }
 }
 
@@ -49,18 +49,13 @@ mod tests {
 
     #[test]
     fn test_random_lb() {
-        let peers = vec![
-            "127.0.0.1:3001".to_string(),
-            "127.0.0.1:3002".to_string(),
-            "127.0.0.1:3003".to_string(),
-            "127.0.0.1:3004".to_string(),
-        ];
-        let all: HashSet<String> = peers.clone().into_iter().collect();
+        let candidates = vec![0, 1, 2, 3];
+        let all: HashSet<usize> = candidates.iter().copied().collect();
 
         let random = Random;
         for _ in 0..100 {
-            let peer = random.get_peer(&peers).unwrap();
-            assert!(all.contains(peer));
+            let index = random.get_index(&candidates).unwrap();
+            assert!(all.contains(index));
         }
     }
 }

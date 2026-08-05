@@ -447,7 +447,14 @@ fn parse_addr(addr: &str) -> Result<SocketAddr> {
 mod tests {
     use std::time::Duration;
 
+    use api::v1::HealthCheckRequest;
+    use api::v1::health_check_client::HealthCheckClient;
+    use api::v1::meta::Role;
+    use meta_client::client::MetaClientBuilder;
+    use servers::grpc::GRPC_SERVER;
+
     use super::*;
+    use crate::instance::builder::FrontendBuilder;
 
     #[test]
     fn test_effective_http_timeout_for_pending_rows() {
@@ -537,5 +544,53 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_services_builder_health_check_is_reachable() {
+        // Arrange
+        let options = FrontendOptions {
+            http: HttpOptions {
+                addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            },
+            grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:0"),
+            mysql: crate::service_config::MysqlOptions {
+                enable: false,
+                ..Default::default()
+            },
+            postgres: crate::service_config::PostgresOptions {
+                enable: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut services = Services::new(options, instance, Default::default())
+            .build()
+            .unwrap();
+
+        // Act
+        services.start_all().await.unwrap();
+        let addr = services.addr(GRPC_SERVER).unwrap();
+        let health_check = HealthCheckClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap()
+            .health_check(HealthCheckRequest {})
+            .await;
+        services.shutdown_all().await.unwrap();
+
+        // Assert
+        assert!(health_check.is_ok());
     }
 }
