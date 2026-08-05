@@ -769,12 +769,17 @@ async fn execute_last_row_prefilter(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
-    let (pk_entries, remaining): (Vec<_>, Vec<_>) = all_prefilter_entries(prefilter_ctx)
+    let (mut pk_entries, remaining): (Vec<_>, Vec<_>) = all_prefilter_entries(prefilter_ctx)
         .into_iter()
         .partition(|entry| matches!(entry.kind, PrefilterEntryKind::PkGroup));
     if pk_entries.is_empty() {
-        return execute_prefilter_by_reading_columns(prefilter_ctx, reader_builder, build_ctx)
-            .await;
+        // No PK matcher (e.g. a bare instant query with only a time predicate):
+        // keep the focused two-stage LastRow prefilter by treating the whole
+        // encoded PK column as one run stream grouped by key, so per-series
+        // last-row selection and coverage pruning still apply.
+        pk_entries.push(PrefilterEntry::without_cache(
+            PrefilterEntryKind::PkGroupAll,
+        ));
     }
 
     let pk_result =
@@ -1010,7 +1015,7 @@ fn prefilter_column_names_for_entries(
                         .to_string(),
                 );
             }
-            PrefilterEntryKind::PkGroup => {
+            PrefilterEntryKind::PkGroup | PrefilterEntryKind::PkGroupAll => {
                 prefilter_column_names.insert(PRIMARY_KEY_COLUMN_NAME.to_string());
             }
         }
@@ -1164,6 +1169,8 @@ enum PrefilterEntryKind {
     Simple(usize),
     Physical(usize),
     PkGroup,
+    /// The whole encoded PK column treated as one run stream (no PK matcher).
+    PkGroupAll,
 }
 
 struct PrefilterEntry {
@@ -1285,17 +1292,32 @@ fn eval_entry_mask(
             let Some(coverage) = last_row_coverage.as_ref() else {
                 return primary_key_filter_mask(batch, pk_filter.as_mut());
             };
-            let (mask, runs) = eval_last_row_pk_mask(batch, pk_filter.as_mut(), coverage)?;
-            for run in runs {
-                if let Some(previous) = prefilter_ctx.last_row_runs.last_mut()
-                    && previous.key == run.key
-                {
-                    previous.rows += run.rows;
-                } else {
-                    prefilter_ctx.last_row_runs.push(run);
-                }
-            }
+            let (mask, runs) = eval_last_row_pk_mask(batch, Some(pk_filter.as_mut()), coverage)?;
+            record_last_row_runs(prefilter_ctx, runs);
             Ok(mask)
+        }
+        PrefilterEntryKind::PkGroupAll => {
+            let Some(coverage) = last_row_coverage.as_ref() else {
+                // Without coverage there is nothing to prune: select every row.
+                return Ok(BooleanBuffer::new_set(batch.num_rows()));
+            };
+            let (mask, runs) = eval_last_row_pk_mask(batch, None, coverage)?;
+            record_last_row_runs(prefilter_ctx, runs);
+            Ok(mask)
+        }
+    }
+}
+
+/// Coalesces adjacent `LastRowRun`s with the same key, mirroring the row order
+/// of the batches they were produced from.
+fn record_last_row_runs(prefilter_ctx: &mut PrefilterContext, runs: Vec<LastRowRun>) {
+    for run in runs {
+        if let Some(previous) = prefilter_ctx.last_row_runs.last_mut()
+            && previous.key == run.key
+        {
+            previous.rows += run.rows;
+        } else {
+            prefilter_ctx.last_row_runs.push(run);
         }
     }
 }
@@ -1319,11 +1341,29 @@ pub(crate) fn primary_key_filter_mask(
 
 fn eval_last_row_pk_mask(
     batch: &RecordBatch,
-    pk_filter: &mut dyn PrimaryKeyFilter,
+    pk_filter: Option<&mut dyn PrimaryKeyFilter>,
     coverage: &LastRowCoverageFilter,
 ) -> Result<(BooleanBuffer, Vec<LastRowRun>)> {
     let pk_column_index = primary_key_column_index(batch)?;
-    let matched = matching_primary_key_runs(batch, pk_column_index, pk_filter)?;
+    let matched = match pk_filter {
+        Some(filter) => matching_primary_key_runs(batch, pk_column_index, filter)?,
+        // No PK matcher: treat the whole PK column as one run stream grouped by key.
+        None => {
+            let keys = PrimaryKeys::try_new(batch, pk_column_index)?;
+            let mut runs = Vec::new();
+            let mut start = 0;
+            while start < batch.num_rows() {
+                let key = keys.value(start);
+                let mut end = start + 1;
+                while end < batch.num_rows() && keys.value(end) == key {
+                    end += 1;
+                }
+                runs.push((start..end, key));
+                start = end;
+            }
+            runs
+        }
+    };
     let mut builder = BooleanBufferBuilder::new(batch.num_rows());
     builder.append_n(batch.num_rows(), false);
     let mut selected_runs = Vec::new();
@@ -1511,14 +1551,40 @@ mod tests {
         coverage.0.insert(key, 10);
 
         let (equal_mask, equal_runs) =
-            eval_last_row_pk_mask(&batch, pk_filter.as_mut(), &coverage.for_file(10)).unwrap();
+            eval_last_row_pk_mask(&batch, Some(pk_filter.as_mut()), &coverage.for_file(10))
+                .unwrap();
         assert_eq!(equal_mask.count_set_bits(), 2);
         assert_eq!(equal_runs.len(), 1);
 
         let (older_mask, older_runs) =
-            eval_last_row_pk_mask(&batch, pk_filter.as_mut(), &coverage.for_file(9)).unwrap();
+            eval_last_row_pk_mask(&batch, Some(pk_filter.as_mut()), &coverage.for_file(9)).unwrap();
         assert_eq!(older_mask.count_set_bits(), 0);
         assert!(older_runs.is_empty());
+    }
+
+    #[test]
+    fn test_last_row_pk_mask_without_pk_filter() {
+        let key = new_primary_key(&["a", "x"]);
+        let other = new_primary_key(&["b", "x"]);
+        let batch = new_prefilter_batch(
+            &[key.as_slice(), key.as_slice(), other.as_slice()],
+            &[9, 10, 11],
+        );
+        let coverage = LastRowCoverage::default();
+        coverage.0.insert(key, 10);
+
+        // The strict `>` coverage comparison still prunes runs already covered
+        // by a newer file when there is no PK matcher.
+        let (equal_mask, equal_runs) =
+            eval_last_row_pk_mask(&batch, None, &coverage.for_file(10)).unwrap();
+        assert_eq!(equal_mask.count_set_bits(), 3);
+        assert_eq!(equal_runs.len(), 2);
+
+        let (older_mask, older_runs) =
+            eval_last_row_pk_mask(&batch, None, &coverage.for_file(9)).unwrap();
+        assert_eq!(older_mask.count_set_bits(), 1);
+        assert_eq!(older_runs.len(), 1);
+        assert_eq!(older_runs[0].key, other);
     }
 
     fn new_test_filters(exprs: &[datafusion_expr::Expr]) -> Vec<SimpleFilterEvaluator> {

@@ -286,6 +286,19 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().series_row_selector = Some(selector);
     }
 
+    /// Creates a copy of this provider with an independent scan request, so
+    /// hints can be applied per TableScan node without leaking to sibling
+    /// scans that share the same region provider.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            region_id: self.region_id,
+            engine: self.engine.clone(),
+            metadata: self.metadata.clone(),
+            scan_request: Arc::new(Mutex::new(self.scan_request.lock().unwrap().clone())),
+            query_ctx: self.query_ctx.clone(),
+        }
+    }
+
     pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
         self.scan_request.lock().unwrap().vector_search = Some(hint);
     }
