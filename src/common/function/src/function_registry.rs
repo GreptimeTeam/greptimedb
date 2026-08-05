@@ -551,7 +551,7 @@ mod tests {
         // Regression test: the ADMIN executor resolves `get_admin_function`
         // before falling back to `FUNCTION_REGISTRY`, so registering a function
         // whose name already exists in the normal registry would shadow the
-        // ADMIN-invokable built-in (e.g. `flush_table`). Such registrations
+        // ADMIN-invocable built-in (e.g. `flush_table`). Such registrations
         // must be rejected with
         // [`FunctionRegistrationResult::AlreadyExists`] and must not be
         // inserted into the ADMIN registry.
