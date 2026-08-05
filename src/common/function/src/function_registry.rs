@@ -14,6 +14,7 @@
 
 //! functions registry
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use datafusion::catalog::TableFunction;
@@ -52,6 +53,15 @@ pub struct FunctionRegistry {
     window_functions: RwLock<HashMap<String, WindowUDF>>,
 }
 
+/// The result of registering a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionRegistrationResult {
+    /// The function was newly registered.
+    Registered,
+    /// A function with the same name was already registered and was kept.
+    AlreadyExists,
+}
+
 impl FunctionRegistry {
     /// Register a function in the registry by converting it into a `ScalarFunctionFactory`.
     ///
@@ -68,6 +78,29 @@ impl FunctionRegistry {
             .write()
             .unwrap()
             .insert(func.name().to_string(), func);
+    }
+
+    /// Register a function only if no function with the same name exists.
+    ///
+    /// The duplicate check and the insert happen atomically under the same
+    /// write lock of the functions map. If a function with the same name
+    /// already exists, it is kept unchanged and
+    /// [`FunctionRegistrationResult::AlreadyExists`] is returned; otherwise the
+    /// function is registered and [`FunctionRegistrationResult::Registered`] is
+    /// returned.
+    pub fn register_if_absent(
+        &self,
+        func: impl Into<ScalarFunctionFactory>,
+    ) -> FunctionRegistrationResult {
+        let func = func.into();
+        let mut functions = self.functions.write().unwrap();
+        match functions.entry(func.name().to_string()) {
+            Entry::Occupied(_) => FunctionRegistrationResult::AlreadyExists,
+            Entry::Vacant(entry) => {
+                entry.insert(func);
+                FunctionRegistrationResult::Registered
+            }
+        }
     }
 
     /// Register a scalar function in the registry.
@@ -232,10 +265,92 @@ pub fn get_admin_function(name: &str) -> Option<ScalarFunctionFactory> {
     ADMIN_FUNCTION_REGISTRY.get_function(name)
 }
 
+/// Register a function that is only available to the ADMIN statement executor.
+///
+/// If a function with the same name is already registered in the ADMIN
+/// registry, the existing one is kept and
+/// [`FunctionRegistrationResult::AlreadyExists`] is returned. A name that
+/// already exists in the normal [`FUNCTION_REGISTRY`] when this call
+/// linearizes is also rejected: the ADMIN executor resolves admin-only
+/// functions before falling back to the normal registry, so inserting such a
+/// name here would shadow the built-in. Otherwise the function is registered
+/// and [`FunctionRegistrationResult::Registered`] is returned.
+///
+/// The enforced contract is one-way: it only guards the ADMIN registration
+/// against names already present in the normal registry. A later ordinary
+/// [`FunctionRegistry::register`] may still install the same name in the
+/// normal registry because the normal registry keeps its legacy replace
+/// semantics.
+pub fn register_admin_function(
+    func: impl Into<ScalarFunctionFactory>,
+) -> FunctionRegistrationResult {
+    register_admin_function_in(&ADMIN_FUNCTION_REGISTRY, &FUNCTION_REGISTRY, func)
+}
+
+/// Core implementation of [`register_admin_function`] against a pair of
+/// registries, parameterized so tests can exercise it with local registries.
+///
+/// Locking: the ADMIN-registry write lock is acquired first, then a read lock
+/// on the normal registry, and the normal-registry guard (bound to
+/// `normal_functions`) is kept alive through both the normal-name check and
+/// the ADMIN insertion below. This is the only code path that holds both
+/// registries' locks, so the ADMIN -> FUNCTION acquisition order is
+/// consistent and a concurrent normal-registry registration cannot slip in
+/// between the check and the ADMIN insert and be shadowed.
+///
+/// The enforced contract is one-way: it only guards the ADMIN registration
+/// against names already present in the normal registry. A later ordinary
+/// [`FunctionRegistry::register`] may still install the same name in the
+/// normal registry because the normal registry keeps its legacy replace
+/// semantics.
+fn register_admin_function_in(
+    admin_registry: &FunctionRegistry,
+    normal_registry: &FunctionRegistry,
+    func: impl Into<ScalarFunctionFactory>,
+) -> FunctionRegistrationResult {
+    let func = func.into();
+    let mut admin_functions = admin_registry.functions.write().unwrap();
+    // The normal-registry guard is a read lock: it is held across the
+    // normal-name check and the ADMIN insertion below, and while it is alive
+    // no writer can acquire the normal-registry write lock, so a concurrent
+    // normal-registry registration cannot slip in between the check and the
+    // ADMIN insert and be shadowed.
+    let normal_functions = normal_registry.functions.read().unwrap();
+    if normal_functions.contains_key(func.name()) {
+        drop(normal_functions);
+        return FunctionRegistrationResult::AlreadyExists;
+    }
+    let result = match admin_functions.entry(func.name().to_string()) {
+        Entry::Occupied(_) => FunctionRegistrationResult::AlreadyExists,
+        Entry::Vacant(entry) => {
+            entry.insert(func);
+            FunctionRegistrationResult::Registered
+        }
+    };
+    // Drop the read guard only after the ADMIN insertion, so writers to the
+    // normal registry stay blocked until the check-and-insert is complete.
+    drop(normal_functions);
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use super::*;
     use crate::scalars::test::TestAndFunction;
+    use crate::scalars::udf::create_udf;
+
+    /// Creates a [`ScalarFunctionFactory`] with the given name. Each call
+    /// allocates a distinct factory closure, so factories can be told apart by
+    /// [`Arc::ptr_eq`] on their `factory` field even when names are identical.
+    fn named_factory(name: &str) -> ScalarFunctionFactory {
+        ScalarFunctionFactory {
+            name: name.to_string(),
+            factory: Arc::new(|_ctx| create_udf(Arc::new(TestAndFunction::default()))),
+        }
+    }
 
     #[test]
     fn test_function_registry() {
@@ -246,5 +361,227 @@ mod tests {
         registry.register_scalar(TestAndFunction::default());
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
+    }
+
+    #[test]
+    fn test_register_if_absent_registers_new_function() {
+        let registry = FunctionRegistry::default();
+        let name = "pr3_register_if_absent_new";
+        let factory = named_factory(name);
+
+        assert_eq!(
+            registry.register_if_absent(factory.clone()),
+            FunctionRegistrationResult::Registered
+        );
+        let registered = registry
+            .get_function(name)
+            .expect("function should be registered");
+        assert!(Arc::ptr_eq(&registered.factory, &factory.factory));
+    }
+
+    #[test]
+    fn test_register_if_absent_first_registration_wins() {
+        let registry = FunctionRegistry::default();
+        let name = "pr3_register_if_absent_duplicate";
+        let first = named_factory(name);
+        let second = named_factory(name);
+
+        assert_eq!(
+            registry.register_if_absent(first.clone()),
+            FunctionRegistrationResult::Registered
+        );
+        assert_eq!(
+            registry.register_if_absent(second.clone()),
+            FunctionRegistrationResult::AlreadyExists
+        );
+
+        let stored = registry
+            .get_function(name)
+            .expect("function should be registered");
+        assert!(Arc::ptr_eq(&stored.factory, &first.factory));
+        assert!(!Arc::ptr_eq(&stored.factory, &second.factory));
+    }
+
+    #[test]
+    fn test_register_replaces_existing_function() {
+        // Regression test: `register` keeps its replace semantics.
+        let registry = FunctionRegistry::default();
+        let name = "pr3_register_replaces";
+        let first = named_factory(name);
+        let second = named_factory(name);
+
+        registry.register(first.clone());
+        registry.register(second.clone());
+
+        let stored = registry
+            .get_function(name)
+            .expect("function should be registered");
+        assert!(Arc::ptr_eq(&stored.factory, &second.factory));
+        assert!(!Arc::ptr_eq(&stored.factory, &first.factory));
+    }
+
+    #[test]
+    fn test_concurrent_register_if_absent_same_name() {
+        const THREADS: usize = 8;
+        let registry = Arc::new(FunctionRegistry::default());
+        let name = "pr3_concurrent_same_name";
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let factory = named_factory(name);
+                    // Synchronize so every thread attempts registration at the
+                    // same time; only one may win the write lock.
+                    barrier.wait();
+                    let result = registry.register_if_absent(factory.clone());
+                    (result, factory)
+                })
+            })
+            .collect();
+
+        let mut results: Vec<(FunctionRegistrationResult, ScalarFunctionFactory)> =
+            Vec::with_capacity(THREADS);
+        for handle in handles {
+            results.push(handle.join().expect("thread should not panic"));
+        }
+
+        let registered = results
+            .iter()
+            .filter(|(result, _)| *result == FunctionRegistrationResult::Registered)
+            .count();
+        let already_exists = results
+            .iter()
+            .filter(|(result, _)| *result == FunctionRegistrationResult::AlreadyExists)
+            .count();
+        assert_eq!(registered, 1);
+        assert_eq!(already_exists, THREADS - 1);
+
+        let winner = results
+            .iter()
+            .find(|(result, _)| *result == FunctionRegistrationResult::Registered)
+            .map(|(_, factory)| factory)
+            .expect("exactly one registration must win");
+
+        let stored = registry
+            .get_function(name)
+            .expect("function should be registered");
+        assert!(
+            Arc::ptr_eq(&stored.factory, &winner.factory),
+            "the stored factory must be the factory of the winning registration"
+        );
+    }
+
+    #[test]
+    fn test_register_admin_function_first_wins() {
+        // Tests touching the global registry must use unique names.
+        let name = "pr3_admin_runtime_register";
+        let first = named_factory(name);
+        let second = named_factory(name);
+
+        assert_eq!(
+            register_admin_function(first.clone()),
+            FunctionRegistrationResult::Registered
+        );
+        assert_eq!(
+            register_admin_function(second.clone()),
+            FunctionRegistrationResult::AlreadyExists
+        );
+
+        let stored = get_admin_function(name).expect("admin function should be queryable");
+        assert!(Arc::ptr_eq(&stored.factory, &first.factory));
+        assert!(!Arc::ptr_eq(&stored.factory, &second.factory));
+    }
+
+    #[test]
+    fn test_register_admin_function_duplicate_same_factory() {
+        // The exact same factory clone registered twice: the first registration
+        // wins, the duplicate is rejected, and the stored factory is
+        // pointer-equal to the original. Tests touching the global registry
+        // must use unique names.
+        let name = "pr3_admin_runtime_register_same_factory";
+        let factory = named_factory(name);
+
+        assert_eq!(
+            register_admin_function(factory.clone()),
+            FunctionRegistrationResult::Registered
+        );
+        assert_eq!(
+            register_admin_function(factory.clone()),
+            FunctionRegistrationResult::AlreadyExists
+        );
+
+        let stored = get_admin_function(name).expect("admin function should be queryable");
+        assert!(Arc::ptr_eq(&stored.factory, &factory.factory));
+    }
+
+    #[test]
+    fn test_register_admin_function_in_is_one_way_later_normal_register_allowed() {
+        // The guard is one-way: after the ADMIN registration completes, an
+        // ordinary normal-registry registration of the same name still
+        // succeeds because the normal registry keeps its legacy replace
+        // semantics.
+        let admin = FunctionRegistry::default();
+        let normal = FunctionRegistry::default();
+        let name = "pr3_admin_in_one_way";
+        let admin_factory = named_factory(name);
+        let normal_factory = named_factory(name);
+
+        assert_eq!(
+            register_admin_function_in(&admin, &normal, admin_factory.clone()),
+            FunctionRegistrationResult::Registered
+        );
+
+        normal.register(normal_factory.clone());
+
+        let stored_admin = admin
+            .get_function(name)
+            .expect("the ADMIN registration must be kept");
+        assert!(Arc::ptr_eq(&stored_admin.factory, &admin_factory.factory));
+        let stored_normal = normal
+            .get_function(name)
+            .expect("the later normal registration must succeed");
+        assert!(Arc::ptr_eq(&stored_normal.factory, &normal_factory.factory));
+    }
+
+    #[test]
+    fn test_register_admin_function_rejects_normal_registry_builtin_name() {
+        // Regression test: the ADMIN executor resolves `get_admin_function`
+        // before falling back to `FUNCTION_REGISTRY`, so registering a function
+        // whose name already exists in the normal registry would shadow the
+        // ADMIN-invocable built-in (e.g. `flush_table`). Such registrations
+        // must be rejected with
+        // [`FunctionRegistrationResult::AlreadyExists`] and must not be
+        // inserted into the ADMIN registry.
+        let factory = named_factory("flush_table");
+
+        assert_eq!(
+            register_admin_function(factory.clone()),
+            FunctionRegistrationResult::AlreadyExists
+        );
+        assert!(
+            get_admin_function("flush_table").is_none(),
+            "a normal-registry built-in must not be shadowed into the ADMIN registry"
+        );
+        assert!(
+            FUNCTION_REGISTRY.get_function("flush_table").is_some(),
+            "the normal-registry built-in must remain registered"
+        );
+    }
+
+    #[test]
+    fn test_builtin_admin_functions_remain_queryable() {
+        // Built-in admin-only functions registered at startup stay queryable
+        // through the same global registry used for runtime registrations.
+        #[cfg(feature = "enterprise")]
+        {
+            assert!(get_admin_function("purge_table").is_some());
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            assert!(get_admin_function("purge_table").is_none());
+        }
     }
 }
