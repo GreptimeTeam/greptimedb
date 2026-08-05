@@ -10,8 +10,10 @@
 
 headerPath = "licenses/enterprise-header.txt"
 
-# Only the enterprise-gated sources. Keep this list in sync with the
-# "# enterprise" block in `licenserc.toml`'s `excludes`.
+# Only the enterprise-gated sources: every file reachable solely through
+# `#[cfg(feature = "enterprise")] mod ...;` belongs here. Keep this list in sync
+# with the "# enterprise" block in `licenserc.toml`'s `excludes` — both are
+# enforced by `make check-enterprise-license`.
 includes = [
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
