@@ -46,7 +46,10 @@ use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
+    is_legacy_json2_extension_type,
+};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -122,7 +125,7 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
 /// parts of the field and must match.
 fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
     let is_json = |field: &Field| {
-        is_json_extension_type(field)
+        is_any_json_extension_type(field)
             || field
                 .metadata()
                 .get(datatypes::schema::TYPE_KEY)
@@ -913,11 +916,18 @@ fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
     let schema = schema.clone();
     let mut new_fields = Vec::with_capacity(schema.fields().len());
     for field in schema.fields().iter() {
-        let new_field = if is_json_extension_type(field)
+        let new_field = if is_json2_extension_type(field)
             && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
         {
+            let is_legacy_json2 = is_legacy_json2_extension_type(field);
             let mut new_field = field.as_ref().clone();
             new_field.set_data_type(DataType::Binary);
+            if is_legacy_json2 {
+                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
+                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
+                // identity.
+                new_field = new_field.with_extension_type(Json2ExtensionType::default());
+            }
             Arc::new(new_field)
         } else {
             field.clone()
@@ -1291,7 +1301,10 @@ mod tests {
     use std::task::{Context, Poll};
 
     use arrow::array::{Int64Array, TimestampMillisecondArray};
-    use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
+    use arrow_schema::extension::{
+        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+    };
+    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
     use common_meta::peer::Peer;
@@ -1311,6 +1324,7 @@ mod tests {
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
+    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
@@ -1338,6 +1352,31 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn test_amend_legacy_json2_field_preserves_json2_identity() {
+        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
+            StdHashMap::from([
+                (
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                ),
+                (
+                    EXTENSION_TYPE_METADATA_KEY.to_string(),
+                    serde_json::json!({
+                        "json_structure_settings": { "Structured": null }
+                    })
+                    .to_string(),
+                ),
+            ]),
+        );
+
+        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
+        let field = schema.field(0);
+        assert_eq!(&DataType::Binary, field.data_type());
+        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
+        assert!(is_json2_extension_type(field));
     }
 
     fn merge_scan_exec_with_sorted_input(

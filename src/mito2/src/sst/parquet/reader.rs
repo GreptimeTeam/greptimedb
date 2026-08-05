@@ -31,7 +31,7 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
@@ -541,7 +541,7 @@ impl ParquetReaderBuilder {
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field)
+            .any(is_json2_extension_type)
         {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
@@ -2443,7 +2443,7 @@ mod tests {
     use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
     use datatypes::arrow::datatypes::{Fields, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
@@ -2520,7 +2520,7 @@ mod tests {
         let b_field = Arc::new(Field::new("b", DataType::Utf8, true));
         let json_fields = Fields::from(vec![a_field, b_field]);
         let json_field = Field::new("j", DataType::Struct(json_fields.clone()), true)
-            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+            .with_extension_type(Json2ExtensionType::default());
         let schema = Arc::new(Schema::new(vec![json_field]));
 
         let a_array = Arc::new(StructArray::new(

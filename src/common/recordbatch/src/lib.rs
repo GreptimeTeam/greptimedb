@@ -45,7 +45,7 @@ use datatypes::arrow::util::display::{
     ArrayFormatter, ArrayFormatterFactory, DisplayIndex, FormatOptions, FormatResult,
 };
 use datatypes::arrow::util::pretty::pretty_format_batches_with_options;
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::is_any_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
@@ -455,7 +455,7 @@ impl ArrayFormatterFactory for BinaryFormatterFactory {
         Ok(Some(ArrayFormatter::new(
             Box::new(BinaryFormatter {
                 array,
-                is_json: field.is_some_and(is_json_extension_type),
+                is_json: field.is_some_and(is_any_json_extension_type),
                 default: ArrayFormatter::try_new(array, options)?,
                 null: options.null(),
             }),
@@ -485,7 +485,7 @@ impl DisplayIndex for BinaryFormatter<'_> {
                 ArrowDataType::Binary => self.array.as_binary::<i32>().value(idx),
                 ArrowDataType::LargeBinary => self.array.as_binary::<i64>().value(idx),
                 ArrowDataType::BinaryView => self.array.as_binary_view().value(idx),
-                _ => unreachable!(),
+                _ => return Ok(self.default.value(idx).write(f)?),
             };
             let value =
                 jsonb_to_string(bytes).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
