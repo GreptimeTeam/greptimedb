@@ -189,6 +189,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Query result is too large: {} rows, exceeds the maximum of {} rows",
+        rows,
+        limit
+    ))]
+    ResultTooLarge {
+        limit: usize,
+        rows: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery {
         reason: String,
@@ -814,6 +826,8 @@ impl ErrorExt for Error {
 
             TooManyConcurrentRequests { .. } => StatusCode::RuntimeResourcesExhausted,
 
+            ResultTooLarge { .. } => StatusCode::RuntimeResourcesExhausted,
+
             ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
 
@@ -889,6 +903,8 @@ impl ErrorExt for Error {
             CollectRecordbatch { source, .. } => source.retry_hint(),
 
             TooManyConcurrentRequests { .. } => RetryHint::Retryable,
+
+            ResultTooLarge { .. } => RetryHint::NonRetryable,
 
             _ => RetryHint::NonRetryable,
         }

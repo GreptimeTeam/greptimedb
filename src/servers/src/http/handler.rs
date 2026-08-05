@@ -40,7 +40,7 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
-use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
+use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result, ResultTooLargeSnafu};
 use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -175,16 +175,21 @@ pub async fn sql(
 
     let mut resp = match format {
         ResponseFormat::Arrow => {
-            ArrowResponse::from_output(outputs, query_params.compression).await
+            ArrowResponse::from_output(outputs, query_params.compression, state.max_result_rows)
+                .await
         }
         ResponseFormat::Csv(with_names, with_types) => {
-            CsvResponse::from_output(outputs, with_names, with_types).await
+            CsvResponse::from_output(outputs, with_names, with_types, state.max_result_rows).await
         }
-        ResponseFormat::Table => TableResponse::from_output(outputs).await,
-        ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
-        ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
-        ResponseFormat::Json => JsonResponse::from_output(outputs).await,
-        ResponseFormat::Null => NullResponse::from_output(outputs).await,
+        ResponseFormat::Table => TableResponse::from_output(outputs, state.max_result_rows).await,
+        ResponseFormat::GreptimedbV1 => {
+            GreptimedbV1Response::from_output(outputs, state.max_result_rows).await
+        }
+        ResponseFormat::InfluxdbV1 => {
+            InfluxdbV1Response::from_output(outputs, epoch, state.max_result_rows).await
+        }
+        ResponseFormat::Json => JsonResponse::from_output(outputs, state.max_result_rows).await,
+        ResponseFormat::Null => NullResponse::from_output(outputs, state.max_result_rows).await,
     };
 
     if let Some(limit) = query_params.limit {
@@ -526,9 +531,65 @@ pub async fn sql_format(
     Json(SqlFormatResponse { formatted }).into_response()
 }
 
+/// Errors when the total number of rows in `batches` exceeds `max_result_rows`
+/// (`0` disables the limit). Used for results that are already materialized.
+pub(crate) fn check_max_result_rows<'a>(
+    batches: impl IntoIterator<Item = &'a RecordBatch>,
+    max_result_rows: usize,
+) -> std::result::Result<(), ErrorResponse> {
+    if max_result_rows == 0 {
+        return Ok(());
+    }
+    let total_rows = batches.into_iter().map(|b| b.num_rows()).sum::<usize>();
+    if total_rows > max_result_rows {
+        return Err(ErrorResponse::from_error(
+            ResultTooLargeSnafu {
+                limit: max_result_rows,
+                rows: total_rows,
+            }
+            .build(),
+        ));
+    }
+    Ok(())
+}
+
+/// Collects a record batch stream into a `Vec`, erroring as soon as the total
+/// number of rows exceeds `max_result_rows` (`0` disables the limit). This
+/// converts unbounded in-memory accumulation of query results (memory DoS)
+/// into a clean error while keeping the buffered result bounded.
+pub(crate) async fn collect_with_max_rows(
+    mut stream: SendableRecordBatchStream,
+    max_result_rows: usize,
+) -> std::result::Result<Vec<RecordBatch>, ErrorResponse> {
+    if max_result_rows == 0 {
+        return util::collect(stream)
+            .await
+            .map_err(|err| ErrorResponse::from_error(err));
+    }
+
+    let mut batches = Vec::new();
+    let mut total_rows = 0usize;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|err| ErrorResponse::from_error(err))?;
+        total_rows += batch.num_rows();
+        if total_rows > max_result_rows {
+            return Err(ErrorResponse::from_error(
+                ResultTooLargeSnafu {
+                    limit: max_result_rows,
+                    rows: total_rows,
+                }
+                .build(),
+            ));
+        }
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
 /// Create a response from query result
 pub async fn from_output(
     outputs: Vec<crate::error::Result<Output>>,
+    max_result_rows: usize,
 ) -> std::result::Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
@@ -547,17 +608,18 @@ pub async fn from_output(
                 OutputData::Stream(stream) => {
                     let schema = stream.schema().clone();
                     // TODO(sunng87): streaming response
-                    let mut http_record_output = match util::collect(stream).await {
-                        Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
-                            Ok(rows) => rows,
+                    let mut http_record_output =
+                        match collect_with_max_rows(stream, max_result_rows).await {
+                            Ok(rows) => match HttpRecordsOutput::try_new(schema, rows) {
+                                Ok(rows) => rows,
+                                Err(err) => {
+                                    return Err(ErrorResponse::from_error(err));
+                                }
+                            },
                             Err(err) => {
-                                return Err(ErrorResponse::from_error(err));
+                                return Err(err);
                             }
-                        },
-                        Err(err) => {
-                            return Err(ErrorResponse::from_error(err));
-                        }
-                    };
+                        };
                     if let Some(physical_plan) = o.meta.plan {
                         let mut result_map = HashMap::new();
 
@@ -572,7 +634,12 @@ pub async fn from_output(
                     results.push(GreptimeQueryOutput::Records(http_record_output))
                 }
                 OutputData::RecordBatches(rbs) => {
-                    match HttpRecordsOutput::try_new(rbs.schema(), rbs.take()) {
+                    let schema = rbs.schema();
+                    let batches = rbs.take();
+                    if let Err(err) = check_max_result_rows(&batches, max_result_rows) {
+                        return Err(err);
+                    }
+                    match HttpRecordsOutput::try_new(schema, batches) {
                         Ok(rows) => {
                             results.push(GreptimeQueryOutput::Records(rows));
                         }
@@ -682,15 +749,24 @@ pub async fn promql(
         let outputs = sql_handler.do_promql_query(&prom_query, query_ctx).await;
 
         match format {
-            ResponseFormat::Arrow => ArrowResponse::from_output(outputs, compression).await,
-            ResponseFormat::Csv(with_names, with_types) => {
-                CsvResponse::from_output(outputs, with_names, with_types).await
+            ResponseFormat::Arrow => {
+                ArrowResponse::from_output(outputs, compression, state.max_result_rows).await
             }
-            ResponseFormat::Table => TableResponse::from_output(outputs).await,
-            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
-            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
-            ResponseFormat::Json => JsonResponse::from_output(outputs).await,
-            ResponseFormat::Null => NullResponse::from_output(outputs).await,
+            ResponseFormat::Csv(with_names, with_types) => {
+                CsvResponse::from_output(outputs, with_names, with_types, state.max_result_rows)
+                    .await
+            }
+            ResponseFormat::Table => {
+                TableResponse::from_output(outputs, state.max_result_rows).await
+            }
+            ResponseFormat::GreptimedbV1 => {
+                GreptimedbV1Response::from_output(outputs, state.max_result_rows).await
+            }
+            ResponseFormat::InfluxdbV1 => {
+                InfluxdbV1Response::from_output(outputs, epoch, state.max_result_rows).await
+            }
+            ResponseFormat::Json => JsonResponse::from_output(outputs, state.max_result_rows).await,
+            ResponseFormat::Null => NullResponse::from_output(outputs, state.max_result_rows).await,
         }
     };
 
@@ -828,5 +904,51 @@ mod tests {
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["state"], "error");
         assert_eq!(value["reason"], "conversion failed");
+    }
+
+    #[tokio::test]
+    async fn http_query_output_stream_respects_max_result_rows() {
+        use common_recordbatch::{RecordBatch, RecordBatches};
+        use datatypes::prelude::*;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use datatypes::vectors::UInt32Vector;
+
+        let column_schemas = vec![ColumnSchema::new(
+            "numbers",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])) as _],
+        )
+        .unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        // A stream larger than the limit errors cleanly instead of being
+        // collected into memory in full.
+        let outputs = vec![Ok(Output::new(
+            OutputData::Stream(recordbatches.as_stream()),
+            Default::default(),
+        ))];
+        let result = from_output(outputs, 2).await;
+        let err = result.expect_err("must error when the result exceeds the limit");
+        assert_eq!(err.code(), StatusCode::RuntimeResourcesExhausted as u32);
+        assert!(err.error().contains("maximum of 2"));
+
+        // A stream within the limit is collected normally.
+        let outputs = vec![Ok(Output::new(
+            OutputData::Stream(recordbatches.as_stream()),
+            Default::default(),
+        ))];
+        let (output, _) = from_output(outputs, 4)
+            .await
+            .expect("must succeed when the result is within the limit");
+        let records = match output.first().unwrap() {
+            GreptimeQueryOutput::Records(records) => records,
+            _ => unreachable!(),
+        };
+        assert_eq!(records.num_rows(), 4);
     }
 }

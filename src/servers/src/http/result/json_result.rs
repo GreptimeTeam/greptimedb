@@ -31,10 +31,12 @@ pub struct JsonResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,
 }
-
 impl JsonResponse {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(outputs).await {
+    pub async fn from_output(
+        outputs: Vec<crate::error::Result<Output>>,
+        max_result_rows: usize,
+    ) -> HttpResponse {
+        match handler::from_output(outputs, max_result_rows).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
                 if output.len() > 1 {
@@ -131,5 +133,59 @@ impl IntoResponse for JsonResponse {
             payload,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::status_code::StatusCode;
+    use common_query::Output;
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::*;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{UInt32Vector, VectorRef};
+
+    use super::*;
+
+    fn numbers_recordbatches() -> RecordBatches {
+        let column_schemas = vec![ColumnSchema::new(
+            "numbers",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4]))];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        RecordBatches::try_new(schema, vec![recordbatch]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_json_response_respects_max_result_rows() {
+        // A result larger than the limit errors cleanly instead of being buffered whole.
+        let recordbatches = numbers_recordbatches();
+        let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
+        match JsonResponse::from_output(outputs, 2).await {
+            HttpResponse::Error(err) => {
+                assert_eq!(err.code(), StatusCode::RuntimeResourcesExhausted as u32);
+                assert!(err.error().contains("maximum of 2"));
+            }
+            _ => panic!("expected error response"),
+        }
+
+        // A result within the limit still works.
+        let recordbatches = numbers_recordbatches();
+        let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
+        match JsonResponse::from_output(outputs, 4).await {
+            HttpResponse::Json(resp) => {
+                let records = match resp.output().first().unwrap() {
+                    GreptimeQueryOutput::Records(records) => records,
+                    _ => unreachable!(),
+                };
+                assert_eq!(records.num_rows(), 4);
+            }
+            _ => panic!("expected json response"),
+        }
     }
 }

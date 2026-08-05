@@ -34,8 +34,11 @@ pub struct TableResponse {
 }
 
 impl TableResponse {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(outputs).await {
+    pub async fn from_output(
+        outputs: Vec<crate::error::Result<Output>>,
+        max_result_rows: usize,
+    ) -> HttpResponse {
+        match handler::from_output(outputs, max_result_rows).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
                 if output.len() > 1 {

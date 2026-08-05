@@ -50,7 +50,10 @@ pub async fn logs(
         .start_timer();
 
     let output = handler.query(params, query_ctx).await;
-    let resp = GreptimedbV1Response::from_output(vec![output]).await;
+    // Bound the query result by the default `max_result_rows` limit so log
+    // queries cannot buffer unbounded results in memory.
+    let resp =
+        GreptimedbV1Response::from_output(vec![output], crate::http::DEFAULT_MAX_RESULT_ROWS).await;
 
     resp.with_execution_time(exec_start.elapsed().as_millis() as u64)
         .into_response()

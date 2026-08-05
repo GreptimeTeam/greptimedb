@@ -158,6 +158,9 @@ impl ExtraHttpRouterProviders {
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 /// Default address port for the public HTTP API server.
 const DEFAULT_HTTP_API_ADDR_PORT: u16 = 4006;
+/// Default maximum rows of a single query result the HTTP API will materialize
+/// before refusing to buffer the whole result in memory. `0` disables the limit.
+pub const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 
 /// Authorization header
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
@@ -248,6 +251,11 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
+    /// Maximum rows of a single query result the HTTP API will materialize
+    /// before returning an error. This converts unbounded buffering of large
+    /// query results (memory DoS) into a clean error. Set to 0 to disable.
+    pub max_result_rows: usize,
+
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
@@ -273,6 +281,8 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+
             experimental_enable_explain_analyze_stream: true,
             enable_api_server: false,
             api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
@@ -601,6 +611,9 @@ impl From<NullResponse> for HttpResponse {
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
     pub experimental_enable_explain_analyze_stream: bool,
+    /// Maximum rows of a single query result the HTTP API will materialize.
+    /// `0` disables the limit.
+    pub max_result_rows: usize,
 }
 
 #[derive(Clone)]
@@ -642,6 +655,7 @@ impl HttpServerBuilder {
             experimental_enable_explain_analyze_stream: self
                 .options
                 .experimental_enable_explain_analyze_stream,
+            max_result_rows: self.options.max_result_rows,
         });
 
         Self {
@@ -1676,6 +1690,8 @@ mod test {
         // The API server is disabled by default.
         assert!(!opts.enable_api_server);
         assert_eq!(opts.api_server_addr, "127.0.0.1:4006");
+        // The query result row limit is enabled by default.
+        assert_eq!(opts.max_result_rows, DEFAULT_MAX_RESULT_ROWS);
     }
 
     #[tokio::test]
@@ -2028,7 +2044,7 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
         let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
 
-        let json_resp = GreptimedbV1Response::from_output(outputs).await;
+        let json_resp = GreptimedbV1Response::from_output(outputs, DEFAULT_MAX_RESULT_ROWS).await;
         if let HttpResponse::GreptimedbV1(json_resp) = json_resp {
             let json_output = &json_resp.output[0];
             if let GreptimeQueryOutput::Records(r) = json_output {
@@ -2075,15 +2091,33 @@ mod test {
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
-                ResponseFormat::Csv(with_names, with_types) => {
-                    CsvResponse::from_output(outputs, with_names, with_types).await
+                ResponseFormat::Arrow => {
+                    ArrowResponse::from_output(outputs, None, DEFAULT_MAX_RESULT_ROWS).await
                 }
-                ResponseFormat::Table => TableResponse::from_output(outputs).await,
-                ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
-                ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
-                ResponseFormat::Json => JsonResponse::from_output(outputs).await,
-                ResponseFormat::Null => NullResponse::from_output(outputs).await,
+                ResponseFormat::Csv(with_names, with_types) => {
+                    CsvResponse::from_output(
+                        outputs,
+                        with_names,
+                        with_types,
+                        DEFAULT_MAX_RESULT_ROWS,
+                    )
+                    .await
+                }
+                ResponseFormat::Table => {
+                    TableResponse::from_output(outputs, DEFAULT_MAX_RESULT_ROWS).await
+                }
+                ResponseFormat::GreptimedbV1 => {
+                    GreptimedbV1Response::from_output(outputs, DEFAULT_MAX_RESULT_ROWS).await
+                }
+                ResponseFormat::InfluxdbV1 => {
+                    InfluxdbV1Response::from_output(outputs, None, DEFAULT_MAX_RESULT_ROWS).await
+                }
+                ResponseFormat::Json => {
+                    JsonResponse::from_output(outputs, DEFAULT_MAX_RESULT_ROWS).await
+                }
+                ResponseFormat::Null => {
+                    NullResponse::from_output(outputs, DEFAULT_MAX_RESULT_ROWS).await
+                }
             };
 
             match json_resp {

@@ -24,6 +24,7 @@ use axum::extract::{Json, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use common_error::status_code::StatusCode as ErrorStatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
@@ -163,6 +164,7 @@ async fn test_sql_not_provided() {
     let api_state = ApiState {
         sql_handler,
         experimental_enable_explain_analyze_stream: false,
+        max_result_rows: HttpOptions::default().max_result_rows,
     };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
@@ -197,6 +199,7 @@ async fn test_sql_output_rows() {
     let api_state = ApiState {
         sql_handler,
         experimental_enable_explain_analyze_stream: false,
+        max_result_rows: HttpOptions::default().max_result_rows,
     };
 
     let query_sql = "select sum(uint32s) from numbers limit 20";
@@ -305,6 +308,7 @@ async fn test_dashboard_sql_limit() {
     let api_state = ApiState {
         sql_handler,
         experimental_enable_explain_analyze_stream: false,
+        max_result_rows: HttpOptions::default().max_result_rows,
     };
     for format in ["greptimedb_v1", "csv", "table"] {
         let query = create_query(format, "select * from numbers", Some(1000));
@@ -351,6 +355,7 @@ async fn test_sql_form() {
     let api_state = ApiState {
         sql_handler,
         experimental_enable_explain_analyze_stream: false,
+        max_result_rows: HttpOptions::default().max_result_rows,
     };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table", "null"] {
@@ -731,4 +736,74 @@ async fn get_body(response: Response) -> Bytes {
     axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn test_http_query_result_respects_max_result_rows() {
+    common_telemetry::init_default_ut_logging();
+
+    let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let api_state = ApiState {
+        sql_handler,
+        experimental_enable_explain_analyze_stream: false,
+        max_result_rows: 100,
+    };
+
+    // A query returning more rows than the limit errors cleanly.
+    for format in [
+        "greptimedb_v1",
+        "json",
+        "csv",
+        "table",
+        "influxdb_v1",
+        "arrow",
+    ] {
+        let query = create_query(format, "select * from numbers", None);
+        let resp = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
+        let HttpResponse::Error(err) = resp else {
+            panic!("expected error response for format {format}");
+        };
+        assert_eq!(
+            err.code(),
+            ErrorStatusCode::RuntimeResourcesExhausted as u32,
+            "format {format}"
+        );
+        assert!(err.error().contains("maximum of 100"), "format {format}");
+    }
+
+    // A query within the limit still works.
+    let api_state = ApiState {
+        sql_handler: create_testing_sql_query_handler(MemTable::specified_numbers_table(50)),
+        experimental_enable_explain_analyze_stream: false,
+        max_result_rows: 100,
+    };
+    for format in ["greptimedb_v1", "json"] {
+        let query = create_query(format, "select * from numbers", None);
+        let resp = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
+        match resp {
+            HttpResponse::GreptimedbV1(resp) => match resp.output().first().unwrap() {
+                Records(records) => assert_eq!(records.num_rows(), 50),
+                _ => unreachable!(),
+            },
+            HttpResponse::Json(resp) => match resp.output().first().unwrap() {
+                Records(records) => assert_eq!(records.num_rows(), 50),
+                _ => unreachable!(),
+            },
+            _ => panic!("expected success response for format {format}"),
+        }
+    }
 }

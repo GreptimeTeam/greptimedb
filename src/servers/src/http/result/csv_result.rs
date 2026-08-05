@@ -37,8 +37,9 @@ impl CsvResponse {
         outputs: Vec<crate::error::Result<Output>>,
         with_names: bool,
         with_types: bool,
+        max_result_rows: usize,
     ) -> HttpResponse {
-        match handler::from_output(outputs).await {
+        match handler::from_output(outputs, max_result_rows).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
                 if output.len() > 1 {
@@ -284,7 +285,7 @@ mod tests {
         let output = Output::new_with_record_batches(recordbatches);
         let outputs = vec![Ok(output)];
 
-        let resp = CsvResponse::from_output(outputs, with_names, with_types)
+        let resp = CsvResponse::from_output(outputs, with_names, with_types, usize::MAX)
             .await
             .into_response();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
