@@ -267,14 +267,70 @@ pub fn get_admin_function(name: &str) -> Option<ScalarFunctionFactory> {
 
 /// Register a function that is only available to the ADMIN statement executor.
 ///
-/// If a function with the same name is already registered, the existing one is
-/// kept and [`FunctionRegistrationResult::AlreadyExists`] is returned;
-/// otherwise the function is registered and
-/// [`FunctionRegistrationResult::Registered`] is returned.
+/// If a function with the same name is already registered in the ADMIN
+/// registry, the existing one is kept and
+/// [`FunctionRegistrationResult::AlreadyExists`] is returned. A name that
+/// already exists in the normal [`FUNCTION_REGISTRY`] when this call
+/// linearizes is also rejected: the ADMIN executor resolves admin-only
+/// functions before falling back to the normal registry, so inserting such a
+/// name here would shadow the built-in. Otherwise the function is registered
+/// and [`FunctionRegistrationResult::Registered`] is returned.
+///
+/// The enforced contract is one-way: it only guards the ADMIN registration
+/// against names already present in the normal registry. A later ordinary
+/// [`FunctionRegistry::register`] may still install the same name in the
+/// normal registry because the normal registry keeps its legacy replace
+/// semantics.
 pub fn register_admin_function(
     func: impl Into<ScalarFunctionFactory>,
 ) -> FunctionRegistrationResult {
-    ADMIN_FUNCTION_REGISTRY.register_if_absent(func)
+    register_admin_function_in(&ADMIN_FUNCTION_REGISTRY, &FUNCTION_REGISTRY, func)
+}
+
+/// Core implementation of [`register_admin_function`] against a pair of
+/// registries, parameterized so tests can exercise it with local registries.
+///
+/// Locking: the ADMIN-registry write lock is acquired first, then a read lock
+/// on the normal registry, and the normal-registry guard (bound to
+/// `normal_functions`) is kept alive through both the normal-name check and
+/// the ADMIN insertion below. This is the only code path that holds both
+/// registries' locks, so the ADMIN -> FUNCTION acquisition order is
+/// consistent and a concurrent normal-registry registration cannot slip in
+/// between the check and the ADMIN insert and be shadowed.
+///
+/// The enforced contract is one-way: it only guards the ADMIN registration
+/// against names already present in the normal registry. A later ordinary
+/// [`FunctionRegistry::register`] may still install the same name in the
+/// normal registry because the normal registry keeps its legacy replace
+/// semantics.
+fn register_admin_function_in(
+    admin_registry: &FunctionRegistry,
+    normal_registry: &FunctionRegistry,
+    func: impl Into<ScalarFunctionFactory>,
+) -> FunctionRegistrationResult {
+    let func = func.into();
+    let mut admin_functions = admin_registry.functions.write().unwrap();
+    // The normal-registry guard is a read lock: it is held across the
+    // normal-name check and the ADMIN insertion below, and while it is alive
+    // no writer can acquire the normal-registry write lock, so a concurrent
+    // normal-registry registration cannot slip in between the check and the
+    // ADMIN insert and be shadowed.
+    let normal_functions = normal_registry.functions.read().unwrap();
+    if normal_functions.contains_key(func.name()) {
+        drop(normal_functions);
+        return FunctionRegistrationResult::AlreadyExists;
+    }
+    let result = match admin_functions.entry(func.name().to_string()) {
+        Entry::Occupied(_) => FunctionRegistrationResult::AlreadyExists,
+        Entry::Vacant(entry) => {
+            entry.insert(func);
+            FunctionRegistrationResult::Registered
+        }
+    };
+    // Drop the read guard only after the ADMIN insertion, so writers to the
+    // normal registry stay blocked until the check-and-insert is complete.
+    drop(normal_functions);
+    result
 }
 
 #[cfg(test)]
@@ -459,6 +515,60 @@ mod tests {
 
         let stored = get_admin_function(name).expect("admin function should be queryable");
         assert!(Arc::ptr_eq(&stored.factory, &factory.factory));
+    }
+
+    #[test]
+    fn test_register_admin_function_in_is_one_way_later_normal_register_allowed() {
+        // The guard is one-way: after the ADMIN registration completes, an
+        // ordinary normal-registry registration of the same name still
+        // succeeds because the normal registry keeps its legacy replace
+        // semantics.
+        let admin = FunctionRegistry::default();
+        let normal = FunctionRegistry::default();
+        let name = "pr3_admin_in_one_way";
+        let admin_factory = named_factory(name);
+        let normal_factory = named_factory(name);
+
+        assert_eq!(
+            register_admin_function_in(&admin, &normal, admin_factory.clone()),
+            FunctionRegistrationResult::Registered
+        );
+
+        normal.register(normal_factory.clone());
+
+        let stored_admin = admin
+            .get_function(name)
+            .expect("the ADMIN registration must be kept");
+        assert!(Arc::ptr_eq(&stored_admin.factory, &admin_factory.factory));
+        let stored_normal = normal
+            .get_function(name)
+            .expect("the later normal registration must succeed");
+        assert!(Arc::ptr_eq(&stored_normal.factory, &normal_factory.factory));
+    }
+
+    #[test]
+    fn test_register_admin_function_rejects_normal_registry_builtin_name() {
+        // Regression test: the ADMIN executor resolves `get_admin_function`
+        // before falling back to `FUNCTION_REGISTRY`, so registering a function
+        // whose name already exists in the normal registry would shadow the
+        // ADMIN-invokable built-in (e.g. `flush_table`). Such registrations
+        // must be rejected with
+        // [`FunctionRegistrationResult::AlreadyExists`] and must not be
+        // inserted into the ADMIN registry.
+        let factory = named_factory("flush_table");
+
+        assert_eq!(
+            register_admin_function(factory.clone()),
+            FunctionRegistrationResult::AlreadyExists
+        );
+        assert!(
+            get_admin_function("flush_table").is_none(),
+            "a normal-registry built-in must not be shadowed into the ADMIN registry"
+        );
+        assert!(
+            FUNCTION_REGISTRY.get_function("flush_table").is_some(),
+            "the normal-registry built-in must remain registered"
+        );
     }
 
     #[test]
