@@ -1701,7 +1701,7 @@ impl QueryContext {
 pub struct TriggerContext {
     pub reason: TriggerReason,
     pub protocol: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -1739,7 +1739,7 @@ impl Default for TriggerContext {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, AsRefStr, EnumString,
 )]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum TriggerReason {
     #[default]
@@ -2330,5 +2330,18 @@ mod tests {
         assert_eq!(pb_roundtrip.extensions, pb.extensions);
         assert_eq!(pb_roundtrip.channel, pb.channel);
         assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_trigger_context_serialization() {
+        let context = TriggerContext::new(TriggerReason::Manual, "mysql");
+
+        assert_eq!(
+            serde_json::json!({
+                "reason": "manual",
+                "protocol": "mysql",
+            }),
+            serde_json::to_value(context).unwrap()
+        );
     }
 }

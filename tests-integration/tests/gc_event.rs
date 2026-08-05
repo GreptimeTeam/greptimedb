@@ -153,7 +153,7 @@ WHERE type = 'batch_gc'
   AND json_get_string(procedure_trigger, 'type') = 'Submitted'"#,
     );
     assert_eq!(
-        r#"{"reason":{"type":"manual"},"protocol":"unknown","extensions":{}}"#,
+        r#"{"protocol":"unknown","reason":"manual"}"#,
         find_eventually_string(instance, &submitted, "trigger_context").await
     );
 

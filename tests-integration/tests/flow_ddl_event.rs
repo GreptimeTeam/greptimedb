@@ -120,10 +120,7 @@ async fn assert_trigger_context(
         "trigger_context",
     )
     .await;
-    assert_eq!(
-        r#"{"extensions":{},"protocol":"unknown","reason":{"type":"manual"}}"#,
-        actual
-    );
+    assert_eq!(r#"{"protocol":"unknown","reason":"manual"}"#, actual);
 }
 
 async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>, flow: &str) {

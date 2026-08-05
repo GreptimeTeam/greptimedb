@@ -130,10 +130,7 @@ WHERE type = '{event_type}'
         "trigger_context",
     )
     .await;
-    assert_eq!(
-        r#"{"extensions":{},"protocol":"unknown","reason":{"type":"manual"}}"#,
-        actual
-    );
+    assert_eq!(r#"{"protocol":"unknown","reason":"manual"}"#, actual);
 
     let lifecycle = format!(
         r#"SELECT count(*) AS event_count
