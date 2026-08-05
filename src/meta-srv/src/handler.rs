@@ -405,6 +405,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             mailbox_message,
             heartbeat_config,
+            extensions: Default::default(),
         };
         Ok(res)
     }
