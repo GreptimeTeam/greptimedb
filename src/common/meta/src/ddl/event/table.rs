@@ -296,7 +296,11 @@ impl TableDdlEvent {
     }
 
     /// Builds the bounded event emitted when dropping a table is submitted.
-    pub(crate) fn drop_table_submitted(locator: TableDdlLocator, drop_if_exists: bool) -> Self {
+    pub(crate) fn drop_table_submitted(
+        locator: TableDdlLocator,
+        drop_if_exists: bool,
+        trigger_context: TriggerContext,
+    ) -> Self {
         Self::submitted(
             TableDdlEventType::DropTable,
             [locator],
@@ -304,33 +308,39 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 drop_if_exists,
             }),
-            None,
+            Some(trigger_context),
         )
     }
 
     /// Builds the bounded event emitted when restoring a dropped table is submitted.
     #[cfg(feature = "enterprise")]
-    pub(crate) fn undrop_table_submitted(locator: TableDdlLocator) -> Self {
+    pub(crate) fn undrop_table_submitted(
+        locator: TableDdlLocator,
+        trigger_context: TriggerContext,
+    ) -> Self {
         Self::submitted(
             TableDdlEventType::UndropTable,
             [locator],
             TableDdlPayload::UndropTable(UndropTablePayload {
                 version: TABLE_DDL_PAYLOAD_VERSION,
             }),
-            None,
+            Some(trigger_context),
         )
     }
 
     /// Builds the bounded event emitted when purging a dropped table is submitted.
     #[cfg(feature = "enterprise")]
-    pub(crate) fn purge_dropped_table_submitted(locator: TableDdlLocator) -> Self {
+    pub(crate) fn purge_dropped_table_submitted(
+        locator: TableDdlLocator,
+        trigger_context: TriggerContext,
+    ) -> Self {
         Self::submitted(
             TableDdlEventType::PurgeDroppedTable,
             [locator],
             TableDdlPayload::PurgeDroppedTable(PurgeDroppedTablePayload {
                 version: TABLE_DDL_PAYLOAD_VERSION,
             }),
-            None,
+            Some(trigger_context),
         )
     }
 
@@ -338,6 +348,7 @@ impl TableDdlEvent {
     pub(crate) fn truncate_table_submitted(
         locator: TableDdlLocator,
         time_range_count: usize,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::TruncateTable,
@@ -346,7 +357,7 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 time_range_count,
             }),
-            None,
+            Some(trigger_context),
         )
     }
 

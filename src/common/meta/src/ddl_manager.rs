@@ -77,7 +77,7 @@ use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CommentOnTask, CreateDatabaseTask, CreateFlowTask,
     CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TriggerContext, TruncateTableTask, UndropTableTask,
+    TriggerContext, TriggerReason, TruncateTableTask, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
 };
 
 const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
@@ -564,10 +564,12 @@ impl DdlManager {
     pub async fn submit_drop_table_task(
         &self,
         drop_table_task: DropTableTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = DropTableProcedure::new(drop_table_task, context);
+        let procedure =
+            DropTableProcedure::new_with_trigger_context(drop_table_task, context, trigger_context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -580,6 +582,7 @@ impl DdlManager {
     pub async fn submit_undrop_table_task(
         &self,
         undrop_table_task: UndropTableTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         #[cfg(not(feature = "enterprise"))]
         {
@@ -605,6 +608,7 @@ impl DdlManager {
                 undrop_table_task,
                 context,
                 Some(original_table_name),
+                trigger_context,
             );
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -618,6 +622,7 @@ impl DdlManager {
     pub async fn submit_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         #[cfg(not(feature = "enterprise"))]
         {
@@ -631,7 +636,11 @@ impl DdlManager {
         #[cfg(feature = "enterprise")]
         {
             let context = self.create_context();
-            let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
+            let procedure = PurgeDroppedTableProcedure::new_with_trigger_context(
+                purge_dropped_table_task,
+                context,
+                trigger_context,
+            );
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
             self.execute_procedure_and_wait(procedure_with_id).await
@@ -658,8 +667,11 @@ impl DdlManager {
         #[cfg(feature = "enterprise")]
         {
             let context = self.create_context();
-            let procedure =
-                PurgeDroppedTableProcedure::new_if_expired(purge_dropped_table_task, context);
+            let procedure = PurgeDroppedTableProcedure::new_if_expired_with_trigger_context(
+                purge_dropped_table_task,
+                context,
+                TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+            );
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
             self.execute_procedure_and_wait(procedure_with_id).await
@@ -766,9 +778,15 @@ impl DdlManager {
         &self,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
+        let procedure = TruncateTableProcedure::new_with_trigger_context(
+            truncate_table_task,
+            table_info_value,
+            context,
+            trigger_context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -853,12 +871,19 @@ impl DdlManager {
                     )
                     .await
                 }
-                DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
+                DropTable(drop_table_task) => {
+                    handle_drop_table_task(self, drop_table_task, request.trigger_context).await
+                }
                 UndropTable(undrop_table_task) => {
-                    handle_undrop_table_task(self, undrop_table_task).await
+                    handle_undrop_table_task(self, undrop_table_task, request.trigger_context).await
                 }
                 PurgeDroppedTable(purge_dropped_table_task) => {
-                    handle_purge_dropped_table_task(self, purge_dropped_table_task).await
+                    handle_purge_dropped_table_task(
+                        self,
+                        purge_dropped_table_task,
+                        request.trigger_context,
+                    )
+                    .await
                 }
                 AlterTable(alter_table_task) => {
                     handle_alter_table_task(
@@ -870,7 +895,8 @@ impl DdlManager {
                     .await
                 }
                 TruncateTable(truncate_table_task) => {
-                    handle_truncate_table_task(self, truncate_table_task).await
+                    handle_truncate_table_task(self, truncate_table_task, request.trigger_context)
+                        .await
                 }
                 CreateLogicalTables(create_table_tasks) => {
                     handle_create_logical_table_tasks(
@@ -926,6 +952,7 @@ impl DdlManager {
 async fn handle_truncate_table_task(
     ddl_manager: &DdlManager,
     truncate_table_task: TruncateTableTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = truncate_table_task.table_id;
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
@@ -950,7 +977,7 @@ async fn handle_truncate_table_task(
     );
 
     let (id, _) = ddl_manager
-        .submit_truncate_table_task(truncate_table_task, table_info_value)
+        .submit_truncate_table_task(truncate_table_task, table_info_value, trigger_context)
         .await?;
 
     info!("Table: {table_id} is truncated via procedure_id {id:?}");
@@ -1012,9 +1039,12 @@ async fn handle_alter_table_task(
 async fn handle_drop_table_task(
     ddl_manager: &DdlManager,
     drop_table_task: DropTableTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
-    let (id, _) = ddl_manager.submit_drop_table_task(drop_table_task).await?;
+    let (id, _) = ddl_manager
+        .submit_drop_table_task(drop_table_task, trigger_context)
+        .await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");
 
@@ -1027,10 +1057,11 @@ async fn handle_drop_table_task(
 async fn handle_undrop_table_task(
     ddl_manager: &DdlManager,
     undrop_table_task: UndropTableTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = undrop_table_task.table_id;
     let (id, _) = ddl_manager
-        .submit_undrop_table_task(undrop_table_task)
+        .submit_undrop_table_task(undrop_table_task, trigger_context)
         .await?;
 
     info!("Table: {table_id} is undropped via procedure_id {id:?}");
@@ -1044,9 +1075,10 @@ async fn handle_undrop_table_task(
 async fn handle_purge_dropped_table_task(
     ddl_manager: &DdlManager,
     purge_dropped_table_task: PurgeDroppedTableTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_purge_dropped_table_task(purge_dropped_table_task)
+        .submit_purge_dropped_table_task(purge_dropped_table_task, trigger_context)
         .await?;
 
     info!("Dropped table is purged via procedure_id {id:?}");
@@ -1650,7 +1682,10 @@ mod tests {
         let ddl_manager = build_soft_drop_test_ddl_manager();
 
         let err = ddl_manager
-            .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
+            .submit_undrop_table_task(
+                UndropTableTask { table_id: 1024 },
+                TriggerContext::default(),
+            )
             .await
             .unwrap_err();
 
@@ -1664,13 +1699,19 @@ mod tests {
         let ddl_manager = build_soft_drop_test_ddl_manager();
 
         let err = ddl_manager
-            .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
+            .submit_undrop_table_task(
+                UndropTableTask { table_id: 1024 },
+                TriggerContext::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, crate::error::Error::Unsupported { .. }));
 
         let err = ddl_manager
-            .submit_purge_dropped_table_task(PurgeDroppedTableTask { table_id: 1024 })
+            .submit_purge_dropped_table_task(
+                PurgeDroppedTableTask { table_id: 1024 },
+                TriggerContext::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, crate::error::Error::Unsupported { .. }));

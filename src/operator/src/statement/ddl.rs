@@ -1375,6 +1375,7 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
             ensure!(
@@ -1488,6 +1489,7 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
         ensure!(
             !is_readonly_schema(&table_name.schema_name),
             SchemaReadOnlySnafu {
@@ -2751,6 +2753,7 @@ async fn execute_undrop_table(
             table_name: table_name.to_string(),
         })?;
 
+    let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
     let request = SubmitDdlTaskRequest::new(
         to_meta_query_context(query_context),
         DdlTask::new_undrop_table(dropped.table_id),
@@ -2804,7 +2807,9 @@ mod test {
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
     #[cfg(feature = "enterprise")]
-    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::ddl::{
+        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
+    };
     #[cfg(feature = "enterprise")]
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -2949,6 +2954,13 @@ mod test {
 
         let requests = procedure.requests.lock().unwrap();
         assert!(matches!(&requests[0].task, DdlTask::UndropTable(task) if task.table_id == 42));
+        assert_eq!(
+            requests[0]
+                .query_context
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY),
+            Some(&TriggerReason::Manual.as_ref().to_string())
+        );
         assert_eq!(
             cache.invalidations.lock().unwrap()[0],
             vec![CacheIdent::TableId(42), CacheIdent::TableName(name)]

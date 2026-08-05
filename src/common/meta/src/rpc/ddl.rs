@@ -69,6 +69,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
 /// Reserved query-context extension key for the trigger reason supplied by frontend.
 pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
+/// Protocol recorded when the trigger does not originate from a frontend protocol.
+pub const UNKNOWN_TRIGGER_PROTOCOL: &str = "unknown";
 
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
@@ -1689,7 +1691,7 @@ impl QueryContext {
             12 => "log",
             13 => "promql",
             14 => "splunk",
-            _ => "unknown",
+            _ => UNKNOWN_TRIGGER_PROTOCOL,
         }
     }
 }
@@ -1729,7 +1731,7 @@ impl TriggerContext {
 
 impl Default for TriggerContext {
     fn default() -> Self {
-        Self::new(TriggerReason::default(), "unknown")
+        Self::new(TriggerReason::default(), UNKNOWN_TRIGGER_PROTOCOL)
     }
 }
 

@@ -53,8 +53,8 @@ use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::{
-    DropTableTask, PurgeDroppedTableTask, QueryContext, TriggerContext, TruncateTableTask,
-    UndropTableTask,
+    DropTableTask, PurgeDroppedTableTask, QueryContext, TriggerContext, TriggerReason,
+    TruncateTableTask, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
 };
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -315,26 +315,33 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "drop")
                     .with_table_id(12),
                 true,
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "drop_if_exists": true,
             }),
-            rows: vec![table_locator_values(Some("drop"), Some(12))],
+            rows: vec![submitted_table_locator_values(Some("drop"), Some(12))],
         },
         #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::UndropTable,
-            event: TableDdlEvent::undrop_table_submitted(TableDdlLocator::from_table_id(13)),
+            event: TableDdlEvent::undrop_table_submitted(
+                TableDdlLocator::from_table_id(13),
+                TriggerContext::default(),
+            ),
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![table_locator_values(None, Some(13))],
+            rows: vec![submitted_table_locator_values(None, Some(13))],
         },
         #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::PurgeDroppedTable,
-            event: TableDdlEvent::purge_dropped_table_submitted(TableDdlLocator::from_table_id(14)),
+            event: TableDdlEvent::purge_dropped_table_submitted(
+                TableDdlLocator::from_table_id(14),
+                TriggerContext::default(),
+            ),
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![table_locator_values(None, Some(14))],
+            rows: vec![submitted_table_locator_values(None, Some(14))],
         },
         EventCase {
             event_type: TableDdlEventType::TruncateTable,
@@ -342,12 +349,13 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "truncate")
                     .with_table_id(15),
                 4,
+                TriggerContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "time_range_count": 4,
             }),
-            rows: vec![table_locator_values(Some("truncate"), Some(15))],
+            rows: vec![submitted_table_locator_values(Some("truncate"), Some(15))],
         },
     ]
 }
@@ -406,8 +414,11 @@ fn procedure_cases() -> Vec<ProcedureCase> {
     #[cfg(feature = "enterprise")]
     let undrop_table = UndropTableProcedure::new(UndropTableTask { table_id: 45 }, test_context());
     #[cfg(feature = "enterprise")]
-    let purge_dropped_table =
-        PurgeDroppedTableProcedure::new(PurgeDroppedTableTask { table_id: 46 }, test_context());
+    let purge_dropped_table = PurgeDroppedTableProcedure::new_if_expired_with_trigger_context(
+        PurgeDroppedTableTask { table_id: 46 },
+        test_context(),
+        TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+    );
     let truncate_table = truncate_procedure(TruncateTableTask {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
         schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -471,21 +482,25 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "drop_if_exists": true,
             }),
-            rows: vec![table_locator_values(Some("drop"), Some(44))],
+            rows: vec![submitted_table_locator_values(Some("drop"), Some(44))],
         },
         #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(undrop_table),
             event_type: "undrop_table",
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![table_locator_values(None, Some(45))],
+            rows: vec![submitted_table_locator_values(None, Some(45))],
         },
         #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(purge_dropped_table),
             event_type: "purge_dropped_table",
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![table_locator_values(None, Some(46))],
+            rows: vec![submitted_table_locator_values_with_trigger_context(
+                None,
+                Some(46),
+                TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+            )],
         },
         ProcedureCase {
             procedure: Box::new(truncate_table),
@@ -494,7 +509,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "time_range_count": 1,
             }),
-            rows: vec![table_locator_values(Some("truncate"), Some(47))],
+            rows: vec![submitted_table_locator_values(Some("truncate"), Some(47))],
         },
     ]
 }
@@ -551,8 +566,20 @@ fn logical_locator_values(
 }
 
 fn submitted_table_locator_values(table_name: Option<&str>, table_id: Option<u32>) -> Vec<Value> {
+    submitted_table_locator_values_with_trigger_context(
+        table_name,
+        table_id,
+        TriggerContext::default(),
+    )
+}
+
+fn submitted_table_locator_values_with_trigger_context(
+    table_name: Option<&str>,
+    table_id: Option<u32>,
+    trigger_context: TriggerContext,
+) -> Vec<Value> {
     let mut values = table_locator_values(table_name, table_id);
-    *values.last_mut().unwrap() = trigger_context_value();
+    *values.last_mut().unwrap() = trigger_context_value_for(trigger_context);
     values
 }
 
@@ -567,7 +594,11 @@ fn submitted_logical_locator_values(
 }
 
 fn trigger_context_value() -> Value {
-    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+    trigger_context_value_for(TriggerContext::default())
+}
+
+fn trigger_context_value_for(trigger_context: TriggerContext) -> Value {
+    jsonb_value(&serde_json::to_value(trigger_context).unwrap())
 }
 
 fn string_value(value: &str) -> Value {
@@ -580,10 +611,11 @@ fn table_id_value(value: u32) -> Value {
 
 fn truncate_procedure(task: TruncateTableTask) -> TruncateTableProcedure {
     let table_info = test_create_table_task_with_id("metrics", task.table_id).table_info;
-    TruncateTableProcedure::new(
+    TruncateTableProcedure::new_with_trigger_context(
         task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
         test_context(),
+        TriggerContext::default(),
     )
 }
 

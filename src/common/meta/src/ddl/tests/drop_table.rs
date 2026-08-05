@@ -1787,6 +1787,7 @@ async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare(
         new_undrop_table_task(table_id),
         ddl_context,
         Some(original_table_name),
+        TriggerContext::default(),
     );
 
     let keys = procedure
@@ -1854,6 +1855,7 @@ async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
         new_undrop_table_task(original_table_id),
         ddl_context.clone(),
         Some(original_table_name.clone()),
+        TriggerContext::default(),
     );
     let mut hard_drop = DropTableProcedure::new(
         new_drop_table_task(table_name, recreated_table_id, false),

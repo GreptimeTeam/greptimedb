@@ -43,7 +43,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
-use crate::rpc::ddl::UndropTableTask;
+use crate::rpc::ddl::{TriggerContext, UndropTableTask};
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
 };
@@ -57,15 +57,24 @@ impl UndropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::UndropTable";
 
     pub fn new(task: UndropTableTask, context: DdlContext) -> Self {
-        Self::new_with_original_table_name(task, context, None)
+        Self::new_with_trigger_context(task, context, TriggerContext::default())
+    }
+
+    pub fn new_with_trigger_context(
+        task: UndropTableTask,
+        context: DdlContext,
+        trigger_context: TriggerContext,
+    ) -> Self {
+        Self::new_with_original_table_name(task, context, None, trigger_context)
     }
 
     pub(crate) fn new_with_original_table_name(
         task: UndropTableTask,
         context: DdlContext,
         table_name: Option<TableName>,
+        trigger_context: TriggerContext,
     ) -> Self {
-        let mut data = UndropTableData::new(task);
+        let mut data = UndropTableData::new(task, trigger_context);
         data.table_name = table_name;
         Self { context, data }
     }
@@ -448,7 +457,7 @@ impl Procedure for UndropTableProcedure {
                     })
                     .unwrap_or_default()
                     .with_table_id(self.data.task.table_id);
-                TableDdlEvent::undrop_table_submitted(locator)
+                TableDdlEvent::undrop_table_submitted(locator, self.data.trigger_context.clone())
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
         };
@@ -556,10 +565,12 @@ pub struct UndropTableData {
     drop_generation: Option<String>,
     #[serde(default)]
     tombstone_identity_loaded: bool,
+    #[serde(default)]
+    trigger_context: TriggerContext,
 }
 
 impl UndropTableData {
-    fn new(task: UndropTableTask) -> Self {
+    fn new(task: UndropTableTask, trigger_context: TriggerContext) -> Self {
         Self {
             state: UndropTableState::Prepare,
             task,
@@ -571,6 +582,7 @@ impl UndropTableData {
             retention_expires_at: None,
             drop_generation: None,
             tombstone_identity_loaded: false,
+            trigger_context,
         }
     }
 

@@ -43,7 +43,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::TruncateTableTask;
+use crate::rpc::ddl::{TriggerContext, TruncateTableTask};
 use crate::rpc::router::{find_leader_regions, find_leaders};
 
 pub struct TruncateTableProcedure {
@@ -101,7 +101,11 @@ impl Procedure for TruncateTableProcedure {
                 let task = &self.data.task;
                 let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
                     .with_table_id(task.table_id);
-                TableDdlEvent::truncate_table_submitted(locator, task.time_ranges.len())
+                TableDdlEvent::truncate_table_submitted(
+                    locator,
+                    task.time_ranges.len(),
+                    self.data.trigger_context.clone(),
+                )
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable),
         };
@@ -113,14 +117,15 @@ impl Procedure for TruncateTableProcedure {
 impl TruncateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTable";
 
-    pub(crate) fn new(
+    pub(crate) fn new_with_trigger_context(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         context: DdlContext,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self {
             context,
-            data: TruncateTableData::new(task, table_info_value),
+            data: TruncateTableData::new(task, table_info_value, trigger_context),
         }
     }
 
@@ -227,17 +232,21 @@ pub struct TruncateTableData {
     state: TruncateTableState,
     task: TruncateTableTask,
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+    #[serde(default)]
+    trigger_context: TriggerContext,
 }
 
 impl TruncateTableData {
     pub fn new(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self {
             state: TruncateTableState::Prepare,
             task,
             table_info_value,
+            trigger_context,
         }
     }
 

@@ -45,7 +45,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -155,7 +155,7 @@ impl PersistentContext {
                     RegionMigrationTriggerReason::Failover => TriggerReason::RegionFailover,
                     RegionMigrationTriggerReason::Unknown => TriggerReason::Unknown,
                 },
-                "unknown",
+                UNKNOWN_TRIGGER_PROTOCOL,
             ),
         }
     }

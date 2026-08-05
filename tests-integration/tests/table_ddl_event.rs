@@ -29,6 +29,8 @@ use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
 };
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::UNKNOWN_TRIGGER_PROTOCOL;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
@@ -343,12 +345,25 @@ async fn test_table_ddl_procedure_events() {
 
     // Act / Assert: Alter and Truncate have a rich submitted row and lightweight
     // terminal lifecycle row.
-    run_sql(
+    run_sql_with_context(
         &frontend,
         &format!("ALTER TABLE {TABLE} ADD COLUMN extra STRING"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let alter_table_procedure_id = submitted_procedure_id(&frontend, "alter_table", TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "alter_table",
+        &alter_table_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "alter_table",
@@ -373,9 +388,26 @@ async fn test_table_ddl_procedure_events() {
         &format!("INSERT INTO {TABLE} VALUES ('a', 0, 1, 'b')"),
     )
     .await;
-    run_sql(&frontend, &format!("TRUNCATE TABLE {TABLE}")).await;
+    run_sql_with_context(
+        &frontend,
+        &format!("TRUNCATE TABLE {TABLE}"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
+    )
+    .await;
     let truncate_table_procedure_id =
         submitted_procedure_id(&frontend, "truncate_table", TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "truncate_table",
+        &truncate_table_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "truncate_table",
@@ -398,8 +430,25 @@ async fn test_table_ddl_procedure_events() {
 
     // Act / Assert: Drop records the table name, while Undrop and Purge use the
     // table ID as their submitted locator.
-    run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
+    run_sql_with_context(
+        &frontend,
+        &format!("DROP TABLE {TABLE}"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
+    )
+    .await;
     let drop_table_procedure_id = submitted_procedure_id(&frontend, "drop_table", TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "drop_table",
+        &drop_table_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "drop_table",
@@ -424,10 +473,24 @@ async fn test_table_ddl_procedure_events() {
         let (undrop_table_procedure_id, _) = cluster
             .metasrv
             .ddl_manager()
-            .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id })
+            .submit_undrop_table_task(
+                common_meta::rpc::ddl::UndropTableTask { table_id },
+                common_meta::rpc::ddl::TriggerContext::new(
+                    common_meta::rpc::ddl::TriggerReason::Manual,
+                    UNKNOWN_TRIGGER_PROTOCOL,
+                ),
+            )
             .await
             .unwrap();
         let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
+        assert_trigger_context(
+            &frontend,
+            "undrop_table",
+            &undrop_table_procedure_id,
+            "manual",
+            "unknown",
+        )
+        .await;
         assert_id_submitted_event(
             &frontend,
             "undrop_table",
@@ -451,12 +514,24 @@ async fn test_table_ddl_procedure_events() {
         let (purge_table_procedure_id, _) = cluster
             .metasrv
             .ddl_manager()
-            .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask {
-                table_id,
-            })
+            .submit_purge_dropped_table_task(
+                common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
+                common_meta::rpc::ddl::TriggerContext::new(
+                    common_meta::rpc::ddl::TriggerReason::Manual,
+                    UNKNOWN_TRIGGER_PROTOCOL,
+                ),
+            )
             .await
             .unwrap();
         let purge_table_procedure_id = purge_table_procedure_id.to_string();
+        assert_trigger_context(
+            &frontend,
+            "purge_dropped_table",
+            &purge_table_procedure_id,
+            "manual",
+            "unknown",
+        )
+        .await;
         assert_id_submitted_event(
             &frontend,
             "purge_dropped_table",
@@ -488,16 +563,29 @@ async fn test_table_ddl_procedure_events() {
     )
     .await;
     let physical_table_id = find_table_id(&frontend, PHYSICAL_TABLE).await;
-    run_sql(
+    run_sql_with_context(
         &frontend,
         &format!(
             "CREATE TABLE {LOGICAL_TABLE} (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (\"on_physical_table\" = \"{PHYSICAL_TABLE}\")"
         ),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let logical_table_id = find_table_id(&frontend, LOGICAL_TABLE).await;
     let create_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "create_logical_tables", LOGICAL_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "create_logical_tables",
+        &create_logical_tables_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
 
     // Assert: logical Create emits one submitted row per logical table and
     // preserves the logical and physical table IDs on its terminal row.
@@ -531,13 +619,26 @@ async fn test_table_ddl_procedure_events() {
 
     // Act / Assert: logical Alter preserves the one-row-per-logical-table submitted
     // contract and emits a lightweight terminal row.
-    run_sql(
+    run_sql_with_context(
         &frontend,
         &format!("ALTER TABLE {LOGICAL_TABLE} ADD COLUMN rack STRING PRIMARY KEY"),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::HttpSql,
+        )),
     )
     .await;
     let alter_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "alter_logical_tables", LOGICAL_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "alter_logical_tables",
+        &alter_logical_tables_procedure_id,
+        "manual",
+        "httpsql",
+    )
+    .await;
     assert_named_submitted_event(
         &frontend,
         "alter_logical_tables",
