@@ -1,7 +1,7 @@
 CREATE TABLE view_metrics (
     host STRING,
-    region STRING,
-    value INT,
+    "region" STRING,
+    "value" INT,
     event_ts TIMESTAMP TIME INDEX,
     PRIMARY KEY (host)
 );
@@ -36,23 +36,23 @@ WHERE value IS NOT NULL AND value >= 10;
 
 CREATE VIEW persisted_grouped_aggregate AS
 SELECT
-    region AS region_name,
+    "region" AS region_name,
     COUNT(*) AS row_count,
     SUM(value) AS value_sum,
     AVG(value) AS value_avg
 FROM view_metrics
-GROUP BY region;
+GROUP BY "region";
 
 CREATE VIEW persisted_union AS
-SELECT host AS host_name, region AS region_name
+SELECT host AS host_name, "region" AS region_name
 FROM view_metrics
-WHERE region = 'east'
+WHERE "region" = 'east'
 UNION
-SELECT host AS host_name, region AS region_name
+SELECT host AS host_name, "region" AS region_name
 FROM view_metrics
 WHERE host = 'beta'
 UNION ALL
-SELECT host AS host_name, region AS region_name
+SELECT host AS host_name, "region" AS region_name
 FROM view_metrics
 WHERE host = 'beta';
 
@@ -67,10 +67,10 @@ WHERE metrics.value IS NOT NULL OR labels.enabled IS NULL;
 
 CREATE VIEW persisted_window AS
 SELECT
-    region AS region_name,
+    "region" AS region_name,
     host AS host_name,
     event_ts AS event_time,
-    ROW_NUMBER() OVER (PARTITION BY region ORDER BY event_ts) AS row_num
+    ROW_NUMBER() OVER (PARTITION BY "region" ORDER BY event_ts) AS row_num
 FROM view_metrics;
 
 CREATE VIEW persisted_date_format AS
