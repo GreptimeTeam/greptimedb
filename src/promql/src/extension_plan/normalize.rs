@@ -17,8 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_query::prometheus::is_prometheus_stale_nan;
-use datafusion::arrow::array::{Array, BooleanArray, Float64Array};
+use datafusion::arrow::array::{Array, BooleanArray};
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
@@ -43,7 +42,8 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
+    resolve_column_name, serialize_column_index,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -416,11 +416,12 @@ impl SeriesNormalizeStream {
         // Filter out Prometheus stale markers.
         let mut stale_marker_filter = vec![true; input.num_rows()];
         for column in result_batch.columns() {
-            if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
-                for (i, flag) in stale_marker_filter.iter_mut().enumerate() {
-                    if float_column.is_valid(i) && is_prometheus_stale_nan(float_column.value(i)) {
-                        *flag = false;
-                    }
+            let Some(stale_sample_column) = prometheus_stale_sample_column(column.as_ref()) else {
+                continue;
+            };
+            for (i, flag) in stale_marker_filter.iter_mut().enumerate() {
+                if is_prometheus_stale_sample(stale_sample_column, i) {
+                    *flag = false;
                 }
             }
         }
@@ -462,6 +463,8 @@ impl Stream for SeriesNormalizeStream {
 
 #[cfg(test)]
 mod test {
+    use common_query::native_histogram::{build_histogram_array, read_histogram};
+    use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{
@@ -476,6 +479,7 @@ mod test {
     use datatypes::arrow_array::StringArray;
 
     use super::*;
+    use crate::extension_plan::test_util::native_histogram;
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
@@ -657,5 +661,59 @@ mod test {
         assert_eq!(value.value(0), 42.0);
         assert_eq!(auxiliary.value(0).to_bits(), 0x7ff8_0000_0000_0000);
         assert!(!value.is_valid(1));
+    }
+
+    #[tokio::test]
+    async fn filters_native_histogram_stale_markers() {
+        let histograms = build_histogram_array(&[
+            Some(native_histogram(42.0)),
+            Some(native_histogram(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))),
+            Some(native_histogram(f64::NAN)),
+            None,
+        ]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", histograms.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_000, 2_000, 3_000, 4_000,
+                ])),
+                histograms,
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: true,
+            tag_columns: Vec::new(),
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let context = SessionContext::default();
+        let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+        let batch = batches.iter().find(|batch| batch.num_rows() == 3).unwrap();
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StructArray>()
+            .unwrap();
+
+        assert_eq!(read_histogram(values, 0).unwrap().unwrap().sum, 42.0);
+        assert!(read_histogram(values, 1).unwrap().unwrap().sum.is_nan());
+        assert!(read_histogram(values, 2).unwrap().is_none());
     }
 }
