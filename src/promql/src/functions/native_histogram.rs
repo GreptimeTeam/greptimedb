@@ -92,20 +92,28 @@ fn read_scalar_f64_arg(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AnnotationReturn {
     FloatNull,
+    BooleanTrue,
     BooleanFalse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AnnotationLevel {
+    Info,
+    Warning,
 }
 
 impl AnnotationReturn {
     fn data_type(self) -> DataType {
         match self {
             Self::FloatNull => DataType::Float64,
-            Self::BooleanFalse => DataType::Boolean,
+            Self::BooleanTrue | Self::BooleanFalse => DataType::Boolean,
         }
     }
 
     fn scalar_value(self) -> ScalarValue {
         match self {
             Self::FloatNull => ScalarValue::Float64(None),
+            Self::BooleanTrue => ScalarValue::Boolean(Some(true)),
             Self::BooleanFalse => ScalarValue::Boolean(Some(false)),
         }
     }
@@ -116,6 +124,7 @@ struct NativeHistogramAnnotationUdf {
     name: &'static str,
     signature: Signature,
     return_kind: AnnotationReturn,
+    level: AnnotationLevel,
     message: String,
     collector: Option<PromqlAnnotationCollector>,
 }
@@ -124,6 +133,7 @@ impl NativeHistogramAnnotationUdf {
     fn new(
         name: &'static str,
         return_kind: AnnotationReturn,
+        level: AnnotationLevel,
         message: String,
         collector: Option<PromqlAnnotationCollector>,
     ) -> Self {
@@ -131,6 +141,7 @@ impl NativeHistogramAnnotationUdf {
             name,
             signature: Signature::variadic_any(Volatility::Volatile),
             return_kind,
+            level,
             message,
             collector,
         }
@@ -141,6 +152,7 @@ impl PartialEq for NativeHistogramAnnotationUdf {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.return_kind == other.return_kind
+            && self.level == other.level
             && self.message == other.message
     }
 }
@@ -151,6 +163,7 @@ impl Hash for NativeHistogramAnnotationUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.return_kind.hash(state);
+        self.level.hash(state);
         self.message.hash(state);
     }
 }
@@ -188,7 +201,10 @@ impl ScalarUDFImpl for NativeHistogramAnnotationUdf {
                 .cloned()
                 .or_else(|| self.collector.clone())
         {
-            collector.record_info(self.message.clone());
+            match self.level {
+                AnnotationLevel::Info => collector.record_info(self.message.clone()),
+                AnnotationLevel::Warning => collector.record_warning(self.message.clone()),
+            }
         }
         Ok(ColumnarValue::Scalar(self.return_kind.scalar_value()))
     }
@@ -205,6 +221,10 @@ impl NativeHistogramDrop {
         "prom_native_histogram_drop_bool"
     }
 
+    const fn bool_true_name() -> &'static str {
+        "prom_native_histogram_keep_bool"
+    }
+
     pub fn float_null_udf(
         message: String,
         collector: Option<PromqlAnnotationCollector>,
@@ -212,6 +232,7 @@ impl NativeHistogramDrop {
         ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
             Self::float_null_name(),
             AnnotationReturn::FloatNull,
+            AnnotationLevel::Info,
             message,
             collector,
         ))
@@ -224,14 +245,39 @@ impl NativeHistogramDrop {
         ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
             Self::bool_false_name(),
             AnnotationReturn::BooleanFalse,
+            AnnotationLevel::Info,
+            message,
+            collector,
+        ))
+    }
+
+    pub fn bool_true_udf(
+        message: String,
+        collector: Option<PromqlAnnotationCollector>,
+    ) -> ScalarUDF {
+        ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
+            Self::bool_true_name(),
+            AnnotationReturn::BooleanTrue,
+            AnnotationLevel::Info,
+            message,
+            collector,
+        ))
+    }
+
+    pub fn warning_bool_false_udf(
+        message: String,
+        collector: Option<PromqlAnnotationCollector>,
+    ) -> ScalarUDF {
+        ScalarUDF::new_from_impl(NativeHistogramAnnotationUdf::new(
+            Self::bool_false_name(),
+            AnnotationReturn::BooleanFalse,
+            AnnotationLevel::Warning,
             message,
             collector,
         ))
     }
 }
 
-// Synthetic drop UDFs only cover info-level invalid PromQL combinations.
-// Warning annotations stay in the histogram UDFs that actually drop samples.
 fn record_info(collector: &Option<PromqlAnnotationCollector>, message: impl Into<String>) {
     if let Some(collector) = collector {
         collector.record_info(message);
@@ -845,19 +891,38 @@ impl NativeHistogramAggregateAccumulator {
         }
     }
 
-    fn push_histogram(&mut self, histogram: NativeHistogram, count: u64) {
+    fn push_histogram(&mut self, histogram: NativeHistogram, count: u64) -> DfResult<()> {
         if self.dropped_incompatible {
-            return;
+            return Ok(());
+        }
+        if self.kind.needs_count() && count == 0 {
+            return Ok(());
         }
 
         self.observe_reset_hints(
             histogram.reset_hint == COUNTER_RESET_HINT,
             histogram.reset_hint == NOT_COUNTER_RESET_HINT,
         );
+        let combined_count = if self.kind.needs_count() {
+            self.count.checked_add(count).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "{}: native histogram sample count overflow",
+                    self.kind.name()
+                ))
+            })?
+        } else {
+            self.count
+        };
         let value = match self.value.take() {
             Some(value) => {
                 record_custom_reconciliation(&self.collector, self.kind.name(), &value, &histogram);
-                match value.add(&histogram) {
+                let combined = match self.kind {
+                    NativeHistogramAggregateKind::Sum => value.add(&histogram),
+                    NativeHistogramAggregateKind::Avg => {
+                        weighted_histogram_mean(value, self.count, histogram, count, combined_count)
+                    }
+                };
+                match combined {
                     Some(value) => Some(value),
                     None => {
                         self.record_incompatible();
@@ -869,8 +934,9 @@ impl NativeHistogramAggregateAccumulator {
         };
         if !self.dropped_incompatible {
             self.value = value;
-            self.count += count;
+            self.count = combined_count;
         }
+        Ok(())
     }
 
     fn mark_incompatible(&mut self) {
@@ -891,12 +957,26 @@ impl NativeHistogramAggregateAccumulator {
     }
 }
 
-fn range_sum_histograms(
+fn weighted_histogram_mean(
+    left: NativeHistogram,
+    left_count: u64,
+    right: NativeHistogram,
+    right_count: u64,
+    total_count: u64,
+) -> Option<NativeHistogram> {
+    let total_count = total_count as f64;
+    left.scale(left_count as f64 / total_count)
+        .add(&right.scale(right_count as f64 / total_count))
+}
+
+fn range_fold_histograms(
     samples: Vec<NativeHistogram>,
+    kind: NativeHistogramAggregateKind,
     name: &'static str,
     collector: &Option<PromqlAnnotationCollector>,
 ) -> Option<NativeHistogram> {
     let mut value = None;
+    let mut count = 0u64;
     let mut counter_reset_seen = false;
     let mut not_counter_reset_seen = false;
     for histogram in samples {
@@ -908,7 +988,14 @@ fn range_sum_histograms(
         value = match value {
             Some(value) => {
                 record_custom_reconciliation(collector, name, &value, &histogram);
-                match value.add(&histogram) {
+                let next_count = count.checked_add(1)?;
+                let combined = match kind {
+                    NativeHistogramAggregateKind::Sum => value.add(&histogram),
+                    NativeHistogramAggregateKind::Avg => {
+                        weighted_histogram_mean(value, count, histogram, 1, next_count)
+                    }
+                };
+                match combined {
                     Some(value) => Some(value),
                     None => {
                         record_warning(
@@ -923,6 +1010,7 @@ fn range_sum_histograms(
             }
             None => Some(histogram),
         };
+        count = count.checked_add(1)?;
     }
     value
 }
@@ -1016,14 +1104,18 @@ fn native_histogram_range_histogram(
             continue;
         };
         let histogram = match kind {
-            NativeHistogramRangeHistogramKind::Sum => {
-                range_sum_histograms(samples, func_name, &collector)
-            }
-            NativeHistogramRangeHistogramKind::Avg => {
-                let count = samples.len();
-                range_sum_histograms(samples, func_name, &collector)
-                    .map(|histogram| histogram.divide_by(count as f64))
-            }
+            NativeHistogramRangeHistogramKind::Sum => range_fold_histograms(
+                samples,
+                NativeHistogramAggregateKind::Sum,
+                func_name,
+                &collector,
+            ),
+            NativeHistogramRangeHistogramKind::Avg => range_fold_histograms(
+                samples,
+                NativeHistogramAggregateKind::Avg,
+                func_name,
+                &collector,
+            ),
             NativeHistogramRangeHistogramKind::Last => samples.last().cloned(),
         };
         result.push(histogram);
@@ -2113,7 +2205,7 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
             let Some(histogram) = read_histogram(histograms, row)? else {
                 continue;
             };
-            self.push_histogram(histogram, 1);
+            self.push_histogram(histogram, 1)?;
         }
 
         Ok(())
@@ -2125,7 +2217,7 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
             (_, false, None) => None,
             (NativeHistogramAggregateKind::Sum, false, value) => value,
             (NativeHistogramAggregateKind::Avg, false, Some(value)) if self.count > 0 => {
-                Some(value.divide_by(self.count as f64))
+                Some(value)
             }
             (NativeHistogramAggregateKind::Avg, _, _) => None,
         };
@@ -2229,7 +2321,7 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
                 continue;
             };
             let count = counts.map(|counts| counts.value(row)).unwrap_or(1);
-            self.push_histogram(histogram, count);
+            self.push_histogram(histogram, count)?;
         }
 
         Ok(())
@@ -2799,6 +2891,15 @@ mod tests {
         read_histogram(&array, 0).unwrap().unwrap()
     }
 
+    fn evaluated_histogram(
+        accumulator: &mut NativeHistogramAggregateAccumulator,
+    ) -> NativeHistogram {
+        let ScalarValue::Struct(array) = accumulator.evaluate().unwrap() else {
+            panic!("native histogram accumulator returned a non-struct value");
+        };
+        read_histogram(&array, 0).unwrap().unwrap()
+    }
+
     fn histogram_range_input(values: Vec<Option<NativeHistogram>>) -> Vec<ColumnarValue> {
         let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
             (0..values.len()).map(|idx| Some((idx as i64 + 1) * 1000)),
@@ -3196,6 +3297,80 @@ mod tests {
     }
 
     #[test]
+    fn histogram_averages_avoid_sum_overflow() {
+        let large = sample_histogram(1.0e308, 1.0e308, vec![1.0e308]);
+
+        let range_average = run_histogram_range_udf(
+            NativeHistogramAvgOverTime::scalar_udf(),
+            vec![large.clone(), large.clone()],
+        );
+        assert_eq!(range_average.count, 1.0e308);
+        assert_eq!(range_average.sum, 1.0e308);
+        assert_eq!(range_average.positive_buckets, vec![1.0e308]);
+
+        let mut aggregate =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
+        aggregate.push_histogram(large.clone(), 1).unwrap();
+        aggregate.push_histogram(large, 1).unwrap();
+        let aggregate_average = evaluated_histogram(&mut aggregate);
+        assert_eq!(aggregate_average.count, 1.0e308);
+        assert_eq!(aggregate_average.sum, 1.0e308);
+        assert_eq!(aggregate_average.positive_buckets, vec![1.0e308]);
+    }
+
+    #[test]
+    fn histogram_average_partial_states_are_weighted() {
+        let mut first =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
+        first
+            .push_histogram(sample_histogram(1.0, 1.0, vec![1.0]), 1)
+            .unwrap();
+        first
+            .push_histogram(sample_histogram(3.0, 3.0, vec![3.0]), 1)
+            .unwrap();
+        let first_state = first
+            .state()
+            .unwrap()
+            .into_iter()
+            .map(|value| value.to_array_of_size(1).unwrap())
+            .collect::<Vec<_>>();
+
+        let mut second =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
+        second
+            .push_histogram(sample_histogram(8.0, 8.0, vec![8.0]), 1)
+            .unwrap();
+        let second_state = second
+            .state()
+            .unwrap()
+            .into_iter()
+            .map(|value| value.to_array_of_size(1).unwrap())
+            .collect::<Vec<_>>();
+
+        let mut merged =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
+        merged.merge_batch(&first_state).unwrap();
+        merged.merge_batch(&second_state).unwrap();
+        let average = evaluated_histogram(&mut merged);
+        assert_eq!(average.count, 4.0);
+        assert_eq!(average.sum, 4.0);
+        assert_eq!(average.positive_buckets, vec![4.0]);
+    }
+
+    #[test]
+    fn histogram_average_rejects_sample_count_overflow() {
+        let mut aggregate =
+            NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Avg, None);
+        aggregate.value = Some(sample_histogram(1.0, 1.0, vec![1.0]));
+        aggregate.count = u64::MAX;
+
+        let error = aggregate
+            .push_histogram(sample_histogram(1.0, 1.0, vec![1.0]), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("sample count overflow"));
+    }
+
+    #[test]
     fn presence_only_range_functions_preserve_null_semantics() {
         let first = sample_histogram(1.0, 1.0, vec![1.0]);
         let second = sample_histogram(2.0, 2.0, vec![2.0]);
@@ -3343,8 +3518,9 @@ mod tests {
 
         let range_collector = PromqlAnnotationCollector::default();
         assert!(
-            range_sum_histograms(
+            range_fold_histograms(
                 vec![reset.clone(), unknown.clone(), not_reset.clone()],
+                NativeHistogramAggregateKind::Sum,
                 NativeHistogramSumOverTime::name(),
                 &Some(range_collector.clone()),
             )
@@ -3360,8 +3536,8 @@ mod tests {
             NativeHistogramAggregateKind::Avg,
         ] {
             let mut first_partial = NativeHistogramAggregateAccumulator::new(kind, None);
-            first_partial.push_histogram(reset.clone(), 1);
-            first_partial.push_histogram(unknown.clone(), 1);
+            first_partial.push_histogram(reset.clone(), 1).unwrap();
+            first_partial.push_histogram(unknown.clone(), 1).unwrap();
             let first_states = first_partial
                 .state()
                 .unwrap()
@@ -3370,7 +3546,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let mut second_partial = NativeHistogramAggregateAccumulator::new(kind, None);
-            second_partial.push_histogram(not_reset.clone(), 1);
+            second_partial.push_histogram(not_reset.clone(), 1).unwrap();
             let second_states = second_partial
                 .state()
                 .unwrap()
@@ -3402,7 +3578,7 @@ mod tests {
             NativeHistogramAggregateAccumulator::new(NativeHistogramAggregateKind::Sum, None);
         let empty_size = accumulator.size();
 
-        accumulator.push_histogram(histogram, 1);
+        accumulator.push_histogram(histogram, 1).unwrap();
 
         assert!(heap_size > 0);
         assert_eq!(accumulator.size(), empty_size + heap_size);

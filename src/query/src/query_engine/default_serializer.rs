@@ -188,6 +188,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramDelta::scalar_udf(),
             NativeHistogramDivScalar::scalar_udf(),
             NativeHistogramDrop::bool_false_udf(String::new(), None),
+            NativeHistogramDrop::bool_true_udf(String::new(), None),
             NativeHistogramDrop::float_null_udf(String::new(), None),
             NativeHistogramEq::scalar_udf(),
             NativeHistogramFraction::scalar_udf(),
@@ -348,6 +349,13 @@ mod tests {
                 args: vec![col("histogram")],
             }),
             Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::bool_true_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("histogram")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::float_null_udf(
                     "ignored annotation".to_string(),
                     None,
@@ -379,6 +387,7 @@ mod tests {
         let decoded = decoded.to_string();
         assert!(decoded.contains("prom_native_histogram_count"));
         assert!(decoded.contains("prom_native_histogram_drop_bool"));
+        assert!(decoded.contains("prom_native_histogram_keep_bool"));
         assert!(decoded.contains("prom_native_histogram_drop_float"));
 
         let schema = Arc::new(Schema::new(vec![
