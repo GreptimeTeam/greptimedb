@@ -2713,6 +2713,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qp_010_prepared_plan_errors_after_table_dropped() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let query_ctx = QueryContext::arc();
+        let stmt = parse_test_sql("SELECT * FROM source").remove(0);
+
+        // Plan against the (about to be dropped) table.
+        let cached_plan = instance
+            .query_engine()
+            .planner()
+            .plan(
+                &query::parser::QueryStatement::Sql(stmt.clone()),
+                query_ctx.clone(),
+            )
+            .await
+            .expect("plan SELECT * FROM source");
+
+        // Drop the table: the cached plan is now stale (`current == None`).
+        // Pinned drop behavior: re-validation must fail with the re-planning
+        // error (table not found) instead of silently executing the stale plan.
+        let catalog = instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .expect("memory catalog manager");
+        catalog
+            .deregister_table_sync(catalog::DeregisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "source".to_string(),
+            })
+            .expect("deregister source");
+
+        let result = instance
+            .validate_prepared_plan(&cached_plan, stmt, query_ctx)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a dropped table must make the cached prepared plan fail to re-plan"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_restricted_endpoint_handlers_check_permissions() -> TestResult<()> {
         let checker = Arc::new(RejectEndpointPermissionChecker::default());
         let plugins = Plugins::new();
