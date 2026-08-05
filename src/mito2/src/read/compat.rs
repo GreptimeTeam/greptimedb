@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
+    Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array, new_null_array,
 };
 use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
@@ -28,8 +28,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
-use datatypes::vectors::VectorRef;
 use datatypes::vectors::json::array::JsonArray;
+use datatypes::vectors::{Helper, VectorRef};
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -194,21 +194,35 @@ impl FlatCompatBatch {
                     cast_type,
                 });
             } else {
+                // TODO(fys): need check again.
                 // Create a default vector with 1 element for that column.
-                let default_vector = expect_column
-                    .column_schema
-                    .create_default_vector(1)
-                    .context(CreateDefaultSnafu {
-                        region_id: expect_metadata.region_id,
-                        column: &expect_column.column_schema.name,
-                    })?
-                    .with_context(|| CompatReaderSnafu {
-                        region_id: expect_metadata.region_id,
-                        reason: format!(
-                            "column {} does not have a default value to read",
-                            expect_column.column_schema.name
-                        ),
-                    })?;
+                // `expect_data_type` may be a query-concretized JSON2 type,
+                // while region metadata still carries its unconcretized type.
+                // The default vector must match the target Arrow field above.
+                let default_vector = if expect_column.column_schema.is_nullable()
+                    && expect_column.column_schema.default_constraint().is_none()
+                {
+                    Helper::try_into_vector(new_null_array(&expect_data_type.as_arrow_type(), 1))
+                        .context(CreateDefaultSnafu {
+                            region_id: expect_metadata.region_id,
+                            column: &expect_column.column_schema.name,
+                        })?
+                } else {
+                    expect_column
+                        .column_schema
+                        .create_default_vector(1)
+                        .context(CreateDefaultSnafu {
+                            region_id: expect_metadata.region_id,
+                            column: &expect_column.column_schema.name,
+                        })?
+                        .with_context(|| CompatReaderSnafu {
+                            region_id: expect_metadata.region_id,
+                            reason: format!(
+                                "column {} does not have a default value to read",
+                                expect_column.column_schema.name
+                            ),
+                        })?
+                };
                 index_or_defaults.push(IndexOrDefault::DefaultValue {
                     default_vector,
                     semantic_type: expect_column.semantic_type,

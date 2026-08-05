@@ -392,3 +392,65 @@ drop table json2_variant_null;
 
 Affected Rows: 0
 
+-- A newly added JSON2 column must not read data from a dropped column with the
+-- same name in an older SST. Column identity is determined by column id, not
+-- by the parquet root name.
+create table json2_drop_add_same_name (
+    ts timestamp time index,
+    b json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat',
+);
+
+Affected Rows: 0
+
+insert into json2_drop_add_same_name
+values (1, '{"a": "old"}');
+
+Affected Rows: 1
+
+admin flush_table('json2_drop_add_same_name');
+
++-----------------------------------------------+
+| ADMIN flush_table('json2_drop_add_same_name') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+alter table json2_drop_add_same_name drop column b;
+
+Affected Rows: 0
+
+alter table json2_drop_add_same_name add column b json2;
+
+Affected Rows: 0
+
+insert into json2_drop_add_same_name
+values (2, '{"a": "new"}');
+
+Affected Rows: 1
+
+admin flush_table('json2_drop_add_same_name');
+
++-----------------------------------------------+
+| ADMIN flush_table('json2_drop_add_same_name') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+select ts, b.a
+from json2_drop_add_same_name
+order by ts;
+
++-------------------------+------------------------------------------------+
+| ts                      | json_get(json2_drop_add_same_name.b,Utf8("a")) |
++-------------------------+------------------------------------------------+
+| 1970-01-01T00:00:00.001 |                                                |
+| 1970-01-01T00:00:00.002 | new                                            |
++-------------------------+------------------------------------------------+
+
+drop table json2_drop_add_same_name;
+
+Affected Rows: 0
+

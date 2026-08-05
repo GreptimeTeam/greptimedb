@@ -101,3 +101,33 @@ from json2_variant_null
 order by ts;
 
 drop table json2_variant_null;
+
+-- A newly added JSON2 column must not read data from a dropped column with the
+-- same name in an older SST. Column identity is determined by column id, not
+-- by the parquet root name.
+create table json2_drop_add_same_name (
+    ts timestamp time index,
+    b json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat',
+);
+
+insert into json2_drop_add_same_name
+values (1, '{"a": "old"}');
+
+admin flush_table('json2_drop_add_same_name');
+
+alter table json2_drop_add_same_name drop column b;
+alter table json2_drop_add_same_name add column b json2;
+
+insert into json2_drop_add_same_name
+values (2, '{"a": "new"}');
+
+admin flush_table('json2_drop_add_same_name');
+
+select ts, b.a
+from json2_drop_add_same_name
+order by ts;
+
+drop table json2_drop_add_same_name;

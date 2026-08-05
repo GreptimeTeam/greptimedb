@@ -1122,6 +1122,7 @@ mod tests {
     use std::collections::HashMap;
 
     use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
+    use datatypes::extension::json::is_structured_json_field;
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
@@ -1130,6 +1131,29 @@ mod tests {
     use store_api::storage::ColumnDefaultConstraint;
 
     use super::*;
+
+    #[test]
+    fn test_to_alter_add_json2_column_preserves_extension() {
+        let sql = "ALTER TABLE monitor ADD COLUMN payload JSON2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        let expr = to_alter_table_expr(alter_table, &QueryContext::arc()).unwrap();
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = expr.kind.unwrap() else {
+            unreachable!()
+        };
+        let column_def = add_columns[0].column_def.as_ref().unwrap();
+        let column_schema = try_as_column_schema(column_def).unwrap();
+        let schema = Schema::new(vec![column_schema]);
+
+        assert!(is_structured_json_field(&schema.arrow_schema().fields()[0]));
+    }
 
     #[test]
     fn test_create_flow_tql_expr() {
