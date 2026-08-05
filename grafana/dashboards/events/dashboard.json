@@ -1,0 +1,1325 @@
+{
+  "id": null,
+  "panels": [
+    {
+      "collapsed": false,
+      "description": "Procedure volume and lifecycle health for the selected events and object filters.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Number of distinct procedures in the selected time range and filters; this is not the raw event-row count.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT COUNT(DISTINCT procedure_id) AS procedures FROM scoped_events WHERE $__timeFilter(timestamp) AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring}",
+          "refId": "A"
+        }
+      ],
+      "title": "Procedures",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Distinct procedures that emitted a Succeeded lifecycle trigger in the selected range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Succeeded' THEN procedure_id END) AS succeeded FROM scoped_events WHERE $__timeFilter(timestamp) AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring}",
+          "refId": "A"
+        }
+      ],
+      "title": "Succeeded",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Distinct procedures that emitted Failed or Poisoned. A non-zero value is a terminal failure signal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 10,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_id END) AS failed_or_poisoned FROM scoped_events WHERE $__timeFilter(timestamp) AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring}",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed / Poisoned",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Procedures that were in-flight for more than 15 minutes as of the selected time range end.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 15,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT COUNT(*) AS long_running FROM (SELECT procedure_id FROM scoped_events WHERE ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY procedure_id HAVING COUNT(CASE WHEN procedure_trigger_type = 'Submitted' THEN 1 END) > 0 AND COUNT(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 END) = 0 AND MIN(timestamp) < $__timeTo() - INTERVAL '15' MINUTE) AS in_flight",
+          "refId": "A"
+        }
+      ],
+      "title": "In-flight > 15m",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Availability of greptime_private.events. Before the first recorded event creates the table, the dashboard uses an empty fallback relation and event panels return no data.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "yellow",
+                  "index": 0,
+                  "text": "Waiting for first recorded event"
+                }
+              },
+              "type": "value"
+            },
+            {
+              "options": {
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "Ready"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 25,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS status FROM information_schema.tables WHERE table_schema = 'greptime_private' AND table_name = 'events'",
+          "refId": "A"
+        }
+      ],
+      "title": "Event recorder status",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "description": "Time-series procedure activity and terminal outcomes by event type.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 6,
+      "panels": [],
+      "title": "Lifecycle",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Five-minute procedure activity by event type. Each series counts distinct procedure_id values, not duplicated topology or locator rows.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineInterpolation": "linear",
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT date_bin(INTERVAL '5' MINUTE, timestamp) AS time, type AS metric, COUNT(DISTINCT procedure_id) AS value FROM scoped_events WHERE $__timeFilter(timestamp) AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY time, metric ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Procedure activity by type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Terminal success, failure or poison, and retry counts by event type. Retry is diagnostic and not a terminal outcome.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "id": 8,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "normal",
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT type, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Succeeded' THEN procedure_id END) AS succeeded, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_id END) AS failed_or_poisoned, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN procedure_id END) AS retried FROM scoped_events WHERE $__timeFilter(timestamp) AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY type ORDER BY type",
+          "refId": "A"
+        }
+      ],
+      "title": "Terminal outcomes by type",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "description": "Failed, poisoned, and long-running procedure investigations.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 9,
+      "panels": [],
+      "title": "Investigation",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Terminal Failed or Poisoned lifecycle rows. Object locator columns can be null on lightweight terminal events; payload preserves submitted intent when available.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), failed_events AS (SELECT * FROM scoped_events WHERE (procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned') AND ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring}), submitted_context AS (SELECT type, procedure_id, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE procedure_trigger_type = 'Submitted' GROUP BY type, procedure_id) SELECT CAST(f.timestamp AS STRING) AS event_time, f.type, f.procedure_id, f.procedure_state, f.procedure_trigger_type AS trigger, f.catalog_name, f.schema_name, f.table_name, f.table_id, f.region_id, f.procedure_error, json_to_string(f.payload) AS terminal_payload, s.submitted_payload FROM failed_events f LEFT JOIN submitted_context s ON s.type = f.type AND s.procedure_id = f.procedure_id ORDER BY f.timestamp DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed or poisoned procedures",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Procedures that were in-flight for more than 15 minutes as of the selected time range end.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT type, procedure_id, CAST(MIN(timestamp) AS STRING) AS submitted_at, CAST(MAX(timestamp) AS STRING) AS latest_event_at, last_value(procedure_state ORDER BY timestamp) AS latest_state, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(region_id) AS region_id FROM scoped_events WHERE ('__greptime_all__' IN (${event_type:sqlstring}) OR type IN (${event_type:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY type, procedure_id HAVING COUNT(CASE WHEN procedure_trigger_type = 'Submitted' THEN 1 END) > 0 AND COUNT(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 END) = 0 AND MIN(timestamp) < $__timeTo() - INTERVAL '15' MINUTE ORDER BY submitted_at LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Long-running procedures (> 15m)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Procedure-level database and table DDL executions, including lifecycle outcome, retry count, and Submitted-time object context.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 12,
+      "panels": [],
+      "title": "DDL Operations",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Database DDL execution per procedure. The row combines submission, retries, and terminal outcome; an execution with Submitted but no terminal event is In-flight.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error FROM scoped_events WHERE type IN ('create_database', 'alter_database', 'drop_database') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE type IN ('create_database', 'alter_database', 'drop_database') AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Database DDL executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Table DDL execution per procedure. Multiple table locators are collapsed into affected_table_count, so logical-table batch operations do not duplicate executions.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error FROM scoped_events WHERE type IN ('create_table', 'create_logical_tables', 'alter_table', 'alter_logical_tables', 'drop_table', 'undrop_table', 'purge_dropped_table', 'truncate_table') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, COUNT(DISTINCT COALESCE(table_name, CAST(table_id AS STRING))) AS affected_table_count, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE type IN ('create_table', 'create_logical_tables', 'alter_table', 'alter_logical_tables', 'drop_table', 'undrop_table', 'purge_dropped_table', 'truncate_table') AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.affected_table_count, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Table DDL executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Report-only Batch GC records by region. Batch GC does not guarantee a Submitted event, so these rows never contribute to the In-flight lifecycle count.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT CAST(timestamp AS STRING) AS event_time, procedure_id, procedure_state, procedure_trigger_type AS trigger, region_id, table_id, region_number, procedure_error, json_to_string(payload) AS payload, json_to_string(gc_report) AS gc_report FROM scoped_events WHERE $__timeFilter(timestamp) AND type = 'batch_gc' AND gc_report IS NOT NULL AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} ORDER BY timestamp DESC LIMIT 300",
+          "refId": "A"
+        }
+      ],
+      "title": "Batch GC reports",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete execution row for each Repartition root or group. Group rows are linked to roots from Submitted metadata and retain their own lifecycle outcome without duplicating topology mappings.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "root_procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show repartition topology",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-repartition_parent_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}"
+                  },
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "id": 16,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), root_lifecycle AS (SELECT procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS root_submitted_time, MAX(timestamp) AS root_last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS root_terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error FROM scoped_events WHERE type = 'repartition' GROUP BY procedure_id), root_context AS (SELECT procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE type = 'repartition' AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY procedure_id), group_lifecycle AS (SELECT procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS group_submitted_time, MAX(timestamp) AS group_last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS group_terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error FROM scoped_events WHERE type = 'repartition_group' GROUP BY procedure_id), group_context AS (SELECT parent_procedure_id, procedure_id AS group_procedure_id, repartition_group_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(table_name) AS table_name, MAX(table_id) AS table_id, MAX(json_to_string(payload)) AS submitted_payload, COUNT(*) AS topology_mapping_count FROM scoped_events WHERE type = 'repartition_group' AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) GROUP BY parent_procedure_id, procedure_id, repartition_group_id), group_parent_summary AS (SELECT c.parent_procedure_id, COUNT(DISTINCT c.group_procedure_id) AS child_group_count, COUNT(DISTINCT CASE WHEN l.succeeded = 1 THEN c.group_procedure_id END) AS succeeded_group_count, COUNT(DISTINCT CASE WHEN l.failed = 1 OR l.poisoned = 1 THEN c.group_procedure_id END) AS failed_group_count FROM group_context c LEFT JOIN group_lifecycle l ON l.procedure_id = c.group_procedure_id GROUP BY c.parent_procedure_id) SELECT 'Root' AS execution_level, l.procedure_id AS root_procedure_id, l.procedure_id AS procedure_id, CAST(NULL AS STRING) AS repartition_group_id, CAST(l.root_submitted_time AS STRING) AS start_time, CAST(l.root_terminal_time AS STRING) AS end_time, CAST(l.root_last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.catalog_name, c.schema_name, c.table_name, c.table_id, c.submitted_payload, COALESCE(p.child_group_count, 0) AS child_group_count, COALESCE(p.succeeded_group_count, 0) AS succeeded_group_count, COALESCE(p.failed_group_count, 0) AS failed_group_count, CAST(NULL AS BIGINT) AS topology_mapping_count FROM root_lifecycle l JOIN root_context c ON c.procedure_id = l.procedure_id LEFT JOIN group_parent_summary p ON p.parent_procedure_id = l.procedure_id WHERE COALESCE(l.procedure_id, '') LIKE ${repartition_parent_id:sqlstring} UNION ALL SELECT 'Group' AS execution_level, c.parent_procedure_id AS root_procedure_id, l.procedure_id AS procedure_id, c.repartition_group_id, CAST(l.group_submitted_time AS STRING) AS start_time, CAST(l.group_terminal_time AS STRING) AS end_time, CAST(l.group_last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.catalog_name, c.schema_name, c.table_name, c.table_id, c.submitted_payload, CAST(NULL AS BIGINT) AS child_group_count, CAST(NULL AS BIGINT) AS succeeded_group_count, CAST(NULL AS BIGINT) AS failed_group_count, c.topology_mapping_count FROM group_lifecycle l JOIN group_context c ON c.group_procedure_id = l.procedure_id WHERE COALESCE(c.parent_procedure_id, '') LIKE ${repartition_parent_id:sqlstring} ORDER BY start_time DESC LIMIT 300",
+          "refId": "A"
+        }
+      ],
+      "title": "Repartition executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One source-to-target region mapping per Repartition group. The group outcome is joined by child procedure ID, while root procedure ID provides the parent execution context.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "root_procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "group_procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "id": 17,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), group_submitted AS (SELECT parent_procedure_id, procedure_id AS group_procedure_id, repartition_group_id, table_id, timestamp AS group_submitted_time, source_region_id, source_region_number, source_partition_expr, target_region_id, target_region_number, target_partition_expr FROM scoped_events WHERE type = 'repartition_group' AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp)), group_lifecycle AS (SELECT procedure_id, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS failed FROM scoped_events WHERE type = 'repartition_group' GROUP BY procedure_id) SELECT CAST(s.group_submitted_time AS STRING) AS event_time, s.parent_procedure_id AS root_procedure_id, s.group_procedure_id, s.repartition_group_id, s.table_id, CASE WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS group_outcome, s.source_region_id, s.source_region_number, s.source_partition_expr, s.target_region_id, s.target_region_number, s.target_partition_expr FROM group_submitted s LEFT JOIN group_lifecycle l ON l.procedure_id = s.group_procedure_id WHERE COALESCE(s.parent_procedure_id, '') LIKE ${repartition_parent_id:sqlstring} ORDER BY s.group_submitted_time DESC LIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "Repartition topology",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Batch GC reports and WAL prune records. These maintenance event types have intentionally sparse lifecycle emission.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "id": 19,
+      "panels": [],
+      "title": "Maintenance Operations",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "description": "Repartition and Region Migration executions, including child-group topology where applicable.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Region Operations",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "description": "Collapsed full-screen detail for one selected procedure. Open it from a procedure identifier to inspect the lifecycle fields that contain data for that trace.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 21,
+      "panels": [
+        {
+          "datasource": {
+            "type": "mysql",
+            "uid": "${information_schema}"
+          },
+          "description": "Recorded fields for the selected procedure within the selected time range, ordered by event timestamp. The detail keeps timestamp, type, and procedure ID, then shows only fields with a value in this trace.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "inspect": true
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 83
+          },
+          "id": 18,
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "format": "table",
+              "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))\n    ) ), trace AS (\n  SELECT *\n  FROM scoped_events\n  WHERE COALESCE(procedure_id, '') = ${trace_procedure_id:sqlstring}\n  ORDER BY timestamp DESC\n  LIMIT 500\n)\nSELECT ${trace_columns:raw}\nFROM trace\nORDER BY timestamp",
+              "refId": "A"
+            }
+          ],
+          "title": "Procedure lifecycle trace",
+          "type": "table"
+        }
+      ],
+      "title": "Procedure Trace",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "Each persisted WAL Prune transition, including topic and requested prune boundary. latest_offset is the optional observed exclusive upper bound, not a deleted-record count.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 22,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ) SELECT CAST(timestamp AS STRING) AS event_time, topic_name, prunable_entry_id, latest_offset, procedure_id, procedure_state, procedure_trigger_type AS trigger, procedure_error, json_to_string(payload) AS payload FROM scoped_events WHERE type = 'wal_prune' AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} ORDER BY timestamp DESC LIMIT 500",
+          "refId": "A"
+        }
+      ],
+      "title": "WAL prune records",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Region Migration execution per procedure, including affected scope, trigger reason, and source and destination datanode identities.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "id": 23,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), lifecycle AS (SELECT procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error FROM scoped_events WHERE type = 'region_migration' GROUP BY procedure_id), migration_context AS (SELECT procedure_id, COUNT(DISTINCT table_id) AS affected_table_count, COUNT(DISTINCT region_id) AS affected_region_count, MAX(region_migration_trigger_reason) AS trigger_reason, MAX(region_migration_src_node_id) AS from_datanode_id, MAX(region_migration_src_peer_addr) AS from_datanode_addr, MAX(region_migration_dst_node_id) AS to_datanode_id, MAX(region_migration_dst_peer_addr) AS to_datanode_addr, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE type = 'region_migration' AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY procedure_id) SELECT l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, c.affected_table_count, c.affected_region_count, c.trigger_reason, c.from_datanode_id, c.from_datanode_addr, c.to_datanode_id, c.to_datanode_addr, c.submitted_payload FROM lifecycle l JOIN migration_context c ON c.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Region migration executions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mysql",
+        "uid": "${information_schema}"
+      },
+      "description": "One complete Flow or View DDL execution per procedure. The row combines submission, retries, and terminal outcome; submitted payload preserves object intent.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "procedure_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Show lifecycle trace",
+                    "url": "/d/greptimedb-events/greptimedb-events?var-trace_procedure_id=${__value.raw}&var-information_schema=${information_schema}&from=${__from}&to=${__to}&viewPanel=18"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))     ) ), lifecycle AS (SELECT type, procedure_id, MIN(CASE WHEN procedure_trigger_type = 'Submitted' THEN timestamp END) AS submitted_time, MAX(timestamp) AS last_event_time, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN timestamp END) AS terminal_time, COUNT(DISTINCT CASE WHEN procedure_trigger_type = 'Retrying' THEN timestamp END) AS retry_count, MAX(CASE WHEN procedure_trigger_type = 'Succeeded' THEN 1 ELSE 0 END) AS succeeded, MAX(CASE WHEN procedure_trigger_type = 'Failed' THEN 1 ELSE 0 END) AS failed, MAX(CASE WHEN procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END) AS poisoned, last_value(CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN procedure_error END ORDER BY CASE WHEN procedure_trigger_type = 'Succeeded' OR procedure_trigger_type = 'Failed' OR procedure_trigger_type = 'Poisoned' THEN 1 ELSE 0 END, timestamp) AS procedure_error, MAX(flow_id) AS flow_id, MAX(view_id) AS view_id FROM scoped_events WHERE type IN ('create_flow', 'drop_flow', 'create_view', 'drop_view') GROUP BY type, procedure_id), submitted_context AS (SELECT type, procedure_id, MAX(catalog_name) AS catalog_name, MAX(schema_name) AS schema_name, MAX(flow_name) AS flow_name, MAX(view_name) AS view_name, MAX(json_to_string(payload)) AS submitted_payload FROM scoped_events WHERE type IN ('create_flow', 'drop_flow', 'create_view', 'drop_view') AND procedure_trigger_type = 'Submitted' AND $__timeFilter(timestamp) AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring})) AND COALESCE(procedure_id, '') LIKE ${procedure_id:sqlstring} GROUP BY type, procedure_id) SELECT l.type, l.procedure_id, CAST(l.submitted_time AS STRING) AS start_time, CAST(l.terminal_time AS STRING) AS end_time, CAST(l.last_event_time AS STRING) AS last_seen_time, CASE WHEN l.poisoned = 1 THEN 'Poisoned' WHEN l.failed = 1 THEN 'Failed' WHEN l.succeeded = 1 THEN 'Succeeded' ELSE 'In-flight' END AS outcome, l.retry_count, l.procedure_error, s.catalog_name, s.schema_name, s.flow_name, l.flow_id, s.view_name, l.view_id, s.submitted_payload FROM lifecycle l JOIN submitted_context s ON s.type = l.type AND s.procedure_id = l.procedure_id ORDER BY l.submitted_time DESC LIMIT 200",
+          "refId": "A"
+        }
+      ],
+      "title": "Flow and View DDL executions",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "greptimedb",
+    "events",
+    "slo"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "information_schema",
+        "type": "datasource",
+        "query": "mysql",
+        "refresh": 1,
+        "regex": "",
+        "includeAll": false,
+        "options": [],
+        "current": {
+          "text": "information_schema",
+          "value": "P0CE5E4D2C4819379"
+        }
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT CASE WHEN COUNT(*) > 0 THEN 'greptime_private.events' ELSE '(SELECT CAST(NULL AS STRING) AS type, NULL::BYTEA AS payload, CAST(NULL AS TIMESTAMP) AS timestamp WHERE FALSE) AS events' END AS __value FROM information_schema.tables WHERE table_schema = 'greptime_private' AND table_name = 'events'",
+        "hide": 2,
+        "includeAll": false,
+        "label": "Events relation",
+        "multi": false,
+        "name": "events_relation",
+        "query": "SELECT CASE WHEN COUNT(*) > 0 THEN 'greptime_private.events' ELSE '(SELECT CAST(NULL AS STRING) AS type, NULL::BYTEA AS payload, CAST(NULL AS TIMESTAMP) AS timestamp WHERE FALSE) AS events' END AS __value FROM information_schema.tables WHERE table_schema = 'greptime_private' AND table_name = 'events'",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "WITH expected (ordinal_position, column_name, fallback) AS (\n  VALUES\n    (1, 'procedure_id', 'CAST(NULL AS STRING) AS procedure_id'),\n    (2, 'procedure_state', 'CAST(NULL AS STRING) AS procedure_state'),\n    (3, 'procedure_error', 'CAST(NULL AS STRING) AS procedure_error'),\n    (4, 'procedure_trigger', 'NULL::BYTEA AS procedure_trigger, CAST(NULL AS STRING) AS procedure_trigger_type, CAST(NULL AS STRING) AS procedure_trigger_display'),\n    (5, 'catalog_name', 'CAST(NULL AS STRING) AS catalog_name'),\n    (6, 'schema_name', 'CAST(NULL AS STRING) AS schema_name'),\n    (7, 'table_name', 'CAST(NULL AS STRING) AS table_name'),\n    (8, 'table_id', 'CAST(NULL AS INT UNSIGNED) AS table_id'),\n    (9, 'physical_table_id', 'CAST(NULL AS INT UNSIGNED) AS physical_table_id'),\n    (10, 'region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_id'),\n    (11, 'region_number', 'CAST(NULL AS INT UNSIGNED) AS region_number'),\n    (12, 'gc_report', 'NULL::BYTEA AS gc_report'),\n    (13, 'parent_procedure_id', 'CAST(NULL AS STRING) AS parent_procedure_id'),\n    (14, 'repartition_group_id', 'CAST(NULL AS STRING) AS repartition_group_id'),\n    (15, 'source_region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS source_region_id'),\n    (16, 'source_region_number', 'CAST(NULL AS INT UNSIGNED) AS source_region_number'),\n    (17, 'source_partition_expr', 'CAST(NULL AS STRING) AS source_partition_expr'),\n    (18, 'target_region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS target_region_id'),\n    (19, 'target_region_number', 'CAST(NULL AS INT UNSIGNED) AS target_region_number'),\n    (20, 'target_partition_expr', 'CAST(NULL AS STRING) AS target_partition_expr'),\n    (21, 'region_migration_trigger_reason', 'CAST(NULL AS STRING) AS region_migration_trigger_reason'),\n    (22, 'region_migration_src_node_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_migration_src_node_id'),\n    (23, 'region_migration_src_peer_addr', 'CAST(NULL AS STRING) AS region_migration_src_peer_addr'),\n    (24, 'region_migration_dst_node_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_migration_dst_node_id'),\n    (25, 'region_migration_dst_peer_addr', 'CAST(NULL AS STRING) AS region_migration_dst_peer_addr'),\n    (26, 'topic_name', 'CAST(NULL AS STRING) AS topic_name'),\n    (27, 'prunable_entry_id', 'CAST(NULL AS BIGINT UNSIGNED) AS prunable_entry_id'),\n    (28, 'latest_offset', 'CAST(NULL AS BIGINT UNSIGNED) AS latest_offset'),\n    (29, 'flow_name', 'CAST(NULL AS STRING) AS flow_name'),\n    (30, 'flow_id', 'CAST(NULL AS INT UNSIGNED) AS flow_id'),\n    (31, 'view_name', 'CAST(NULL AS STRING) AS view_name'),\n    (32, 'view_id', 'CAST(NULL AS INT UNSIGNED) AS view_id')\n), available AS (\n  SELECT DISTINCT column_name, data_type\n  FROM information_schema.columns\n  WHERE table_schema = 'greptime_private' AND table_name = 'events'\n)\nSELECT string_agg(\n  CASE\n    WHEN expected.column_name = 'procedure_trigger' AND available.data_type = 'string'\n      THEN 'NULL::BYTEA AS procedure_trigger, CASE WHEN procedure_trigger LIKE ''Retrying%'' THEN ''Retrying'' ELSE procedure_trigger END AS procedure_trigger_type, procedure_trigger AS procedure_trigger_display'\n    WHEN expected.column_name = 'procedure_trigger' AND available.column_name IS NOT NULL\n      THEN 'procedure_trigger, json_get_string(procedure_trigger, ''type'') AS procedure_trigger_type, json_to_string(procedure_trigger) AS procedure_trigger_display'\n    WHEN available.column_name IS NULL THEN expected.fallback\n    ELSE expected.column_name\n  END,\n  ', ' ORDER BY expected.ordinal_position\n) AS __value\nFROM expected\nLEFT JOIN available ON expected.column_name = available.column_name",
+        "hide": 2,
+        "includeAll": false,
+        "label": "Event columns",
+        "multi": false,
+        "name": "event_columns",
+        "query": "WITH expected (ordinal_position, column_name, fallback) AS (\n  VALUES\n    (1, 'procedure_id', 'CAST(NULL AS STRING) AS procedure_id'),\n    (2, 'procedure_state', 'CAST(NULL AS STRING) AS procedure_state'),\n    (3, 'procedure_error', 'CAST(NULL AS STRING) AS procedure_error'),\n    (4, 'procedure_trigger', 'NULL::BYTEA AS procedure_trigger, CAST(NULL AS STRING) AS procedure_trigger_type, CAST(NULL AS STRING) AS procedure_trigger_display'),\n    (5, 'catalog_name', 'CAST(NULL AS STRING) AS catalog_name'),\n    (6, 'schema_name', 'CAST(NULL AS STRING) AS schema_name'),\n    (7, 'table_name', 'CAST(NULL AS STRING) AS table_name'),\n    (8, 'table_id', 'CAST(NULL AS INT UNSIGNED) AS table_id'),\n    (9, 'physical_table_id', 'CAST(NULL AS INT UNSIGNED) AS physical_table_id'),\n    (10, 'region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_id'),\n    (11, 'region_number', 'CAST(NULL AS INT UNSIGNED) AS region_number'),\n    (12, 'gc_report', 'NULL::BYTEA AS gc_report'),\n    (13, 'parent_procedure_id', 'CAST(NULL AS STRING) AS parent_procedure_id'),\n    (14, 'repartition_group_id', 'CAST(NULL AS STRING) AS repartition_group_id'),\n    (15, 'source_region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS source_region_id'),\n    (16, 'source_region_number', 'CAST(NULL AS INT UNSIGNED) AS source_region_number'),\n    (17, 'source_partition_expr', 'CAST(NULL AS STRING) AS source_partition_expr'),\n    (18, 'target_region_id', 'CAST(NULL AS BIGINT UNSIGNED) AS target_region_id'),\n    (19, 'target_region_number', 'CAST(NULL AS INT UNSIGNED) AS target_region_number'),\n    (20, 'target_partition_expr', 'CAST(NULL AS STRING) AS target_partition_expr'),\n    (21, 'region_migration_trigger_reason', 'CAST(NULL AS STRING) AS region_migration_trigger_reason'),\n    (22, 'region_migration_src_node_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_migration_src_node_id'),\n    (23, 'region_migration_src_peer_addr', 'CAST(NULL AS STRING) AS region_migration_src_peer_addr'),\n    (24, 'region_migration_dst_node_id', 'CAST(NULL AS BIGINT UNSIGNED) AS region_migration_dst_node_id'),\n    (25, 'region_migration_dst_peer_addr', 'CAST(NULL AS STRING) AS region_migration_dst_peer_addr'),\n    (26, 'topic_name', 'CAST(NULL AS STRING) AS topic_name'),\n    (27, 'prunable_entry_id', 'CAST(NULL AS BIGINT UNSIGNED) AS prunable_entry_id'),\n    (28, 'latest_offset', 'CAST(NULL AS BIGINT UNSIGNED) AS latest_offset'),\n    (29, 'flow_name', 'CAST(NULL AS STRING) AS flow_name'),\n    (30, 'flow_id', 'CAST(NULL AS INT UNSIGNED) AS flow_id'),\n    (31, 'view_name', 'CAST(NULL AS STRING) AS view_name'),\n    (32, 'view_id', 'CAST(NULL AS INT UNSIGNED) AS view_id')\n), available AS (\n  SELECT DISTINCT column_name, data_type\n  FROM information_schema.columns\n  WHERE table_schema = 'greptime_private' AND table_name = 'events'\n)\nSELECT string_agg(\n  CASE\n    WHEN expected.column_name = 'procedure_trigger' AND available.data_type = 'string'\n      THEN 'NULL::BYTEA AS procedure_trigger, CASE WHEN procedure_trigger LIKE ''Retrying%'' THEN ''Retrying'' ELSE procedure_trigger END AS procedure_trigger_type, procedure_trigger AS procedure_trigger_display'\n    WHEN expected.column_name = 'procedure_trigger' AND available.column_name IS NOT NULL\n      THEN 'procedure_trigger, json_get_string(procedure_trigger, ''type'') AS procedure_trigger_type, json_to_string(procedure_trigger) AS procedure_trigger_display'\n    WHEN available.column_name IS NULL THEN expected.fallback\n    ELSE expected.column_name\n  END,\n  ', ' ORDER BY expected.ordinal_position\n) AS __value\nFROM expected\nLEFT JOIN available ON expected.column_name = available.column_name",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "allValue": "'__greptime_all__'",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT type FROM ${events_relation:raw} ORDER BY type",
+        "includeAll": true,
+        "label": "Event type",
+        "multi": true,
+        "name": "event_type",
+        "query": "SELECT DISTINCT type FROM ${events_relation:raw} WHERE $__timeFilter(timestamp) ORDER BY type",
+        "type": "query",
+        "refresh": 2
+      },
+      {
+        "allValue": "'__greptime_all__'",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT DISTINCT catalog_name FROM information_schema.schemata ORDER BY catalog_name",
+        "includeAll": true,
+        "label": "Catalog",
+        "multi": true,
+        "name": "catalog",
+        "query": "WITH events AS (SELECT timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)) SELECT catalog_name FROM (SELECT catalog_name FROM information_schema.schemata WHERE catalog_name IS NOT NULL UNION SELECT DISTINCT COALESCE(catalog_name, '(none)') AS catalog_name FROM events WHERE procedure_trigger_type = 'Submitted') catalogs ORDER BY catalog_name",
+        "type": "query",
+        "refresh": 2
+      },
+      {
+        "allValue": "'__greptime_all__'",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "SELECT schema_name FROM information_schema.schemata WHERE '__greptime_all__' IN (${catalog:sqlstring}) OR catalog_name IN (${catalog:sqlstring}) ORDER BY schema_name",
+        "includeAll": true,
+        "label": "Schema",
+        "multi": true,
+        "name": "schema",
+        "query": "WITH events AS (SELECT timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)) SELECT schema_name FROM (SELECT schema_name FROM information_schema.schemata WHERE '__greptime_all__' IN (${catalog:sqlstring}) OR catalog_name IN (${catalog:sqlstring}) UNION SELECT DISTINCT schema_name FROM events WHERE procedure_trigger_type = 'Submitted' AND schema_name IS NOT NULL AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) ) schemas ORDER BY schema_name",
+        "type": "query",
+        "refresh": 2
+      },
+      {
+        "current": {
+          "text": "%",
+          "value": "%"
+        },
+        "label": "Procedure ID (LIKE)",
+        "name": "procedure_id",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "%",
+          "value": "%"
+        },
+        "label": "Repartition parent ID (LIKE)",
+        "name": "repartition_parent_id",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "__select_a_procedure__",
+          "value": "__select_a_procedure__"
+        },
+        "label": "Trace procedure ID",
+        "name": "trace_procedure_id",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "datasource": {
+          "type": "mysql",
+          "uid": "${information_schema}"
+        },
+        "definition": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))\n    ) ), trace AS (\n  SELECT *\n  FROM scoped_events\n  WHERE COALESCE(procedure_id, '') = ${trace_procedure_id:sqlstring}\n  ORDER BY timestamp DESC\n  LIMIT 500\n)\nSELECT concat_ws(', ',\n  'CAST(timestamp AS STRING) AS timestamp',\n  'type',\n  'procedure_id',\n  CASE WHEN COUNT(payload) > 0 THEN 'json_to_string(payload) AS payload' END,\n  CASE WHEN COUNT(procedure_state) > 0 THEN 'procedure_state' END,\n  CASE WHEN COUNT(procedure_error) > 0 THEN 'procedure_error' END,\n  CASE WHEN COUNT(procedure_trigger_display) > 0 THEN 'procedure_trigger_display AS procedure_trigger' END,\n  CASE WHEN COUNT(catalog_name) > 0 THEN 'catalog_name' END,\n  CASE WHEN COUNT(schema_name) > 0 THEN 'schema_name' END,\n  CASE WHEN COUNT(table_name) > 0 THEN 'table_name' END,\n  CASE WHEN COUNT(table_id) > 0 THEN 'table_id' END,\n  CASE WHEN COUNT(physical_table_id) > 0 THEN 'physical_table_id' END,\n  CASE WHEN COUNT(region_id) > 0 THEN 'region_id' END,\n  CASE WHEN COUNT(region_number) > 0 THEN 'region_number' END,\n  CASE WHEN COUNT(region_migration_trigger_reason) > 0 THEN 'region_migration_trigger_reason' END,\n  CASE WHEN COUNT(region_migration_src_node_id) > 0 THEN 'region_migration_src_node_id' END,\n  CASE WHEN COUNT(region_migration_src_peer_addr) > 0 THEN 'region_migration_src_peer_addr' END,\n  CASE WHEN COUNT(region_migration_dst_node_id) > 0 THEN 'region_migration_dst_node_id' END,\n  CASE WHEN COUNT(region_migration_dst_peer_addr) > 0 THEN 'region_migration_dst_peer_addr' END,\n  CASE WHEN COUNT(topic_name) > 0 THEN 'topic_name' END,\n  CASE WHEN COUNT(prunable_entry_id) > 0 THEN 'prunable_entry_id' END,\n  CASE WHEN COUNT(latest_offset) > 0 THEN 'latest_offset' END,\n  CASE WHEN COUNT(gc_report) > 0 THEN 'json_to_string(gc_report) AS gc_report' END,\n  CASE WHEN COUNT(parent_procedure_id) > 0 THEN 'parent_procedure_id' END,\n  CASE WHEN COUNT(repartition_group_id) > 0 THEN 'repartition_group_id' END,\n  CASE WHEN COUNT(source_region_id) > 0 THEN 'source_region_id' END,\n  CASE WHEN COUNT(source_region_number) > 0 THEN 'source_region_number' END,\n  CASE WHEN COUNT(source_partition_expr) > 0 THEN 'source_partition_expr' END,\n  CASE WHEN COUNT(target_region_id) > 0 THEN 'target_region_id' END,\n  CASE WHEN COUNT(target_region_number) > 0 THEN 'target_region_number' END,\n  CASE WHEN COUNT(target_partition_expr) > 0 THEN 'target_partition_expr' END,\n  CASE WHEN COUNT(flow_name) > 0 THEN 'flow_name' END,\n  CASE WHEN COUNT(flow_id) > 0 THEN 'flow_id' END,\n  CASE WHEN COUNT(view_name) > 0 THEN 'view_name' END,\n  CASE WHEN COUNT(view_id) > 0 THEN 'view_id' END\n) AS __value\nFROM trace",
+        "hide": 2,
+        "includeAll": false,
+        "label": "Trace columns",
+        "multi": false,
+        "name": "trace_columns",
+        "query": "WITH events AS (SELECT type, payload, timestamp, ${event_columns:raw} FROM ${events_relation:raw} WHERE $__timeFilter(timestamp)), scoped_events AS (\n  SELECT e.*\n  FROM events e\n  WHERE\n    ('__greptime_all__' IN (${catalog:sqlstring}) AND '__greptime_all__' IN (${schema:sqlstring}))\n    OR COALESCE(e.procedure_id, '') IN (\n      SELECT DISTINCT procedure_id\n      FROM events\n      WHERE procedure_trigger_type = 'Submitted'\n        AND ('__greptime_all__' IN (${catalog:sqlstring}) OR COALESCE(catalog_name, '(none)') IN (${catalog:sqlstring})) AND ('__greptime_all__' IN (${schema:sqlstring}) OR COALESCE(schema_name, '(none)') IN (${schema:sqlstring}))\n    ) ), trace AS (\n  SELECT *\n  FROM scoped_events\n  WHERE COALESCE(procedure_id, '') = ${trace_procedure_id:sqlstring}\n  ORDER BY timestamp DESC\n  LIMIT 500\n)\nSELECT concat_ws(', ',\n  'CAST(timestamp AS STRING) AS timestamp',\n  'type',\n  'procedure_id',\n  CASE WHEN COUNT(payload) > 0 THEN 'json_to_string(payload) AS payload' END,\n  CASE WHEN COUNT(procedure_state) > 0 THEN 'procedure_state' END,\n  CASE WHEN COUNT(procedure_error) > 0 THEN 'procedure_error' END,\n  CASE WHEN COUNT(procedure_trigger_display) > 0 THEN 'procedure_trigger_display AS procedure_trigger' END,\n  CASE WHEN COUNT(catalog_name) > 0 THEN 'catalog_name' END,\n  CASE WHEN COUNT(schema_name) > 0 THEN 'schema_name' END,\n  CASE WHEN COUNT(table_name) > 0 THEN 'table_name' END,\n  CASE WHEN COUNT(table_id) > 0 THEN 'table_id' END,\n  CASE WHEN COUNT(physical_table_id) > 0 THEN 'physical_table_id' END,\n  CASE WHEN COUNT(region_id) > 0 THEN 'region_id' END,\n  CASE WHEN COUNT(region_number) > 0 THEN 'region_number' END,\n  CASE WHEN COUNT(region_migration_trigger_reason) > 0 THEN 'region_migration_trigger_reason' END,\n  CASE WHEN COUNT(region_migration_src_node_id) > 0 THEN 'region_migration_src_node_id' END,\n  CASE WHEN COUNT(region_migration_src_peer_addr) > 0 THEN 'region_migration_src_peer_addr' END,\n  CASE WHEN COUNT(region_migration_dst_node_id) > 0 THEN 'region_migration_dst_node_id' END,\n  CASE WHEN COUNT(region_migration_dst_peer_addr) > 0 THEN 'region_migration_dst_peer_addr' END,\n  CASE WHEN COUNT(topic_name) > 0 THEN 'topic_name' END,\n  CASE WHEN COUNT(prunable_entry_id) > 0 THEN 'prunable_entry_id' END,\n  CASE WHEN COUNT(latest_offset) > 0 THEN 'latest_offset' END,\n  CASE WHEN COUNT(gc_report) > 0 THEN 'json_to_string(gc_report) AS gc_report' END,\n  CASE WHEN COUNT(parent_procedure_id) > 0 THEN 'parent_procedure_id' END,\n  CASE WHEN COUNT(repartition_group_id) > 0 THEN 'repartition_group_id' END,\n  CASE WHEN COUNT(source_region_id) > 0 THEN 'source_region_id' END,\n  CASE WHEN COUNT(source_region_number) > 0 THEN 'source_region_number' END,\n  CASE WHEN COUNT(source_partition_expr) > 0 THEN 'source_partition_expr' END,\n  CASE WHEN COUNT(target_region_id) > 0 THEN 'target_region_id' END,\n  CASE WHEN COUNT(target_region_number) > 0 THEN 'target_region_number' END,\n  CASE WHEN COUNT(target_partition_expr) > 0 THEN 'target_partition_expr' END,\n  CASE WHEN COUNT(flow_name) > 0 THEN 'flow_name' END,\n  CASE WHEN COUNT(flow_id) > 0 THEN 'flow_id' END,\n  CASE WHEN COUNT(view_name) > 0 THEN 'view_name' END,\n  CASE WHEN COUNT(view_id) > 0 THEN 'view_id' END\n) AS __value\nFROM trace",
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "1h",
+      "6h",
+      "24h",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "GreptimeDB Events",
+  "uid": "greptimedb-events",
+  "version": 1
+}
