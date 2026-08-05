@@ -2646,6 +2646,18 @@ async fn test_on_rollback() {
         procedure.on_delete_metadata().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
+        assert!(procedure.dropping_regions.is_empty());
+        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+
+        // The physical table can be dropped again after the metadata rollback.
+        let retry_task = new_drop_table_task("phy_table", physical_table_id, false);
+        let mut retry = DropTableProcedure::new(retry_task, ddl_context.clone());
+        retry.on_prepare().await.unwrap();
+        retry.on_delete_metadata().await.unwrap();
+        retry.rollback(&ctx).await.unwrap();
+        assert!(retry.dropping_regions.is_empty());
+        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+
         // Rollback again
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
