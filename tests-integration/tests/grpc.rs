@@ -789,6 +789,9 @@ pub async fn test_health_check(store_type: StorageType) {
     let grpc_client = Client::with_urls(vec![addr]);
     grpc_client.health_check().await.unwrap();
 
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    assert!(db.sql("SHOW TABLES").await.is_ok());
+
     let _ = fe_grpc_server.shutdown().await;
 }
 
