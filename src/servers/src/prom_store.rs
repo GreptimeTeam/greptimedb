@@ -16,7 +16,7 @@
 //! handles prometheus remote_write, remote_read logic
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::hash_map::{DefaultHasher, Entry};
 use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
@@ -356,14 +356,31 @@ pub fn recordbatches_to_timeseries(
     table_name: &str,
     recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
-    Ok(recordbatches
-        .take()
-        .into_iter()
-        .map(|x| recordbatch_to_timeseries(table_name, x))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+    let mut timeseries: Vec<TimeSeries> = Vec::new();
+    // Maps a labelset to the index of its TimeSeries in `timeseries`, so that
+    // series split across RecordBatch boundaries are merged into a single
+    // TimeSeries instead of being emitted once per batch.
+    let mut timeseries_by_labels: HashMap<Vec<Label>, usize> = HashMap::new();
+
+    for recordbatch in recordbatches.take() {
+        let batch_timeseries = recordbatch_to_timeseries(table_name, recordbatch)?;
+        for series in batch_timeseries {
+            match timeseries_by_labels.entry(series.labels.clone()) {
+                Entry::Occupied(entry) => {
+                    timeseries[*entry.get()].samples.extend(series.samples);
+                }
+                Entry::Vacant(entry) => {
+                    let index = timeseries.len();
+                    entry.insert(index);
+                    timeseries.push(series);
+                }
+            }
+        }
+    }
+
+    timeseries
+        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
+    Ok(timeseries)
 }
 
 fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
@@ -1288,6 +1305,81 @@ mod tests {
                 },
             ],
             timeseries[1].samples
+        );
+    }
+
+    #[test]
+    fn recordbatches_to_timeseries_merges_series_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+        ]));
+
+        // The same series (instance = "host1") is split across two RecordBatches:
+        // the first batch holds two samples, the second batch holds one more.
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![3.0, 4.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1", "host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![3000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![5.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
+
+        // The series must be merged into a single TimeSeries holding all samples.
+        assert_eq!(1, timeseries.len());
+        assert_eq!(
+            vec![
+                Label {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "metric1".to_string(),
+                },
+                Label {
+                    name: "instance".to_string(),
+                    value: "host1".to_string(),
+                },
+            ],
+            timeseries[0].labels
+        );
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 3.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 4.0,
+                    timestamp: 2000,
+                },
+                Sample {
+                    value: 5.0,
+                    timestamp: 3000,
+                },
+            ],
+            timeseries[0].samples
         );
     }
 }
