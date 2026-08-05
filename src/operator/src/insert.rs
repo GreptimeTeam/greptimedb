@@ -36,7 +36,7 @@ use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{TRIGGER_REASON_EXTENSION_KEY, TriggerReason};
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -67,12 +67,6 @@ use table::requests::{
     TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY,
     VALID_TABLE_OPTION_KEYS, is_semantic_option_key, validate_semantic_option,
 };
-
-fn with_trigger_reason(ctx: &QueryContextRef, reason: TriggerReason) -> QueryContextRef {
-    let mut ctx = ctx.as_ref().clone();
-    ctx.set_extension(TRIGGER_REASON_EXTENSION_KEY, reason.as_ref());
-    Arc::new(ctx)
-}
 use table::table_reference::TableReference;
 
 use crate::error::{
@@ -665,7 +659,10 @@ impl Inserter {
                     statement_executor
                         .alter_logical_tables(
                             alter_tables,
-                            with_trigger_reason(ctx, TriggerReason::AutoAlter),
+                            crate::utils::with_trigger_reason(
+                                ctx.clone(),
+                                TriggerReason::AutoAlter,
+                            ),
                         )
                         .await?;
                 }
@@ -689,7 +686,10 @@ impl Inserter {
                     statement_executor
                         .alter_table_inner(
                             alter_expr,
-                            with_trigger_reason(ctx, TriggerReason::AutoAlter),
+                            crate::utils::with_trigger_reason(
+                                ctx.clone(),
+                                TriggerReason::AutoAlter,
+                            ),
                         )
                         .await?;
                 }
@@ -801,7 +801,10 @@ impl Inserter {
                     statement_executor
                         .alter_table_inner(
                             alter_expr,
-                            with_trigger_reason(ctx, TriggerReason::AutoAlter),
+                            crate::utils::with_trigger_reason(
+                                ctx.clone(),
+                                TriggerReason::AutoAlter,
+                            ),
                         )
                         .await?;
                 }
@@ -891,7 +894,7 @@ impl Inserter {
             .create_table_inner(
                 create_table_expr,
                 None,
-                with_trigger_reason(ctx, TriggerReason::AutoCreate),
+                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
             )
             .await;
 
@@ -1083,7 +1086,7 @@ impl Inserter {
             .create_table_inner(
                 &mut create_table_expr,
                 partitions,
-                with_trigger_reason(ctx, TriggerReason::AutoCreate),
+                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
             )
             .await;
 
@@ -1117,7 +1120,7 @@ impl Inserter {
         let res = statement_executor
             .create_logical_tables(
                 &create_table_exprs,
-                with_trigger_reason(ctx, TriggerReason::AutoCreate),
+                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
             )
             .await;
 

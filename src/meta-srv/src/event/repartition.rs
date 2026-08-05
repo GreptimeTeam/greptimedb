@@ -384,6 +384,7 @@ mod tests {
         PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
+    use common_meta::rpc::ddl::TriggerContext;
     use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
     use table::table_name::TableName;
     use uuid::Uuid;
@@ -401,6 +402,7 @@ mod tests {
             TableName::new("greptime", "public", "repartition_events"),
             1024,
             Some(Duration::from_secs(30)),
+            TriggerContext::default(),
         )
     }
 

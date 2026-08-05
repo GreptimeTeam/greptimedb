@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -31,7 +32,12 @@ async fn test_parallel_process_datanodes_empty() {
     let env = TestEnv::new();
     let report = env
         .scheduler
-        .parallel_process_datanodes(HashMap::new(), HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            TriggerContext::default(),
+        )
         .await;
 
     match report {
@@ -95,7 +101,12 @@ async fn test_parallel_process_datanodes_with_candidates() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            TriggerContext::default(),
+        )
         .await;
 
     match report {
@@ -176,11 +187,68 @@ async fn test_handle_tick() {
 
     assert_eq!(*ctx.get_table_to_region_stats_calls.lock().unwrap(), 1);
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
+    assert_eq!(
+        ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
+        &[TriggerContext::new(TriggerReason::ScheduledGc, "unknown")]
+    );
 
     let tracker = scheduler.region_gc_tracker.lock().await;
     assert!(
         tracker.contains_key(&region_id),
         "Tracker should have one region: {:?}",
         tracker
+    );
+}
+
+#[tokio::test]
+async fn test_handle_manual_gc_without_regions_records_manual_trigger_context() {
+    init_default_ut_logging();
+
+    let table_id = 1;
+    let region_id = RegionId::new(table_id, 1);
+    let peer = Peer::new(1, "");
+    let candidates = HashMap::from([(table_id, vec![new_candidate(region_id, 1.0)])]);
+    let file_refs = FileRefsManifest {
+        manifest_version: HashMap::from([(region_id, 1)]),
+        ..Default::default()
+    };
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(HashMap::from([(
+                table_id,
+                vec![mock_region_stat(
+                    region_id,
+                    RegionRole::Leader,
+                    TEST_REGION_SIZE_200MB,
+                    10,
+                )],
+            )])))),
+            gc_reports: Arc::new(Mutex::new(HashMap::from([(
+                region_id,
+                GcReport::default(),
+            )]))),
+            candidates: Arc::new(Mutex::new(Some(candidates))),
+            file_refs: Arc::new(Mutex::new(Some(file_refs))),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(
+            table_id,
+            (table_id, vec![(region_id, peer)]),
+        )])),
+    );
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
+        receiver: GcScheduler::channel().1,
+        config: GcSchedulerOptions::default(),
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    scheduler.handle_manual_gc(None, None, None).await.unwrap();
+
+    assert_eq!(
+        ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
+        &[TriggerContext::new(TriggerReason::Manual, "unknown")]
     );
 }

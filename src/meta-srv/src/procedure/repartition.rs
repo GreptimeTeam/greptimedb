@@ -113,14 +113,10 @@ fn default_timeout() -> Duration {
 }
 
 impl PersistentContext {
-    /// Creates a new [PersistentContext] with the given table name, table id and timeout.
+    /// Creates a new [PersistentContext] with the table, timeout and trigger context.
     ///
     /// If the timeout is not provided, the default timeout will be used.
-    pub fn new(table_name: TableName, table_id: TableId, timeout: Option<Duration>) -> Self {
-        Self::new_with_trigger_context(table_name, table_id, timeout, TriggerContext::default())
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         TableName {
             catalog_name,
             schema_name,
@@ -911,12 +907,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         timeout: Option<Duration>,
         trigger_context: TriggerContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persistent_ctx = PersistentContext::new_with_trigger_context(
-            table_name,
-            table_id,
-            timeout,
-            trigger_context,
-        );
+        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout, trigger_context);
         let from = match source {
             RepartitionSource::Partitioned {
                 exprs,
@@ -1149,6 +1140,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
 
         Context::new(
@@ -1476,6 +1468,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -1542,6 +1535,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![test_plan(table_id)];
         let context = Context::new(
@@ -1595,6 +1589,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         let failed_plan = test_plan(table_id);
         let failed_plan = with_rollback_metadata(
@@ -1728,6 +1723,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![failed_plan, succeeded_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {
@@ -1837,6 +1833,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![plan.clone()];
         persistent_ctx.unknown_procedures = vec![ProcedureMeta {
@@ -1898,6 +1895,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -2026,6 +2024,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
+            TriggerContext::default(),
         );
         persistent_ctx.plans = vec![failed_merge_plan, succeeded_split_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {

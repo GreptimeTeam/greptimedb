@@ -62,14 +62,6 @@ impl CreateLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
-        context: DdlContext,
-    ) -> Self {
-        Self::new_with_trigger_context(tasks, physical_table_id, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
-        tasks: Vec<CreateTableTask>,
-        physical_table_id: TableId,
         trigger_context: TriggerContext,
         context: DdlContext,
     ) -> Self {

@@ -219,29 +219,8 @@ pub enum State {
 impl BatchGcProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::BatchGcProcedure";
 
-    pub fn new(
-        mailbox: MailboxRef,
-        table_metadata_manager: TableMetadataManagerRef,
-        server_addr: String,
-        regions: Vec<RegionId>,
-        full_file_listing: bool,
-        timeout: Duration,
-        region_routes_override: Region2Peers,
-    ) -> Self {
-        Self::new_with_trigger_context(
-            mailbox,
-            table_metadata_manager,
-            server_addr,
-            regions,
-            full_file_listing,
-            timeout,
-            region_routes_override,
-            TriggerContext::default(),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_trigger_context(
+    pub fn new(
         mailbox: MailboxRef,
         table_metadata_manager: TableMetadataManagerRef,
         server_addr: String,
@@ -1263,6 +1242,7 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
+            TriggerContext::default(),
         );
         procedure.data.region_routes = HashMap::from([
             (first_region, (first_peer, vec![])),
@@ -1303,6 +1283,7 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
+            TriggerContext::default(),
         )
     }
 }

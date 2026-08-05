@@ -14,11 +14,19 @@
 
 use std::sync::{Arc, RwLock};
 
+use common_meta::rpc::ddl::{TRIGGER_REASON_EXTENSION_KEY, TriggerReason};
 use common_time::Timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
 
 use crate::error::{Error, InvalidTimezoneSnafu};
+
+/// Adds an explicit trigger reason to a query context for a derived DDL operation.
+pub fn with_trigger_reason(ctx: QueryContextRef, reason: TriggerReason) -> QueryContextRef {
+    let mut ctx = ctx.as_ref().clone();
+    ctx.set_extension(TRIGGER_REASON_EXTENSION_KEY, reason.as_ref());
+    Arc::new(ctx)
+}
 
 pub fn to_meta_query_context(
     query_context: QueryContextRef,

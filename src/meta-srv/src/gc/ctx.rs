@@ -318,7 +318,7 @@ impl DefaultGcSchedulerCtx {
             full_file_listing
         );
 
-        let procedure = BatchGcProcedure::new_with_trigger_context(
+        let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
             self.table_metadata_manager.clone(),
             self.server_addr.clone(),

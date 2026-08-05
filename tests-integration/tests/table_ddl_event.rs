@@ -16,9 +16,15 @@ use std::sync::Arc;
 #[cfg(feature = "enterprise")]
 use std::time::Duration;
 
+use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, Row, RowInsertRequest, RowInsertRequests, SemanticType};
+use api::v1::{
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, CreateTableExpr, DdlRequest,
+    Row, RowInsertRequest, RowInsertRequests, SemanticType, alter_table_expr,
+};
 use client::OutputData;
+use common_catalog::consts::MITO_ENGINE;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
@@ -27,6 +33,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
@@ -41,6 +48,7 @@ const PHYSICAL_TABLE: &str = "table_ddl_events_phy";
 const LOGICAL_TABLE: &str = "table_ddl_events_logical";
 const AUTO_TABLE: &str = "table_ddl_events_auto";
 const AUTO_INFLUX_TABLE: &str = "table_ddl_events_auto_influx";
+const GRPC_TABLE: &str = "table_ddl_events_grpc";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_ddl_procedure_events() {
@@ -191,6 +199,94 @@ async fn test_table_ddl_procedure_events() {
         &auto_influx_create_procedure_id,
         "auto_create",
         "influx",
+    )
+    .await;
+
+    // gRPC DDL bypasses the SQL statement executor, so it must set its own
+    // manual trigger reason before submitting the table procedure.
+    GrpcQueryHandler::do_query(
+        frontend.as_ref(),
+        Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: GRPC_TABLE.to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "host".to_string(),
+                        data_type: ColumnDataType::String as i32,
+                        is_nullable: true,
+                        semantic_type: SemanticType::Tag as i32,
+                        ..Default::default()
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        data_type: ColumnDataType::TimestampMillisecond as i32,
+                        is_nullable: false,
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
+                ..Default::default()
+            })),
+        }),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Grpc,
+        )),
+    )
+    .await
+    .unwrap();
+    let grpc_create_procedure_id =
+        submitted_procedure_id(&frontend, "create_table", GRPC_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "create_table",
+        &grpc_create_procedure_id,
+        "manual",
+        "grpc",
+    )
+    .await;
+    GrpcQueryHandler::do_query(
+        frontend.as_ref(),
+        Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: GRPC_TABLE.to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "value".to_string(),
+                            data_type: ColumnDataType::Float64 as i32,
+                            is_nullable: true,
+                            semantic_type: SemanticType::Field as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                })),
+            })),
+        }),
+        Arc::new(QueryContext::with_channel(
+            "greptime",
+            "public",
+            Channel::Grpc,
+        )),
+    )
+    .await
+    .unwrap();
+    let grpc_alter_procedure_id =
+        submitted_procedure_id(&frontend, "alter_table", GRPC_TABLE).await;
+    assert_trigger_context(
+        &frontend,
+        "alter_table",
+        &grpc_alter_procedure_id,
+        "manual",
+        "grpc",
     )
     .await;
 
@@ -472,8 +568,7 @@ async fn run_sql_with_context(
     sql: &str,
     query_context: Arc<QueryContext>,
 ) {
-    let output = instance
-        .do_query(sql, query_context)
+    let output = SqlQueryHandler::do_query(instance.as_ref(), sql, query_context)
         .await
         .remove(0)
         .unwrap();

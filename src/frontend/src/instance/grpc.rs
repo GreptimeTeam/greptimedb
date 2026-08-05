@@ -31,12 +31,14 @@ use auth::{
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
 use futures::Stream;
 use futures::stream::StreamExt;
+use operator::utils::with_trigger_reason;
 use query::parser::PromQuery;
 use servers::error as server_error;
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
@@ -176,9 +178,10 @@ impl GrpcQueryHandler for Instance {
 
                     match expr {
                         DdlExpr::CreateTable(mut expr) => {
+                            let ctx = with_trigger_reason(ctx.clone(), TriggerReason::Manual);
                             let _ = self
                                 .statement_executor
-                                .create_table_inner(&mut expr, None, ctx.clone())
+                                .create_table_inner(&mut expr, None, ctx)
                                 .await?;
                             Output::new_with_affected_rows(0)
                         }
@@ -190,8 +193,9 @@ impl GrpcQueryHandler for Instance {
                             Output::new_with_affected_rows(0)
                         }
                         DdlExpr::AlterTable(expr) => {
+                            let ctx = with_trigger_reason(ctx.clone(), TriggerReason::Manual);
                             self.statement_executor
-                                .alter_table_inner(expr, ctx.clone())
+                                .alter_table_inner(expr, ctx)
                                 .await?
                         }
                         DdlExpr::CreateDatabase(expr) => {

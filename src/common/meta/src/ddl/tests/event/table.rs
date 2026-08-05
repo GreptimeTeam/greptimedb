@@ -53,7 +53,8 @@ use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::{
-    DropTableTask, PurgeDroppedTableTask, TriggerContext, TruncateTableTask, UndropTableTask,
+    DropTableTask, PurgeDroppedTableTask, QueryContext, TriggerContext, TruncateTableTask,
+    UndropTableTask,
 };
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -177,7 +178,13 @@ fn later_lifecycle_events_are_uniform() {
 fn create_success_events_keep_allocated_ids() {
     let mut task = test_create_table_task("create_success");
     task.table_info.ident.table_id = 7;
-    let create_table = CreateTableProcedure::new(task, test_context()).unwrap();
+    let create_table = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        test_context(),
+    )
+    .unwrap();
     let state = ProcedureState::Done {
         output: Some(Arc::new(42_u32)),
     };
@@ -196,6 +203,7 @@ fn create_success_events_keep_allocated_ids() {
             test_create_logical_table_task("bar"),
         ],
         1024,
+        TriggerContext::default(),
         test_context(),
     );
     let state = ProcedureState::Done {
@@ -345,18 +353,29 @@ fn event_cases() -> Vec<EventCase> {
 }
 
 fn procedure_cases() -> Vec<ProcedureCase> {
-    let create_table =
-        CreateTableProcedure::new(test_create_table_task("create"), test_context()).unwrap();
+    let create_table = CreateTableProcedure::new(
+        test_create_table_task("create"),
+        QueryContext::default(),
+        TriggerContext::default(),
+        test_context(),
+    )
+    .unwrap();
     let create_logical_tables = CreateLogicalTablesProcedure::new(
         vec![
             test_create_logical_table_task("logical1"),
             test_create_logical_table_task("logical2"),
         ],
         41,
+        TriggerContext::default(),
         test_context(),
     );
-    let alter_table =
-        AlterTableProcedure::new(42, test_alter_table_task("alter"), test_context()).unwrap();
+    let alter_table = AlterTableProcedure::new(
+        42,
+        test_alter_table_task("alter"),
+        TriggerContext::default(),
+        test_context(),
+    )
+    .unwrap();
     let alter_logical_tables = AlterLogicalTablesProcedure::new(
         vec![
             make_alter_logical_table_add_column_task(
@@ -371,6 +390,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             ),
         ],
         43,
+        TriggerContext::default(),
         test_context(),
     );
     let drop_table = DropTableProcedure::new(

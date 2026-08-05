@@ -217,7 +217,10 @@ impl GcScheduler {
                 .await;
         }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
-        let report = self.trigger_gc().instrument(span).await?;
+        let report = self
+            .trigger_gc(TriggerContext::new(TriggerReason::ScheduledGc, "unknown"))
+            .instrument(span)
+            .await?;
 
         // Periodically clean up stale tracker entries
         self.cleanup_tracker_if_needed().await?;
@@ -301,7 +304,9 @@ impl GcScheduler {
 
         // No specific regions, use default tick behavior
         let Some(regions) = region_ids else {
-            let report = self.trigger_gc().await?;
+            let report = self
+                .trigger_gc(TriggerContext::new(TriggerReason::Manual, "unknown"))
+                .await?;
             info!("Finished manual gc request");
             return Ok(report);
         };

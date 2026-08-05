@@ -492,12 +492,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateTableProcedure::new_with_query_context(
-            create_table_task,
-            query_context,
-            trigger_context,
-            context,
-        )?;
+        let procedure =
+            CreateTableProcedure::new(create_table_task, query_context, trigger_context, context)?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -529,7 +525,7 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateLogicalTablesProcedure::new_with_trigger_context(
+        let procedure = CreateLogicalTablesProcedure::new(
             create_table_tasks,
             physical_table_id,
             trigger_context,
@@ -551,7 +547,7 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = AlterLogicalTablesProcedure::new_with_trigger_context(
+        let procedure = AlterLogicalTablesProcedure::new(
             alter_table_tasks,
             physical_table_id,
             trigger_context,
@@ -1443,10 +1439,9 @@ mod tests {
     use crate::procedure_executor::ExecutorContext;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
-use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
-#[cfg(not(feature = "enterprise"))]
-use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
-    use crate::rpc::ddl::TriggerContext;
+    use crate::rpc::ddl::{CreatorGrantIntent, TriggerContext, UndropTableTask};
+    #[cfg(not(feature = "enterprise"))]
+    use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};

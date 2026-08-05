@@ -144,7 +144,7 @@ mod tests {
     };
     use crate::key::table_route::TableRouteValue;
     use crate::peer::Peer;
-    use crate::rpc::ddl::AlterTableTask;
+    use crate::rpc::ddl::{AlterTableTask, TriggerContext};
     use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -240,7 +240,9 @@ mod tests {
             },
         };
 
-        let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context).unwrap();
+        let mut procedure =
+            AlterTableProcedure::new(table_id, task, TriggerContext::default(), ddl_context)
+                .unwrap();
         procedure.on_prepare().await.unwrap();
         let alter_kind = procedure.make_region_alter_kind().unwrap();
         let Some(Body::Alter(alter_region_request)) =
@@ -296,7 +298,9 @@ mod tests {
             },
         };
 
-        let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context).unwrap();
+        let mut procedure =
+            AlterTableProcedure::new(table_id, task, TriggerContext::default(), ddl_context)
+                .unwrap();
         procedure.on_prepare().await.unwrap();
         let alter_kind = procedure.make_region_alter_kind().unwrap();
         let Some(Body::Alter(alter_region_request)) =

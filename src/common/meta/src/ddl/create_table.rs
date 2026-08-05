@@ -84,16 +84,7 @@ fn build_executor_from_create_table_data(
 impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub fn new(task: CreateTableTask, context: DdlContext) -> Result<Self> {
-        Self::new_with_query_context(
-            task,
-            QueryContext::default(),
-            TriggerContext::default(),
-            context,
-        )
-    }
-
-    pub fn new_with_query_context(
+    pub fn new(
         task: CreateTableTask,
         query_context: QueryContext,
         trigger_context: TriggerContext,

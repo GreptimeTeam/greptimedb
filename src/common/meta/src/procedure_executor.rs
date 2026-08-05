@@ -23,7 +23,7 @@ use crate::ddl_manager::DdlManagerRef;
 use crate::error::{
     ParseProcedureIdSnafu, ProcedureNotFoundSnafu, QueryProcedureSnafu, Result, UnsupportedSnafu,
 };
-use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse, TriggerContext};
 use crate::rpc::procedure::{
     self, GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -127,8 +127,11 @@ impl ProcedureExecutor for LocalProcedureExecutor {
     async fn submit_ddl_task(
         &self,
         ctx: &ExecutorContext,
-        request: SubmitDdlTaskRequest,
+        mut request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
+        let protocol = request.query_context.channel_protocol();
+        request.trigger_context =
+            TriggerContext::from_query_context(&mut request.query_context, protocol);
         self.ddl_manager.submit_ddl_task(ctx, request).await
     }
 

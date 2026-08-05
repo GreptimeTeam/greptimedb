@@ -607,6 +607,7 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
+            TriggerContext::default(),
         )
     }
 }

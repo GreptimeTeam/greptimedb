@@ -75,6 +75,7 @@ pub struct MockSchedulerCtx {
     pub candidates: Arc<Mutex<Option<HashMap<TableId, Vec<GcCandidate>>>>>,
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
+    pub gc_trigger_contexts: Arc<Mutex<Vec<TriggerContext>>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
@@ -213,9 +214,13 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
-        _trigger_context: TriggerContext,
+        trigger_context: TriggerContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
+        self.gc_trigger_contexts
+            .lock()
+            .unwrap()
+            .push(trigger_context);
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {

@@ -48,7 +48,7 @@ use crate::ddl::test_util::{assert_column_name, get_raw_table_info, put_datanode
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::ddl::{CreateTableTask, QueryContext, TriggerContext};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
 fn create_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
@@ -189,7 +189,13 @@ async fn test_on_prepare_table_exists_err() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -212,7 +218,13 @@ async fn test_on_prepare_with_create_if_table_exists() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Done { output: Some(..) });
     let table_id = *status.downcast_output_ref::<u32>().unwrap();
@@ -225,7 +237,13 @@ async fn test_on_prepare_without_create_if_table_exists() {
     let ddl_context = new_ddl_context(node_manager);
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
-    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -244,7 +262,13 @@ async fn test_on_datanode_create_regions_should_retry() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -261,7 +285,13 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -278,7 +308,13 @@ async fn test_on_datanode_create_regions_remaps_addresses_when_retrying() {
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
-    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
 
     let table_route = procedure.data.table_route.as_mut().unwrap();
@@ -299,7 +335,13 @@ async fn test_on_create_metadata_error() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task.clone(), ddl_context.clone()).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task.clone(),
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -332,7 +374,13 @@ async fn test_on_create_metadata() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -360,7 +408,13 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
     let task = test_create_table_task("foo");
-    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+    let mut procedure = CreateTableProcedure::new(
+        task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
 
     execute_procedure_until(&mut procedure, |p| {
         p.data.state == CreateTableState::CreateMetadata

@@ -121,7 +121,7 @@ async fn test_batch_gc_event() {
         .collect::<Vec<_>>();
     assert_eq!(regions.len(), 1);
 
-    let procedure = BatchGcProcedure::new_with_trigger_context(
+    let procedure = BatchGcProcedure::new(
         cluster.metasrv.mailbox().clone(),
         cluster.metasrv.table_metadata_manager().clone(),
         cluster.metasrv.options().grpc.server_addr.clone(),

@@ -29,7 +29,7 @@ use common_meta::ddl::test_util::create_table::{
 };
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::rpc::ddl::CreateTableTask;
+use common_meta::rpc::ddl::{CreateTableTask, QueryContext, TriggerContext};
 use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_procedure::Status;
 use store_api::storage::RegionId;
@@ -91,6 +91,8 @@ fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
 fn test_region_request_builder() {
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
+        QueryContext::default(),
+        TriggerContext::default(),
         test_data::new_ddl_context(Arc::new(NodeClients::default())),
     )
     .unwrap();
@@ -188,6 +190,8 @@ async fn test_on_datanode_create_regions() {
 
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
+        QueryContext::default(),
+        TriggerContext::default(),
         test_data::new_ddl_context(node_manager),
     )
     .unwrap();
@@ -260,8 +264,12 @@ async fn test_on_datanode_create_logical_regions() {
         .unwrap()
         .0;
     let _ = kv_backend.txn(physical_route_txn).await.unwrap();
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(vec![task1, task2, task3], physical_table_id, ctx);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task1, task2, task3],
+        physical_table_id,
+        TriggerContext::default(),
+        ctx,
+    );
 
     let expected_created_regions = Arc::new(Mutex::new(HashMap::from([(1, 3), (2, 3), (3, 3)])));
 

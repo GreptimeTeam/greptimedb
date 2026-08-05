@@ -30,6 +30,7 @@ use auth::{
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_recordbatch::RecordBatches;
@@ -38,6 +39,7 @@ use operator::insert::{
     AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
 };
 use operator::statement::StatementExecutor;
+use operator::utils::with_trigger_reason;
 use prost::Message;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
@@ -229,6 +231,8 @@ impl PendingRowsSchemaAlterer for Instance {
             return Ok(());
         }
 
+        let ctx = with_trigger_reason(ctx, TriggerReason::AutoCreate);
+
         let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
         if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
             self.create_metric_physical_table_if_missing(
@@ -355,6 +359,8 @@ impl PendingRowsSchemaAlterer for Instance {
         if alter_exprs.is_empty() {
             return Ok(());
         }
+
+        let ctx = with_trigger_reason(ctx, TriggerReason::AutoAlter);
 
         self.statement_executor
             .alter_logical_tables(alter_exprs, ctx)

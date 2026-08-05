@@ -29,7 +29,7 @@ use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::tests::create_table::test_create_table_task;
 use crate::error::Error;
-use crate::rpc::ddl::CreateViewTask;
+use crate::rpc::ddl::{CreateViewTask, QueryContext, TriggerContext};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 pub(crate) fn test_table_names() -> HashSet<table::table_name::TableName> {
@@ -259,7 +259,13 @@ async fn test_replace_table() {
     {
         // Create a `foo` table.
         let task = test_create_table_task("foo");
-        let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+        let mut procedure = CreateTableProcedure::new(
+            task,
+            QueryContext::default(),
+            TriggerContext::default(),
+            ddl_context.clone(),
+        )
+        .unwrap();
         procedure.on_prepare().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),

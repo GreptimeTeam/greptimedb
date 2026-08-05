@@ -1671,6 +1671,29 @@ pub struct QueryContext {
     pub sst_min_sequences: HashMap<u64, u64>,
 }
 
+impl QueryContext {
+    /// Returns the protocol name represented by the wire channel value.
+    pub fn channel_protocol(&self) -> &'static str {
+        match self.channel {
+            1 => "mysql",
+            2 => "postgres",
+            3 => "httpsql",
+            4 => "prometheus",
+            5 => "otlp",
+            6 => "grpc",
+            7 => "influx",
+            8 => "opentsdb",
+            9 => "loki",
+            10 => "elasticsearch",
+            11 => "jaeger",
+            12 => "log",
+            13 => "promql",
+            14 => "splunk",
+            _ => "unknown",
+        }
+    }
+}
+
 /// The stable context recorded for a procedure trigger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerContext {

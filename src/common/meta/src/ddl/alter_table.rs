@@ -97,8 +97,14 @@ fn build_executor_from_alter_expr(alter_data: &AlterTableData) -> AlterTableExec
 impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
-    pub fn new(table_id: TableId, task: AlterTableTask, context: DdlContext) -> Result<Self> {
-        Self::new_with_region_locks(table_id, task, TriggerContext::default(), vec![], context)
+<<<<<<< HEAD
+    pub fn new(
+        table_id: TableId,
+        task: AlterTableTask,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Result<Self> {
+        Self::new_with_region_locks(table_id, task, trigger_context, vec![], context)
     }
 
     pub(crate) fn new_with_region_locks(

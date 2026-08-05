@@ -59,7 +59,7 @@ use crate::lock_key::RegionLock;
 use crate::node_manager::NodeManagerRef;
 use crate::peer::Peer;
 use crate::poison_key::table_poison_key;
-use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::ddl::{AlterTableTask, TriggerContext};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -121,7 +121,8 @@ async fn test_on_prepare_table_exists_err() {
         .unwrap();
 
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(1024, task, TriggerContext::default(), ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableAlreadyExists);
 }
@@ -131,7 +132,8 @@ async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(1024, task, TriggerContext::default(), ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
@@ -245,8 +247,13 @@ async fn test_on_submit_alter_request() {
     let alter_table_task = test_alter_table_task(table_name);
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -299,8 +306,13 @@ async fn test_on_submit_alter_request_without_sync_request() {
     let alter_table_task = test_alter_table_task(table_name);
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -357,7 +369,13 @@ async fn test_on_submit_alter_request_with_outdated_request() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        TriggerContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let err = procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -386,7 +404,13 @@ async fn test_on_update_metadata_rename() {
         .unwrap();
 
     let task = test_rename_alter_table_task(table_name, new_table_name);
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.on_update_metadata().await.unwrap();
 
@@ -466,7 +490,13 @@ async fn test_on_update_metadata_add_columns() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -563,7 +593,13 @@ async fn test_on_update_table_options() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -938,8 +974,13 @@ async fn prepare_alter_table_procedure(
         },
     };
     let procedure_id = ProcedureId::random();
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     (procedure, procedure_id)
 }

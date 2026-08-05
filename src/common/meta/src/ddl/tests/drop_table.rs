@@ -65,7 +65,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::KvBackend;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
-use crate::rpc::ddl::DropTableTask;
+use crate::rpc::ddl::{DropTableTask, QueryContext, TriggerContext};
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
@@ -1007,7 +1007,13 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
     let mut create_task = test_create_table_task(table_name, 1025);
     create_task.create_table.table_id = None;
     create_task.table_info.ident.table_id = 0;
-    let mut create_procedure = CreateTableProcedure::new(create_task, ddl_context.clone()).unwrap();
+    let mut create_procedure = CreateTableProcedure::new(
+        create_task,
+        QueryContext::default(),
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     execute_procedure_until_done(&mut create_procedure).await;
 
     let live_table = ddl_context
@@ -2626,8 +2632,12 @@ async fn test_on_rollback() {
     let physical_table_id = table_id;
     // Creates the logical table metadata.
     let task = test_create_logical_table_task("foo");
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context.clone());
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task],
+        physical_table_id,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    );
     procedure.on_prepare().await.unwrap();
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
