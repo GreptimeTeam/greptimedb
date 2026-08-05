@@ -39,6 +39,12 @@ excludes = [
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
+    "src/common/function/src/admin/purge_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin.rs",
+    "src/common/meta/src/ddl/purge_dropped_table.rs",
+    "src/common/meta/src/ddl/undrop_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin_test.rs",
+    # enterprise:end
 ]
 
 [properties]

@@ -12,16 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "enterprise")]
+use std::collections::HashSet;
+#[cfg(feature = "enterprise")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "enterprise")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
+#[cfg(feature = "enterprise")]
 use common_meta::ddl_manager::DdlManagerRef;
+#[cfg(feature = "enterprise")]
+use common_meta::key::DroppedTableName;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
-use common_meta::key::{DroppedTableName, TableMetadataManagerRef};
+#[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::PurgeDroppedTableTask;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
@@ -33,6 +41,7 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::gc::Region2Peers;
 use crate::gc::procedure::BatchGcProcedure;
+#[cfg(feature = "enterprise")]
 use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
 use crate::service::mailbox::MailboxRef;
 
@@ -60,32 +69,39 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         region_routes_override: Region2Peers,
     ) -> Result<GcReport>;
 
+    #[cfg(feature = "enterprise")]
     async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>>;
 
+    #[cfg(feature = "enterprise")]
     async fn purge_dropped_table(&self, table_id: TableId) -> Result<()>;
 
+    #[cfg(feature = "enterprise")]
     fn try_reserve_purge(
         &self,
         table_id: TableId,
         max_in_flight: usize,
     ) -> Option<PurgeReservation>;
 
+    #[cfg(feature = "enterprise")]
     fn next_purge_scan_start(&self, _table_count: usize) -> usize {
         0
     }
 }
 
+#[cfg(feature = "enterprise")]
 pub(crate) enum PurgeOutcome {
     Succeeded,
     Failed,
 }
 
+#[cfg(feature = "enterprise")]
 pub(crate) struct PurgeReservation {
     table_id: TableId,
     in_flight: Arc<Mutex<HashSet<TableId>>>,
     outcome_recorded: bool,
 }
 
+#[cfg(feature = "enterprise")]
 impl PurgeReservation {
     pub(crate) fn try_new(
         in_flight: Arc<Mutex<HashSet<TableId>>>,
@@ -118,6 +134,7 @@ impl PurgeReservation {
     }
 }
 
+#[cfg(feature = "enterprise")]
 impl Drop for PurgeReservation {
     fn drop(&mut self) {
         if !self.outcome_recorded {
@@ -138,10 +155,13 @@ pub(crate) struct DefaultGcSchedulerCtx {
     /// Procedure manager.
     pub(crate) procedure_manager: ProcedureManagerRef,
     /// DDL manager used to submit the existing purge procedure.
+    #[cfg(feature = "enterprise")]
     pub(crate) ddl_manager: DdlManagerRef,
     /// Process-local reservations for purge procedures submitted by this scheduler.
     /// Procedure recovery after a metasrv restart may outlive this set.
+    #[cfg(feature = "enterprise")]
     in_flight_purges: Arc<Mutex<HashSet<TableId>>>,
+    #[cfg(feature = "enterprise")]
     purge_scan_cursor: AtomicUsize,
     /// For getting `RegionStats`.
     pub(crate) meta_peer_client: MetaPeerClientRef,
@@ -155,7 +175,7 @@ impl DefaultGcSchedulerCtx {
     pub fn try_new(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
-        ddl_manager: DdlManagerRef,
+        #[cfg(feature = "enterprise")] ddl_manager: DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
@@ -163,8 +183,11 @@ impl DefaultGcSchedulerCtx {
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
+            #[cfg(feature = "enterprise")]
             ddl_manager,
+            #[cfg(feature = "enterprise")]
             in_flight_purges: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(feature = "enterprise")]
             purge_scan_cursor: AtomicUsize::new(0),
             meta_peer_client,
             mailbox,
@@ -241,6 +264,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         .await
     }
 
+    #[cfg(feature = "enterprise")]
     async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
         self.table_metadata_manager
             .list_dropped_tables()
@@ -248,6 +272,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
             .context(TableMetadataManagerSnafu)
     }
 
+    #[cfg(feature = "enterprise")]
     async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
         self.ddl_manager
             .submit_expired_purge_dropped_table_task(PurgeDroppedTableTask { table_id })
@@ -256,6 +281,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         Ok(())
     }
 
+    #[cfg(feature = "enterprise")]
     fn try_reserve_purge(
         &self,
         table_id: TableId,
@@ -264,6 +290,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
     }
 
+    #[cfg(feature = "enterprise")]
     fn next_purge_scan_start(&self, table_count: usize) -> usize {
         if table_count == 0 {
             return 0;
@@ -319,7 +346,7 @@ impl DefaultGcSchedulerCtx {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "enterprise"))]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 

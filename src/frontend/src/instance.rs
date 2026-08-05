@@ -1531,6 +1531,7 @@ pub fn check_permission(
                 validate_param(table_name, query_ctx)?;
             }
         }
+        #[cfg(feature = "enterprise")]
         Statement::UndropTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
@@ -3228,8 +3229,11 @@ mod tests {
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test undrop table
-        let sql = "UNDROP TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins.clone(), &query_ctx);
+        #[cfg(feature = "enterprise")]
+        {
+            let sql = "UNDROP TABLE {catalog}{schema}demo;";
+            replace_test(sql, plugins.clone(), &query_ctx);
+        }
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
