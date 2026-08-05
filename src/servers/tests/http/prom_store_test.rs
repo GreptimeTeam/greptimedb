@@ -231,7 +231,6 @@ fn make_test_app_with_write_failure_inner(
 ) -> Router {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
-        experimental_enable_prometheus_native_histogram,
         ..Default::default()
     };
 
@@ -243,7 +242,14 @@ fn make_test_app_with_write_failure_inner(
     });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
-        .with_prom_handler(instance, None, true, PromValidationMode::Unchecked, None)
+        .with_prom_handler(
+            instance,
+            None,
+            true,
+            PromValidationMode::Unchecked,
+            experimental_enable_prometheus_native_histogram,
+            None,
+        )
         .build();
     server.build(server.make_app()).unwrap()
 }
@@ -707,7 +713,7 @@ async fn test_prometheus_remote_write_v2_rejects_native_histogram_when_disabled(
         result
             .text()
             .await
-            .contains("native histogram ingestion is experimental")
+            .contains("prom_store.experimental_enable_prometheus_native_histogram")
     );
     assert!(write_rx.try_recv().is_err());
 }
