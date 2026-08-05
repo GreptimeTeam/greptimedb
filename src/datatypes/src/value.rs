@@ -1044,11 +1044,14 @@ impl PartialOrd for ListValue {
 
 impl Ord for ListValue {
     fn cmp(&self, other: &Self) -> Ordering {
-        assert_eq!(
-            self.datatype, other.datatype,
-            "Cannot compare different datatypes!"
-        );
-        self.items.cmp(&other.items)
+        // A total order: compare the datatype first, then the items.
+        // Consistent with `Eq` (which requires both datatypes and items to be
+        // equal) and mirroring `StructValue`'s schema-first ordering. Lists
+        // with different item types are ordered by their datatype instead of
+        // panicking.
+        self.datatype
+            .cmp(&other.datatype)
+            .then_with(|| self.items.cmp(&other.items))
     }
 }
 
@@ -1878,6 +1881,47 @@ pub(crate) mod tests {
         items[0] = Value::Int32(2);
         let s3 = StructValue::new(items, struct_type);
         assert_eq!(s1.cmp(&s3), Ordering::Less);
+
+        // Same-type List: equal datatypes, items decide.
+        let list_bool_1 = Value::List(build_list_value());
+        let list_bool_2 = Value::List(ListValue::new(
+            vec![Value::Boolean(false), Value::Boolean(true)],
+            Arc::new(ConcreteDataType::boolean_datatype()),
+        ));
+        assert_eq!(list_bool_1.cmp(&list_bool_2), Ordering::Greater);
+        assert_eq!(list_bool_1.cmp(&list_bool_1), Ordering::Equal);
+
+        // Cross-item-type List (List<Boolean> vs List<Int32>): same variant
+        // but different datatypes — must not panic and orders by data_type()
+        // deterministically.
+        let list_int = Value::List(ListValue::new(
+            vec![Value::Int32(1), Value::Int32(2)],
+            Arc::new(ConcreteDataType::int32_datatype()),
+        ));
+        let ab = list_bool_1.cmp(&list_int);
+        assert_ne!(ab, Ordering::Equal);
+        // Antisymmetry and partial_cmp consistency.
+        assert_eq!(list_int.cmp(&list_bool_1), ab.reverse());
+        assert_eq!(list_bool_1.partial_cmp(&list_int), Some(ab));
+        assert_eq!(list_int.partial_cmp(&list_bool_1), Some(ab.reverse()));
+
+        // Float total order (documented caveat): `OrderedFloat` never panics,
+        // even though IEEE floats are only partially ordered. In this
+        // codebase's ordered-float version, -0.0 and +0.0 compare `Equal`
+        // (consistent with `Eq`), and NaN compares equal to NaN and greater
+        // than everything else. The test pins that documented `Ord` behavior.
+        let neg_zero = Value::Float64(OrderedF64::from(-0.0f64));
+        let pos_zero = Value::Float64(OrderedF64::from(0.0f64));
+        assert_eq!(neg_zero.cmp(&pos_zero), Ordering::Equal);
+        assert_eq!(pos_zero.cmp(&neg_zero), Ordering::Equal);
+        assert_eq!(neg_zero.cmp(&neg_zero), Ordering::Equal);
+        assert_eq!(neg_zero.partial_cmp(&pos_zero), Some(Ordering::Equal));
+        let nan = Value::Float64(OrderedF64::nan());
+        let one = Value::Float64(OrderedF64::from(1.0f64));
+        assert_eq!(nan.cmp(&one), Ordering::Greater);
+        assert_eq!(one.cmp(&nan), Ordering::Less);
+        assert_eq!(nan.cmp(&nan), Ordering::Equal);
+        assert_eq!(nan.partial_cmp(&one), Some(Ordering::Greater));
 
         // Cross-type comparisons never panic and are deterministic.
         let pairs = [
