@@ -48,6 +48,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check enterprise license lists
+        run: make check-enterprise-license
       - uses: korandoru/hawkeye@v5
       - name: Check enterprise license header
         uses: korandoru/hawkeye@v5
@@ -74,6 +76,8 @@ jobs:
           version: "latest"
       - name: Run check-version script tests
         run: uv run --no-project python .github/scripts/check-version-test.py
+      - name: Run enterprise license check tests
+        run: python3 scripts/check-enterprise-license-test.py
       - name: Run fuzz orchestration script tests
         run: .github/scripts/run-fuzz-targets-test.sh
 
