@@ -248,9 +248,6 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
-    /// Validation mode while decoding Prometheus remote write requests.
-    pub prom_validation_mode: PromValidationMode,
-
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
@@ -276,7 +273,6 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
-            prom_validation_mode: PromValidationMode::Strict,
             experimental_enable_explain_analyze_stream: true,
             enable_api_server: false,
             api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
