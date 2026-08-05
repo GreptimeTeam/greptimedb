@@ -204,14 +204,7 @@ impl WorkerHandle {
 
     pub async fn get_full_flow_stat(
         &self,
-    ) -> Result<
-        (
-            BTreeMap<FlowId, usize>,
-            BTreeMap<FlowId, i64>,
-            BTreeMap<FlowId, i64>,
-        ),
-        Error,
-    > {
+    ) -> Result<(BTreeMap<FlowId, usize>, BTreeMap<FlowId, i64>, BTreeMap<FlowId, i64>), Error> {
         let ret = self
             .itc_client
             .call_with_resp(Request::QueryFullFlowStat)
