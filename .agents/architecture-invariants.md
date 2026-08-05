@@ -103,6 +103,33 @@ So:
 - Upgrading DataFusion means bumping the version in `[workspace.dependencies]`
   **and** the rev in `[patch.crates-io]` together, for all of them.
 
+## 7. Enterprise-gated code is licensed differently from the rest
+
+A few sources in this repo are governed by the GreptimeDB Enterprise License
+(`LICENSE-ENTERPRISE`) rather than Apache-2.0. They are compiled only with the
+`enterprise` feature, and the license boundary is drawn at **file** granularity —
+so how you gate a change decides which license applies to it.
+
+- A whole feature that only exists in the enterprise build goes into its own
+  module file (e.g. `src/sql/src/statements/drop/trigger.rs`), pulled in by
+  `#[cfg(feature = "enterprise")] pub mod trigger;`. That file carries the
+  enterprise header, and must be listed in `licenserc-enterprise.toml`
+  (`includes`) **and** in `licenserc.toml` (`excludes`) so the Apache-2.0 check
+  skips it. Submodules of such a module inherit all of this.
+- A branch on a shared path — an extra enum variant, a match arm, an `if` — stays
+  inline behind `#[cfg(feature = "enterprise")]` in the shared file (e.g. the
+  trigger variants in `src/sql/src/statements/statement.rs`). The file keeps its
+  Apache-2.0 header. Do not split a file just to gate three lines.
+- The `enterprise` feature must be forwarded down every dependency edge that
+  needs it (`enterprise = ["sql/enterprise", ...]`). A crate that gates code on a
+  feature its dependents never enable silently compiles the OSS path.
+
+`make check-enterprise-license` verifies the bookkeeping half of this: every file
+behind an enterprise-gated `mod` appears in both configs, and neither config has
+stale entries. It runs in CI. Deciding what belongs in a separate file is still
+yours — hawkeye alone cannot catch a miss, because a wrongly Apache-headered
+enterprise file passes the default check exactly by not being excluded from it.
+
 ## Maintenance contract
 
 Update this file when a new repo-wide invariant emerges (a new persisted format,
