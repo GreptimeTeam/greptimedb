@@ -1246,6 +1246,7 @@ impl StatementExecutor {
         );
 
         let view_id = view_info.table_id();
+        let view_name = TableName::new(&catalog, &schema, &view);
 
         let task = DropViewTask {
             catalog,
@@ -1256,6 +1257,18 @@ impl StatementExecutor {
         };
 
         self.drop_view_procedure(task, query_context).await?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[
+                    CacheIdent::TableId(view_id),
+                    CacheIdent::TableName(view_name),
+                ],
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
     }
