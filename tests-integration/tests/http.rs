@@ -115,6 +115,7 @@ macro_rules! http_tests {
                 test_sql_api,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_prometheus_label_replace_response,
                 test_prom_http_api,
                 test_metrics_api,
                 test_health_api,
@@ -825,6 +826,39 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     assert_eq!(
         "0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n",
         csv_body
+    );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_label_replace_response").await;
+    let client = TestClient::new(app).await;
+
+    let query = encode(r#"label_replace(demo, "host_copy", "$1", "host", "(.*)")"#);
+    let res = client
+        .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=0"))
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {
+                    "__name__": "demo",
+                    "host": "host1",
+                    "host_copy": "host1"
+                },
+                "value": [0.0, "1.1"]
+            }]
+        }))
+        .unwrap()
     );
 
     guard.remove_all().await;
