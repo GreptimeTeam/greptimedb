@@ -35,7 +35,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::CreateViewTask;
+use crate::rpc::ddl::{CreateViewTask, TriggerContext};
 
 // The procedure to execute `[CreateViewTask]`.
 pub struct CreateViewProcedure {
@@ -47,12 +47,21 @@ impl CreateViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateView";
 
     pub fn new(task: CreateViewTask, context: DdlContext) -> Self {
+        Self::new_with_trigger_context(task, TriggerContext::default(), context)
+    }
+
+    pub fn new_with_trigger_context(
+        task: CreateViewTask,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateViewData {
                 state: CreateViewState::Prepare,
                 task,
                 need_update: false,
+                trigger_context,
             },
         }
     }
@@ -279,7 +288,7 @@ impl Procedure for CreateViewProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let expr = &self.data.task.create_view;
-                ViewDdlEvent::create_submitted(
+                ViewDdlEvent::create_submitted_with_trigger_context(
                     &expr.catalog_name,
                     &expr.schema_name,
                     &expr.view_name,
@@ -289,6 +298,7 @@ impl Procedure for CreateViewProcedure {
                         referenced_table_count: self.data.task.table_names().len(),
                         column_count: self.data.task.columns().len(),
                     },
+                    self.data.trigger_context.clone(),
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
@@ -321,6 +331,8 @@ pub struct CreateViewData {
     pub task: CreateViewTask,
     /// Whether to update the view info.
     pub need_update: bool,
+    #[serde(default)]
+    pub trigger_context: TriggerContext,
 }
 
 impl CreateViewData {

@@ -50,7 +50,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext, TriggerContext};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -63,6 +63,15 @@ impl CreateFlowProcedure {
 
     /// Returns a new [CreateFlowProcedure].
     pub fn new(task: CreateFlowTask, query_context: QueryContext, context: DdlContext) -> Self {
+        Self::new_with_trigger_context(task, query_context, TriggerContext::default(), context)
+    }
+
+    pub fn new_with_trigger_context(
+        task: CreateFlowTask,
+        query_context: QueryContext,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateFlowData {
@@ -76,6 +85,7 @@ impl CreateFlowProcedure {
                 prev_flow_info_value: None,
                 did_replace: false,
                 flow_type: None,
+                trigger_context,
             },
         }
     }
@@ -410,7 +420,7 @@ impl Procedure for CreateFlowProcedure {
         }
 
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => FlowDdlEvent::create_submitted(
+            EventTrigger::Submitted => FlowDdlEvent::create_submitted_with_trigger_context(
                 &self.data.task.catalog_name,
                 &self.data.task.flow_name,
                 CreateFlowEventIntent {
@@ -419,6 +429,7 @@ impl Procedure for CreateFlowProcedure {
                     expire_after: self.data.task.expire_after,
                     eval_interval_secs: self.data.task.eval_interval_secs,
                 },
+                self.data.trigger_context.clone(),
             ),
             EventTrigger::Succeeded => {
                 let flow_id = match ctx.lifecycle_state {
@@ -701,6 +712,8 @@ pub struct CreateFlowData {
     #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
+    #[serde(default)]
+    pub(crate) trigger_context: TriggerContext,
 }
 
 impl CreateFlowData {

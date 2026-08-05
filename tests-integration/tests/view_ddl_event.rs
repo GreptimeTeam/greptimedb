@@ -124,6 +124,7 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
         ),
     )
     .await;
+    assert_trigger_context(instance, CREATE_VIEW_EVENT_TYPE, &procedure_id).await;
     assert_single_event(
         instance,
         &format!(
@@ -141,6 +142,25 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
         ),
     )
     .await;
+}
+
+async fn assert_trigger_context(
+    instance: &Arc<frontend::instance::Instance>,
+    event_type: &str,
+    procedure_id: &str,
+) {
+    let actual = find_eventually_string(
+        instance,
+        &format!(
+            "SELECT json_to_string(trigger_context) AS trigger_context FROM greptime_private.events WHERE type = '{event_type}' AND procedure_id = '{procedure_id}' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"')"
+        ),
+        "trigger_context",
+    )
+    .await;
+    assert_eq!(
+        r#"{"extensions":{},"protocol":"unknown","reason":{"type":"manual"}}"#,
+        actual
+    );
 }
 
 async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
@@ -163,6 +183,7 @@ WHERE type = '{DROP_VIEW_EVENT_TYPE}'
         ),
     )
     .await;
+    assert_trigger_context(instance, DROP_VIEW_EVENT_TYPE, &procedure_id).await;
     assert_single_event(
         instance,
         &format!(

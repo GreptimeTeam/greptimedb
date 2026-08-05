@@ -38,11 +38,13 @@ use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
+use crate::rpc::ddl::TriggerContext;
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
     runtime_context: DdlContext,
     context: DropDatabaseContext,
+    trigger_context: TriggerContext,
 
     state: Box<dyn State>,
 }
@@ -86,8 +88,25 @@ impl DropDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropDatabase";
 
     pub fn new(catalog: String, schema: String, drop_if_exists: bool, context: DdlContext) -> Self {
+        Self::new_with_trigger_context(
+            catalog,
+            schema,
+            drop_if_exists,
+            TriggerContext::default(),
+            context,
+        )
+    }
+
+    pub fn new_with_trigger_context(
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             runtime_context: context,
+            trigger_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -104,11 +123,13 @@ impl DropDatabaseProcedure {
             catalog,
             schema,
             drop_if_exists,
+            trigger_context,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
         Ok(Self {
             runtime_context,
+            trigger_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -159,6 +180,7 @@ impl Procedure for DropDatabaseProcedure {
             catalog: &self.context.catalog,
             schema: &self.context.schema,
             drop_if_exists: self.context.drop_if_exists,
+            trigger_context: &self.trigger_context,
             state: self.state.as_ref(),
         };
 
@@ -180,10 +202,11 @@ impl Procedure for DropDatabaseProcedure {
         }
 
         let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
-            DatabaseDdlEvent::drop_submitted(
+            DatabaseDdlEvent::drop_submitted_with_trigger_context(
                 &self.context.catalog,
                 &self.context.schema,
                 self.context.drop_if_exists,
+                self.trigger_context.clone(),
             )
         } else {
             DatabaseDdlEvent::drop_lifecycle()
@@ -199,6 +222,7 @@ struct DropDatabaseData<'a> {
     // The schema name
     schema: &'a str,
     drop_if_exists: bool,
+    trigger_context: &'a TriggerContext,
     state: &'a dyn State,
 }
 
@@ -209,5 +233,7 @@ struct DropDatabaseOwnedData {
     // The schema name
     schema: String,
     drop_if_exists: bool,
+    #[serde(default)]
+    trigger_context: TriggerContext,
     state: Box<dyn State>,
 }

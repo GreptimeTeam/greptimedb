@@ -709,7 +709,10 @@ impl StatementExecutor {
         .context(error::InvalidExprSnafu)?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_create_trigger(task),
         );
 
@@ -773,7 +776,10 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_create_flow(task),
         );
 
@@ -1086,7 +1092,10 @@ impl StatementExecutor {
         };
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(ctx),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                ctx,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_create_view(expr, view_info.clone()),
         );
 
@@ -1172,7 +1181,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_drop_flow(expr),
         );
 
@@ -1207,7 +1219,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_drop_trigger(expr),
         );
 
@@ -1288,7 +1303,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_drop_view(expr),
         );
 
@@ -2050,7 +2068,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_alter_logical_tables(tables_data),
         );
 
@@ -2068,7 +2089,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2092,7 +2116,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         );
 
@@ -2108,7 +2135,10 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_alter_database(alter_expr),
         );
 
@@ -2218,7 +2248,10 @@ impl StatementExecutor {
         creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context(crate::utils::with_trigger_reason(
+                query_context,
+                TriggerReason::Manual,
+            )),
             DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
         );
 

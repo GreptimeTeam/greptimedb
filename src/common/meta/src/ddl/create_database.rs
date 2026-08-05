@@ -34,7 +34,7 @@ use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, UserCacheIdent};
 use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::rpc::ddl::CreatorGrantIntent;
+use crate::rpc::ddl::{CreatorGrantIntent, TriggerContext};
 
 /// Describes the creator-access result of an atomic create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +95,26 @@ impl CreateDatabaseProcedure {
         creator: Option<CreatorGrantIntent>,
         context: DdlContext,
     ) -> Self {
+        Self::new_with_trigger_context(
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+            creator,
+            TriggerContext::default(),
+            context,
+        )
+    }
+
+    pub fn new_with_trigger_context(
+        catalog: String,
+        schema: String,
+        create_if_not_exists: bool,
+        options: HashMap<String, String>,
+        creator: Option<CreatorGrantIntent>,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateDatabaseData {
@@ -104,6 +124,7 @@ impl CreateDatabaseProcedure {
                 create_if_not_exists,
                 options,
                 creator,
+                trigger_context,
             },
         }
     }
@@ -284,11 +305,12 @@ impl Procedure for CreateDatabaseProcedure {
         }
 
         let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
-            DatabaseDdlEvent::create_submitted(
+            DatabaseDdlEvent::create_submitted_with_trigger_context(
                 &self.data.catalog,
                 &self.data.schema,
                 self.data.create_if_not_exists,
                 &self.data.options,
+                self.data.trigger_context.clone(),
             )
         } else {
             DatabaseDdlEvent::create_lifecycle()
@@ -321,6 +343,8 @@ pub struct CreateDatabaseData {
     /// Authenticated creator whose access is ensured, absent for legacy schema-only requests.
     #[serde(default)]
     pub creator: Option<CreatorGrantIntent>,
+    #[serde(default)]
+    pub trigger_context: TriggerContext,
 }
 
 #[cfg(test)]

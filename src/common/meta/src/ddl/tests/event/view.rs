@@ -18,7 +18,8 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-    PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN, VIEW_NAME_COLUMN, jsonb_value,
+    PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, VIEW_ID_COLUMN,
+    VIEW_NAME_COLUMN, jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -35,6 +36,7 @@ use crate::ddl::event::view::{
 };
 use crate::ddl::tests::create_view::test_create_view_task;
 use crate::ddl::tests::drop_view::new_drop_view_task;
+use crate::rpc::ddl::TriggerContext;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 #[test]
@@ -254,6 +256,11 @@ impl ViewEventLocator<'_> {
                 .map(ValueData::U32Value)
                 .map(Into::into)
                 .unwrap_or_default(),
+            if self.catalog_name.is_some() {
+                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+            } else {
+                Value { value_data: None }
+            },
         ]
     }
 }
@@ -264,6 +271,7 @@ fn view_schema() -> Vec<ColumnSchema> {
         SCHEMA_NAME_COLUMN.column_schema(),
         VIEW_NAME_COLUMN.column_schema(),
         VIEW_ID_COLUMN.column_schema(),
+        TRIGGER_CONTEXT_COLUMN.column_schema(),
     ]
 }
 

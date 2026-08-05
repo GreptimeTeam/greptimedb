@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use auth::{DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, PermissionReq};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
 use common_error::ext::BoxedError;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
@@ -33,6 +34,7 @@ use datafusion::logical_expr::col;
 use datafusion::sql::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan, lit};
 use datatypes::arrow::array::{Array, AsArray};
+use operator::utils::with_trigger_reason;
 use servers::error::{
     CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
     TableNotFoundSnafu,
@@ -165,7 +167,11 @@ impl Instance {
         };
 
         self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx.clone())
+            .create_table_inner(
+                &mut create_table_expr,
+                None,
+                with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
+            )
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;

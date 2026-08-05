@@ -21,10 +21,12 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, CreateTableExpr, SemanticType};
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoValue;
+use common_meta::rpc::ddl::TriggerReason;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use itertools::Itertools;
 use operator::expr_helper;
+use operator::utils::with_trigger_reason;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
@@ -131,7 +133,11 @@ impl StreamingEngine {
                 .build(),
         );
         stmt_exec
-            .create_table_inner(&mut create_table, None, ctx)
+            .create_table_inner(
+                &mut create_table,
+                None,
+                with_trigger_reason(ctx, TriggerReason::AutoCreate),
+            )
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;

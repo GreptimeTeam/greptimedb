@@ -35,7 +35,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::DropViewTask;
+use crate::rpc::ddl::{DropViewTask, TriggerContext};
 
 /// The procedure for dropping a view.
 pub struct DropViewProcedure {
@@ -49,11 +49,20 @@ impl DropViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropView";
 
     pub fn new(task: DropViewTask, context: DdlContext) -> Self {
+        Self::new_with_trigger_context(task, TriggerContext::default(), context)
+    }
+
+    pub fn new_with_trigger_context(
+        task: DropViewTask,
+        trigger_context: TriggerContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: DropViewData {
                 state: DropViewState::Prepare,
                 task,
+                trigger_context,
             },
         }
     }
@@ -221,12 +230,13 @@ impl Procedure for DropViewProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let table_ref = self.data.table_ref();
-                ViewDdlEvent::drop_submitted(
+                ViewDdlEvent::drop_submitted_with_trigger_context(
                     table_ref.catalog,
                     table_ref.schema,
                     table_ref.table,
                     self.data.view_id(),
                     self.data.task.drop_if_exists,
+                    self.data.trigger_context.clone(),
                 )
             }
             _ => ViewDdlEvent::drop_lifecycle(),
@@ -241,6 +251,8 @@ impl Procedure for DropViewProcedure {
 pub(crate) struct DropViewData {
     state: DropViewState,
     task: DropViewTask,
+    #[serde(default)]
+    trigger_context: TriggerContext,
 }
 
 impl DropViewData {

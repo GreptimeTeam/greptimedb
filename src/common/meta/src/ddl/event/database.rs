@@ -20,12 +20,13 @@ use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN,
-    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, column_schemas, nullable_string,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, column_schemas,
+    nullable_json, nullable_string,
 };
 use serde::Serialize;
 use snafu::ResultExt;
 
-use crate::rpc::ddl::{AlterDatabaseKind, SetDatabaseOption, UnsetDatabaseOption};
+use crate::rpc::ddl::{AlterDatabaseKind, SetDatabaseOption, TriggerContext, UnsetDatabaseOption};
 
 pub(crate) const CREATE_DATABASE_EVENT_TYPE: &str = "create_database";
 pub(crate) const ALTER_DATABASE_EVENT_TYPE: &str = "alter_database";
@@ -39,6 +40,7 @@ pub(crate) struct DatabaseDdlEvent {
     catalog_name: Option<String>,
     schema_name: Option<String>,
     payload: Option<DatabaseDdlPayload>,
+    trigger_context: Option<TriggerContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,11 +85,30 @@ struct DatabaseOptionIntent {
 }
 
 impl DatabaseDdlEvent {
+    #[cfg(test)]
     pub(crate) fn create_submitted(
         catalog_name: &str,
         schema_name: &str,
         create_if_not_exists: bool,
         options: &HashMap<String, String>,
+    ) -> Self {
+        let mut event = Self::create_submitted_with_trigger_context(
+            catalog_name,
+            schema_name,
+            create_if_not_exists,
+            options,
+            TriggerContext::default(),
+        );
+        event.trigger_context = None;
+        event
+    }
+
+    pub(crate) fn create_submitted_with_trigger_context(
+        catalog_name: &str,
+        schema_name: &str,
+        create_if_not_exists: bool,
+        options: &HashMap<String, String>,
+        trigger_context: TriggerContext,
     ) -> Self {
         let mut options = options.iter().collect::<Vec<_>>();
         options.sort_unstable_by_key(|(left, _)| *left);
@@ -107,13 +128,31 @@ impl DatabaseDdlEvent {
                 create_if_not_exists,
                 options,
             }),
+            trigger_context,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn alter_submitted(
         catalog_name: &str,
         schema_name: &str,
         kind: &AlterDatabaseKind,
+    ) -> Self {
+        let mut event = Self::alter_submitted_with_trigger_context(
+            catalog_name,
+            schema_name,
+            kind,
+            TriggerContext::default(),
+        );
+        event.trigger_context = None;
+        event
+    }
+
+    pub(crate) fn alter_submitted_with_trigger_context(
+        catalog_name: &str,
+        schema_name: &str,
+        kind: &AlterDatabaseKind,
+        trigger_context: TriggerContext,
     ) -> Self {
         let intent = match kind {
             AlterDatabaseKind::SetDatabaseOptions(options) => AlterDatabaseIntent::Set {
@@ -152,13 +191,31 @@ impl DatabaseDdlEvent {
                 version: PAYLOAD_VERSION,
                 intent,
             }),
+            trigger_context,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn drop_submitted(
         catalog_name: &str,
         schema_name: &str,
         drop_if_exists: bool,
+    ) -> Self {
+        let mut event = Self::drop_submitted_with_trigger_context(
+            catalog_name,
+            schema_name,
+            drop_if_exists,
+            TriggerContext::default(),
+        );
+        event.trigger_context = None;
+        event
+    }
+
+    pub(crate) fn drop_submitted_with_trigger_context(
+        catalog_name: &str,
+        schema_name: &str,
+        drop_if_exists: bool,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self::submitted(
             DROP_DATABASE_EVENT_TYPE,
@@ -168,6 +225,7 @@ impl DatabaseDdlEvent {
                 version: PAYLOAD_VERSION,
                 drop_if_exists,
             }),
+            trigger_context,
         )
     }
 
@@ -188,12 +246,14 @@ impl DatabaseDdlEvent {
         catalog_name: &str,
         schema_name: &str,
         payload: DatabaseDdlPayload,
+        trigger_context: TriggerContext,
     ) -> Self {
         Self {
             event_type,
             catalog_name: Some(catalog_name.to_string()),
             schema_name: Some(schema_name.to_string()),
             payload: Some(payload),
+            trigger_context: Some(trigger_context),
         }
     }
 
@@ -203,6 +263,7 @@ impl DatabaseDdlEvent {
             catalog_name: None,
             schema_name: None,
             payload: None,
+            trigger_context: None,
         }
     }
 }
@@ -223,14 +284,22 @@ impl Event for DatabaseDdlEvent {
         column_schemas([
             &EVENT_TABLE_CATALOG_NAME_COLUMN,
             &EVENT_TABLE_SCHEMA_NAME_COLUMN,
+            &TRIGGER_CONTEXT_COLUMN,
         ])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
+        let trigger_context = self
+            .trigger_context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .context(SerializeEventSnafu)?;
         Ok(vec![Row {
             values: vec![
                 nullable_string(self.catalog_name.as_deref()),
                 nullable_string(self.schema_name.as_deref()),
+                nullable_json(trigger_context.as_ref()),
             ],
         }])
     }

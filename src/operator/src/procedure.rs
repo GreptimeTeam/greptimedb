@@ -19,7 +19,7 @@ use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
-use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
+use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, TriggerReason};
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
     GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use table::table_name::TableName;
 
 use crate::error;
-use crate::utils::to_meta_query_context;
+use crate::utils::{to_meta_query_context, with_trigger_reason};
 
 /// The operator for procedures which implements [`ProcedureServiceHandler`].
 #[derive(Clone)]
@@ -77,7 +77,7 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?;
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_ctx),
+            to_meta_query_context(with_trigger_reason(query_ctx, TriggerReason::Manual)),
             DdlTask::new_purge_dropped_table(dropped.table_id),
         );
         self.procedure_executor
@@ -161,7 +161,9 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ProcedureExecutor, ProcedureExecutorRef};
-    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::ddl::{
+        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
+    };
     use common_meta::rpc::procedure::{MigrateRegionResponse, ProcedureStateResponse};
     use session::context::QueryContextBuilder;
     use table::table_name::TableName;
@@ -277,6 +279,13 @@ mod tests {
         );
         assert_eq!(requests[0].query_context.current_catalog, "catalog");
         assert_eq!(requests[0].query_context.current_schema, "schema");
+        assert_eq!(
+            Some(&TriggerReason::Manual.as_ref().to_string()),
+            requests[0]
+                .query_context
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY)
+        );
     }
 
     #[tokio::test]

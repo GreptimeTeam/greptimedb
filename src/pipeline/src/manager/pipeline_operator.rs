@@ -19,12 +19,14 @@ use std::time::Instant;
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
+use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::info;
 use common_time::FOREVER;
 use datatypes::timestamp::TimestampNanosecond;
 use futures::FutureExt;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
+use operator::utils::with_trigger_reason;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -131,7 +133,11 @@ impl PipelineOperator {
 
         // create table
         self.statement_executor
-            .create_table_inner(&mut expr, None, ctx.clone())
+            .create_table_inner(
+                &mut expr,
+                None,
+                with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
+            )
             .await
             .context(CreateTableSnafu)?;
 

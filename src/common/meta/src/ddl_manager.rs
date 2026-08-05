@@ -507,10 +507,15 @@ impl DdlManager {
     pub async fn submit_create_view_task(
         &self,
         create_view_task: CreateViewTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateViewProcedure::new(create_view_task, context);
+        let procedure = CreateViewProcedure::new_with_trigger_context(
+            create_view_task,
+            trigger_context,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -691,14 +696,16 @@ impl DdlManager {
             options,
             creator,
         }: CreateDatabaseTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateDatabaseProcedure::new(
+        let procedure = CreateDatabaseProcedure::new_with_trigger_context(
             catalog,
             schema,
             create_if_not_exists,
             options,
             creator,
+            trigger_context,
             context,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -715,9 +722,16 @@ impl DdlManager {
             schema,
             drop_if_exists,
         }: DropDatabaseTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
+        let procedure = DropDatabaseProcedure::new_with_trigger_context(
+            catalog,
+            schema,
+            drop_if_exists,
+            trigger_context,
+            context,
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -726,9 +740,14 @@ impl DdlManager {
     pub async fn submit_alter_database(
         &self,
         alter_database_task: AlterDatabaseTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = AlterDatabaseProcedure::new(alter_database_task, context)?;
+        let procedure = AlterDatabaseProcedure::new_with_trigger_context(
+            alter_database_task,
+            trigger_context,
+            context,
+        )?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -740,9 +759,15 @@ impl DdlManager {
         &self,
         create_flow: CreateFlowTask,
         query_context: QueryContext,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
+        let procedure = CreateFlowProcedure::new_with_trigger_context(
+            create_flow,
+            query_context,
+            trigger_context,
+            context,
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -753,9 +778,11 @@ impl DdlManager {
     pub async fn submit_drop_flow_task(
         &self,
         drop_flow: DropFlowTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = DropFlowProcedure::new(drop_flow, context);
+        let procedure =
+            DropFlowProcedure::new_with_trigger_context(drop_flow, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -766,9 +793,11 @@ impl DdlManager {
     pub async fn submit_drop_view_task(
         &self,
         drop_view: DropViewTask,
+        trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = DropViewProcedure::new(drop_view, context);
+        let procedure =
+            DropViewProcedure::new_with_trigger_context(drop_view, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -918,22 +947,35 @@ impl DdlManager {
                 }
                 DropLogicalTables(_) => todo!(),
                 CreateDatabase(create_database_task) => {
-                    handle_create_database_task(self, create_database_task).await
+                    handle_create_database_task(self, create_database_task, request.trigger_context)
+                        .await
                 }
                 DropDatabase(drop_database_task) => {
-                    handle_drop_database_task(self, drop_database_task).await
+                    handle_drop_database_task(self, drop_database_task, request.trigger_context)
+                        .await
                 }
                 AlterDatabase(alter_database_task) => {
-                    handle_alter_database_task(self, alter_database_task).await
+                    handle_alter_database_task(self, alter_database_task, request.trigger_context)
+                        .await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, create_flow_task, request.query_context).await
+                    handle_create_flow_task(
+                        self,
+                        create_flow_task,
+                        request.query_context,
+                        request.trigger_context,
+                    )
+                    .await
                 }
-                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
+                DropFlow(drop_flow_task) => {
+                    handle_drop_flow_task(self, drop_flow_task, request.trigger_context).await
+                }
                 CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task).await
+                    handle_create_view_task(self, create_view_task, request.trigger_context).await
                 }
-                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
+                DropView(drop_view_task) => {
+                    handle_drop_view_task(self, drop_view_task, request.trigger_context).await
+                }
                 CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
@@ -1166,11 +1208,12 @@ async fn handle_create_logical_table_tasks(
 async fn handle_create_database_task(
     ddl_manager: &DdlManager,
     create_database_task: CreateDatabaseTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let catalog = create_database_task.catalog.clone();
     let schema = create_database_task.schema.clone();
     let (id, _) = ddl_manager
-        .submit_create_database(create_database_task)
+        .submit_create_database(create_database_task, trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1188,9 +1231,10 @@ async fn handle_create_database_task(
 async fn handle_drop_database_task(
     ddl_manager: &DdlManager,
     drop_database_task: DropDatabaseTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_database(drop_database_task.clone())
+        .submit_drop_database(drop_database_task.clone(), trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1208,9 +1252,10 @@ async fn handle_drop_database_task(
 async fn handle_alter_database_task(
     ddl_manager: &DdlManager,
     alter_database_task: AlterDatabaseTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_alter_database(alter_database_task.clone())
+        .submit_alter_database(alter_database_task.clone(), trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1229,9 +1274,10 @@ async fn handle_alter_database_task(
 async fn handle_drop_flow_task(
     ddl_manager: &DdlManager,
     drop_flow_task: DropFlowTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_flow_task(drop_flow_task.clone())
+        .submit_drop_flow_task(drop_flow_task.clone(), trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1273,9 +1319,10 @@ async fn handle_drop_trigger_task(
 async fn handle_drop_view_task(
     ddl_manager: &DdlManager,
     drop_view_task: DropViewTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_view_task(drop_view_task.clone())
+        .submit_drop_view_task(drop_view_task.clone(), trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1295,9 +1342,10 @@ async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     create_flow_task: CreateFlowTask,
     query_context: QueryContext,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_flow_task(create_flow_task.clone(), query_context)
+        .submit_create_flow_task(create_flow_task.clone(), query_context, trigger_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1393,9 +1441,10 @@ async fn handle_alter_logical_table_tasks(
 async fn handle_create_view_task(
     ddl_manager: &DdlManager,
     create_view_task: CreateViewTask,
+    trigger_context: TriggerContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_view_task(create_view_task)
+        .submit_create_view_task(create_view_task, trigger_context)
         .await?;
 
     let procedure_id = id.to_string();

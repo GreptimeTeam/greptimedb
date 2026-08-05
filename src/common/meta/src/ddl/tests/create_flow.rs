@@ -37,7 +37,7 @@ use crate::key::flow::flow_info::{
     FlowInfoValue, FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus,
 };
 use crate::key::table_route::TableRouteValue;
-use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext, TriggerContext};
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 pub(crate) fn test_query_context() -> QueryContext {
@@ -428,6 +428,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
 
     // Construct CreateFlowData and verify CreateRequest carries internal key.
     let data = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::CreateFlows,
         task,
         flow_id: Some(1024),
@@ -441,6 +442,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
     };
 
     let data2 = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: data.task.clone(),
         flow_id: Some(1024),
@@ -601,6 +603,7 @@ fn test_create_request_strips_defer_on_missing_source_runtime_option() {
     enable_defer_on_missing_source(&mut task);
 
     let data = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::CreateFlows,
         task,
         flow_id: Some(1024),
@@ -1061,6 +1064,7 @@ fn test_create_flow_data_new_format_serialization() {
     };
 
     let data = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::Prepare,
         task: create_test_flow_task_for_serialization(),
         flow_id: None,
@@ -1162,6 +1166,7 @@ fn test_flow_info_conversion_with_flow_context() {
     };
 
     let data = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: create_test_flow_task_for_serialization(),
         flow_id: Some(123),
@@ -1204,6 +1209,7 @@ fn test_flow_info_conversion_strips_scheduled_time_extension() {
     };
 
     let data = CreateFlowData {
+        trigger_context: TriggerContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: create_test_flow_task_for_serialization(),
         flow_id: Some(123),

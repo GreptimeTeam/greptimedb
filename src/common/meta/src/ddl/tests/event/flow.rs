@@ -20,7 +20,8 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
-    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, TRIGGER_CONTEXT_COLUMN,
+    jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -58,6 +59,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
+                Value { value_data: None },
             ],
         }],
     );
@@ -82,6 +84,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
+                Value { value_data: None },
             ],
         }],
     );
@@ -107,6 +110,7 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
                     Value { value_data: None },
                     Value { value_data: None },
                     Value { value_data: None },
+                    Value { value_data: None },
                 ],
             }],
         );
@@ -123,6 +127,7 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
                 Value { value_data: None },
                 Value { value_data: None },
                 ValueData::U32Value(42).into(),
+                Value { value_data: None },
             ],
         }],
     );
@@ -206,6 +211,7 @@ fn flow_schema() -> Vec<ColumnSchema> {
         CATALOG_NAME_COLUMN.column_schema(),
         FLOW_NAME_COLUMN.column_schema(),
         FLOW_ID_COLUMN.column_schema(),
+        TRIGGER_CONTEXT_COLUMN.column_schema(),
     ]
 }
 
@@ -246,6 +252,7 @@ fn assert_procedure_event_contract(
                     .map(ValueData::U32Value)
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
+                Value { value_data: None },
             ],
         }],
     );
