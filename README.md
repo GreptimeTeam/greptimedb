@@ -19,16 +19,22 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 </h3>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?filter=!*-*&label=stable&color=brightgreen" alt="Stable"/>
 </a>
-<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=!*-*-*&label=canary&color=blueviolet" alt="Canary"/>
 </a>
+<a href="https://github.com/GreptimeTeam/greptimedb/releases">
+<img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb?include_prereleases&filter=*-nightly-*&label=nightly&color=orange" alt="Nightly"/>
+</a>
+
+<sub><b>stable</b> for production &nbsp;·&nbsp; <b>latest</b> includes pre-releases &nbsp;·&nbsp; <b>nightly</b> is a weekly snapshot of <code>main</code></sub>
+
 <a href="https://hub.docker.com/r/greptime/greptimedb/">
 <img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
 </a>
-<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml">
-<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="GitHub Actions"/>
+<a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml">
+<img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml/badge.svg" alt="GitHub Actions"/>
 </a>
 <a href="https://codecov.io/gh/GreptimeTeam/greptimedb">
 <img src="https://codecov.io/gh/GreptimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C" alt="Codecov"/>
@@ -149,7 +155,7 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
-  --rpc-bind-addr 0.0.0.0:4001 \
+  --grpc-bind-addr 0.0.0.0:4001 \
   --mysql-addr 0.0.0.0:4002 \
   --postgres-addr 0.0.0.0:4003
 ```
@@ -208,14 +214,6 @@ GreptimeDB is at [v1.0 GA](https://github.com/GreptimeTeam/greptimedb/releases/t
 Read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026), or browse the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version).
 
 If GreptimeDB is useful to you, please star the repo.
-
-<a href="https://www.star-history.com/?repos=GreptimeTeam%2FGreptimeDB&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&theme=dark&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
- </picture>
-</a>
 
 <img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 

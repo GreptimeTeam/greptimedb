@@ -1,0 +1,166 @@
+# PromQL overlapping range-boundary benchmark.
+#
+# 128 series × 780 timestamps at 15s cadence = 99,840 rows. Data starts one
+# hour before evaluation; 481 evaluations span two hours. `count_over_time` is
+# boundary-sensitive, while `sum_over_time` intentionally includes kernel scan
+# work and the plain selector controls unrelated path variance.
+
+[case]
+name = "promql_range_boundary"
+description = "PromQL overlapping range-boundary generation at 15-second scrape and evaluation cadence"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 8623
+
+[[scenario.tables]]
+database = "public"
+name = "promql_range_boundary"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 128, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 13
+rows_per_sst = 7680
+row_group_size = 1920
+series_count = 128
+start_unix_nanos = 1704067200000000000
+step_nanos = 15000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "plain_selector_control_2h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') promql_range_boundary{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Four samples per full window: fixed-overhead/small-window control.
+[[scenario.queries]]
+name = "count_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_range_boundary{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Twenty samples per full window: representative dense overlap.
+[[scenario.queries]]
+name = "count_over_time_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# 240 samples per full window: primary boundary-sensitive stress case.
+[[scenario.queries]]
+name = "count_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Edge-scan kernel candidates: the Phase 3 implementation replaces repeated
+# per-window scans with exact edge-prefix counts.
+[[scenario.queries]]
+name = "changes_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') changes(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "changes_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') changes(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "resets_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') resets(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "resets_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') resets(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# The deterministic wave is not a true monotonic counter. This query exercises
+# the regular rate path but is not a numeric counter-rate oracle.
+[[scenario.queries]]
+name = "rate_wave_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') rate(promql_range_boundary{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Same wide boundaries as count, but the sum kernel scans all window values and
+# intentionally dilutes the boundary-only gain.
+[[scenario.queries]]
+name = "sum_over_time_1h_dilution"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') sum_over_time(promql_range_boundary{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20

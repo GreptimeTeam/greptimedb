@@ -12,6 +12,7 @@ path = "tests/main.rs"
 [features]
 dashboard = ["servers/dashboard"]
 vector_index = []
+enterprise = ["frontend/enterprise", "meta-srv/enterprise", "common-meta/enterprise"]
 
 [lints]
 workspace = true
@@ -25,7 +26,7 @@ auth.workspace = true
 axum.workspace = true
 base64.workspace = true
 cache.workspace = true
-catalog.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 clap.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -33,6 +34,7 @@ cmd.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
+common-datasource.workspace = true
 common-error.workspace = true
 common-event-recorder.workspace = true
 common-frontend.workspace = true

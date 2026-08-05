@@ -20,7 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
-    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
+    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -238,7 +238,7 @@ fn assert_procedure_event_contract(
                 ValueData::StringValue(event.procedure_id.to_string()).into(),
                 ValueData::StringValue(state.to_string()).into(),
                 ValueData::StringValue(String::new()).into(),
-                ValueData::StringValue(trigger.to_string()).into(),
+                jsonb_value(&serde_json::json!({"type": trigger})),
                 optional_string(locator.catalog_name),
                 optional_string(locator.flow_name),
                 locator

@@ -33,7 +33,7 @@ use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{StorageType, get_test_store_config};
 use tokio::sync::oneshot;
@@ -779,10 +779,9 @@ ORDER BY partition_ordinal_position;",
     .unwrap();
 }
 
-async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
-    info!("triggering table gc for table: {}", table_name);
-    let table_metadata_manager = metasrv.table_metadata_manager();
-    let table_id = table_metadata_manager
+async fn get_table_id(metasrv: &Arc<Metasrv>, table_name: &str) -> TableId {
+    metasrv
+        .table_metadata_manager()
         .table_name_manager()
         .get(TableNameKey::new(
             DEFAULT_CATALOG_NAME,
@@ -792,7 +791,13 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
         .await
         .unwrap()
         .unwrap()
-        .table_id();
+        .table_id()
+}
+
+async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
+    info!("triggering table gc for table: {}", table_name);
+    let table_metadata_manager = metasrv.table_metadata_manager();
+    let table_id = get_table_id(metasrv, table_name).await;
     let (_, table_route_value) = table_metadata_manager
         .table_route_manager()
         .get_physical_table_route(table_id)
@@ -821,6 +826,22 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
         .await
         .unwrap();
     watcher::wait(&mut watcher).await.unwrap();
+}
+
+async fn assert_table_sst_files_match_manifests(cluster: &GreptimeDbCluster, table_name: &str) {
+    // Other tables may retain compacted SSTs until their own GC runs.
+    let table_id = get_table_id(&cluster.metasrv, table_name).await;
+    let table_dir = format!("/{table_id}/");
+    let retain_table_files = |files: BTreeSet<String>| {
+        files
+            .into_iter()
+            .filter(|path| path.contains(&table_dir))
+            .collect::<BTreeSet<_>>()
+    };
+
+    let storage_files = retain_table_files(cluster.list_sst_files_from_all_datanodes().await);
+    let manifest_files = retain_table_files(cluster.list_sst_files_from_manifests().await);
+    assert_eq!(storage_files, manifest_files);
 }
 
 async fn trigger_full_gc(ticker: &GcTickerRef) {
@@ -1028,9 +1049,7 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repartition_mito_table").await;
 
     // It should be ok, if we try to compact the table after split partition.
     let compact_sql = "ADMIN COMPACT_TABLE('repartition_mito_table', 'swcs', '3600')";
@@ -1059,9 +1078,7 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repartition_mito_table").await;
 
     let result = run_sql(
         instance,
@@ -1150,9 +1167,7 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     .await
     .unwrap();
     check_output_stream(result.data, expected_all).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repartition_mito_table").await;
 
     // It should be ok, if we try to compact the table after merge partition.
     let compact_sql = "ADMIN COMPACT_TABLE('repartition_mito_table', 'swcs', '3600')";
@@ -1182,9 +1197,7 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     .await
     .unwrap();
     check_output_stream(result.data, expected_all).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repartition_mito_table").await;
 
     let result = run_sql(
         instance,
@@ -1422,9 +1435,7 @@ pub async fn test_repartition_metric(
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repart_phy_metric").await;
 
     // It should be ok, if we try to compact the table after split partition.
     let compact_sql = "ADMIN COMPACT_TABLE('repart_phy_metric', 'swcs', '3600')";
@@ -1453,9 +1464,7 @@ pub async fn test_repartition_metric(
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repart_phy_metric").await;
 
     let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('b_host', '2022-01-02 00:00:00', 3.0);"#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
@@ -1532,9 +1541,7 @@ pub async fn test_repartition_metric(
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repart_phy_metric").await;
 
     // It should be ok, if we try to compact the table after merge partition.
     let compact_sql = "ADMIN COMPACT_TABLE('repart_phy_metric', 'swcs', '3600')";
@@ -1565,9 +1572,7 @@ pub async fn test_repartition_metric(
     .await
     .unwrap();
     check_output_stream(result.data, expected).await;
-    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
-    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+    assert_table_sst_files_match_manifests(&cluster, "repart_phy_metric").await;
 
     let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('c_host', '2022-01-03 00:00:00', 5.0);"#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();

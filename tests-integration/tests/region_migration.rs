@@ -29,7 +29,6 @@ use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRe
 use common_meta::peer::Peer;
 use common_procedure::event::{
     EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
-    EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME,
 };
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -51,7 +50,7 @@ use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
 };
 use meta_srv::selector::{Selector, SelectorOptions};
-use sea_query::{Expr, Iden, Order, PostgresQueryBuilder, Query};
+use sea_query::{Alias, Expr, Iden, Order, PostgresQueryBuilder, Query};
 use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
@@ -1289,7 +1288,6 @@ enum RegionMigrationEvents {
     ProcedureId,
     Timestamp,
     ProcedureState,
-    ProcedureTrigger,
     Schema,
     Table,
     EventType,
@@ -1308,7 +1306,6 @@ impl Iden for RegionMigrationEvents {
                 Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
                 Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
                 Self::ProcedureState => EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
-                Self::ProcedureTrigger => EVENTS_TABLE_PROCEDURE_TRIGGER_COLUMN_NAME,
                 Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
                 Self::Table => DEFAULT_EVENTS_TABLE_NAME,
                 Self::EventType => EVENTS_TABLE_TYPE_COLUMN_NAME,
@@ -1333,7 +1330,9 @@ async fn check_region_migration_events_system_table(
     tokio::time::sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
 
     // The query is equivalent to the following SQL:
-    //   SELECT region_migration_trigger_reason, procedure_state FROM greptime_private.events WHERE
+    //   SELECT region_migration_trigger_reason, procedure_state,
+    //          json_get_string(procedure_trigger, 'type') AS procedure_trigger
+    //   FROM greptime_private.events WHERE
     //       type = 'region_migration' AND
     //       procedure_id = '${procedure_id}' AND
     //       table_id = ${table_id} AND
@@ -1344,7 +1343,10 @@ async fn check_region_migration_events_system_table(
     let query = Query::select()
         .column(RegionMigrationEvents::RegionMigrationTriggerReason)
         .column(RegionMigrationEvents::ProcedureState)
-        .column(RegionMigrationEvents::ProcedureTrigger)
+        .expr_as(
+            Expr::cust("json_get_string(procedure_trigger, 'type')"),
+            Alias::new("procedure_trigger"),
+        )
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))

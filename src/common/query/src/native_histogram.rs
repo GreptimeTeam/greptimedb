@@ -37,6 +37,7 @@ use datatypes::types::{StructField, StructType};
 use once_cell::sync::Lazy;
 
 use crate::prelude::greptime_native_histogram;
+use crate::prometheus::format_prometheus_float;
 
 pub const NATIVE_HISTOGRAM_FIELD: &str = "greptime_native_histogram";
 pub const SCHEMA_FIELD: &str = "schema";
@@ -603,7 +604,11 @@ impl NativeHistogram {
                     lower,
                     upper,
                     count: *count,
-                    boundary_rule: BoundaryRule::OpenLeft,
+                    boundary_rule: if self.uses_custom_buckets() && idx == 0 {
+                        BoundaryRule::ClosedBoth
+                    } else {
+                        BoundaryRule::OpenLeft
+                    },
                 });
             } else {
                 result.push(Bucket {
@@ -758,9 +763,9 @@ impl NativeHistogram {
                 .map(|bucket| {
                     (
                         bucket.boundary_rule as u8,
-                        bucket.lower.to_string(),
-                        bucket.upper.to_string(),
-                        bucket.count.to_string(),
+                        format_prometheus_float(bucket.lower),
+                        format_prometheus_float(bucket.upper),
+                        format_prometheus_float(bucket.count),
                     )
                 })
                 .collect(),
@@ -1205,9 +1210,19 @@ fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
         return None;
     }
     if schema < 0 {
-        return Some(2.0_f64.powi(idx.checked_shl((-schema) as u32)?));
+        let exponent = idx.checked_shl((-schema) as u32)?;
+        return Some(if exponent == f64::MAX_EXP {
+            f64::MAX
+        } else {
+            2.0_f64.powi(exponent)
+        });
     }
-    Some(2.0_f64.powf(idx as f64 / (1u32 << schema) as f64))
+    let exponent = idx as f64 / (1u32 << schema) as f64;
+    Some(if exponent == f64::MAX_EXP as f64 {
+        f64::MAX
+    } else {
+        2.0_f64.powf(exponent)
+    })
 }
 
 /// Returns the Arrow type for a complete native histogram value.
@@ -1926,6 +1941,14 @@ mod tests {
         histogram.schema = 1;
         let reduced = histogram.copy_to_schema(0).unwrap();
         assert_eq!(reduced.positive_spans[0].offset, i32::MIN / 2);
+    }
+
+    #[test]
+    fn terminal_exponential_bucket_uses_max_finite_bound() {
+        for (schema, index) in [(-1, 512), (0, 1024), (2, 4096)] {
+            assert_eq!(get_bound(index, schema, &[]), Some(f64::MAX));
+            assert_eq!(get_bound(index + 1, schema, &[]), Some(f64::INFINITY));
+        }
     }
 
     #[test]

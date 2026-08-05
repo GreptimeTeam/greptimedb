@@ -32,7 +32,7 @@ pub use common_query::{Output, OutputData, OutputMeta};
 pub use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use snafu::OptionExt;
 
-pub use self::client::Client;
+pub use self::client::{Client, ClientOptions};
 pub use self::database::{Database, OutputMetrics, OutputWithMetrics};
 pub use self::error::{Error, Result};
 use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};

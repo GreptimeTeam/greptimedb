@@ -117,6 +117,14 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
+        #[cfg(not(feature = "enterprise"))]
+        ensure!(
+            !self.experimental_soft_drop.enable,
+            error::InvalidArgumentsSnafu {
+                err_msg: "gc.experimental_soft_drop.enable is only available in GreptimeDB Enterprise Edition",
+            }
+        );
+
         ensure!(
             !self.experimental_soft_drop.enable || self.enable,
             error::InvalidArgumentsSnafu {
@@ -239,6 +247,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_valid_when_gc_is_enabled() {
         let options = GcSchedulerOptions {
@@ -253,6 +262,23 @@ mod tests {
         assert!(options.validate().is_ok());
     }
 
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_soft_drop_rejected_in_non_enterprise_build() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_days(1),
+            },
+            ..Default::default()
+        };
+
+        let err = options.validate().unwrap_err();
+        assert!(err.to_string().contains("Enterprise Edition"));
+    }
+
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_requires_gc() {
         let options = GcSchedulerOptions {
@@ -266,6 +292,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_be_positive() {
         let options = GcSchedulerOptions {
@@ -280,6 +307,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_be_at_least_one_millisecond() {
         let options = GcSchedulerOptions {
@@ -294,6 +322,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_fit_i64_millis() {
         let options = GcSchedulerOptions {

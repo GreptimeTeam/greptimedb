@@ -46,6 +46,24 @@ select j.a, j.a.x from json2_table order by ts;
 
 select j.c, j.y from json2_table order by ts;
 
+select j from json2_table order by ts;
+
+select * from json2_table order by ts;
+
+select count(*) from (select j from json2_table group by j);
+
+select count(*) from (select distinct j from json2_table);
+
+select ts, j from (select ts, j from json2_table) order by ts;
+
+select json_get(j, '') from json2_table order by ts;
+
+select json_get(j, '$') from json2_table order by ts;
+
+select json_get(j, '.') from json2_table order by ts;
+
+select json_get(j, '$.') from json2_table order by ts;
+
 select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;

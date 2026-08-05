@@ -141,6 +141,7 @@ pub enum ServerMode {
 struct ConfigContext {
     wal_dir: String,
     data_home: String,
+    copy_root: String,
     procedure_dir: String,
     is_raft_engine: bool,
     kafka_wal_broker_endpoints: String,
@@ -345,6 +346,7 @@ impl ServerMode {
         let ctx = ConfigContext {
             wal_dir,
             data_home: data_home.display().to_string(),
+            copy_root: sqlness_home.join("copy").display().to_string(),
             procedure_dir,
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
@@ -765,7 +767,6 @@ mod tests {
                 .unwrap();
 
         assert!(metasrv_config.contains("[gc]\nenable = true"));
-        assert!(metasrv_config.contains("[gc.experimental_soft_drop]\nenable = true"));
         assert!(datanode_config.contains("[region_engine.mito.gc]\nenable = true"));
     }
 }

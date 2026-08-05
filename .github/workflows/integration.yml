@@ -1,0 +1,984 @@
+on:
+  schedule:
+    - cron: "0 15 * * 1-5"
+  merge_group:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
+      - 'Makefile'
+  workflow_dispatch:
+
+name: Integration CI
+
+env:
+  CARGO_FUZZ_VERSION: "0.13.2"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Build GreptimeDB binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build Binaries Cache
+        id: build-binaries-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Report build binaries cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Build binaries cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.build-binaries-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: |
+          started_epoch="$(date +%s)"
+          cargo install cargo-gc-bin --force
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- cargo-gc-bin install: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
+      - name: Build greptime binaries
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: |
+          started_epoch="$(date +%s)"
+          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index"
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
+      - name: Pack greptime binaries
+        shell: bash
+        run: |
+          mkdir bins && \
+          mv ./target/debug/greptime bins && \
+          mv ./target/debug/sqlness-runner bins
+      - name: Print greptime binaries info
+        run: ls -lh bins
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bins
+          version: current
+
+  sqlness:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Sqlness Test (${{ matrix.mode.name }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        mode:
+          - name: "Basic"
+            opts: ""
+            kafka: false
+            postgres: false
+            mysql: false
+          - name: "Remote WAL"
+            opts: "-w kafka -k 127.0.0.1:9092"
+            kafka: true
+            postgres: false
+            mysql: false
+          - name: "PostgreSQL KvBackend"
+            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
+            kafka: false
+            postgres: true
+            mysql: false
+          - name: "MySQL KvBackend"
+            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
+            kafka: false
+            postgres: false
+            mysql: true
+          - name: "Flat format"
+            opts: "--enable-flat-format"
+            kafka: false
+            postgres: false
+            mysql: false
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - if: matrix.mode.kafka
+        name: Setup Kafka
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
+
+      - if: matrix.mode.postgres
+        name: Setup PostgreSQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
+
+      - if: matrix.mode.mysql
+        name: Setup MySQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
+
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run sqlness
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-${{ matrix.mode.name }}
+          path: /tmp/sqlness*
+          retention-days: 3
+
+  export-import-v2-e2e:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Export/Import V2 E2E Test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "export-import-v2-e2e"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup MinIO
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait minio
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Start GreptimeDB standalone
+        env:
+          GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT: ${{ runner.temp }}/greptime-export-import-v2
+        run: |
+          mkdir -p "${GREPTIMEDB_STANDALONE__STORAGE__COPY_ROOT}"
+          ./bins/greptime standalone start > greptimedb.log 2>&1 &
+          greptime_pid=$!
+          echo "Waiting for GreptimeDB..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "GreptimeDB is ready"
+              exit 0
+            fi
+            if ! kill -0 "${greptime_pid}" 2>/dev/null; then
+              cat greptimedb.log
+              exit 1
+            fi
+            sleep 1
+          done
+          cat greptimedb.log
+          exit 1
+      - name: Run export/import v2 E2E tests
+        run: cargo test -p cli data::export_v2::tests --lib -- --ignored --test-threads=1
+        env:
+          TMPDIR: ${{ runner.temp }}/greptime-export-import-v2
+          GREPTIME_ADDR: 127.0.0.1:4000
+          GT_S3_BUCKET: greptime
+          GT_S3_ACCESS_KEY_ID: superpower_ci_user
+          GT_S3_ACCESS_KEY: superpower_password
+          GT_S3_REGION: us-west-2
+          GT_S3_ENDPOINT_URL: http://127.0.0.1:9000
+      - name: Upload GreptimeDB logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-import-v2-e2e-logs
+          path: greptimedb.log
+          if-no-files-found: warn
+          retention-days: 3
+
+  run-multi-lang-tests:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Run Multi-language SDK Tests
+    needs: build
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: bins
+
+  compat:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
+    name: Compatibility Test (recent releases)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run compatibility test
+        run: python3 .github/scripts/run-compat.py --preserve-state
+      - name: Upload compatibility logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-logs
+          path: /tmp/sqlness-compat*
+          retention-days: 3
+
+  prepare-fuzz-targets:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Prepare Fuzz Targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Fuzz Dependency Cache
+        id: fuzz-dependencies-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          shared-key: "fuzz-dependencies"
+          workspaces: ". -> target"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - name: Look up prebuilt fuzz binaries
+        id: fuzz-binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+      - name: Report fuzz cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Fuzz cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.fuzz-dependencies-cache.outputs.cache-hit }}"
+            printf -- '- Prebuilt binary cache: `%s`\n' "${{ steps.fuzz-binaries.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Set Rust Fuzz
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+      - name: Build fuzz target binaries
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          FUZZ_TARGETS: |
+            fuzz_create_database
+            fuzz_create_table
+            fuzz_alter_table
+            fuzz_insert
+            fuzz_create_logical_table
+            fuzz_alter_logical_table
+            fuzz_insert_logical_table
+            fuzz_repartition_table
+            fuzz_repartition_metric_table
+            fuzz_repartition_table_chaos
+            fuzz_remote_wal_logical_prune
+            fuzz_migrate_mito_regions
+            fuzz_migrate_metric_regions
+            fuzz_failover_mito_regions
+            fuzz_failover_metric_regions
+          FUZZ_UNSTABLE_TARGETS: unstable_fuzz_create_table_standalone
+          FUZZ_BIN_DIR: ${{ runner.temp }}/greptime-fuzz-binaries
+        run: |
+          set -euo pipefail
+          target_dir="$(cargo metadata --manifest-path tests-fuzz/Cargo.toml --no-deps --format-version 1 | jq -r '.target_directory')"
+          mkdir -p "${FUZZ_BIN_DIR}"
+          build_targets() {
+            local unstable="$1"
+            local targets="$2"
+            while IFS= read -r target; do
+              [[ -z "${target}" ]] && continue
+              args=(fuzz build "${target}" --fuzz-dir tests-fuzz -D -s none)
+              if [[ "${unstable}" == true ]]; then
+                args+=(--features unstable)
+              fi
+              cargo "${args[@]}"
+              binary="$(find "${target_dir}" -type f -path "*/debug/${target}" -perm -u+x -print -quit)"
+              if [[ -z "${binary}" ]]; then
+                echo "Unable to locate built fuzz target: ${target}" >&2
+                exit 1
+              fi
+              cp "${binary}" "${FUZZ_BIN_DIR}/${target}"
+            done <<<"${targets}"
+          }
+          build_targets false "${FUZZ_TARGETS}"
+          build_targets true "${FUZZ_UNSTABLE_TARGETS}"
+      - name: Save prebuilt fuzz binaries
+        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/greptime-fuzz-binaries
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+      - name: Pack prebuilt fuzz binaries
+        shell: bash
+        run: |
+          tar -C "${{ runner.temp }}" -cf "${{ runner.temp }}/fuzz-target-binaries.tar" \
+            greptime-fuzz-binaries
+      - name: Upload prebuilt fuzz binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}/fuzz-target-binaries.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Fuzz Test (Standalone, ${{ matrix.group.name }})
+    needs: [build, prepare-fuzz-targets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        group:
+          - name: "Database and regular table"
+            id: "database-and-regular-table"
+            targets: |
+              fuzz_create_database
+              fuzz_create_table
+              fuzz_alter_table
+              fuzz_insert
+          - name: "Logical table"
+            id: "logical-table"
+            targets: |
+              fuzz_create_logical_table
+              fuzz_alter_logical_table
+              fuzz_insert_logical_table
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: |
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
+      - name: Run GreptimeDB
+        run: |
+          mkdir -p /tmp/greptime-fuzz-runtime
+          ./bins/greptime standalone start >/tmp/greptime-fuzz-runtime/greptime.log 2>&1 &
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
+        with:
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
+          max-total-time: 120
+          fail-fast: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
+          FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
+          FUZZ_GROUP: ${{ matrix.group.id }}
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
+        uses: ./.github/actions/upload-fuzz-artifacts
+        with:
+          artifact-name: fuzz-standalone-${{ matrix.group.id }}
+
+  unstable-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Unstable Fuzz Test
+    needs: [build-greptime-ci, prepare-fuzz-targets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: unstable_fuzz_create_table_standalone
+      - name: Download pre-built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Run Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_FUZZ_BINARY_PATH: ./bin/greptime
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance/
+        with:
+          targets: unstable_fuzz_create_table_standalone
+          group: unstable-fuzz-create-table
+          max-total-time: 120
+          unstable: 'true'
+          fail-fast: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'false'
+          FUZZ_GROUP: unstable-fuzz-create-table
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
+        uses: ./.github/actions/upload-fuzz-artifacts
+        with:
+          artifact-name: fuzz-unstable-standalone
+
+  build-greptime-ci:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Build GreptimeDB binary (profile-CI)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build Profile-CI Cache
+        id: build-greptime-ci-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-greptime-ci"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - name: Report profile-CI cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Build profile-CI cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.build-greptime-ci-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: |
+          started_epoch="$(date +%s)"
+          cargo install cargo-gc-bin --force
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- cargo-gc-bin install: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
+      - name: Build greptime binary
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: |
+          started_epoch="$(date +%s)"
+          cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Profile-CI binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/ci/greptime bin
+      - name: Print greptime binaries info
+        run: ls -lh bin
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bin
+          version: current
+
+  distributed-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
+    runs-on: ubuntu-latest
+    needs: [build-greptime-ci, prepare-fuzz-targets]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        group:
+          - name: "Database and regular table"
+            id: "database-and-regular-table"
+            targets: |
+              fuzz_create_database
+              fuzz_create_table
+              fuzz_alter_table
+              fuzz_insert
+          - name: "Logical table"
+            id: "logical-table"
+            targets: |
+              fuzz_create_logical_table
+              fuzz_alter_logical_table
+              fuzz_insert_logical_table
+        mode:
+          - name: "Remote WAL"
+            id: "remote-wal"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
+        include:
+          - group:
+              name: "Repartition"
+              id: "repartition"
+              targets: |
+                fuzz_repartition_table
+                fuzz_repartition_metric_table
+            mode:
+              name: "Local WAL"
+              id: "local-wal"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
+          - group:
+              name: "Logical pruning"
+              id: "logical-pruning"
+              targets: "fuzz_remote_wal_logical_prune"
+            mode:
+              name: "Remote WAL logical pruning"
+              id: "remote-wal-logical-pruning"
+              minio: true
+              kafka: true
+              values: "with-remote-wal-logical-prune.yaml"
+              kafkaWalHelper: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluster
+        uses: ./.github/actions/setup-kafka-cluster
+      - name: Setup Etcd cluster
+        uses: ./.github/actions/setup-etcd-cluster
+      # Only the Kafka WAL helper needs the Rust toolchain.
+      - if: matrix.mode.kafkaWalHelper
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - if: matrix.mode.kafkaWalHelper
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - if: matrix.mode.kafkaWalHelper
+        name: Kafka WAL Helper Cache
+        id: kafka-wal-helper-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-kafka-wal-helper"
+          shared-key: "kafka-wal-helper"
+          workspaces: ". -> target"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          save-if: ${{ github.event_name == 'pull_request' }}
+      - if: matrix.mode.kafkaWalHelper
+        name: Report Kafka WAL helper cache lookup
+        shell: bash
+        run: |
+          {
+            printf '## Kafka WAL helper cache lookup\n\n'
+            printf -- '- Dependency cache: `%s`\n' "${{ steps.kafka-wal-helper-cache.outputs.cache-hit }}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - if: matrix.mode.kafkaWalHelper
+        name: Build Kafka WAL helper binary
+        shell: bash
+        run: |
+          started_epoch="$(date +%s)"
+          cargo build --bin kafka_wal_helper
+          elapsed_secs=$(( $(date +%s) - started_epoch ))
+          printf -- '- Kafka WAL helper build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
+          mkdir -p amd64
+          cp target/debug/kafka_wal_helper amd64/kafka_wal_helper
+      - if: matrix.mode.kafkaWalHelper
+        name: Build and push Kafka WAL helper image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/ci/ubuntu/Dockerfile.kafka-wal-helper
+          push: true
+          tags: localhost:5001/greptime/kafka-wal-helper:latest
+          build-args: |
+            TARGETARCH=amd64
+            TARGET_BIN=kafka_wal_helper
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=180s \
+            -n kafka-cluster
+      - if: matrix.mode.kafkaWalHelper
+        name: Setup Kafka WAL helper
+        shell: bash
+        run: |
+          kubectl -n kafka-cluster apply \
+            -f .github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
+
+          kubectl -n kafka-cluster wait \
+            --for=condition=Ready \
+            pod -l app=kafka-wal-helper \
+            --timeout=120s
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - if: matrix.mode.kafkaWalHelper
+        name: Port forward Kafka WAL helper
+        run: |
+          kubectl port-forward service/kafka-wal-helper 8080:8080 -n kafka-cluster&
+      - if: matrix.mode.kafka
+        name: Check Kafka readiness
+        shell: bash
+        run: |
+          .github/scripts/wait-kafka-ready.sh
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_KAFKA_WAL_HELPER_URL: http://127.0.0.1:8080
+          GT_KAFKA_ADDR: kafka.kafka-cluster.svc.cluster.local:9092
+          GT_WAL_TOPIC_PREFIX: greptimedb_wal_topic
+          GT_WAL_NUM_TOPICS: 3
+          GT_FUZZ_OVERRIDE_DELETE_AFTER_SECS: 300
+        with:
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
+          max-total-time: ${{ matrix.mode.kafkaWalHelper && 600 || 120 }}
+          fail-fast: 'true'
+          collect-cluster-artifacts: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'true'
+          GT_FUZZ_NS: my-greptimedb
+          GT_FUZZ_CLUSTER: my-greptimedb
+          GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          FUZZ_GROUP: ${{ matrix.group.id }}
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            timeout --signal=TERM --kill-after=10s 180s \
+              .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
+        uses: ./.github/actions/upload-fuzz-artifacts
+        with:
+          artifact-name: fuzz-distributed-${{ matrix.mode.id }}-${{ matrix.group.id }}
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: |
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
+
+  distributed-fuzztest-with-chaos:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
+    runs-on: ubuntu-latest
+    needs: [build-greptime-ci, prepare-fuzz-targets]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        group:
+          - name: "Migration"
+            id: "migration"
+            targets: |
+              fuzz_migrate_mito_regions
+              fuzz_migrate_metric_regions
+          - name: "Failover"
+            id: "failover"
+            targets: |
+              fuzz_failover_mito_regions
+              fuzz_failover_metric_regions
+        mode:
+          - name: "Remote WAL"
+            id: "remote-wal"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
+        include:
+          - group:
+              name: "Migration"
+              id: "migration"
+              targets: |
+                fuzz_migrate_mito_regions
+                fuzz_migrate_metric_regions
+            mode:
+              name: "Local WAL"
+              id: "local-wal"
+              minio: true
+              kafka: false
+              values: "with-minio.yaml"
+          - group:
+              name: "Repartition"
+              id: "repartition"
+              targets: "fuzz_repartition_table_chaos"
+            mode:
+              name: "Local WAL repartition chaos"
+              id: "local-wal-repartition-chaos"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - name: Setup Chaos Mesh
+        uses: ./.github/actions/setup-chaos
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluster
+        uses: ./.github/actions/setup-kafka-cluster
+      - name: Setup Etcd cluster
+        uses: ./.github/actions/setup-etcd-cluster
+      - name: Download prebuilt fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-target-binaries
+          path: ${{ runner.temp }}
+      - name: Unpack and verify prebuilt fuzz binaries
+        uses: ./.github/actions/restore-fuzz-binaries
+        with:
+          directory: ${{ runner.temp }}
+          targets: ${{ matrix.group.targets }}
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=180s \
+            -n kafka-cluster
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
+          enable-region-failover: ${{ matrix.mode.kafka }}
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - if: matrix.mode.kafka
+        name: Check Kafka readiness
+        shell: bash
+        run: |
+          .github/scripts/wait-kafka-ready.sh
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          targets: ${{ matrix.group.targets }}
+          group: ${{ matrix.group.id }}
+          max-total-time: 120
+          fail-fast: 'true'
+          collect-cluster-artifacts: 'true'
+          prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries
+      - name: Collect setup failure artifacts
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        env:
+          FUZZ_COLLECT_CLUSTER_ARTIFACTS: 'true'
+          GT_FUZZ_NS: my-greptimedb
+          GT_FUZZ_CLUSTER: my-greptimedb
+          GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          FUZZ_GROUP: ${{ matrix.group.id }}
+        run: |
+          if [[ ! -f /tmp/greptime-fuzz-artifacts/manifest.json ]]; then
+            timeout --signal=TERM --kill-after=10s 180s \
+              .github/scripts/collect-fuzz-target-artifacts.sh \
+              setup /tmp/greptime-fuzz-artifacts/targets/setup || true
+          fi
+      - name: Upload fuzz test artifacts
+        if: ${{ failure() && !cancelled() }}
+        uses: ./.github/actions/upload-fuzz-artifacts
+        with:
+          artifact-name: fuzz-distributed-chaos-${{ matrix.mode.id }}-${{ matrix.group.id }}
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: |
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f

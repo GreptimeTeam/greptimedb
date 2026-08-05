@@ -30,7 +30,7 @@ SPEC.loader.exec_module(runner)
 
 
 class QueryRegressionCaseSelectionTest(unittest.TestCase):
-    def test_all_selects_the_five_routine_cases(self) -> None:
+    def test_all_selects_the_routine_default_cases(self) -> None:
         self.assertEqual(
             runner.split_cases(["all"]),
             [
@@ -39,6 +39,7 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
                 "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
                 "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
                 "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
+                "tests/perf/query_cases/promql_range_boundary/case.toml",
             ],
         )
 

@@ -424,7 +424,8 @@ impl ErrorExt for Error {
             | InvalidQueryContextExtension { .. }
             | ConflictingSnapshotSequence { .. } => StatusCode::InvalidArguments,
 
-            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            BuildBackend { source, .. } => source.status_code(),
+            ListObjects { .. } => StatusCode::StorageUnavailable,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
 
@@ -492,5 +493,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_backend_delegates_error_metadata() {
+        let source = common_datasource::error::LocalFileAccessDisabledSnafu {
+            path: "file:///tmp/data.parquet",
+        }
+        .build();
+        let error = Error::BuildBackend {
+            source,
+            location: Location::default(),
+        };
+
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
     }
 }

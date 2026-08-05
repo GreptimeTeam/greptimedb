@@ -34,14 +34,19 @@ use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
+#[cfg(feature = "enterprise")]
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
 };
 use common_meta::instruction::CacheIdent;
+#[cfg(feature = "enterprise")]
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
+use common_meta::procedure_executor::ExecutorContext;
+#[cfg(feature = "enterprise")]
+use common_meta::procedure_executor::ProcedureExecutorRef;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
@@ -361,7 +366,9 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr = &mut expr_helper::create_external_expr(create_expr, &ctx).await?;
+        let create_expr =
+            &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
+                .await?;
         self.create_table_inner(create_expr, None, ctx).await
     }
 
@@ -1244,6 +1251,7 @@ impl StatementExecutor {
         );
 
         let view_id = view_info.table_id();
+        let view_name = TableName::new(&catalog, &schema, &view);
 
         let task = DropViewTask {
             catalog,
@@ -1254,6 +1262,18 @@ impl StatementExecutor {
         };
 
         self.drop_view_procedure(task, query_context).await?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[
+                    CacheIdent::TableId(view_id),
+                    CacheIdent::TableName(view_name),
+                ],
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
     }
@@ -1403,6 +1423,7 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[cfg(feature = "enterprise")]
     #[tracing::instrument(skip_all)]
     pub async fn undrop_table(
         &self,
@@ -2419,11 +2440,7 @@ fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOpti
         .is_some_and(|value| value == "true");
 
     for column in schema.column_schemas() {
-        if column
-            .data_type
-            .as_json()
-            .is_some_and(|json_type| json_type.is_json2())
-        {
+        if column.data_type.is_json2() {
             ensure!(
                 append_mode,
                 InvalidSqlSnafu {
@@ -2707,6 +2724,7 @@ fn convert_value(
     .context(error::SqlCommonSnafu)
 }
 
+#[cfg(feature = "enterprise")]
 async fn execute_undrop_table(
     table_metadata_manager: &TableMetadataManagerRef,
     procedure_executor: &ProcedureExecutorRef,
@@ -2759,20 +2777,31 @@ async fn execute_undrop_table(
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "enterprise")]
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    #[cfg(feature = "enterprise")]
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    #[cfg(feature = "enterprise")]
     use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
+    #[cfg(feature = "enterprise")]
     use common_meta::instruction::CacheIdent;
+    #[cfg(feature = "enterprise")]
     use common_meta::key::table_route::TableRouteValue;
+    #[cfg(feature = "enterprise")]
     use common_meta::key::test_utils::new_test_table_info_with_name;
+    #[cfg(feature = "enterprise")]
     use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+    #[cfg(feature = "enterprise")]
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    #[cfg(feature = "enterprise")]
     use common_meta::procedure_executor::{
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
+    #[cfg(feature = "enterprise")]
     use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    #[cfg(feature = "enterprise")]
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
@@ -2785,12 +2814,14 @@ mod test {
     use super::*;
     use crate::expr_helper;
 
+    #[cfg(feature = "enterprise")]
     #[derive(Default)]
     struct RecordingProcedureExecutor {
         requests: Mutex<Vec<SubmitDdlTaskRequest>>,
         fail: bool,
     }
 
+    #[cfg(feature = "enterprise")]
     #[async_trait::async_trait]
     impl ProcedureExecutor for RecordingProcedureExecutor {
         async fn submit_ddl_task(
@@ -2837,12 +2868,14 @@ mod test {
         }
     }
 
+    #[cfg(feature = "enterprise")]
     #[derive(Default)]
     struct RecordingCacheInvalidator {
         invalidations: Mutex<Vec<Vec<CacheIdent>>>,
         fail: bool,
     }
 
+    #[cfg(feature = "enterprise")]
     #[async_trait::async_trait]
     impl CacheInvalidator for RecordingCacheInvalidator {
         async fn invalidate(
@@ -2865,6 +2898,7 @@ mod test {
         }
     }
 
+    #[cfg(feature = "enterprise")]
     async fn dropped_table_manager(table_id: TableId, name: &TableName) -> TableMetadataManagerRef {
         let backend = Arc::new(MemoryKvBackend::default());
         let manager = Arc::new(TableMetadataManager::new(backend));
@@ -2883,6 +2917,7 @@ mod test {
         manager
     }
 
+    #[cfg(feature = "enterprise")]
     #[tokio::test]
     async fn test_undrop_table_execution_path() {
         let name = TableName::new("greptime", "public", "metrics");
@@ -2916,6 +2951,7 @@ mod test {
         );
     }
 
+    #[cfg(feature = "enterprise")]
     #[tokio::test]
     async fn test_undrop_table_missing_tombstone_submits_nothing() {
         let manager = Arc::new(TableMetadataManager::new(Arc::new(
@@ -2936,6 +2972,7 @@ mod test {
         assert!(procedure.requests.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "enterprise")]
     #[tokio::test]
     async fn test_undrop_table_submit_failure_does_not_invalidate() {
         let name = TableName::new("greptime", "public", "metrics");
@@ -2957,6 +2994,7 @@ mod test {
         assert!(cache.invalidations.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "enterprise")]
     #[tokio::test]
     async fn test_undrop_table_cache_failure_returns_success_after_submit() {
         let name = TableName::new("greptime", "public", "metrics");

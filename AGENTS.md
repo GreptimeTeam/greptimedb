@@ -83,9 +83,12 @@ change-coupling points, and gotchas:
    and commit the regenerated `config/config.md`.
 6. If you changed a persisted or wire format, add a compatibility test case (see
    `.agents/architecture-invariants.md`).
-7. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
+7. If you added or gated an enterprise-only file, give it the enterprise license
+   header, list it in `licenserc-enterprise.toml` (`includes`) and
+   `licenserc.toml` (`excludes`), and run `make check-enterprise-license`.
+8. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
    the CLA.
-8. When creating or updating a pull request, follow
+9. When creating or updating a pull request, follow
    [`.github/pull_request_template.md`](.github/pull_request_template.md): include
    the CLA statement, fill the change-intention section with enough detail, and
    update checklist items accurately.

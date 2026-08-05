@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+#[cfg(feature = "enterprise")]
 use std::time::Duration;
 
 use client::OutputData;
@@ -44,12 +45,18 @@ async fn test_table_ddl_procedure_events() {
     // Arrange: use a distributed cluster to submit Undrop and Purge directly
     // through the metasrv DDL manager and exercise logical-table task grouping.
     let home_dir = create_temp_dir("table_ddl_procedure_events");
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
     let mut gc_options = GcSchedulerOptions {
         enable: true,
         ..Default::default()
     };
-    gc_options.experimental_soft_drop.enable = true;
-    gc_options.experimental_soft_drop.retention = Duration::from_secs(1);
+    // Soft drop is enterprise-only; non-enterprise builds run this test with
+    // plain GC and skip the undrop/purge assertions below.
+    #[cfg(feature = "enterprise")]
+    {
+        gc_options.experimental_soft_drop.enable = true;
+        gc_options.experimental_soft_drop.retention = Duration::from_secs(1);
+    }
     let cluster = GreptimeDbClusterBuilder::new("table_ddl_procedure_events")
         .await
         .with_datanodes(1)
@@ -179,59 +186,64 @@ async fn test_table_ddl_procedure_events() {
         "Succeeded",
     )
     .await;
-    let (undrop_table_procedure_id, _) = cluster
-        .metasrv
-        .ddl_manager()
-        .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id })
-        .await
-        .unwrap();
-    let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
-    assert_id_submitted_event(
-        &frontend,
-        "undrop_table",
-        &undrop_table_procedure_id,
-        "\
+    #[cfg(feature = "enterprise")]
+    {
+        let (undrop_table_procedure_id, _) = cluster
+            .metasrv
+            .ddl_manager()
+            .submit_undrop_table_task(common_meta::rpc::ddl::UndropTableTask { table_id })
+            .await
+            .unwrap();
+        let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
+        assert_id_submitted_event(
+            &frontend,
+            "undrop_table",
+            &undrop_table_procedure_id,
+            "\
 +--------------+
 | type         |
 +--------------+
 | undrop_table |
 +--------------+",
-    )
-    .await;
-    assert_lightweight_terminal_event(
-        &frontend,
-        "undrop_table",
-        &undrop_table_procedure_id,
-        "Succeeded",
-    )
-    .await;
-    run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
-    let (purge_table_procedure_id, _) = cluster
-        .metasrv
-        .ddl_manager()
-        .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask { table_id })
-        .await
-        .unwrap();
-    let purge_table_procedure_id = purge_table_procedure_id.to_string();
-    assert_id_submitted_event(
-        &frontend,
-        "purge_dropped_table",
-        &purge_table_procedure_id,
-        "\
+        )
+        .await;
+        assert_lightweight_terminal_event(
+            &frontend,
+            "undrop_table",
+            &undrop_table_procedure_id,
+            "Succeeded",
+        )
+        .await;
+        run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
+        let (purge_table_procedure_id, _) = cluster
+            .metasrv
+            .ddl_manager()
+            .submit_purge_dropped_table_task(common_meta::rpc::ddl::PurgeDroppedTableTask {
+                table_id,
+            })
+            .await
+            .unwrap();
+        let purge_table_procedure_id = purge_table_procedure_id.to_string();
+        assert_id_submitted_event(
+            &frontend,
+            "purge_dropped_table",
+            &purge_table_procedure_id,
+            "\
 +---------------------+
 | type                |
 +---------------------+
 | purge_dropped_table |
 +---------------------+",
-    )
-    .await;
-    assert_lightweight_terminal_event(
-        &frontend,
-        "purge_dropped_table",
-        &purge_table_procedure_id,
-        "Succeeded",
-    )
-    .await;
+        )
+        .await;
+        assert_lightweight_terminal_event(
+            &frontend,
+            "purge_dropped_table",
+            &purge_table_procedure_id,
+            "Succeeded",
+        )
+        .await;
+    }
 
     // Arrange / Act: metric logical-table DDL is executed through the distributed
     // frontend, which groups logical DDL tasks for the meta procedure manager.
@@ -340,7 +352,7 @@ async fn submitted_procedure_id(
     table_name: &str,
 ) -> String {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{table_name}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{table_name}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1') ORDER BY timestamp DESC LIMIT 1",
         PROCEDURE_ID_COLUMN.name(),
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
@@ -357,7 +369,7 @@ async fn assert_named_submitted_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1')",
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
         TYPE_COLUMN.name(),
@@ -368,6 +380,7 @@ async fn assert_named_submitted_event(
     assert_eventually_eq(instance, &query, expected).await;
 }
 
+#[cfg(feature = "enterprise")]
 async fn assert_id_submitted_event(
     instance: &Arc<Instance>,
     event_type: &str,
@@ -375,7 +388,7 @@ async fn assert_id_submitted_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = 'Submitted' AND json_path_match({}, '$.version == 1')",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match({}, '$.version == 1')",
         TYPE_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
@@ -394,7 +407,7 @@ async fn assert_id_terminal_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
         TYPE_COLUMN.name(),
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
@@ -418,7 +431,7 @@ async fn assert_logical_terminal_event(
     expected: &str,
 ) {
     let query = format!(
-        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND {} = {table_id} AND {} = {physical_table_id} AND json_is_null({})",
+        "SELECT {}, {} AS name FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND {} = {physical_table_id} AND json_is_null({})",
         TYPE_COLUMN.name(),
         TABLE_NAME_COLUMN.name(),
         TYPE_COLUMN.name(),
@@ -438,7 +451,7 @@ async fn assert_lightweight_terminal_event(
     terminal_trigger: &str,
 ) {
     let query = format!(
-        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND {} = '{terminal_trigger}' AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
+        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),

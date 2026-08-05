@@ -31,6 +31,7 @@ use api::v1::{
     UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
     unset_index,
 };
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
@@ -140,6 +141,7 @@ pub fn extract_add_columns_expr(
 pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
     query_ctx: &QueryContextRef,
+    local_file_access: &LocalFileAccess,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
@@ -148,7 +150,7 @@ pub(crate) async fn create_external_expr(
 
     let mut table_options = create.options.into_map();
 
-    let (object_store, files) = prepare_file_table_files(&table_options)
+    let (object_store, files) = prepare_file_table_files(&table_options, local_file_access)
         .await
         .context(PrepareFileTableSnafu)?;
 

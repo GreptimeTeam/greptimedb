@@ -14,11 +14,12 @@
 
 //! Structures to describe metadata of files.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
@@ -37,6 +38,7 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
+use crate::sst::parquet::SstInfo;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
 fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
@@ -689,6 +691,90 @@ pub async fn delete_files(
         .await;
     }
     Ok(())
+}
+
+/// Tracks finalized SSTs until their manifest edit is committed.
+///
+/// Flush and local compaction jobs use this to remove files that were written successfully but
+/// abandoned by cancellation or a later failure.
+#[derive(Clone)]
+pub(crate) struct UncommittedSsts {
+    region_id: RegionId,
+    files: Arc<Mutex<HashMap<FileId, (u64, bool)>>>,
+    access_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
+}
+
+impl UncommittedSsts {
+    pub(crate) fn new(
+        region_id: RegionId,
+        access_layer: AccessLayerRef,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
+        Self {
+            region_id,
+            files: Arc::new(Mutex::new(HashMap::new())),
+            access_layer,
+            cache_manager,
+        }
+    }
+
+    /// Tracks newly finalized SSTs before they become visible in the manifest.
+    pub(crate) fn track(&self, ssts: &[SstInfo]) {
+        let mut files = self.files.lock().unwrap();
+        for sst in ssts {
+            files.insert(
+                sst.file_id,
+                (sst.index_metadata.version, sst.index_metadata.file_size > 0),
+            );
+        }
+    }
+
+    /// Disarms cleanup after the manifest edit has committed or may have committed.
+    ///
+    /// A manifest update error does not guarantee that the edit was not persisted. Once an edit
+    /// may become visible, its SSTs must be retained to avoid deleting referenced files.
+    pub(crate) fn disarm_cleanup(&self) {
+        self.files.lock().unwrap().clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn num_tracked_files(&self) -> usize {
+        self.files.lock().unwrap().len()
+    }
+
+    /// Removes all finalized SSTs still owned by this job.
+    pub(crate) async fn cleanup(&self) {
+        if let Err(err) = self.try_cleanup().await {
+            error!(err; "Failed to clean uncommitted SSTs for region {}", self.region_id);
+        }
+    }
+
+    async fn try_cleanup(&self) -> crate::error::Result<()> {
+        let files = std::mem::take(&mut *self.files.lock().unwrap());
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        let delete_index = files.values().any(|(_, exists_index)| *exists_index);
+        let file_ids = files
+            .into_iter()
+            .map(|(file_id, (index_version, _))| (file_id, index_version))
+            .collect::<Vec<_>>();
+        delete_files(
+            self.region_id,
+            &file_ids,
+            delete_index,
+            &self.access_layer,
+            &self.cache_manager,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cleanup_for_test(&self) -> crate::error::Result<()> {
+        self.try_cleanup().await
+    }
 }
 
 pub async fn delete_index(

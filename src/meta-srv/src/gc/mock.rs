@@ -327,14 +327,17 @@ impl SchedulerCtx for MockSchedulerCtx {
         Ok(final_report)
     }
 
+    #[cfg(feature = "enterprise")]
     async fn list_dropped_tables(&self) -> Result<Vec<common_meta::key::DroppedTableName>> {
         Ok(vec![])
     }
 
+    #[cfg(feature = "enterprise")]
     async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
         Ok(())
     }
 
+    #[cfg(feature = "enterprise")]
     fn try_reserve_purge(
         &self,
         table_id: TableId,

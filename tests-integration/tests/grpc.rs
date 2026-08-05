@@ -789,6 +789,9 @@ pub async fn test_health_check(store_type: StorageType) {
     let grpc_client = Client::with_urls(vec![addr]);
     grpc_client.health_check().await.unwrap();
 
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    assert!(db.sql("SHOW TABLES").await.is_ok());
+
     let _ = fe_grpc_server.shutdown().await;
 }
 
@@ -872,6 +875,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 value: Some((5.0, "1".to_string())),
+                ..Default::default()
             },
             PromSeriesVector {
                 metric: [
@@ -881,6 +885,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 value: Some((5.0, "2".to_string())),
+                ..Default::default()
             },
         ]
     );
@@ -932,6 +937,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                ..Default::default()
             },
             PromSeriesMatrix {
                 metric: [
@@ -941,6 +947,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                ..Default::default()
             },
         ]
     );

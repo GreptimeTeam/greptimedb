@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
@@ -164,6 +165,7 @@ pub struct DatanodeBuilder {
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
     topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
     open_regions_writable_override: Option<bool>,
+    local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
@@ -178,6 +180,7 @@ impl DatanodeBuilder {
             kv_backend,
             cache_registry: None,
             open_regions_writable_override: None,
+            local_file_access: LocalFileAccess::Disabled,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
@@ -195,6 +198,11 @@ impl DatanodeBuilder {
 
     pub fn with_cache_registry(&mut self, registry: Arc<LayeredCacheRegistry>) -> &mut Self {
         self.cache_registry = Some(registry);
+        self
+    }
+
+    pub fn with_local_file_access(&mut self, local_file_access: LocalFileAccess) -> &mut Self {
+        self.local_file_access = local_file_access;
         self
     }
 
@@ -528,6 +536,7 @@ impl DatanodeBuilder {
         let file_engine = FileRegionEngine::new(
             file_engine_config,
             object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
+            self.local_file_access.clone(),
         );
 
         Ok(vec![

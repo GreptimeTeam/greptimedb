@@ -22,6 +22,7 @@ use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::key::TableMetadataManagerRef;
@@ -632,6 +633,7 @@ impl FrontendInvoker {
             partition_manager,
             None,
             origin_frontend_addr,
+            LocalFileAccess::Disabled,
         ));
 
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);
@@ -721,6 +723,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use api::v1::HealthCheckRequest;
+    use api::v1::health_check_client::HealthCheckClient;
     use api::v1::meta::Role;
     use catalog::memory::new_memory_catalog_manager;
     use common_base::Plugins;
@@ -729,6 +733,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use meta_client::client::MetaClient;
     use query::options::QueryOptions;
+    use servers::grpc::GRPC_SERVER;
 
     use super::*;
     use crate::adapter::flownode_impl::FlowDualEngine;
@@ -831,5 +836,30 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_service_builder_registers_reachable_health_check() {
+        // Arrange: compose the production gRPC service with an ephemeral local listener.
+        let (flownode_server, _report_sender) = new_test_flownode_server().await;
+        let mut opts = FlownodeOptions::default();
+        opts.grpc.bind_addr = "127.0.0.1:0".to_string();
+        let mut services = FlownodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(&flownode_server)
+            .build()
+            .unwrap();
+        services.start_all().await.unwrap();
+        let addr = services.addr(GRPC_SERVER).unwrap();
+
+        // Act: call the shared health handler through the registered production server.
+        let mut client = HealthCheckClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let result = client.health_check(HealthCheckRequest {}).await;
+
+        services.shutdown_all().await.unwrap();
+
+        // Assert: the service composition exposes a healthy endpoint.
+        assert!(result.is_ok());
     }
 }
