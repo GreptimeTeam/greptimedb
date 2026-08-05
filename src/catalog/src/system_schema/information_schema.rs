@@ -21,6 +21,7 @@ pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
 pub mod process_list;
+#[cfg(feature = "enterprise")]
 mod recycle_bin;
 mod region_info;
 pub mod region_peers;
@@ -34,7 +35,7 @@ mod table_semantics;
 pub mod tables;
 mod views;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "enterprise"))]
 mod recycle_bin_test;
 
 use std::collections::HashMap;
@@ -78,6 +79,7 @@ use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::system_schema::information_schema::partitions::InformationSchemaPartitions;
+#[cfg(feature = "enterprise")]
 use crate::system_schema::information_schema::recycle_bin::InformationSchemaRecycleBin;
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
@@ -281,6 +283,7 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 )) as _,
             ),
+            #[cfg(feature = "enterprise")]
             RECYCLE_BIN => Some(Arc::new(InformationSchemaRecycleBin::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -414,6 +417,7 @@ impl InformationSchemaProvider {
             FLOW_STATISTICS.to_string(),
             self.build_table(FLOW_STATISTICS).unwrap(),
         );
+        #[cfg(feature = "enterprise")]
         tables.insert(
             RECYCLE_BIN.to_string(),
             self.build_table(RECYCLE_BIN).unwrap(),
