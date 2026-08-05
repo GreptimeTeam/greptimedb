@@ -77,8 +77,10 @@ use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CommentOnTask, CreateDatabaseTask, CreateFlowTask,
     CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TriggerContext, TriggerReason, TruncateTableTask, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
+    TriggerContext, TruncateTableTask, UndropTableTask,
 };
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::{TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
 
 const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
 
