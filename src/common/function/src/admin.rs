@@ -17,6 +17,7 @@ mod flush_compact_region;
 mod flush_compact_table;
 mod gc;
 mod migrate_region;
+#[cfg(feature = "enterprise")]
 mod purge_table;
 mod reconcile_catalog;
 mod reconcile_database;
@@ -26,6 +27,7 @@ use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use gc::{GcRegionsFunction, GcTableFunction};
 use migrate_region::MigrateRegionFunction;
+#[cfg(feature = "enterprise")]
 use purge_table::PurgeTableFunction;
 use reconcile_catalog::ReconcileCatalogFunction;
 use reconcile_database::ReconcileDatabaseFunction;
@@ -56,7 +58,9 @@ impl AdminFunction {
     }
 
     /// Register functions that must only be resolved by an ADMIN statement.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub fn register_admin_only(registry: &FunctionRegistry) {
+        #[cfg(feature = "enterprise")]
         registry.register(PurgeTableFunction::factory());
     }
 }

@@ -15,13 +15,17 @@
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(feature = "enterprise")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[cfg(feature = "enterprise")]
 use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
+#[cfg(feature = "enterprise")]
+use common_catalog::consts::FILE_ENGINE;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Procedure, StringKey};
@@ -33,9 +37,13 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::{Mutex, mpsc};
 
+#[cfg(feature = "enterprise")]
+use crate::ddl::DdlContext;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
+#[cfg(feature = "enterprise")]
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::{DropTableProcedure, DropTableState};
+#[cfg(feature = "enterprise")]
 use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
@@ -43,36 +51,49 @@ use crate::ddl::test_util::{
     create_logical_table, create_physical_table, create_physical_table_metadata,
     put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
 };
+#[cfg(feature = "enterprise")]
 use crate::ddl::undrop_table::UndropTableProcedure;
-use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
+use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
+#[cfg(feature = "enterprise")]
 use crate::error::{self, Error};
+#[cfg(feature = "enterprise")]
 use crate::key::MetadataKey;
+#[cfg(feature = "enterprise")]
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+#[cfg(feature = "enterprise")]
 use crate::kv_backend::KvBackend;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
-use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, UndropTableTask};
+use crate::rpc::ddl::DropTableTask;
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
+#[cfg(feature = "enterprise")]
 use crate::rpc::store::{BatchDeleteRequest, PutRequest};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
+#[cfg(feature = "enterprise")]
 fn dropped_at_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__dropped_at/{table_id}")
 }
 
+#[cfg(feature = "enterprise")]
 fn retention_expires_at_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__retention_expires_at/{table_id}")
 }
 
+#[cfg(feature = "enterprise")]
 fn purging_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__purging/{table_id}")
 }
 
+#[cfg(feature = "enterprise")]
 fn drop_generation_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__drop_generation/{table_id}")
 }
 
+#[cfg(feature = "enterprise")]
 async fn create_dropped_table(
     context: &DdlContext,
     table_id: TableId,
@@ -101,6 +122,7 @@ async fn create_dropped_table(
         .unwrap();
 }
 
+#[cfg(feature = "enterprise")]
 async fn undrop_at_restore_metadata(
     context: &DdlContext,
     table_id: TableId,
@@ -113,6 +135,7 @@ async fn undrop_at_restore_metadata(
     undrop
 }
 
+#[cfg(feature = "enterprise")]
 fn legacy_undrop_snapshot(procedure: &UndropTableProcedure) -> String {
     let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     let data = data.as_object_mut().unwrap();
@@ -176,6 +199,29 @@ fn test_drop_table_lock_key_includes_table_name() {
     );
 }
 
+#[cfg(not(feature = "enterprise"))]
+#[test]
+fn test_new_drop_table_procedure_disables_soft_drop_without_enterprise() {
+    let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    context.soft_drop_enabled = true;
+
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    assert!(!procedure.data.soft_drop_enabled);
+}
+
+#[cfg(feature = "enterprise")]
+#[test]
+fn test_new_drop_table_procedure_preserves_soft_drop_with_enterprise() {
+    let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    context.soft_drop_enabled = true;
+
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    assert!(procedure.data.soft_drop_enabled);
+}
+
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_soft_drop_preserves_persisted_mode() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -224,6 +270,7 @@ async fn test_recovered_soft_drop_preserves_persisted_mode() {
     assert_matches!(request.body, Some(region_request::Body::Close(_)));
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_legacy_soft_drop_prepare_preserves_persisted_mode() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
@@ -359,6 +406,7 @@ async fn test_on_prepare_table_not_exists_err() {
     assert_eq!(procedure.data.retention_expires_at, None);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_prepare_assigns_stable_deadline_and_recovers_it() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
@@ -394,6 +442,7 @@ async fn test_soft_drop_prepare_assigns_stable_deadline_and_recovers_it() {
     assert_eq!(recovered.data.retention_expires_at, Some(deadline));
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_prepare_rejects_deadline_overflow_before_metadata_delete() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
@@ -596,6 +645,7 @@ async fn test_on_datanode_drop_regions_remaps_addresses_when_retrying() {
     assert_eq!(peers[1].addr, "new-follower");
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -712,6 +762,7 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
     let (tx, mut rx) = mpsc::channel(2);
@@ -816,6 +867,7 @@ async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -929,6 +981,7 @@ async fn test_hard_drop_keeps_delete_tombstone_flow() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_create_table_succeeds_while_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -978,6 +1031,7 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
     assert_eq!(dropped_table.unwrap().table_id, dropped_table_id);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1068,6 +1122,7 @@ async fn test_hard_drop_recreated_table_ignores_previous_orphan_tombstone() {
     procedure.on_prepare().await.unwrap();
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_restores_metadata_and_reopens_regions() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1179,6 +1234,7 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_opens_regions_before_restoring_live_metadata() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1236,6 +1292,7 @@ async fn test_undrop_table_opens_regions_before_restoring_live_metadata() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_logical_table_skips_datanode_open() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1300,6 +1357,7 @@ async fn test_undrop_logical_table_skips_datanode_open() {
     assert!(rx.try_recv().is_err());
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1322,6 +1380,7 @@ async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     assert!(!recovered.data.soft_drop_enabled);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_metric_physical_table_remains_enabled() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1375,6 +1434,7 @@ async fn test_soft_drop_metric_physical_table_remains_enabled() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1407,6 +1467,7 @@ async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     assert!(!recovered.data.soft_drop_enabled);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1438,6 +1499,7 @@ async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
     assert!(!procedure.data.soft_drop_enabled);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_metric_logical_table_fails() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1453,6 +1515,7 @@ async fn test_undrop_metric_logical_table_fails() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_purge_metric_logical_table_fails() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1473,6 +1536,7 @@ async fn test_purge_metric_logical_table_fails() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_fails_when_live_name_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1513,6 +1577,7 @@ async fn test_undrop_table_fails_when_live_name_exists() {
     assert_matches!(err, Error::TableAlreadyExists { .. });
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1569,6 +1634,7 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
     assert_eq!(live_table.table_id(), live_table_id);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_with_create() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1680,6 +1746,7 @@ async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_wit
     assert_eq!(live_table.table_id(), live_table_id);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1737,6 +1804,7 @@ async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare(
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1817,6 +1885,7 @@ async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -1866,6 +1935,7 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     assert_eq!(live_table.table_id(), table_id);
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_legacy_undrop_replays_restore_metadata() {
     for partial_restore in [false, true] {
@@ -1911,6 +1981,7 @@ async fn test_legacy_undrop_replays_restore_metadata() {
     }
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -1995,6 +2066,7 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_automatic_purge_rechecks_unexpired_tombstone() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2050,6 +2122,7 @@ async fn test_automatic_purge_rechecks_unexpired_tombstone() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2127,6 +2200,7 @@ async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_automatic_purge_obeys_runtime_disable() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2176,6 +2250,7 @@ async fn test_recovered_automatic_purge_obeys_runtime_disable() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2231,6 +2306,7 @@ async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_automatic_purge_ignores_foreign_generation_claim() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2280,6 +2356,7 @@ async fn test_recovered_automatic_purge_ignores_foreign_generation_claim() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_undrop_rejects_table_claimed_for_purge() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2307,6 +2384,7 @@ async fn test_undrop_rejects_table_claimed_for_purge() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2338,6 +2416,7 @@ async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
     }
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_recovered_undrop_rejects_replacement_generation() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2375,6 +2454,7 @@ async fn test_recovered_undrop_rejects_replacement_generation() {
     assert_eq!(StatusCode::TableNotFound, error.status_code());
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2450,6 +2530,7 @@ async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
     );
 }
 
+#[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -2518,7 +2599,6 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
 }
-
 #[tokio::test]
 async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
@@ -2591,14 +2671,17 @@ fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool
     }
 }
 
+#[cfg(feature = "enterprise")]
 fn new_undrop_table_task(table_id: TableId) -> UndropTableTask {
     UndropTableTask { table_id }
 }
 
+#[cfg(feature = "enterprise")]
 fn new_purge_dropped_table_task(table_id: TableId) -> PurgeDroppedTableTask {
     PurgeDroppedTableTask { table_id }
 }
 
+#[cfg(feature = "enterprise")]
 async fn create_metric_logical_table_tombstone(
     ddl_context: &crate::ddl::DdlContext,
     physical_table_id: TableId,
@@ -2629,6 +2712,7 @@ struct RecordingRegionFailureDetectorController {
 }
 
 impl RecordingRegionFailureDetectorController {
+    #[cfg(feature = "enterprise")]
     async fn registered(&self) -> Vec<DetectingRegion> {
         self.registered.lock().await.clone()
     }
@@ -2637,6 +2721,7 @@ impl RecordingRegionFailureDetectorController {
         self.deregistered.lock().await.clone()
     }
 
+    #[cfg(feature = "enterprise")]
     async fn clear(&self) {
         self.registered.lock().await.clear();
         self.deregistered.lock().await.clear();

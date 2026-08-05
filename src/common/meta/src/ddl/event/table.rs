@@ -40,7 +40,9 @@ pub(crate) enum TableDdlEventType {
     AlterTable,
     AlterLogicalTables,
     DropTable,
+    #[cfg(feature = "enterprise")]
     UndropTable,
+    #[cfg(feature = "enterprise")]
     PurgeDroppedTable,
     TruncateTable,
 }
@@ -54,7 +56,9 @@ impl TableDdlEventType {
             Self::AlterTable => "alter_table",
             Self::AlterLogicalTables => "alter_logical_tables",
             Self::DropTable => "drop_table",
+            #[cfg(feature = "enterprise")]
             Self::UndropTable => "undrop_table",
+            #[cfg(feature = "enterprise")]
             Self::PurgeDroppedTable => "purge_dropped_table",
             Self::TruncateTable => "truncate_table",
         }
@@ -124,7 +128,9 @@ enum TableDdlPayload {
     AlterTable(AlterTablePayload),
     AlterLogicalTables(AlterLogicalTablesPayload),
     DropTable(DropTablePayload),
+    #[cfg(feature = "enterprise")]
     UndropTable(UndropTablePayload),
+    #[cfg(feature = "enterprise")]
     PurgeDroppedTable(PurgeDroppedTablePayload),
     TruncateTable(TruncateTablePayload),
 }
@@ -161,11 +167,13 @@ struct DropTablePayload {
     drop_if_exists: bool,
 }
 
+#[cfg(feature = "enterprise")]
 #[derive(Debug, Serialize)]
 struct UndropTablePayload {
     version: u8,
 }
 
+#[cfg(feature = "enterprise")]
 #[derive(Debug, Serialize)]
 struct PurgeDroppedTablePayload {
     version: u8,
@@ -288,6 +296,7 @@ impl TableDdlEvent {
     }
 
     /// Builds the bounded event emitted when restoring a dropped table is submitted.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn undrop_table_submitted(locator: TableDdlLocator) -> Self {
         Self::submitted(
             TableDdlEventType::UndropTable,
@@ -299,6 +308,7 @@ impl TableDdlEvent {
     }
 
     /// Builds the bounded event emitted when purging a dropped table is submitted.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn purge_dropped_table_submitted(locator: TableDdlLocator) -> Self {
         Self::submitted(
             TableDdlEventType::PurgeDroppedTable,

@@ -380,6 +380,7 @@ impl StatementExecutor {
                 self.drop_tables(&table_names[..], stmt.drop_if_exists(), query_ctx.clone())
                     .await
             }
+            #[cfg(feature = "enterprise")]
             Statement::UndropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)

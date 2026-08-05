@@ -9,6 +9,7 @@ workspace = true
 
 [features]
 testing = []
+enterprise = []
 default = ["geo"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
 
