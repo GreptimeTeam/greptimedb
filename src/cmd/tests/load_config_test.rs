@@ -103,7 +103,7 @@ fn test_load_datanode_example_config() {
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
@@ -336,7 +336,7 @@ fn test_load_standalone_example_config() {
             auto_create_table: true,
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),

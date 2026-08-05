@@ -277,7 +277,7 @@ prefill_log_files = false
 
 ## Duration for fsyncing log files.
 ## **It's only used when the provider is `raft_engine`**.
-sync_period = "10s"
+sync_period = "5s"
 
 ## Parallelism during WAL recovery.
 recovery_parallelism = 2
