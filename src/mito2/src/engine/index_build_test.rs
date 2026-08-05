@@ -102,7 +102,7 @@ fn assert_listener_counts(
     assert_eq!(listener.finish_count(), expected_success_count);
 }
 
-fn qx_031_bloom_filter_test_cache() -> Arc<CacheManager> {
+fn bloom_filter_test_cache() -> Arc<CacheManager> {
     const CACHE_SIZE: u64 = 64 * 1024;
 
     Arc::new(
@@ -115,7 +115,7 @@ fn qx_031_bloom_filter_test_cache() -> Arc<CacheManager> {
     )
 }
 
-async fn qx_031_scan_with_bloom_filter(
+async fn scan_with_bloom_filter(
     engine: &MitoEngine,
     region_id: RegionId,
     request: ScanRequest,
@@ -140,8 +140,8 @@ async fn qx_031_scan_with_bloom_filter(
 }
 
 #[tokio::test]
-async fn qx_031_bloom_mixed_in_index_on_off_equivalent() {
-    let mut env = TestEnv::with_prefix("qx_031_bloom_mixed_in_index_on_off_equivalent_").await;
+async fn bloom_mixed_in_index_on_off_equivalent() {
+    let mut env = TestEnv::with_prefix("bloom_mixed_in_index_on_off_equivalent_").await;
     let listener = Arc::new(IndexBuildListener::default());
     let engine = env
         .create_engine_with(
@@ -234,9 +234,9 @@ async fn qx_031_bloom_mixed_in_index_on_off_equivalent() {
         filters: vec![mixed_in],
         ..Default::default()
     };
-    let cache_manager = qx_031_bloom_filter_test_cache();
+    let cache_manager = bloom_filter_test_cache();
 
-    let indexed = qx_031_scan_with_bloom_filter(
+    let indexed = scan_with_bloom_filter(
         &engine,
         region_id,
         filtered_request.clone(),
@@ -244,7 +244,7 @@ async fn qx_031_bloom_mixed_in_index_on_off_equivalent() {
         false,
     )
     .await;
-    let unindexed = qx_031_scan_with_bloom_filter(
+    let unindexed = scan_with_bloom_filter(
         &engine,
         region_id,
         filtered_request.clone(),
