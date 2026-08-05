@@ -2,7 +2,7 @@
 Feature Name: Native Histogram Support and Compatibility Decisions
 Tracking Issue: TBD
 Date: 2026-08-04
-Author: TBD
+Author: codex
 ---
 
 # Summary
