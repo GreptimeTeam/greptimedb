@@ -339,14 +339,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to set JSON structure settings: {value}"))]
-    SetJsonSettings {
-        value: String,
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 impl ErrorExt for Error {
@@ -392,9 +384,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } | SetJsonSettings { source, .. } => {
-                source.status_code()
-            }
+            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
