@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arrow_schema::{
-    ArrowError, DataType, DataType as ArrowDataType, Schema as ArrowSchema,
+    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
@@ -110,12 +110,50 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
     TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
 }
 
+/// Returns true when two fields are semantically equivalent JSON columns.
+///
+/// A JSON column is carried on the wire in its binary-encoded form (e.g.
+/// `Binary` + `ARROW:extension:name=greptime.json` / `greptime:type=Json`) and,
+/// after decoding on the remote side, in a concretized structured form (e.g.
+/// `Struct(...)` / `List(...)` carrying the same extension metadata). Both forms
+/// describe the same column, so the raw arrow data type must not be compared
+/// directly. The JSON extension identity (`greptime:type`) and the JSON2
+/// settings (`ARROW:extension:metadata`, e.g. type hints) are the semantic
+/// parts of the field and must match.
+fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    let is_json = |field: &Field| {
+        is_json_extension_type(field)
+            || field
+                .metadata()
+                .get(datatypes::schema::TYPE_KEY)
+                .map(String::as_ref)
+                == Some("Json")
+    };
+
+    is_json(expected_field)
+        && is_json(actual_field)
+        && expected_field.name() == actual_field.name()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+        // Both must carry the same JSON marker.
+        && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
+            == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
+        // JSON2 settings (type hints etc.) must match.
+        && expected_field
+            .metadata()
+            .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+            == actual_field
+                .metadata()
+                .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+}
+
 /// Validates the remote schema before positional column handling.
 ///
 /// A timestamp timezone difference is the only intentional exception. It is
 /// accepted by directly comparing the same timestamp unit, distinct timezones,
 /// and equal name, nullability, and field metadata. Top-level Arrow schema
-/// metadata is non-semantic at this boundary.
+/// metadata is non-semantic at this boundary. JSON columns are additionally
+/// compared semantically (see [`json_fields_compatible`]) because their wire
+/// and decoded representations use different physical arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
@@ -136,6 +174,13 @@ fn validate_remote_schema(
         .enumerate()
     {
         if expected_field == actual_field {
+            continue;
+        }
+
+        // JSON columns are equivalent in their binary wire form and their
+        // decoded structured form; compare them semantically instead of
+        // comparing the raw arrow data type.
+        if json_fields_compatible(expected_field, actual_field) {
             continue;
         }
 
@@ -2508,6 +2553,118 @@ mod tests {
             StdHashMap::from([("greptime:version".to_string(), "0".to_string())]),
         );
         assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    /// Builds the metadata of a JSON column field. `wire_form` mirrors the
+    /// binary-encoded representation (adds `ARROW:extension:name`), while the
+    /// decoded structured form only carries the semantic keys.
+    fn json_field_metadata(wire_form: bool, json_settings: &str) -> StdHashMap<String, String> {
+        let mut metadata = StdHashMap::from([
+            (datatypes::schema::TYPE_KEY.to_string(), "Json".to_string()),
+            (
+                arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY.to_string(),
+                json_settings.to_string(),
+            ),
+        ]);
+        if wire_form {
+            metadata.insert(
+                arrow_schema::extension::EXTENSION_TYPE_NAME_KEY.to_string(),
+                "greptime.json".to_string(),
+            );
+        }
+        metadata
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_json_wire_binary_vs_decoded_struct() {
+        // The merge-scan (expected) side carries a JSON2 column in its binary
+        // wire form (Binary + `ARROW:extension:name`); the remote decoded
+        // stream carries the concretized structured form (Struct + the same
+        // semantic extension metadata, without the arrow extension name). This
+        // mirrors the failing `json2_limit` case: the two representations must
+        // validate as equal.
+        let json_settings = r#"{"json_settings":{"type_hints":[]}}"#;
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(json_field_metadata(true, json_settings)),
+        ]);
+        let actual =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(false, json_settings)),
+            ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_json_decoded_struct_vs_wire_binary() {
+        // The reverse direction: expected side is the decoded structured form
+        // while the actual remote stream advertises the binary wire form.
+        let json_settings = r#"{"json_settings":{"type_hints":[]}}"#;
+        let expected =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(false, json_settings)),
+            ]);
+        let actual = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(json_field_metadata(true, json_settings)),
+        ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_json_fields_with_different_json_settings() {
+        // JSON2 settings (type hints) are semantic: two JSON columns with
+        // different settings describe different logical structures and must be
+        // rejected.
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
+                true,
+                r#"{"json_settings":{"type_hints":[["a",{"JsonType":"Int64"}]]}}"#,
+            )),
+        ]);
+        let actual =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(
+                    false,
+                    r#"{"json_settings":{"type_hints":[["a",{"JsonType":"String"}]]}}"#,
+                )),
+            ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_json_vs_plain_binary_field() {
+        // A JSON column must not be accepted as compatible with a plain Binary
+        // column lacking the JSON extension metadata.
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
+                true,
+                r#"{"json_settings":{"type_hints":[]}}"#,
+            )),
+        ]);
+        let actual = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
     }
 
     #[test]
