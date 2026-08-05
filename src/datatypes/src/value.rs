@@ -511,7 +511,12 @@ impl Value {
         Ok(scalar_value)
     }
 
-    /// Apply `-` unary op if possible
+    /// Apply `-` unary op if possible.
+    ///
+    /// Signed integers follow the project's SQL arithmetic overflow contract
+    /// (wrapping, see `tests/cases/standalone/common/overflow/integer_overflow.result`):
+    /// negating a signed MIN value wraps back to MIN instead of panicking or
+    /// erroring. Unsigned (except zero) and non-numeric types return `None`.
     pub fn try_negative(&self) -> Option<Self> {
         match self {
             Value::Null => Some(Value::Null),
@@ -543,10 +548,10 @@ impl Value {
                     None
                 }
             }
-            Value::Int8(x) => x.checked_neg().map(Value::Int8),
-            Value::Int16(x) => x.checked_neg().map(Value::Int16),
-            Value::Int32(x) => x.checked_neg().map(Value::Int32),
-            Value::Int64(x) => x.checked_neg().map(Value::Int64),
+            Value::Int8(x) => Some(Value::Int8(x.wrapping_neg())),
+            Value::Int16(x) => Some(Value::Int16(x.wrapping_neg())),
+            Value::Int32(x) => Some(Value::Int32(x.wrapping_neg())),
+            Value::Int64(x) => Some(Value::Int64(x.wrapping_neg())),
             Value::Float32(x) => Some(Value::Float32(-*x)),
             Value::Float64(x) => Some(Value::Float64(-*x)),
             Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
@@ -1746,12 +1751,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_try_negative_overflow() {
-        // Negating a MIN value overflows, so try_negative returns None instead
-        // of panicking (consistent with the unsigned arms).
-        assert_eq!(Value::Int8(i8::MIN).try_negative(), None);
-        assert_eq!(Value::Int16(i16::MIN).try_negative(), None);
-        assert_eq!(Value::Int32(i32::MIN).try_negative(), None);
-        assert_eq!(Value::Int64(i64::MIN).try_negative(), None);
+        // Time-like values have their own domain bounds: negating a MIN value
+        // overflows and try_negative returns None instead of panicking.
         assert_eq!(
             Value::Timestamp(Timestamp::new_nanosecond(i64::MIN)).try_negative(),
             None
@@ -1784,6 +1785,40 @@ pub(crate) mod tests {
         assert_eq!(
             Value::Timestamp(Timestamp::new_nanosecond(5)).try_negative(),
             Some(Value::Timestamp(Timestamp::new_nanosecond(-5)))
+        );
+    }
+
+    #[test]
+    fn test_unary_minus_signed_min_wraps() {
+        // GreptimeDB's SQL arithmetic overflow contract is wrapping (see
+        // tests/cases/standalone/common/overflow/integer_overflow.result:
+        // "GreptimeDB wraps on overflow, DuckDB throws error"). `try_negative`
+        // is the unary-minus evaluator of the INSERT/UPDATE value-conversion
+        // path, so negating a signed MIN value must wrap back to MIN instead of
+        // panicking (debug overflow) or erroring.
+        assert_eq!(
+            Value::Int8(i8::MIN).try_negative(),
+            Some(Value::Int8(i8::MIN))
+        );
+        assert_eq!(
+            Value::Int16(i16::MIN).try_negative(),
+            Some(Value::Int16(i16::MIN))
+        );
+        assert_eq!(
+            Value::Int32(i32::MIN).try_negative(),
+            Some(Value::Int32(i32::MIN))
+        );
+        assert_eq!(
+            Value::Int64(i64::MIN).try_negative(),
+            Some(Value::Int64(i64::MIN))
+        );
+
+        // Regular values still negate normally.
+        assert_eq!(Value::Int8(-3).try_negative(), Some(Value::Int8(3)));
+        assert_eq!(Value::Int64(5).try_negative(), Some(Value::Int64(-5)));
+        assert_eq!(
+            Value::Int64(i64::MAX).try_negative(),
+            Some(Value::Int64(-i64::MAX))
         );
     }
 
