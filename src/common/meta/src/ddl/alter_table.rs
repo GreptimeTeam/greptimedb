@@ -244,23 +244,47 @@ impl AlterTableProcedure {
         // Puts the poison before submitting alter region requests to datanodes.
         self.put_poison(ctx_provider, procedure_id).await?;
         let flow = self.data.flow();
-        let results = if flow == AlterTableFlow::MetadataFirst {
-            self.executor
+        if flow == AlterTableFlow::MetadataFirst {
+            let results = self
+                .executor
                 .on_alter_skip_wal_regions(
                     &self.context.node_manager,
                     &physical_table_route.region_routes,
                     alter_kind,
                 )
-                .await
-        } else {
-            self.executor
-                .on_alter_regions(
-                    &self.context.node_manager,
-                    &physical_table_route.region_routes,
-                    alter_kind,
-                )
-                .await
-        };
+                .await;
+
+            return match handle_multiple_results(results) {
+                MultipleResults::PartialRetryable(error) => Err(error),
+                MultipleResults::PartialNonRetryable(error)
+                | MultipleResults::AllNonRetryable(error) => {
+                    // The metadata already enables skip-WAL. Keep retrying until every
+                    // replica applies the runtime option instead of leaving the table in
+                    // a permanently inconsistent state.
+                    Err(BoxedError::new(error)).context(RetryLaterSnafu {
+                        clean_poisons: true,
+                    })
+                }
+                MultipleResults::AllRetryable(error) => {
+                    Err(BoxedError::new(error)).context(RetryLaterSnafu {
+                        clean_poisons: true,
+                    })
+                }
+                MultipleResults::Ok(results) => {
+                    self.handle_alter_region_response(results)?;
+                    Ok(Status::executing_with_clean_poisons(true))
+                }
+            };
+        }
+
+        let results = self
+            .executor
+            .on_alter_regions(
+                &self.context.node_manager,
+                &physical_table_route.region_routes,
+                alter_kind,
+            )
+            .await;
 
         match handle_multiple_results(results) {
             MultipleResults::PartialRetryable(error) => {
@@ -268,11 +292,6 @@ impl AlterTableProcedure {
                 Err(error)
             }
             MultipleResults::PartialNonRetryable(error) => {
-                if flow == AlterTableFlow::MetadataFirst {
-                    return Err(BoxedError::new(error)).context(RetryLaterSnafu {
-                        clean_poisons: true,
-                    });
-                }
                 error!(error; "Partial non-retryable errors occurred during alter table, table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
                 // No retry will be done.
                 Ok(Status::poisoned(
@@ -288,19 +307,12 @@ impl AlterTableProcedure {
                 })
             }
             MultipleResults::Ok(results) => {
-                if flow != AlterTableFlow::MetadataFirst {
-                    self.submit_sync_region_requests(&results, &physical_table_route.region_routes)
-                        .await;
-                }
+                self.submit_sync_region_requests(&results, &physical_table_route.region_routes)
+                    .await;
                 self.handle_alter_region_response(results)?;
                 Ok(Status::executing_with_clean_poisons(true))
             }
             MultipleResults::AllNonRetryable(error) => {
-                if flow == AlterTableFlow::MetadataFirst {
-                    return Err(BoxedError::new(error)).context(RetryLaterSnafu {
-                        clean_poisons: true,
-                    });
-                }
                 error!(error; "All alter requests returned non-retryable errors for table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
                 // It assumes the metadata on datanode is not changed.
                 // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)

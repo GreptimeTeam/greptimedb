@@ -1436,6 +1436,10 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
     }
 }
 
+/// Region option changes used by ALTER requests.
+///
+/// This type currently derives serde for request persistence. Keep future changes
+/// backward compatible with previously serialized variants.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
     WriteBufferSize(Option<ReadableSize>),

@@ -288,6 +288,13 @@ impl StatementExecutor {
                 if key.starts_with("compaction.") {
                     continue;
                 }
+                if key == store_api::mito_engine_options::SKIP_WAL_KEY
+                    && create_expr
+                        .table_options
+                        .contains_key(table::requests::SKIP_WAL_OVERRIDE_KEY)
+                {
+                    continue;
+                }
                 create_expr
                     .table_options
                     .entry(key.clone())

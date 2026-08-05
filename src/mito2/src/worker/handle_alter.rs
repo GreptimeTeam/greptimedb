@@ -51,20 +51,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: OptionOutputTx,
     ) {
         let skip_wal_only = only_enables_skip_wal(&request.kind);
-        let (region, is_follower) = match if skip_wal_only {
-            match self.regions.writable_non_staging_region(region_id) {
-                Ok(region) => Ok((region, false)),
-                Err(_) => self
-                    .regions
-                    .follower_region(region_id)
-                    .map(|region| (region, true)),
-            }
-        } else {
-            self.regions
-                .writable_non_staging_region(region_id)
-                .map(|region| (region, false))
-        } {
-            Ok(region) => region,
+        let (region, is_follower) = match self.regions.writable_non_staging_region(region_id) {
+            Ok(region) => (region, false),
+            Err(_) if skip_wal_only => match self.regions.follower_region(region_id) {
+                Ok(region) => (region, true),
+                Err(e) => {
+                    sender.send(Err(e));
+                    return;
+                }
+            },
             Err(e) => {
                 sender.send(Err(e));
                 return;

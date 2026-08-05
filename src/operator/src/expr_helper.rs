@@ -70,7 +70,7 @@ use sql::statements::{
 };
 use sql::util::extract_tables_from_query;
 use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
-use table::requests::{FILE_TABLE_META_KEY, SKIP_WAL_KEY, TableOptions};
+use table::requests::{FILE_TABLE_META_KEY, SKIP_WAL_OVERRIDE_KEY, TableOptions};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
 pub use trigger::to_create_trigger_task_expr;
@@ -219,9 +219,8 @@ pub fn create_to_expr(
     let mut table_options = HashMap::from(
         &TableOptions::try_from_iter(&raw_table_options).context(UnrecognizedTableOptionSnafu)?,
     );
-    // Keep an explicitly specified false so it can override a schema-level true.
-    if let Some(skip_wal) = raw_table_options.get(SKIP_WAL_KEY) {
-        table_options.insert(SKIP_WAL_KEY.to_string(), skip_wal.to_string());
+    if raw_table_options.contains_key(store_api::mito_engine_options::SKIP_WAL_KEY) {
+        table_options.insert(SKIP_WAL_OVERRIDE_KEY.to_string(), true.to_string());
     }
 
     if table_options.contains_key(COMPACTION_TYPE) {
@@ -1510,8 +1509,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
         assert_eq!(
-            Some("false"),
-            expr.table_options.get(SKIP_WAL_KEY).map(String::as_str)
+            Some("true"),
+            expr.table_options
+                .get(SKIP_WAL_OVERRIDE_KEY)
+                .map(String::as_str)
         );
     }
 

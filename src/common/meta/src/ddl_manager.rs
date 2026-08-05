@@ -417,7 +417,7 @@ impl DdlManager {
         loop {
             // Hold the same physical region locks as migration while validating that
             // this route snapshot is still the one the procedure will mutate.
-            let region_locks = if lock_regions {
+            let region_ids_to_lock = if lock_regions {
                 let (_, route) = self
                     .table_metadata_manager()
                     .table_route_manager()
@@ -436,7 +436,7 @@ impl DdlManager {
             let procedure = AlterTableProcedure::new_with_region_locks(
                 table_id,
                 alter_table_task.clone(),
-                region_locks,
+                region_ids_to_lock,
                 context,
             )?;
 

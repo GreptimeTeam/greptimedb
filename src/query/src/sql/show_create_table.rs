@@ -39,8 +39,8 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
-    WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, SKIP_WAL_OVERRIDE_KEY,
+    TTL_KEY, WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -67,18 +67,14 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
-    let schema_skip_wal = schema_options
-        .as_ref()
-        .and_then(|options| options.extra_options.get(SKIP_WAL_KEY))
-        .is_some_and(|value| value == "true");
-    if table_opts.skip_wal || schema_skip_wal {
+    if table_opts.skip_wal || table_opts.extra_options.contains_key(SKIP_WAL_OVERRIDE_KEY) {
         options.insert(SKIP_WAL_KEY.to_string(), table_opts.skip_wal.to_string());
     }
 
     for (k, v) in table_opts
         .extra_options
         .iter()
-        .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_KEY)
+        .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_OVERRIDE_KEY)
     {
         options.insert(k.clone(), v.clone());
     }
@@ -444,11 +440,10 @@ WITH(
         table_meta
             .options
             .extra_options
-            .insert(SKIP_WAL_KEY.to_string(), true.to_string());
-        assert!(
-            create_sql_options(&table_meta, None)
-                .get(SKIP_WAL_KEY)
-                .is_none()
+            .insert(SKIP_WAL_OVERRIDE_KEY.to_string(), true.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)
         );
 
         let mut schema_options = SchemaOptions::default();

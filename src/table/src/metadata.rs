@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -403,7 +403,6 @@ impl TableMeta {
                 }
                 SetRegionOption::SkipWal => {
                     new_options.skip_wal = true;
-                    new_options.extra_options.remove(SKIP_WAL_KEY);
                 }
             }
         }
@@ -1711,7 +1710,6 @@ mod tests {
             .unwrap();
 
         assert!(new_meta.options.skip_wal);
-        assert!(!new_meta.options.extra_options.contains_key(SKIP_WAL_KEY));
     }
 
     #[test]
