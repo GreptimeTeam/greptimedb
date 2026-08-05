@@ -28,7 +28,8 @@ use coerce::{coerce_columns, coerce_value};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, parse_legacy_json2_settings};
+use datatypes::json::JsonSettings;
 use datatypes::value::Value;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
@@ -701,19 +702,24 @@ fn resolve_value(
                 });
 
             let value = if is_json2 {
-                let json_extension_type: Option<JsonExtensionType> =
-                    if let Some(x) = schema_info.find_column_schema_in_table(&column_name) {
-                        x.column_schema.extension_type()?
-                    } else {
-                        None
-                    };
-                let settings = json_extension_type
-                    .and_then(|x| x.metadata().json_settings.clone())
-                    .unwrap_or_default();
                 let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
                     CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
                 })?;
-                let value = settings.encode(value)?;
+                let value =
+                    if let Some(column) = schema_info.find_column_schema_in_table(&column_name) {
+                        if let Some(extension) = column
+                            .column_schema
+                            .extension_type::<Json2ExtensionType>()?
+                        {
+                            extension.metadata().json_settings().encode(value)?
+                        } else {
+                            parse_legacy_json2_settings(column.column_schema.metadata())?
+                                .unwrap_or_default()
+                                .encode(value)?
+                        }
+                    } else {
+                        JsonSettings::default().encode(value)?
+                    };
 
                 resolve_schema(
                     index,

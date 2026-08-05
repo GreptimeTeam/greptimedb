@@ -25,7 +25,7 @@ use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -103,10 +103,10 @@ impl FlatCompatBatch {
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field)
+            .any(is_json2_extension_type)
         {
             for field in read_format.arrow_schema().fields() {
-                if is_structured_json_field(field)
+                if is_json2_extension_type(field)
                     && let Some(column_id) =
                         actual.column_by_name(field.name()).map(|x| x.column_id)
                     && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
