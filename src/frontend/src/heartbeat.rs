@@ -50,23 +50,26 @@ use crate::error::Result;
 use crate::frontend::FrontendOptions;
 use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 
-/// The result type returned by a [`HeartbeatExtension`].
-pub type HeartbeatExtensionResult<T> = std::result::Result<T, BoxedError>;
+/// The result type returned by a [`FrontendHeartbeatExtension`].
+pub type FrontendHeartbeatExtensionResult<T> = std::result::Result<T, BoxedError>;
 
 /// An extension to frontend heartbeat requests, responses, and lifecycle events.
 ///
-/// [`HeartbeatExtension::request_extensions`] is called for every heartbeat. A failed call is
-/// isolated from the base heartbeat and from other extensions. [`HeartbeatExtension::connected`]
-/// is called once for every successfully established connection generation, including reconnects;
-/// implementations must therefore be idempotent. [`HeartbeatExtension::shutdown`] is called once
-/// during task shutdown after heartbeat I/O has stopped.
+/// [`FrontendHeartbeatExtension::request_extensions`] is called for every heartbeat. A failed call
+/// is isolated from the base heartbeat and from other extensions.
+/// [`FrontendHeartbeatExtension::connected`] is called once for every successfully established
+/// connection generation, including reconnects; implementations must therefore be idempotent.
+/// [`FrontendHeartbeatExtension::shutdown`] is called once during task shutdown after heartbeat
+/// I/O has stopped.
 #[async_trait]
-pub trait HeartbeatExtension: Send + Sync {
+pub trait FrontendHeartbeatExtension: Send + Sync {
     /// Returns the stable name used to make registration idempotent.
     fn name(&self) -> &str;
 
     /// Generates request extensions for one heartbeat.
-    async fn request_extensions(&self) -> HeartbeatExtensionResult<HashMap<String, Vec<u8>>> {
+    async fn request_extensions(
+        &self,
+    ) -> FrontendHeartbeatExtensionResult<HashMap<String, Vec<u8>>> {
         Ok(HashMap::new())
     }
 
@@ -79,33 +82,33 @@ pub trait HeartbeatExtension: Send + Sync {
     }
 
     /// Notifies the extension that a heartbeat connection generation is ready.
-    async fn connected(&self, _generation: u64) -> HeartbeatExtensionResult<()> {
+    async fn connected(&self, _generation: u64) -> FrontendHeartbeatExtensionResult<()> {
         Ok(())
     }
 
     /// Stops and joins background work owned by the extension.
-    async fn shutdown(&self) -> HeartbeatExtensionResult<()> {
+    async fn shutdown(&self) -> FrontendHeartbeatExtensionResult<()> {
         Ok(())
     }
 }
 
 /// A shareable, ordered registry of frontend heartbeat extensions.
 #[derive(Clone, Default)]
-pub struct HeartbeatExtensions {
-    inner: Arc<StdMutex<HeartbeatExtensionsInner>>,
+pub struct FrontendHeartbeatExtensions {
+    inner: Arc<StdMutex<FrontendHeartbeatExtensionsInner>>,
 }
 
 #[derive(Default)]
-struct HeartbeatExtensionsInner {
+struct FrontendHeartbeatExtensionsInner {
     names: HashSet<String>,
-    extensions: Vec<Arc<dyn HeartbeatExtension>>,
+    extensions: Vec<Arc<dyn FrontendHeartbeatExtension>>,
 }
 
-impl HeartbeatExtensions {
+impl FrontendHeartbeatExtensions {
     /// Registers an extension without replacing an existing extension of the same name.
     ///
     /// Returns `true` for a new registration and `false` for an idempotent duplicate.
-    pub fn register(&self, extension: Arc<dyn HeartbeatExtension>) -> bool {
+    pub fn register(&self, extension: Arc<dyn FrontendHeartbeatExtension>) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let name = extension.name().to_string();
         if !inner.names.insert(name) {
@@ -116,7 +119,7 @@ impl HeartbeatExtensions {
     }
 
     /// Returns the registered extensions in registration order.
-    pub fn extensions(&self) -> Vec<Arc<dyn HeartbeatExtension>> {
+    pub fn extensions(&self) -> Vec<Arc<dyn FrontendHeartbeatExtension>> {
         self.inner.lock().unwrap().extensions.clone()
     }
 
@@ -144,7 +147,7 @@ impl HeartbeatExtensions {
 /// Mailbox parsing always runs first, followed by extension handlers, suspension state handling,
 /// and cache invalidation.
 pub fn heartbeat_response_handler_executor(
-    extensions: &HeartbeatExtensions,
+    extensions: &FrontendHeartbeatExtensions,
     suspend_state: Arc<AtomicBool>,
     cache_invalidator: CacheInvalidatorRef,
 ) -> HeartbeatResponseHandlerExecutorRef {
@@ -191,12 +194,12 @@ trait HeartbeatConnector: Send + Sync {
 
 #[async_trait]
 trait HeartbeatRequestSender: Send + Sync {
-    async fn send(&self, request: HeartbeatRequest) -> HeartbeatExtensionResult<()>;
+    async fn send(&self, request: HeartbeatRequest) -> FrontendHeartbeatExtensionResult<()>;
 }
 
 #[async_trait]
 trait HeartbeatResponseStream: Send {
-    async fn message(&mut self) -> HeartbeatExtensionResult<Option<HeartbeatResponse>>;
+    async fn message(&mut self) -> FrontendHeartbeatExtensionResult<Option<HeartbeatResponse>>;
 }
 
 struct HeartbeatConnection {
@@ -229,7 +232,7 @@ struct MetaHeartbeatSender(HeartbeatSender);
 
 #[async_trait]
 impl HeartbeatRequestSender for MetaHeartbeatSender {
-    async fn send(&self, request: HeartbeatRequest) -> HeartbeatExtensionResult<()> {
+    async fn send(&self, request: HeartbeatRequest) -> FrontendHeartbeatExtensionResult<()> {
         self.0.send(request).await.map_err(BoxedError::new)
     }
 }
@@ -238,7 +241,7 @@ struct MetaHeartbeatStream(HeartbeatStream);
 
 #[async_trait]
 impl HeartbeatResponseStream for MetaHeartbeatStream {
-    async fn message(&mut self) -> HeartbeatExtensionResult<Option<HeartbeatResponse>> {
+    async fn message(&mut self) -> FrontendHeartbeatExtensionResult<Option<HeartbeatResponse>> {
         self.0.message().await.map_err(BoxedError::new)
     }
 }
@@ -251,7 +254,7 @@ struct HeartbeatRunner {
     start_time_ms: u64,
     resource_stat: ResourceStatRef,
     env_vars: EnvVars,
-    extensions: HeartbeatExtensions,
+    extensions: FrontendHeartbeatExtensions,
     cancellation: CancellationToken,
     generation: Arc<AtomicU64>,
 }
@@ -397,7 +400,7 @@ impl HeartbeatRunner {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let mut extensions = HashMap::new();
-        self.env_vars.clone().into_extensions(&mut extensions);
+        self.env_vars.into_extensions(&mut extensions);
         let heartbeat_request = HeartbeatRequest {
             peer: Some(Peer {
                 // Metasrv calculates the frontend id by hashing this reachable address.
@@ -442,19 +445,19 @@ impl HeartbeatRunner {
                 if !self.add_request_extensions(&mut request).await {
                     return ConnectionEnd::Shutdown;
                 }
+                debug!(
+                    "Sending a heartbeat request to metasrv, content: {:?}",
+                    request
+                );
                 let result = tokio::select! {
                     _ = self.cancellation.cancelled() => return ConnectionEnd::Shutdown,
-                    result = sender.send(request.clone()) => result,
+                    result = sender.send(request) => result,
                 };
                 if let Err(error) = result {
                     error!(error; "Failed to send heartbeat to metasrv");
                     return ConnectionEnd::Reconnect;
                 }
                 HEARTBEAT_SENT_COUNT.inc();
-                debug!(
-                    "Send a heartbeat request to metasrv, content: {:?}",
-                    request
-                );
             }
         }
     }
@@ -597,7 +600,7 @@ impl HeartbeatTask {
                 start_time_ms: common_time::util::current_time_millis() as u64,
                 resource_stat,
                 env_vars: EnvVars::from_config(&opts.heartbeat_env_vars),
-                extensions: HeartbeatExtensions::default(),
+                extensions: FrontendHeartbeatExtensions::default(),
                 cancellation: CancellationToken::new(),
                 generation: Arc::new(AtomicU64::new(0)),
             },
@@ -608,7 +611,7 @@ impl HeartbeatTask {
     }
 
     /// Installs the extensions registered before heartbeat startup.
-    pub fn with_extensions(mut self, extensions: HeartbeatExtensions) -> Self {
+    pub fn with_extensions(mut self, extensions: FrontendHeartbeatExtensions) -> Self {
         self.runner.extensions = extensions;
         self
     }

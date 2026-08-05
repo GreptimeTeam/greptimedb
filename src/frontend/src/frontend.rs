@@ -200,7 +200,9 @@ mod tests {
     use tonic::{Request, Response, Status, Streaming};
 
     use super::*;
-    use crate::heartbeat::{HeartbeatExtension, HeartbeatExtensionResult, HeartbeatExtensions};
+    use crate::heartbeat::{
+        FrontendHeartbeatExtension, FrontendHeartbeatExtensionResult, FrontendHeartbeatExtensions,
+    };
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
 
@@ -232,12 +234,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl HeartbeatExtension for ShutdownTrackingExtension {
+    impl FrontendHeartbeatExtension for ShutdownTrackingExtension {
         fn name(&self) -> &str {
             "shutdown-tracking"
         }
 
-        async fn shutdown(&self) -> HeartbeatExtensionResult<()> {
+        async fn shutdown(&self) -> FrontendHeartbeatExtensionResult<()> {
             self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
@@ -480,7 +482,7 @@ mod tests {
         let extension = Arc::new(ShutdownTrackingExtension {
             shutdown_calls: AtomicUsize::new(0),
         });
-        let extensions = HeartbeatExtensions::default();
+        let extensions = FrontendHeartbeatExtensions::default();
         assert!(extensions.register(extension.clone()));
         let heartbeat_task = HeartbeatTask::new(
             instance.frontend_peer_addr().to_string(),

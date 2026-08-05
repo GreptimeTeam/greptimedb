@@ -324,7 +324,7 @@ struct MockSender {
 
 #[async_trait]
 impl HeartbeatRequestSender for MockSender {
-    async fn send(&self, request: HeartbeatRequest) -> HeartbeatExtensionResult<()> {
+    async fn send(&self, request: HeartbeatRequest) -> FrontendHeartbeatExtensionResult<()> {
         if self.fail_send.load(Ordering::Acquire) {
             return Err(test_error("mock heartbeat send failure"));
         }
@@ -346,7 +346,7 @@ struct MockStream {
 
 #[async_trait]
 impl HeartbeatResponseStream for MockStream {
-    async fn message(&mut self) -> HeartbeatExtensionResult<Option<HeartbeatResponse>> {
+    async fn message(&mut self) -> FrontendHeartbeatExtensionResult<Option<HeartbeatResponse>> {
         match self.receiver.recv().await {
             Some(MockStreamEvent::Response(response)) => Ok(Some(response)),
             Some(MockStreamEvent::Close) | None => Ok(None),
@@ -460,12 +460,14 @@ impl TestExtension {
 }
 
 #[async_trait]
-impl HeartbeatExtension for TestExtension {
+impl FrontendHeartbeatExtension for TestExtension {
     fn name(&self) -> &str {
         &self.name
     }
 
-    async fn request_extensions(&self) -> HeartbeatExtensionResult<HashMap<String, Vec<u8>>> {
+    async fn request_extensions(
+        &self,
+    ) -> FrontendHeartbeatExtensionResult<HashMap<String, Vec<u8>>> {
         let call = self.request_calls.fetch_add(1, Ordering::AcqRel) + 1;
         if self.fail_request.load(Ordering::Acquire) {
             return Err(test_error("mock extension failure"));
@@ -481,12 +483,12 @@ impl HeartbeatExtension for TestExtension {
         self.response_handler.clone()
     }
 
-    async fn connected(&self, generation: u64) -> HeartbeatExtensionResult<()> {
+    async fn connected(&self, generation: u64) -> FrontendHeartbeatExtensionResult<()> {
         self.connected_generations.lock().unwrap().push(generation);
         Ok(())
     }
 
-    async fn shutdown(&self) -> HeartbeatExtensionResult<()> {
+    async fn shutdown(&self) -> FrontendHeartbeatExtensionResult<()> {
         self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -494,7 +496,7 @@ impl HeartbeatExtension for TestExtension {
 
 fn test_task(
     connector: Arc<dyn HeartbeatConnector>,
-    extensions: HeartbeatExtensions,
+    extensions: FrontendHeartbeatExtensions,
     options: FrontendOptions,
 ) -> HeartbeatTask {
     let executor = heartbeat_response_handler_executor(
@@ -518,7 +520,7 @@ async fn test_heartbeat_without_extensions_preserves_base_behavior() {
     let connector = MockConnector::new([ConnectPlan::Ready(plan)]);
     let task = test_task(
         connector,
-        HeartbeatExtensions::default(),
+        FrontendHeartbeatExtensions::default(),
         FrontendOptions::default(),
     );
 
@@ -539,7 +541,7 @@ async fn test_heartbeat_without_extensions_preserves_base_behavior() {
 #[tokio::test]
 async fn test_initial_connection_failure_does_not_start_extension_lifecycle() {
     let extension = TestExtension::new("lifecycle");
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     assert!(extensions.register(extension.clone()));
     let connector = MockConnector::new([ConnectPlan::Fail]);
     let task = test_task(connector, extensions, FrontendOptions::default());
@@ -553,7 +555,7 @@ async fn test_initial_connection_failure_does_not_start_extension_lifecycle() {
 #[tokio::test]
 async fn test_request_extensions_are_regenerated_for_every_heartbeat() {
     let extension = TestExtension::dynamic("dynamic", "dynamic-key");
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(extension.clone());
     let (plan, handle) = mock_connection(Duration::from_millis(10), Duration::from_millis(10));
     let task = test_task(
@@ -577,7 +579,7 @@ async fn test_failed_provider_preserves_base_and_other_extensions() {
         "successful",
         HashMap::from([("other".to_string(), b"value".to_vec())]),
     );
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(failing);
     extensions.register(successful);
     let task = test_task(
@@ -608,7 +610,7 @@ async fn test_conflicting_provider_output_is_discarded_atomically() {
         "successful",
         HashMap::from([("other".to_string(), b"value".to_vec())]),
     );
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     assert!(extensions.register(conflicting.clone()));
     assert!(!extensions.register(conflicting));
     assert!(extensions.register(successful));
@@ -726,7 +728,7 @@ async fn test_response_extension_handler_order() {
         cache: cache.clone(),
         table_key: table_key.clone(),
     });
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(TestExtension::with_handler("response", handler));
     let executor =
         heartbeat_response_handler_executor(&extensions, suspend_state.clone(), cache.clone());
@@ -780,7 +782,7 @@ async fn test_heartbeat_response_wire_compatibility_preserves_handlers() {
     });
     let suspend_state = Arc::new(AtomicBool::new(false));
     let executor = heartbeat_response_handler_executor(
-        &HeartbeatExtensions::default(),
+        &FrontendHeartbeatExtensions::default(),
         suspend_state.clone(),
         cache.clone(),
     );
@@ -876,7 +878,7 @@ async fn assert_extension_short_circuit_is_isolated(result: ShortCircuitResult) 
     let suspend_state = Arc::new(AtomicBool::new(true));
     let short_circuit_calls = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(TestExtension::with_handler(
         "short-circuit",
         Arc::new(ShortCircuitHandler {
@@ -946,7 +948,7 @@ async fn test_response_extension_error_does_not_skip_remaining_handlers() {
 #[tokio::test]
 async fn test_closed_response_stream_reconnects_once() {
     let extension = TestExtension::new("lifecycle");
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(extension.clone());
     let (first_plan, first) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
     let (second_plan, second) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
@@ -970,6 +972,56 @@ async fn test_closed_response_stream_reconnects_once() {
 }
 
 #[tokio::test]
+async fn test_response_stream_error_reconnects() {
+    let (first_plan, first) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
+    let (second_plan, second) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
+    let connector = MockConnector::new([
+        ConnectPlan::Ready(first_plan),
+        ConnectPlan::Ready(second_plan),
+    ]);
+    let task = test_task(
+        connector.clone(),
+        FrontendHeartbeatExtensions::default(),
+        FrontendOptions::default(),
+    );
+
+    task.start().await.unwrap();
+    first.wait_for_requests(1).await;
+    first.fail_responses();
+    connector.wait_for_calls(2).await;
+    second.wait_for_requests(1).await;
+    assert_eq!(task.generation(), 2);
+    task.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_failed_reconnect_is_retried() {
+    let extension = TestExtension::new("lifecycle");
+    let extensions = FrontendHeartbeatExtensions::default();
+    extensions.register(extension.clone());
+    let (first_plan, first) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
+    let (second_plan, second) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
+    let connector = MockConnector::new([
+        ConnectPlan::Ready(first_plan),
+        ConnectPlan::Fail,
+        ConnectPlan::Ready(second_plan),
+    ]);
+    let task = test_task(connector.clone(), extensions, FrontendOptions::default());
+
+    task.start().await.unwrap();
+    first.wait_for_requests(1).await;
+    first.close_responses();
+    connector.wait_for_calls(3).await;
+    second.wait_for_requests(1).await;
+    assert_eq!(task.generation(), 2);
+    assert_eq!(
+        extension.connected_generations.lock().unwrap().as_slice(),
+        &[1, 2]
+    );
+    task.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_send_failure_reconnects() {
     let (first_plan, first) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
     first.fail_send.store(true, Ordering::Release);
@@ -980,7 +1032,7 @@ async fn test_send_failure_reconnects() {
     ]);
     let task = test_task(
         connector.clone(),
-        HeartbeatExtensions::default(),
+        FrontendHeartbeatExtensions::default(),
         FrontendOptions::default(),
     );
 
@@ -1003,7 +1055,7 @@ async fn test_concurrent_send_receive_failure_creates_one_generation() {
     ]);
     let task = test_task(
         connector.clone(),
-        HeartbeatExtensions::default(),
+        FrontendHeartbeatExtensions::default(),
         FrontendOptions::default(),
     );
 
@@ -1019,7 +1071,7 @@ async fn test_concurrent_send_receive_failure_creates_one_generation() {
 #[tokio::test]
 async fn test_shutdown_cancels_stuck_handshake() {
     let extension = TestExtension::new("lifecycle");
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(extension.clone());
     let connector = MockConnector::new([ConnectPlan::Pending]);
     let task = test_task(connector.clone(), extensions, FrontendOptions::default());
@@ -1041,7 +1093,7 @@ async fn test_shutdown_cancels_retry_sleep_and_joins_supervisor() {
     let connector = MockConnector::new([ConnectPlan::Ready(plan)]);
     let task = test_task(
         connector.clone(),
-        HeartbeatExtensions::default(),
+        FrontendHeartbeatExtensions::default(),
         FrontendOptions::default(),
     );
     task.start().await.unwrap();
@@ -1065,7 +1117,7 @@ async fn test_shutdown_cancels_inflight_response_handler() {
             started: started.clone(),
         }),
     );
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(extension.clone());
     let (plan, handle) = mock_connection(Duration::from_secs(60), Duration::from_secs(60));
     let task = test_task(
@@ -1095,7 +1147,7 @@ async fn test_concurrent_start_has_one_active_generation() {
     let connector = MockConnector::new([ConnectPlan::Ready(plan)]);
     let task = test_task(
         connector.clone(),
-        HeartbeatExtensions::default(),
+        FrontendHeartbeatExtensions::default(),
         FrontendOptions::default(),
     );
     let starts = (0..8).map(|_| {
@@ -1115,7 +1167,7 @@ async fn test_concurrent_start_has_one_active_generation() {
 #[tokio::test]
 async fn test_shutdown_prevents_restart_and_extension_callbacks() {
     let extension = TestExtension::dynamic("lifecycle", "dynamic");
-    let extensions = HeartbeatExtensions::default();
+    let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(extension.clone());
     let (plan, handle) = mock_connection(Duration::from_secs(60), Duration::from_millis(10));
     let connector = MockConnector::new([ConnectPlan::Ready(plan)]);

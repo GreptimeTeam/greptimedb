@@ -19,7 +19,7 @@ use common_base::Plugins;
 use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
-use frontend::heartbeat::HeartbeatExtensions;
+use frontend::heartbeat::FrontendHeartbeatExtensions;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
 use snafu::ResultExt;
@@ -70,14 +70,14 @@ pub async fn setup_frontend_plugins_post_build(
 /// Sets up heartbeat extensions after the frontend [`Instance`] is available.
 ///
 /// Implementations may use the instance to construct extensions and register them in the
-/// [`HeartbeatExtensions`] stored in `plugins`. Registrations must be idempotent because plugin
-/// setup can be invoked more than once.
+/// [`FrontendHeartbeatExtensions`] stored in `plugins`. Registrations must be idempotent because
+/// plugin setup can be invoked more than once.
 pub async fn setup_frontend_heartbeat_extensions(
     plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
     _instance: &Arc<Instance>,
 ) -> Result<()> {
-    plugins.get_or_insert(HeartbeatExtensions::default);
+    plugins.get_or_insert(FrontendHeartbeatExtensions::default);
     Ok(())
 }
 

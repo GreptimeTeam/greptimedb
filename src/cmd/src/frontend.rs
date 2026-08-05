@@ -40,7 +40,7 @@ use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use frontend::frontend::Frontend;
 use frontend::heartbeat::{
-    HeartbeatExtensions, HeartbeatTask, heartbeat_response_handler_executor,
+    FrontendHeartbeatExtensions, HeartbeatTask, heartbeat_response_handler_executor,
 };
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
@@ -500,7 +500,9 @@ impl StartCommand {
         plugins::setup_frontend_heartbeat_extensions(&mut plugins, &plugin_opts, &instance)
             .await
             .context(error::StartFrontendSnafu)?;
-        let heartbeat_extensions = plugins.get::<HeartbeatExtensions>().unwrap_or_default();
+        let heartbeat_extensions = plugins
+            .get::<FrontendHeartbeatExtensions>()
+            .unwrap_or_default();
         let heartbeat_task = Some(create_heartbeat_task_with_extensions(
             &opts,
             meta_client,
@@ -534,7 +536,7 @@ fn create_heartbeat_task_with_extensions(
     options: &frontend::frontend::FrontendOptions,
     meta_client: MetaClientRef,
     instance: &frontend::instance::Instance,
-    extensions: HeartbeatExtensions,
+    extensions: FrontendHeartbeatExtensions,
 ) -> HeartbeatTask {
     let executor = heartbeat_response_handler_executor(
         &extensions,
