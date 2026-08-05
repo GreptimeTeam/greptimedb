@@ -413,6 +413,7 @@ impl InformationSchemaProvider {
             self.build_table(STATISTICS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        #[cfg(feature = "enterprise")]
         tables.insert(
             FLOW_STATISTICS.to_string(),
             self.build_table(FLOW_STATISTICS).unwrap(),

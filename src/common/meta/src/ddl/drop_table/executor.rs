@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "enterprise")]
+use std::collections::HashSet;
 
 use api::v1::region::{
     CleanUpRequest as PbCleanUpRequest, CloseRequest as PbCloseRegionRequest,
@@ -36,6 +38,7 @@ use crate::ddl::utils::{
 use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
+#[cfg(feature = "enterprise")]
 use crate::key::DroppedTableLifecycle;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -114,6 +117,7 @@ impl DropTableExecutor {
 
     /// Rejects dropping a recreated live table while an older tombstone still owns the same
     /// fully qualified name.
+    #[cfg(feature = "enterprise")]
     pub async fn check_tombstone_conflict(
         &self,
         ctx: &DdlContext,
@@ -140,6 +144,25 @@ impl DropTableExecutor {
 
     /// Deletes the table metadata **logically**.
     pub async fn on_delete_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .delete_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+                None,
+            )
+            .await
+    }
+
+    /// Soft-deletes table metadata and retains its tombstone lifecycle markers.
+    #[cfg(feature = "enterprise")]
+    pub async fn on_soft_delete_metadata(
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
@@ -438,6 +461,7 @@ impl DropTableExecutor {
 
     /// Closes all table regions on datanodes without deleting region files or metadata tombstones.
     /// When `flush_leaders_on_close` is set, only leader regions are flushed before close.
+    #[cfg(feature = "enterprise")]
     pub async fn on_close_regions(
         &self,
         node_manager: &NodeManagerRef,
