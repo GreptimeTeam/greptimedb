@@ -11588,6 +11588,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
+ "cache",
  "catalog",
  "chrono",
  "common-base",

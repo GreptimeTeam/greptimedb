@@ -29,6 +29,7 @@ mod function;
 mod vec_avg_test;
 mod vec_product_test;
 mod vec_sum_test;
+mod view_cross_catalog_test;
 
 async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
     let query_ctx = QueryContext::arc();
