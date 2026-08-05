@@ -607,7 +607,7 @@ fn describe_fields(
                 "flow_id".to_string(),
                 None,
                 None,
-                Type::INT8,
+                Type::INT8, // matches type_gt_to_pg(UInt32) — do not use INT4
                 format.format_for(0),
             ),
             FieldInfo::new(

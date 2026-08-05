@@ -97,6 +97,10 @@ impl TaskState {
     /// the first frontend query is dispatched, not after it completes.
     pub fn record_start_time_if_first(&mut self) {
         if self.start_time_millis.is_none() {
+            // start_time is recorded just before the first frontend query is dispatched
+            // (pre-execution), so it may be marginally earlier than the streaming engine's
+            // start_time which is set post-execution. Both are valid approximations of
+            // "when this flow first ran".
             self.start_time_millis = Some(common_time::util::current_time_millis());
         }
     }

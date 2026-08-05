@@ -202,46 +202,17 @@ impl WorkerHandle {
         }
     }
 
-    pub async fn get_state_size(&self) -> Result<BTreeMap<FlowId, usize>, Error> {
+    pub async fn get_full_flow_stat(
+        &self,
+    ) -> Result<(BTreeMap<FlowId, usize>, BTreeMap<FlowId, i64>, BTreeMap<FlowId, i64>), Error> {
         let ret = self
             .itc_client
-            .call_with_resp(Request::QueryStateSize)
+            .call_with_resp(Request::QueryFullFlowStat)
             .await?;
-        ret.into_query_state_size().map_err(|ret| {
+        ret.into_query_full_flow_stat().map_err(|ret| {
             InternalSnafu {
                 reason: format!(
-                    "Flow Node/Worker itc failed, expect Response::QueryStateSize, found {ret:?}"
-                ),
-            }
-            .build()
-        })
-    }
-
-    pub async fn get_last_exec_time_map(&self) -> Result<BTreeMap<FlowId, i64>, Error> {
-        let ret = self
-            .itc_client
-            .call_with_resp(Request::QueryLastExecTimeMap)
-            .await?;
-        ret.into_query_last_exec_time_map().map_err(|ret| {
-            InternalSnafu {
-                reason: format!(
-                    "Flow Node/Worker get_last_exec_time_map failed, expect Response::QueryLastExecTimeMap, found {ret:?}"
-                ),
-            }
-            .build()
-        })
-    }
-
-    /// Query per-flow runtime statistics (start time) from the worker.
-    pub async fn get_flow_exec_stats(&self) -> Result<FlowExecStats, Error> {
-        let ret = self
-            .itc_client
-            .call_with_resp(Request::QueryFlowExecStats)
-            .await?;
-        ret.into_query_flow_exec_stats().map_err(|ret| {
-            InternalSnafu {
-                reason: format!(
-                    "Flow Node/Worker get_flow_exec_stats failed, expect Response::QueryFlowExecStats, found {ret:?}"
+                    "Flow Node/Worker get_full_flow_stat failed, expected Response::QueryFullFlowStat, found {ret:?}"
                 ),
             }
             .build()
@@ -424,31 +395,23 @@ impl<'s> Worker<'s> {
                 Some(Response::ContainTask { result: ret })
             }
             Request::Shutdown => return Err(()),
-            Request::QueryStateSize => {
-                let mut ret = BTreeMap::new();
-                for (flow_id, task_state) in self.task_states.iter() {
-                    ret.insert(*flow_id, task_state.state.get_state_size());
-                }
-                Some(Response::QueryStateSize { result: ret })
-            }
-            Request::QueryLastExecTimeMap => {
-                let mut ret = BTreeMap::new();
-                for (flow_id, task_state) in self.task_states.iter() {
-                    if let Some(last_exec_time) = task_state.state.last_exec_time() {
-                        ret.insert(*flow_id, last_exec_time);
-                    }
-                }
-                Some(Response::QueryLastExecTimeMap { result: ret })
-            }
-            Request::QueryFlowExecStats => {
+            Request::QueryFullFlowStat => {
+                let mut state_size = BTreeMap::new();
+                let mut last_exec_time_map = BTreeMap::new();
                 let mut start_time_map = BTreeMap::new();
                 for (flow_id, task_state) in self.task_states.iter() {
-                    if let Some(start_time) = task_state.state.start_time() {
-                        start_time_map.insert(*flow_id, start_time);
+                    state_size.insert(*flow_id, task_state.state.get_state_size());
+                    if let Some(t) = task_state.state.last_exec_time() {
+                        last_exec_time_map.insert(*flow_id, t);
+                    }
+                    if let Some(t) = task_state.state.start_time() {
+                        start_time_map.insert(*flow_id, t);
                     }
                 }
-                Some(Response::QueryFlowExecStats {
-                    result: FlowExecStats { start_time_map },
+                Some(Response::QueryFullFlowStat {
+                    state_size,
+                    last_exec_time_map,
+                    start_time_map,
                 })
             }
         };
@@ -482,16 +445,7 @@ pub enum Request {
         flow_id: FlowId,
     },
     Shutdown,
-    QueryStateSize,
-    QueryLastExecTimeMap,
-    QueryFlowExecStats,
-}
-
-/// Per-flow runtime statistics gathered from a streaming worker.
-#[derive(Debug, Default)]
-pub struct FlowExecStats {
-    /// each flow's first execution time, in unix timestamp milliseconds
-    pub start_time_map: BTreeMap<FlowId, i64>,
+    QueryFullFlowStat,
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -507,17 +461,10 @@ enum Response {
         result: bool,
     },
     RunAvail,
-    QueryStateSize {
-        /// each flow tasks' state size
-        result: BTreeMap<FlowId, usize>,
-    },
-    QueryLastExecTimeMap {
-        /// each flow tasks' last execution time
-        result: BTreeMap<FlowId, i64>,
-    },
-    QueryFlowExecStats {
-        /// each flow tasks' start time
-        result: FlowExecStats,
+    QueryFullFlowStat {
+        state_size: BTreeMap<FlowId, usize>,
+        last_exec_time_map: BTreeMap<FlowId, i64>,
+        start_time_map: BTreeMap<FlowId, i64>,
     },
 }
 
@@ -643,7 +590,8 @@ mod test {
         );
         tx.send(Batch::empty()).unwrap();
         handle.run_available(0, true).await.unwrap();
-        assert_eq!(handle.get_state_size().await.unwrap().len(), 1);
+        let (state_size, _, _) = handle.get_full_flow_stat().await.unwrap();
+        assert_eq!(state_size.len(), 1);
         assert_eq!(sink_rx.recv().await.unwrap(), Batch::empty());
         drop(handle);
         worker_thread_handle.join().unwrap();

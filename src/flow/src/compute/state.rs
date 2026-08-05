@@ -123,6 +123,8 @@ impl DataflowState {
     pub fn set_last_exec_time(&mut self, time: Timestamp) {
         self.last_exec_time = Some(time);
         if self.start_time.is_none() {
+            // start_time is recorded at the completion of the first execution
+            // (post-execution), consistent with how last_exec_time is recorded.
             self.start_time = Some(time);
         }
     }

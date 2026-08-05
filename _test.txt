@@ -1,0 +1,618 @@
+﻿cargo :    Compiling unicode-ident v1.0.22
+At line:1 char:37
++ ... k_uge27\greptimedb; cargo test -p common-meta flow_state 2>&1 | Out-F ...
++                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling unicode-ident v1.0.22:String) [], RemoteExcept 
+   ion
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling cfg-if v1.0.1
+   Compiling proc-macro2 v1.0.105
+   Compiling serde v1.0.228
+   Compiling serde_core v1.0.228
+   Compiling memchr v2.8.0
+   Compiling quote v1.0.44
+   Compiling syn v2.0.117
+   Compiling getrandom v0.3.4
+   Compiling once_cell v1.21.3
+   Compiling itoa v1.0.15
+   Compiling windows-link v0.2.1
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling hashbrown v0.16.1
+   Compiling windows-targets v0.52.6
+   Compiling pin-project-lite v0.2.16
+   Compiling libm v0.2.15
+   Compiling indexmap v2.13.0
+   Compiling jobserver v0.1.33
+   Compiling cc v1.2.27
+   Compiling futures-core v0.3.31
+   Compiling fnv v1.0.7
+   Compiling futures-sink v0.3.31
+   Compiling zmij v1.0.12
+   Compiling windows-sys v0.61.2
+   Compiling num-traits v0.2.19
+   Compiling slab v0.4.12
+   Compiling pin-utils v0.1.0
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.13
+   Compiling futures-io v0.3.31
+   Compiling base64 v0.22.1
+   Compiling serde_json v1.0.149
+   Compiling percent-encoding v2.3.2
+   Compiling futures-channel v0.3.31
+   Compiling futures-task v0.3.31
+   Compiling libc v0.2.186
+   Compiling tracing-core v0.1.34
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling zerocopy-derive v0.8.26
+   Compiling tracing-attributes v0.1.28
+   Compiling zerocopy v0.8.26
+   Compiling futures-macro v0.3.31
+   Compiling futures-util v0.3.31
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling stable_deref_trait v1.2.0
+   Compiling log v0.4.29
+   Compiling tracing v0.1.41
+   Compiling bytes v1.11.1
+   Compiling smallvec v1.15.1
+   Compiling bitflags v2.12.1
+   Compiling parking_lot_core v0.9.11
+   Compiling synstructure v0.13.2
+   Compiling parking_lot v0.12.4
+   Compiling http v1.3.1
+   Compiling tokio v1.52.3
+   Compiling zerofrom-derive v0.1.6
+   Compiling zerofrom v0.1.6
+   Compiling yoke-derive v0.8.0
+   Compiling num-integer v0.1.46
+   Compiling typenum v1.20.1
+   Compiling yoke v0.8.0
+   Compiling subtle v2.6.1
+   Compiling zerovec-derive v0.11.1
+   Compiling displaydoc v0.2.5
+   Compiling aho-corasick v1.1.3
+   Compiling writeable v0.6.1
+   Compiling zerovec v0.11.2
+   Compiling regex-syntax v0.8.10
+   Compiling tinystr v0.8.1
+   Compiling litemap v0.8.0
+   Compiling spin v0.9.8
+   Compiling lazy_static v1.5.0
+   Compiling icu_locale_core v2.0.0
+   Compiling potential_utf v0.1.2
+   Compiling zerotrie v0.2.2
+   Compiling icu_collections v2.0.0
+   Compiling icu_provider v2.0.0
+   Compiling ryu v1.0.20
+   Compiling anyhow v1.0.102
+   Compiling generic-array v0.14.7
+   Compiling icu_normalizer_data v2.0.0
+   Compiling icu_properties_data v2.0.1
+   Compiling futures-executor v0.3.31
+   Compiling fastrand v2.3.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling crypto-common v0.1.6
+   Compiling thiserror-impl v2.0.17
+   Compiling form_urlencoded v1.2.2
+   Compiling utf8_iter v1.0.4
+   Compiling getrandom v0.2.16
+   Compiling const-random-macro v0.1.16
+   Compiling futures v0.3.31
+   Compiling const-oid v0.9.6
+   Compiling const-random v0.1.18
+   Compiling windows-sys v0.59.0
+   Compiling thiserror v2.0.17
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling icu_normalizer v2.0.0
+   Compiling icu_properties v2.0.1
+   Compiling tokio-util v0.7.18
+   Compiling idna_adapter v1.2.1
+   Compiling async-trait v0.1.89
+   Compiling idna v1.1.0
+   Compiling url v2.5.7
+   Compiling chrono v0.4.44
+   Compiling cpufeatures v0.2.17
+   Compiling rand_core v0.9.3
+   Compiling zstd-sys v2.0.15+zstd.1.5.7
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.4
+   Compiling sha2 v0.10.9
+   Compiling semver v1.0.27
+   Compiling zeroize v1.8.1
+   Compiling ahash v0.8.12
+   Compiling uncased v0.9.10
+   Compiling regex-automata v0.4.13
+   Compiling num-bigint v0.4.6
+   Compiling siphasher v1.0.1
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.7
+   Compiling miniz_oxide v0.8.9
+   Compiling crc32fast v1.4.2
+   Compiling zlib-rs v0.6.2
+   Compiling phf_shared v0.12.1
+   Compiling tower-service v0.3.3
+   Compiling phf_generator v0.12.1
+   Compiling zstd-safe v7.2.4
+   Compiling static_assertions v1.1.0
+   Compiling zstd v0.13.3
+   Compiling phf_codegen v0.12.1
+   Compiling rustc_version v0.4.1
+   Compiling byteorder v1.5.0
+   Compiling chrono-tz-build v0.5.0
+   Compiling num-complex v0.4.6
+   Compiling atomic-waker v1.1.2
+   Compiling chrono-tz v0.10.4
+   Compiling half v2.7.1
+   Compiling either v1.15.0
+   Compiling regex v1.12.2
+   Compiling try-lock v0.2.5
+   Compiling want v0.3.1
+   Compiling flate2 v1.1.9
+   Compiling arrow-buffer v58.3.0
+   Compiling phf v0.12.1
+   Compiling httparse v1.10.1
+   Compiling arrow-schema v58.3.0
+   Compiling httpdate v1.0.3
+   Compiling tower-layer v0.3.3
+   Compiling arrow-data v58.3.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling hashbrown v0.17.1
+   Compiling windows_x86_64_msvc v0.48.5
+   Compiling unicode-width v0.2.1
+   Compiling windows-targets v0.48.5
+   Compiling http-body v1.0.1
+   Compiling humantime v2.2.0
+   Compiling windows-sys v0.48.0
+   Compiling lexical-util v1.0.6
+   Compiling cmake v0.1.54
+   Compiling hex v0.4.3
+   Compiling winapi-util v0.1.9
+   Compiling aws-lc-sys v0.41.0
+   Compiling rand_core v0.10.0
+   Compiling same-file v1.0.6
+   Compiling ipnet v2.11.0
+   Compiling getrandom v0.4.1
+   Compiling walkdir v2.5.0
+   Compiling lexical-parse-integer v1.0.5
+   Compiling lexical-write-integer v1.0.5
+   Compiling arrow-array v58.3.0
+   Compiling itertools v0.11.0
+   Compiling h2 v0.4.11
+   Compiling rustls-pki-types v1.12.0
+   Compiling ring v0.17.14
+   Compiling sync_wrapper v1.0.2
+   Compiling mime v0.3.17
+   Compiling arrow-select v58.3.0
+   Compiling hyper v1.6.0
+   Compiling lexical-write-float v1.0.5
+   Compiling lexical-parse-float v1.0.5
+   Compiling flatbuffers v25.2.10
+   Compiling strum_macros v0.26.4
+   Compiling hmac v0.12.1
+   Compiling strum v0.26.3
+   Compiling twox-hash v2.1.1
+   Compiling lexical-core v1.0.5
+   Compiling hyper-util v0.1.17
+   Compiling comfy-table v7.1.2
+   Compiling arrow-ord v58.3.0
+   Compiling tower v0.5.2
+   Compiling http-body-util v0.1.3
+   Compiling atoi v2.0.0
+   Compiling untrusted v0.9.0
+   Compiling arrow-cast v58.3.0
+   Compiling lz4_flex v0.13.1
+   Compiling uuid v1.21.0
+   Compiling arrow-ipc v58.3.0
+   Compiling itertools v0.14.0
+   Compiling psm v0.1.26
+   Compiling csv-core v0.1.12
+   Compiling simdutf8 v0.1.5
+   Compiling csv v1.3.1
+   Compiling object_store v0.13.2
+   Compiling snap v1.1.1
+   Compiling stacker v0.1.21
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling alloc-stdlib v0.2.2
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow v58.3.0
+   Compiling brotli-decompressor v5.0.0
+   Compiling rand_core v0.6.4
+   Compiling recursive-proc-macro-impl v0.1.1
+   Compiling ordered-float v2.10.1
+   Compiling integer-encoding v3.0.4
+   Compiling fixedbitset v0.5.7
+   Compiling thrift v0.17.0
+   Compiling aws-lc-rs v1.17.0
+   Compiling rustls v0.23.28
+   Compiling brotli v8.0.1
+   Compiling recursive v0.1.1
+   Compiling prost-derive v0.14.1
+   Compiling sqlparser_derive v0.5.0 
+(https://github.com/GreptimeTeam/sqlparser-rs.git?rev=2aefa08a8d69c96eec2d6d6703598a009bba6e4c#2aefa08a)
+   Compiling rustls-webpki v0.103.13
+   Compiling hashbrown v0.14.5
+   Compiling sqlparser v0.61.0 
+(https://github.com/GreptimeTeam/sqlparser-rs.git?rev=2aefa08a8d69c96eec2d6d6703598a009bba6e4c#2aefa08a)
+   Compiling unicase v2.8.1
+   Compiling parquet v58.3.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling block-padding v0.3.3
+   Compiling inout v0.1.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling num-iter v0.1.45
+   Compiling cipher v0.4.4
+   Compiling pbkdf2 v0.12.2
+   Compiling tower-http v0.6.11
+   Compiling tokio-stream v0.1.17
+   Compiling tokio-rustls v0.26.2
+   Compiling md-5 v0.10.6
+   Compiling hybrid-array v0.4.12
+   Compiling base64ct v1.8.0
+   Compiling cpufeatures v0.3.0
+   Compiling pem-rfc7468 v0.7.0
+   Compiling datafusion-doc v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling cmov v0.5.4
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.4
+   Compiling ctutils v0.4.2
+   Compiling der v0.7.10
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.2
+   Compiling salsa20 v0.10.2
+   Compiling tempfile v3.23.0
+   Compiling pin-project-internal v1.1.10
+   Compiling arrayvec v0.7.6
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling scrypt v0.11.0
+   Compiling pin-project v1.1.10
+   Compiling spki v0.7.3
+   Compiling cbc v0.1.2
+   Compiling aes v0.8.4
+   Compiling prost v0.14.1
+   Compiling powerfmt v0.2.0
+   Compiling pkcs5 v0.7.1
+   Compiling deranged v0.5.8
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.0
+   Compiling pkcs8 v0.10.2
+   Compiling prost-types v0.14.1
+   Compiling petgraph v0.8.3
+   Compiling unicode-segmentation v1.12.0
+   Compiling jiff-tzdb v0.1.6
+   Compiling jiff-tzdb-platform v0.1.3
+   Compiling pkcs1 v0.7.5
+   Compiling num-bigint-dig v0.8.6
+   Compiling datafusion-macros v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling dashmap v6.1.0
+   Compiling signature v2.2.0
+   Compiling thiserror-impl v1.0.69
+   Compiling blake3 v1.8.2
+   Compiling matchit v0.8.4
+   Compiling thiserror v1.0.69
+   Compiling rsa v0.9.10
+   Compiling jiff v0.2.28
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling sha1 v0.11.0
+   Compiling toml_datetime v0.6.11
+   Compiling constant_time_eq v0.3.1
+   Compiling arrayref v0.3.9
+   Compiling reqsign-core v3.0.1
+   Compiling blake2 v0.10.6
+   Compiling hyper-timeout v0.5.2
+   Compiling mime_guess v2.0.5
+   Compiling schannel v0.1.27
+   Compiling liblzma-sys v0.4.4
+   Compiling winnow v0.7.11
+   Compiling axum-core v0.5.2
+   Compiling rustls-native-certs v0.8.1
+   Compiling hyper-rustls v0.27.7
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling serde_spanned v0.6.9
+   Compiling libbz2-rs-sys v0.2.1
+   Compiling axum v0.8.4
+   Compiling libz-sys v1.1.22
+   Compiling bzip2 v0.6.1
+   Compiling toml_edit v0.22.27
+   Compiling liblzma v0.4.6
+   Compiling reqwest v0.13.4
+   Compiling tonic v0.14.2
+   Compiling md-5 v0.11.0
+   Compiling datafusion-common-runtime v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling quick-xml v0.39.4
+   Compiling datafusion-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling mea v0.6.4
+   Compiling compression-core v0.4.31
+   Compiling compression-codecs v0.4.37
+   Compiling opendal-core v0.57.0
+   Compiling snafu-derive v0.8.6
+   Compiling datafusion-expr-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-physical-expr-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-functions-window-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-functions-aggregate-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-expr v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling tinyvec_macros v0.1.1
+   Compiling strsim v0.11.1
+   Compiling tinyvec v1.9.0
+   Compiling snafu v0.8.6
+   Compiling datafusion-physical-expr v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-execution v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-functions v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling async-compression v0.4.41
+   Compiling strum_macros v0.25.3
+   Compiling prost-derive v0.13.5
+   Compiling strum_macros v0.27.1
+   Compiling datafusion-physical-plan v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-physical-expr-adapter v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling libgit2-sys v0.18.3+1.9.2
+   Compiling glob v0.3.2
+   Compiling strum v0.25.0
+   Compiling datafusion-session v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-datasource v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling strum v0.27.1
+   Compiling prost v0.13.5
+   Compiling unicode-normalization v0.1.24
+   Compiling protobuf-support v3.7.2
+   Compiling opentelemetry v0.30.0
+   Compiling unicode-bidi v0.3.18
+   Compiling unicode-properties v0.1.3
+   Compiling stringprep v0.1.5
+   Compiling protobuf v3.7.2
+   Compiling toml v0.8.23
+   Compiling cargo-manifest v0.19.1
+   Compiling prometheus v0.14.0
+   Compiling tonic-prost v0.14.2
+   Compiling opentelemetry_sdk v0.30.0
+   Compiling common-error v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\error)
+   Compiling const_format_proc_macros v0.2.34
+   Compiling git2 v0.20.4
+   Compiling time v0.3.47
+   Compiling matchers v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-serde v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling thread_local v1.1.9
+   Compiling tap v1.0.1
+   Compiling anymap2 v0.13.0
+   Compiling wyz v0.5.1
+   Compiling tracing-subscriber v0.3.20
+   Compiling const_format v0.2.34
+   Compiling greptime-proto v0.1.0 (https://github.com/GreptimeTeam/greptime-proto.git?rev=5adb8a1637abe8
+7bcbb455d32136eee5d538cc49#5adb8a16)
+   Compiling common-version v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\version)
+   Compiling radium v0.7.0
+   Compiling tonic v0.13.1
+   Compiling reqwest v0.12.24
+   Compiling crossbeam-channel v0.5.15
+   Compiling funty v2.0.0
+   Compiling bitvec v1.0.1
+   Compiling common-macro v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\macro)
+   Compiling opentelemetry-http v0.30.0
+   Compiling opentelemetry-proto v0.30.0
+   Compiling humantime-serde v1.1.1
+   Compiling dlv-list v0.5.2
+   Compiling fallible-iterator v0.2.0
+   Compiling rustc-demangle v0.1.25
+   Compiling backtrace v0.3.75
+   Compiling postgres-protocol v0.6.8
+   Compiling opentelemetry-otlp v0.30.0
+   Compiling ordered-multimap v0.7.3
+   Compiling bigdecimal v0.4.8
+   Compiling common-base v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\base)
+   Compiling tracing-appender v0.2.3
+   Compiling tracing-opentelemetry v0.31.0
+   Compiling array-init v2.1.0
+   Compiling trim-in-place v0.1.7
+   Compiling opentelemetry-semantic-conventions v0.30.0
+   Compiling rust-ini v0.21.1
+   Compiling postgres-types v0.2.9
+   Compiling rust_decimal v1.42.0
+   Compiling datafusion-pruning v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-catalog v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-functions-aggregate v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling crc32c v0.6.8
+   Compiling syn v1.0.109
+   Compiling common-telemetry v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\telemetry)
+   Compiling datafusion-functions-nested v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling winapi v0.3.9
+   Compiling reqsign-file-read-tokio v3.0.1
+   Compiling num-rational v0.4.2
+   Compiling quick-xml v0.40.1
+   Compiling anstyle v1.0.11
+   Compiling once_cell_polyfill v1.70.1
+   Compiling utf8parse v0.2.2
+   Compiling minimal-lexical v0.2.1
+   Compiling nom v7.1.3
+   Compiling reqsign-aws-v4 v3.0.1
+   Compiling anstyle-parse v0.2.7
+   Compiling anstyle-wincon v3.0.9
+   Compiling datafusion-sql v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling datafusion-datasource-parquet v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-datasource-json v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-datasource-arrow v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-datasource-csv v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling anstyle-query v1.1.3
+   Compiling datafusion-functions-table v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-catalog-listing v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling is_terminal_polyfill v1.70.1
+   Compiling colorchoice v1.0.4
+   Compiling anstream v0.6.19
+   Compiling windows-targets v0.53.5
+   Compiling num v0.4.3
+   Compiling datafusion-physical-optimizer v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-optimizer v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling datafusion-functions-window v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling pem v3.0.5
+   Compiling ucd-trie v0.1.7
+   Compiling clap_lex v0.7.5
+   Compiling clap_builder v4.5.40
+   Compiling pest v2.8.1
+   Compiling reqsign-azure-storage v3.0.1
+   Compiling windows-sys v0.60.2
+   Compiling io-lifetimes v3.0.1
+   Compiling io-lifetimes v2.0.4
+   Compiling reqsign-google v3.0.1
+   Compiling clocksource v0.8.1
+   Compiling reqsign-aliyun-oss v3.1.0
+   Compiling datafusion v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling opendal-service-azure-common v0.57.0
+   Compiling opendal-layer-observe-metrics-common v0.57.0
+   Compiling clap_derive v4.5.40
+   Compiling backon v1.6.0
+   Compiling ordered-float v4.6.0
+   Compiling link-section v0.18.1
+   Compiling fast-float2 v0.2.3
+   Compiling num_cpus v1.17.0
+   Compiling ctor v1.0.7
+   Compiling jsonb v0.4.4
+   Compiling clap v4.5.40
+   Compiling opendal-layer-retry v0.57.0
+   Compiling opendal-layer-prometheus v0.57.0
+   Compiling opendal-service-azblob v0.57.0
+   Compiling opendal-service-oss v0.57.0
+   Compiling opendal-service-gcs v0.57.0
+   Compiling ratelimit v0.10.0
+   Compiling fs-set-times v0.20.3
+   Compiling io-extras v0.19.0
+   Compiling ahash v0.7.8
+   Compiling pest_meta v2.8.1
+   Compiling opendal-service-s3 v0.57.0
+   Compiling sqlparser_derive v0.1.1
+   Compiling common-decimal v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\decimal)
+   Compiling common-time v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\time)
+   Compiling opendal-layer-concurrent-limit v0.57.0
+   Compiling opendal-layer-logging v0.57.0
+   Compiling opendal-layer-tracing v0.57.0
+   Compiling opendal-layer-timeout v0.57.0
+   Compiling opendal-service-fs v0.57.0
+   Compiling opendal-service-http v0.57.0
+   Compiling winx v0.36.4
+   Compiling filetime v0.2.25
+   Compiling enum_dispatch v0.3.13
+   Compiling ambient-authority v0.0.2
+   Compiling maybe-owned v0.3.4
+   Compiling datatypes v1.2.0 (C:\Users\palak_uge27\greptimedb\src\datatypes)
+   Compiling cap-primitives v4.0.2
+   Compiling opendal v0.57.0
+   Compiling pest_generator v2.8.1
+   Compiling hashbrown v0.12.3
+   Compiling common-runtime v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\runtime)
+   Compiling bitflags v1.3.2
+   Compiling dlv-list v0.3.0
+   Compiling ordered-multimap v0.4.3
+   Compiling pest_derive v2.8.1
+   Compiling cap-std v4.0.2
+   Compiling darling_core v0.23.0
+   Compiling darling_core v0.20.11
+   Compiling lz4-sys v1.11.1+lz4-1.10.0
+   Compiling base64 v0.13.1
+   Compiling linked-hash-map v0.5.6
+   Compiling toml_write v0.1.2
+   Compiling ron v0.7.1
+   Compiling yaml-rust v0.4.5
+   Compiling darling_macro v0.20.11
+   Compiling darling_macro v0.23.0
+   Compiling object-store v1.2.0 (C:\Users\palak_uge27\greptimedb\src\object-store)
+   Compiling json5 v0.4.1
+   Compiling rust-ini v0.18.0
+   Compiling common-memory-manager v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\memory-manager)
+   Compiling toml v0.5.11
+   Compiling arc-swap v1.7.1
+   Compiling notify-types v2.0.0
+   Compiling pathdiff v0.2.3
+   Compiling config v0.13.4
+   Compiling notify v8.0.0
+   Compiling darling v0.23.0
+   Compiling darling v0.20.11
+   Compiling core2 v0.4.0
+   Compiling rsasl v2.2.1
+   Compiling common-config v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\config)
+   Compiling derive_builder_core v0.20.2
+   Compiling serde_with_macros v3.21.0
+   Compiling lz4 v1.28.1
+   Compiling api v1.2.0 (C:\Users\palak_uge27\greptimedb\src\api)
+   Compiling arrow-flight v58.3.0
+   Compiling proc-macro-crate v3.3.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling include_dir_macros v0.7.4
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling integer-encoding v4.0.2
+   Compiling vec1 v1.12.1
+   Compiling rskafka v0.6.0 
+(https://github.com/GreptimeTeam/rskafka.git?rev=f5688f83e7da591cda3f2674c2408b4c0ed4ed50#f5688f83)
+   Compiling proc-macro-error2 v2.0.1
+   Compiling include_dir v0.7.4
+   Compiling rustls-native-certs v0.7.3
+   Compiling common-recordbatch v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\recordbatch)
+   Compiling num_enum_derive v0.7.4
+   Compiling serde_with v3.21.0
+   Compiling common-grpc v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\grpc)
+   Compiling derive_builder_macro v0.20.2
+   Compiling itertools v0.10.5
+   Compiling bytemuck v1.23.1
+   Compiling derive_builder v0.20.2
+   Compiling common-wal v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\wal)
+   Compiling aquamarine v0.6.0
+   Compiling num_enum v0.7.4
+   Compiling prettyplease v0.2.37
+   Compiling pulldown-cmark v0.13.0
+   Compiling common-sql v1.2.0 (C:\Users\palak_uge27\greptimedb\src\common\sql)
+   Compiling pulldown-cmark-to-cmark v21.1.0
+   Compiling petgraph v0.7.1
+   Compiling prost-build v0.14.1
+   Compiling store-api v1.2.0 (C:\Users\palak_uge27\greptimedb\src\store-api)
+   Compiling vergen v8.3.2
+   Compiling crossbeam-epoch v0.9.18
+   Compiling datafusion-proto-common v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)
+   Compiling lzokay-native v0.1.0
+   Compiling lz4_flex v0.11.6
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling orc-rust v0.8.0
+   Compiling datafusion-proto v53.1.0 
+(https://github.com/GreptimeTeam/datafusion.git?rev=6d6ae9a8073900bdf89d098d491d4dc0269699b0#6d6ae9a8)

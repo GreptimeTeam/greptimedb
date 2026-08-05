@@ -21,43 +21,25 @@ use crate::engine::FlowStatProvider;
 
 impl FlowStatProvider for StreamingEngine {
     async fn flow_stat(&self) -> FlowStat {
-        let mut full_report = BTreeMap::new();
+        let mut state_size_map = BTreeMap::new();
         let mut last_exec_time_map = BTreeMap::new();
         let mut start_time_map = BTreeMap::new();
 
         for worker in self.worker_handles.iter() {
-            match worker.get_state_size().await {
-                Ok(state_size) => {
-                    full_report.extend(state_size.into_iter().map(|(k, v)| (k as u32, v)));
+            match worker.get_full_flow_stat().await {
+                Ok((sizes, exec_times, start_times)) => {
+                    state_size_map.extend(sizes.into_iter().map(|(k, v)| (k as u32, v)));
+                    last_exec_time_map.extend(exec_times.into_iter().map(|(k, v)| (k as u32, v)));
+                    start_time_map.extend(start_times.into_iter().map(|(k, v)| (k as u32, v)));
                 }
                 Err(err) => {
-                    common_telemetry::error!(err; "Get flow stat size error");
-                }
-            }
-
-            match worker.get_last_exec_time_map().await {
-                Ok(last_exec_time) => {
-                    last_exec_time_map
-                        .extend(last_exec_time.into_iter().map(|(k, v)| (k as u32, v)));
-                }
-                Err(err) => {
-                    common_telemetry::error!(err; "Get last exec time error");
-                }
-            }
-
-            match worker.get_flow_exec_stats().await {
-                Ok(stats) => {
-                    start_time_map
-                        .extend(stats.start_time_map.into_iter().map(|(k, v)| (k as u32, v)));
-                }
-                Err(err) => {
-                    common_telemetry::error!(err; "Get flow exec stats error");
+                    common_telemetry::error!(err; "Get full flow stat error");
                 }
             }
         }
 
         FlowStat {
-            state_size: full_report,
+            state_size: state_size_map,
             last_exec_time_map,
             start_time_map,
         }

@@ -26,6 +26,12 @@ ADMIN FLUSH_FLOW('test_flow_status');
 -- flow_name is deterministic; the rest of the columns are runtime dependent.
 SELECT flow_name FROM information_schema.flow_statistics WHERE flow_name = 'test_flow_status';
 
+-- SHOW FLOW STATUS is exercised below via the empty-result form (six-column header).
+-- Full row values differ between standalone (populated) and distributed (heartbeat
+-- has not yet propagated start_time), so assert only the stable columns here.
+-- SQLNESS REPLACE (\|\s+[0-9]+\s+\|) | ID |
+SELECT flow_id, flow_name FROM information_schema.flow_statistics WHERE flow_name = 'test_flow_status';
+
 -- the like filter matches against flow_name; no matching flow returns empty.
 SHOW FLOW STATUS LIKE 'no_such_flow';
 
