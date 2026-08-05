@@ -28,6 +28,9 @@ use common_query::native_histogram::{
     NativeHistogram, is_native_histogram_value_type, read_histogram,
 };
 use common_query::prometheus::{format_prometheus_float, is_prometheus_stale_nan};
+use common_query::promql_annotations::{
+    PromqlAnnotationCollector, get_promql_annotation_collector,
+};
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::arrow_array::string_array_value_at_index;
@@ -80,6 +83,8 @@ pub struct PrometheusJsonResponse {
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infos: Option<Vec<String>>,
 
     #[serde(skip)]
     pub status_code: Option<StatusCode>,
@@ -124,6 +129,7 @@ impl PrometheusJsonResponse {
             error: Some(reason.into()),
             error_type: Some(error_type.to_string()),
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: Some(error_type),
         }
@@ -136,9 +142,26 @@ impl PrometheusJsonResponse {
             error: None,
             error_type: None,
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: None,
         }
+    }
+
+    /// Adds collected PromQL warnings and infos to the response.
+    fn append_promql_annotations(&mut self, collector: &PromqlAnnotationCollector) {
+        let mut warnings = self.warnings.take().unwrap_or_default();
+        let mut infos = self.infos.take().unwrap_or_default();
+        collector.append_to(&mut warnings, &mut infos);
+        self.warnings = (!warnings.is_empty()).then_some(warnings);
+        self.infos = (!infos.is_empty()).then_some(infos);
+    }
+
+    /// Merges data and annotations from another expanded PromQL query response.
+    pub(crate) fn append_query_response(&mut self, mut other: Self) {
+        self.data.append(other.data);
+        merge_annotations(&mut self.warnings, other.warnings.take());
+        merge_annotations(&mut self.infos, other.infos.take());
     }
 
     /// Convert from `Result<Output>`
@@ -146,7 +169,10 @@ impl PrometheusJsonResponse {
         result: Result<Output>,
         metric_name: Option<String>,
         result_type: ValueType,
+        query_id: Option<&str>,
     ) -> Self {
+        // Hold the collector while a streaming result is consumed.
+        let collector = query_id.and_then(get_promql_annotation_collector);
         let response: Result<Self> = try {
             let result = result?;
             let mut resp =
@@ -187,7 +213,7 @@ impl PrometheusJsonResponse {
 
         let result_type_string = result_type.to_string();
 
-        match response {
+        let mut response = match response {
             Ok(resp) => resp,
             Err(err) => {
                 // Prometheus won't report error if querying nonexist label and metric
@@ -202,7 +228,11 @@ impl PrometheusJsonResponse {
                     Self::error(err.status_code(), err.output_msg())
                 }
             }
+        };
+        if let Some(collector) = collector {
+            response.append_promql_annotations(&collector);
         }
+        response
     }
 
     /// Convert [RecordBatches] to [PromData]
@@ -435,6 +465,16 @@ impl PrometheusJsonResponse {
     }
 }
 
+fn merge_annotations(target: &mut Option<Vec<String>>, source: Option<Vec<String>>) {
+    let Some(source) = source else {
+        return;
+    };
+    let target = target.get_or_insert_default();
+    target.extend(source);
+    target.sort();
+    target.dedup();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -444,6 +484,9 @@ mod tests {
         native_histogram_value_type,
     };
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
+    use common_query::promql_annotations::{
+        PromqlAnnotationCollector, promql_annotation_collector,
+    };
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -452,6 +495,40 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn query_response_preserves_and_merges_promql_annotations() {
+        let query_id = "query_response_preserves_and_merges_promql_annotations";
+        let left = promql_annotation_collector(query_id);
+        left.record_warning("shared warning");
+        left.record_info("left info");
+        let mut response = PrometheusJsonResponse::from_query_result(
+            Ok(Output::new_with_record_batches(RecordBatches::empty())),
+            None,
+            ValueType::Vector,
+            Some(query_id),
+        )
+        .await;
+
+        let right = PromqlAnnotationCollector::default();
+        right.record_warning("shared warning");
+        right.record_info("right info");
+        let mut other = PrometheusJsonResponse::success(PrometheusResponse::None);
+        other.append_promql_annotations(&right);
+        response.append_query_response(other);
+
+        assert_eq!(response.warnings, Some(vec!["shared warning".to_string()]));
+        assert_eq!(
+            response.infos,
+            Some(vec!["left info".to_string(), "right info".to_string()])
+        );
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["warnings"], serde_json::json!(["shared warning"]));
+        assert_eq!(
+            json["infos"],
+            serde_json::json!(["left info", "right info"])
+        );
+    }
 
     fn sample_histogram() -> NativeHistogram {
         NativeHistogram {
