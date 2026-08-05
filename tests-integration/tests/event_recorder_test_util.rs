@@ -70,22 +70,6 @@ pub(crate) async fn find_eventually_u32(
     panic!("timed out waiting for event query: {query}");
 }
 
-/// Returns the first non-null boolean from `column` once the query produces one.
-pub(crate) async fn find_eventually_bool(
-    instance: &Arc<Instance>,
-    query: &str,
-    column: &str,
-) -> bool {
-    for _ in 0..MAX_ATTEMPTS {
-        if let Some(value) = query_first_bool(instance, query, column).await {
-            return value;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-
-    panic!("timed out waiting for event query: {query}");
-}
-
 /// Asserts that the query eventually returns the expected pretty-printed rows.
 pub(crate) async fn assert_eventually_eq(instance: &Arc<Instance>, query: &str, expected: &str) {
     let mut last_actual = None;
@@ -148,17 +132,6 @@ async fn query_first_u32(instance: &Arc<Instance>, query: &str, column: &str) ->
     batch
         .column_by_name(column)?
         .as_primitive::<UInt32Type>()
-        .iter()
-        .next()
-        .flatten()
-}
-
-async fn query_first_bool(instance: &Arc<Instance>, query: &str, column: &str) -> Option<bool> {
-    let batches = query_record_batches(instance, query).await?;
-    let batch = batches.take().into_iter().next()?;
-    batch
-        .column_by_name(column)?
-        .as_boolean()
         .iter()
         .next()
         .flatten()

@@ -52,9 +52,10 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
+use crate::rpc::ddl::{DropTableTask, QueryContext, TriggerContext, TruncateTableTask};
+#[cfg(feature = "enterprise")]
 use crate::rpc::ddl::{
-    DropTableTask, PurgeDroppedTableTask, QueryContext, TriggerContext, TriggerReason,
-    TruncateTableTask, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
+    PurgeDroppedTableTask, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
 };
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 

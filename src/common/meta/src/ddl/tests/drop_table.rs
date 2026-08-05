@@ -65,9 +65,9 @@ use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::KvBackend;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
-use crate::rpc::ddl::{DropTableTask, QueryContext, TriggerContext};
+use crate::rpc::ddl::{DropTableTask, TriggerContext};
 #[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
+use crate::rpc::ddl::{PurgeDroppedTableTask, QueryContext, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
 #[cfg(feature = "enterprise")]
 use crate::rpc::store::{BatchDeleteRequest, PutRequest};

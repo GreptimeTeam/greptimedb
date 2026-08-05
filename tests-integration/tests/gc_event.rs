@@ -25,7 +25,7 @@ use session::context::QueryContext;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{StorageType, get_test_store_config};
 
-use crate::event_recorder_test_util::{find_eventually_bool, find_eventually_string};
+use crate::event_recorder_test_util::find_eventually_string;
 
 const TABLE_NAME: &str = "batch_gc_events";
 const MAX_ATTEMPTS: usize = 60;
@@ -145,14 +145,17 @@ async fn test_batch_gc_event() {
     assert_sst_count(&cluster, 1).await;
 
     let submitted = format!(
-        r#"SELECT json_path_match(trigger_context, '$.reason.type == "manual"') AS manual_trigger_reason
+        r#"SELECT json_to_string(trigger_context) AS trigger_context
 FROM greptime_private.events
 WHERE type = 'batch_gc'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Running'
-  AND json_path_match(procedure_trigger, '$.type == "Submitted"')"#,
+  AND json_get_string(procedure_trigger, 'type') = 'Submitted'"#,
     );
-    assert!(find_eventually_bool(instance, &submitted, "manual_trigger_reason").await);
+    assert_eq!(
+        r#"{"reason":{"type":"manual"},"protocol":"unknown","extensions":{}}"#,
+        find_eventually_string(instance, &submitted, "trigger_context").await
+    );
 
     let succeeded = format!(
         r#"SELECT json_to_string(gc_report) AS gc_report

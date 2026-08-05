@@ -2571,8 +2571,8 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     // the generic inserter. Its submitted events must retain this origin.
     wait_for_data(
         &client,
-        "SELECT count(*) > 0 FROM greptime_private.events WHERE type IN ('create_table', 'create_logical_tables') AND json_path_match(trigger_context, '$.reason.type == \"auto_create\"') AND json_path_match(trigger_context, '$.protocol == \"prometheus\"')",
-        "[[true]]",
+        "SELECT DISTINCT json_to_string(trigger_context) FROM greptime_private.events WHERE type IN ('create_table', 'create_logical_tables') AND json_get_string(procedure_trigger, 'type') = 'Submitted'",
+        r#"[["{\"reason\":{\"type\":\"auto_create\"},\"protocol\":\"prometheus\",\"extensions\":{}}"]]"#,
     )
     .await;
 
@@ -2622,8 +2622,8 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     // direct DDL path outside the generic inserter.
     wait_for_data(
         &client,
-        "SELECT count(*) > 0 FROM greptime_private.events WHERE type IN ('alter_table', 'alter_logical_tables') AND json_path_match(trigger_context, '$.reason.type == \"auto_alter\"') AND json_path_match(trigger_context, '$.protocol == \"prometheus\"')",
-        "[[true]]",
+        "SELECT DISTINCT json_to_string(trigger_context) FROM greptime_private.events WHERE type IN ('alter_table', 'alter_logical_tables') AND json_get_string(procedure_trigger, 'type') = 'Submitted'",
+        r#"[["{\"reason\":{\"type\":\"auto_alter\"},\"protocol\":\"prometheus\",\"extensions\":{}}"]]"#,
     )
     .await;
 
@@ -7145,8 +7145,8 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     // alter-table call, so it must identify itself as an OTLP auto alteration.
     wait_for_data(
         &client,
-        "SELECT count(*) > 0 FROM greptime_private.events WHERE type = 'alter_table' AND json_path_match(trigger_context, '$.reason.type == \"auto_alter\"') AND json_path_match(trigger_context, '$.protocol == \"otlp\"')",
-        "[[true]]",
+        "SELECT DISTINCT json_to_string(trigger_context) FROM greptime_private.events WHERE type = 'alter_table' AND json_get_string(procedure_trigger, 'type') = 'Submitted'",
+        r#"[["{\"reason\":{\"type\":\"auto_alter\"},\"protocol\":\"otlp\",\"extensions\":{}}"]]"#,
     )
     .await;
 

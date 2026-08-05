@@ -367,7 +367,7 @@ pub async fn test_metric_table_region_migration_by_sql(
         .await
         .remove(0);
 
-    let expected = "\
+    let expected = r#"\
 +-------+-------------------------+-----+
 | host  | ts                      | val |
 +-------+-------------------------+-----+
@@ -383,7 +383,7 @@ pub async fn test_metric_table_region_migration_by_sql(
         .await
         .remove(0);
 
-    let expected = "\
+    let expected = r#"\
 +------+-------------------------+-----+
 | job  | ts                      | val |
 +------+-------------------------+-----+
@@ -1348,8 +1348,8 @@ async fn check_region_migration_events_system_table(
             Alias::new("procedure_trigger"),
         )
         .expr_as(
-            Expr::cust("json_path_match(trigger_context, '$.reason.type == \"manual\"')"),
-            Alias::new("manual_trigger_reason"),
+            Expr::cust("json_to_string(trigger_context)"),
+            Alias::new("trigger_context"),
         )
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
@@ -1366,11 +1366,11 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+---------------------------------+-----------------+-------------------+-----------------------+
-| region_migration_trigger_reason | procedure_state | procedure_trigger | manual_trigger_reason |
-+---------------------------------+-----------------+-------------------+-----------------------+
-| Manual                          | Running         | Submitted         | true                  |
-| Manual                          | Done            | Succeeded         |                       |
-+---------------------------------+-----------------+-------------------+-----------------------+";
++---------------------------------+-----------------+-------------------+--------------------------------------------------------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger | trigger_context                                                    |
++---------------------------------+-----------------+-------------------+--------------------------------------------------------------------+
+| Manual                          | Running         | Submitted         | {\"reason\":{\"type\":\"manual\"},\"protocol\":\"unknown\",\"extensions\":{}} |
+| Manual                          | Done            | Succeeded         |                                                                    |
++---------------------------------+-----------------+-------------------+--------------------------------------------------------------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }

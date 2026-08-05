@@ -21,7 +21,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, InvalidTimezoneSnafu};
 
-/// Adds an explicit trigger reason to a query context for a derived DDL operation.
+/// Adds an explicit trigger reason to a query context for a DDL operation.
 pub fn with_trigger_reason(ctx: QueryContextRef, reason: TriggerReason) -> QueryContextRef {
     let mut ctx = ctx.as_ref().clone();
     ctx.set_extension(TRIGGER_REASON_EXTENSION_KEY, reason.as_ref());

@@ -683,13 +683,27 @@ async fn assert_trigger_context(
     reason: &str,
     protocol: &str,
 ) {
-    let query = format!(
-        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"Submitted\"') AND json_path_match(trigger_context, '$.reason.type == \"{reason}\"') AND json_path_match(trigger_context, '$.protocol == \"{protocol}\"')",
+    let event_filter = format!(
+        "FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_get_string({}, 'type') = 'Submitted'",
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
     );
-    assert_single_event(instance, &query).await;
+    assert_single_event(
+        instance,
+        &format!("SELECT count(*) AS event_count {event_filter}"),
+    )
+    .await;
+
+    let actual = find_eventually_string(
+        instance,
+        &format!("SELECT json_to_string(trigger_context) AS trigger_context {event_filter}"),
+        "trigger_context",
+    )
+    .await;
+    let expected =
+        format!(r#"{{"reason":{{"type":"{reason}"}},"protocol":"{protocol}","extensions":{{}}}}"#);
+    assert_eq!(expected, actual);
 }
 
 async fn find_table_id(instance: &Arc<Instance>, table_name: &str) -> u32 {

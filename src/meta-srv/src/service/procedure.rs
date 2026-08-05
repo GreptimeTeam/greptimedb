@@ -33,7 +33,6 @@ use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
 };
-use session::context::Channel;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
@@ -103,7 +102,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
         restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
-        let protocol = Channel::from(query_context.channel as u32).to_string();
+        let protocol = query_context.channel_protocol();
         let trigger_context = TriggerContext::from_query_context(&mut query_context, protocol);
 
         let resp = self
