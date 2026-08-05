@@ -32,11 +32,35 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APACHE_CONFIG = "licenserc.toml"
 ENTERPRISE_CONFIG = "licenserc-enterprise.toml"
+ENTERPRISE_EXCLUDES_START = "# enterprise:start"
+ENTERPRISE_EXCLUDES_END = "# enterprise:end"
 
 ATTRIBUTE = re.compile(r"#\[[^\]]*\]")
-ENTERPRISE_FEATURE = re.compile(r'feature\s*=\s*"enterprise"')
-MOD_DECL = re.compile(r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+MOD_DECL = re.compile(
+    r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
 MODULE_ROOTS = {"mod.rs", "lib.rs", "main.rs"}
+CFG_ATTRIBUTE = re.compile(r"#\[\s*cfg\s*\((.*)\)\s*\]")
+ENTERPRISE_FEATURE = re.compile(r'feature\s*=\s*"enterprise"')
+
+
+def cfg_requires_enterprise(attribute):
+    """Whether `attribute` prevents the item from compiling without enterprise."""
+    match = CFG_ATTRIBUTE.fullmatch(attribute)
+    if not match:
+        return False
+    predicate = match.group(1).strip()
+    if not ENTERPRISE_FEATURE.search(predicate):
+        return False
+    if ENTERPRISE_FEATURE.fullmatch(predicate):
+        return True
+
+    all_match = re.fullmatch(r"all\((.*)\)", predicate)
+    if all_match:
+        terms = [term.strip() for term in all_match.group(1).split(",")]
+        return any(ENTERPRISE_FEATURE.fullmatch(term) for term in terms)
+
+    return False
 
 
 def parse_mod_decls(source):
@@ -46,12 +70,17 @@ def parse_mod_decls(source):
     """
     attributes = []
     for line in source.splitlines():
-        attributes.extend(ATTRIBUTE.findall(line))
-        rest = ATTRIBUTE.sub("", line)
+        rest = line.lstrip()
+        while rest.startswith("#["):
+            attribute = ATTRIBUTE.match(rest)
+            if not attribute:
+                break
+            attributes.append(attribute.group())
+            rest = rest[attribute.end() :].lstrip()
 
         match = MOD_DECL.match(rest)
         if match:
-            gated = any(ENTERPRISE_FEATURE.search(attr) for attr in attributes)
+            gated = any(cfg_requires_enterprise(attr) for attr in attributes)
             yield match.group(1), gated
             attributes = []
             continue
@@ -124,6 +153,18 @@ def load_paths(config_path, key):
         return set(tomllib.load(config).get(key, []))
 
 
+def load_marked_paths(config_path, start_marker, end_marker):
+    """Load a TOML array fragment delimited by comment markers."""
+    source = config_path.read_text(encoding="utf-8")
+    try:
+        fragment = source.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    except IndexError as error:
+        raise ValueError(
+            f"Missing {start_marker!r} or {end_marker!r} in {config_path}"
+        ) from error
+    return set(tomllib.loads(f"paths = [{fragment}]")["paths"])
+
+
 def report(title, paths):
     print(f"\n{title}:")
     for path in sorted(paths):
@@ -136,13 +177,23 @@ def main():
     gated = {path.relative_to(REPO_ROOT).as_posix() for path in gated_files}
 
     enterprise_includes = load_paths(REPO_ROOT / ENTERPRISE_CONFIG, "includes")
-    apache_excludes = load_paths(REPO_ROOT / APACHE_CONFIG, "excludes")
-
+    enterprise_excludes = load_marked_paths(
+        REPO_ROOT / APACHE_CONFIG,
+        ENTERPRISE_EXCLUDES_START,
+        ENTERPRISE_EXCLUDES_END,
+    )
     missing_includes = gated - enterprise_includes
-    missing_excludes = (gated | enterprise_includes) - apache_excludes
-    stale = enterprise_includes - gated
+    missing_excludes = gated - enterprise_excludes
+    stale_includes = enterprise_includes - gated
+    stale_excludes = enterprise_excludes - gated
 
-    if not (missing_includes or missing_excludes or stale or unresolved):
+    if not (
+        missing_includes
+        or missing_excludes
+        or stale_includes
+        or stale_excludes
+        or unresolved
+    ):
         print(f"Enterprise license lists are in sync ({len(gated)} gated files).")
         return
 
@@ -157,11 +208,17 @@ def main():
             "(the Apache-2.0 header must not be applied to them)",
             missing_excludes,
         )
-    if stale:
+    if stale_includes:
         report(
             f"Stale `includes` in {ENTERPRISE_CONFIG} (file is gone, or is no "
-            "longer behind `#[cfg(feature = \"enterprise\")]`)",
-            stale,
+            'longer behind `#[cfg(feature = "enterprise")]`)',
+            stale_includes,
+        )
+    if stale_excludes:
+        report(
+            f"Stale enterprise `excludes` in {APACHE_CONFIG} (file is gone, or "
+            "is no longer enterprise-gated)",
+            stale_excludes,
         )
     if unresolved:
         print("\nEnterprise-gated modules whose file could not be located:")

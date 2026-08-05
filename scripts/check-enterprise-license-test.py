@@ -59,6 +59,19 @@ class ParseModDeclsTest(unittest.TestCase):
             {"recycle_bin_test": True},
         )
 
+    def test_non_gating_enterprise_attributes_are_ignored(self):
+        self.assertEqual(
+            self.parse(
+                """
+                #[cfg(any(test, feature = "enterprise"))]
+                mod shared_test;
+                #[cfg_attr(feature = "enterprise", allow(dead_code))]
+                mod shared;
+                """
+            ),
+            {"shared_test": False, "shared": False},
+        )
+
     def test_doc_comment_between_attribute_and_declaration(self):
         self.assertEqual(
             self.parse(
@@ -181,6 +194,32 @@ class CollectGatedFilesTest(unittest.TestCase):
 
             self.assertEqual(gated, set())
             self.assertEqual(unresolved, [(declaring, "elsewhere")])
+
+
+class ConfigSyncTest(unittest.TestCase):
+    def test_load_marked_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = write(
+                Path(temp_dir),
+                "licenserc.toml",
+                """
+                excludes = [
+                    "copied.rs",
+                    # enterprise:start
+                    "gated.rs",
+                    # enterprise:end
+                ]
+                """,
+            )
+
+            self.assertEqual(
+                checker.load_marked_paths(
+                    config,
+                    checker.ENTERPRISE_EXCLUDES_START,
+                    checker.ENTERPRISE_EXCLUDES_END,
+                ),
+                {"gated.rs"},
+            )
 
 
 if __name__ == "__main__":
