@@ -419,8 +419,8 @@ mod tests {
         i.lit()
     }
 
-    fn qx_031_build_predicates(exprs: &[Expr]) -> Option<BTreeMap<ColumnId, Vec<InListPredicate>>> {
-        let (_d, factory) = PuffinManagerFactory::new_for_test_block("qx_031_bloom_builder_");
+    fn build_bloom_predicates(exprs: &[Expr]) -> Option<BTreeMap<ColumnId, Vec<InListPredicate>>> {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("bloom_builder_");
         let metadata = test_region_metadata();
         BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
@@ -434,7 +434,7 @@ mod tests {
         .map(|applier| (*applier.default_predicates).clone())
     }
 
-    fn qx_031_int64_predicate(values: impl IntoIterator<Item = i64>) -> InListPredicate {
+    fn int64_inlist_predicate(values: impl IntoIterator<Item = i64>) -> InListPredicate {
         InListPredicate {
             list: values
                 .into_iter()
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn qx_031_bloom_pure_literal_in_extracts_exact_predicate() {
+    fn bloom_pure_literal_in_extracts_exact_predicate() {
         let expr = Expr::InList(InList {
             expr: Box::new(column("column2")),
             list: vec![int64_lit(1), int64_lit(2), int64_lit(3)],
@@ -458,27 +458,27 @@ mod tests {
         });
 
         assert_eq!(
-            qx_031_build_predicates(&[expr]),
+            build_bloom_predicates(&[expr]),
             Some(BTreeMap::from([(
                 2,
-                vec![qx_031_int64_predicate([1, 2, 3])]
+                vec![int64_inlist_predicate([1, 2, 3])]
             )]))
         );
     }
 
     #[test]
-    fn qx_031_bloom_pure_nonliteral_in_does_not_extract_predicate() {
+    fn bloom_pure_nonliteral_in_does_not_extract_predicate() {
         let expr = Expr::InList(InList {
             expr: Box::new(column("column1")),
             list: vec![column("column1")],
             negated: false,
         });
 
-        assert_eq!(qx_031_build_predicates(&[expr]), None);
+        assert_eq!(build_bloom_predicates(&[expr]), None);
     }
 
     #[test]
-    fn qx_031_bloom_mixed_literal_null_in_extracts_exact_predicate() {
+    fn bloom_mixed_literal_null_in_extracts_exact_predicate() {
         let expr = Expr::InList(InList {
             expr: Box::new(column("column2")),
             list: vec![
@@ -490,13 +490,13 @@ mod tests {
         });
 
         assert_eq!(
-            qx_031_build_predicates(&[expr]),
-            Some(BTreeMap::from([(2, vec![qx_031_int64_predicate([1, 3])])]))
+            build_bloom_predicates(&[expr]),
+            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([1, 3])])]))
         );
     }
 
     #[test]
-    fn qx_031_bloom_all_literal_null_in_does_not_extract_predicate() {
+    fn bloom_all_literal_null_in_does_not_extract_predicate() {
         let expr = Expr::InList(InList {
             expr: Box::new(column("column2")),
             list: vec![
@@ -506,11 +506,11 @@ mod tests {
             negated: false,
         });
 
-        assert_eq!(qx_031_build_predicates(&[expr]), None);
+        assert_eq!(build_bloom_predicates(&[expr]), None);
     }
 
     #[test]
-    fn qx_031_bloom_mixed_nonliteral_in_keeps_only_independent_predicate() {
+    fn bloom_mixed_nonliteral_in_keeps_only_independent_predicate() {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::InList(InList {
                 expr: Box::new(column("column1")),
@@ -522,20 +522,20 @@ mod tests {
         });
 
         assert_eq!(
-            qx_031_build_predicates(&[expr]),
-            Some(BTreeMap::from([(2, vec![qx_031_int64_predicate([42])])]))
+            build_bloom_predicates(&[expr]),
+            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([42])])]))
         );
     }
 
     #[test]
-    fn qx_031_bloom_encoding_failure_in_does_not_extract_predicate() {
+    fn bloom_encoding_failure_in_does_not_extract_predicate() {
         let expr = Expr::InList(InList {
             expr: Box::new(column("column2")),
             list: vec![int64_lit(1), "not_an_int64".lit()],
             negated: false,
         });
 
-        assert_eq!(qx_031_build_predicates(&[expr]), None);
+        assert_eq!(build_bloom_predicates(&[expr]), None);
     }
 
     #[test]
