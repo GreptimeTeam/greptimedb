@@ -248,12 +248,6 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
-    /// Validation mode while decoding Prometheus remote write requests.
-    pub prom_validation_mode: PromValidationMode,
-
-    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
-    pub experimental_enable_prometheus_native_histogram: bool,
-
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
@@ -279,8 +273,6 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
-            prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: true,
             enable_api_server: false,
             api_server_addr: format!("127.0.0.1:{}", DEFAULT_HTTP_API_ADDR_PORT),
@@ -697,6 +689,7 @@ impl HttpServerBuilder {
         pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
+        experimental_enable_prometheus_native_histogram: bool,
         pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
@@ -704,9 +697,7 @@ impl HttpServerBuilder {
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
-            experimental_enable_prometheus_native_histogram: self
-                .options
-                .experimental_enable_prometheus_native_histogram,
+            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         };
 
