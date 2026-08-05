@@ -1006,17 +1006,12 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
         )
         .await;
 
-    // 5 files to compact.
+    // 40 files to compact. The first task picks 32, leaving 8 for the pending request.
     let end = 1000 * 1000;
-    let version_control = Arc::new(
-        builder
-            .push_l0_file(0, end)
-            .push_l0_file(10, end)
-            .push_l0_file(50, end)
-            .push_l0_file(80, end)
-            .push_l0_file(90, end)
-            .build(),
-    );
+    for offset in 0..40 {
+        builder.push_l0_file(offset * 10, end);
+    }
+    let version_control = Arc::new(builder.build());
     let manifest_ctx = env
         .mock_manifest_context(version_control.current().version.metadata.clone())
         .await;
@@ -1027,13 +1022,9 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
         .map(|file| file.meta_ref().clone())
         .collect();
 
-    // 5 files for next compaction and removes old files.
-    apply_edit(
-        &version_control,
-        &[(0, end), (20, end), (40, end), (60, end), (80, end)],
-        &file_metas,
-        purger.clone(),
-    );
+    // Replaces the files before scheduling the first compaction.
+    let next_files = (0..40).map(|offset| (offset * 20, end)).collect::<Vec<_>>();
+    apply_edit(&version_control, &next_files, &file_metas, purger.clone());
 
     scheduler
         .schedule_automatic_compaction(
