@@ -33,7 +33,6 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
-use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
@@ -45,7 +44,7 @@ use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -866,11 +865,10 @@ impl CreateRequestBuilder {
         for i in 0..self.field_num {
             let mut column_schema =
                 ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
-            if self.field_datatype.is_json() {
-                column_schema.mut_metadata().insert(
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                );
+            if self.field_datatype.is_json2() {
+                column_schema.with_extension_type(&Json2ExtensionType::default());
+            } else if self.field_datatype.is_json() {
+                column_schema.with_extension_type(&JsonExtensionType);
             }
             column_metadatas.push(ColumnMetadata {
                 column_schema,
@@ -931,11 +929,10 @@ impl CreateRequestBuilder {
         for i in 0..self.field_num {
             let mut column_schema =
                 ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
-            if self.field_datatype.is_json() {
-                column_schema.mut_metadata().insert(
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                );
+            if self.field_datatype.is_json2() {
+                column_schema.with_extension_type(&Json2ExtensionType::default());
+            } else if self.field_datatype.is_json() {
+                column_schema.with_extension_type(&JsonExtensionType);
             }
             column_metadatas.push(ColumnMetadata {
                 column_schema,
