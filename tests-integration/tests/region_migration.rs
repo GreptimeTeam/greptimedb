@@ -367,7 +367,7 @@ pub async fn test_metric_table_region_migration_by_sql(
         .await
         .remove(0);
 
-    let expected = r#"\
+    let expected = "\
 +-------+-------------------------+-----+
 | host  | ts                      | val |
 +-------+-------------------------+-----+
@@ -383,7 +383,7 @@ pub async fn test_metric_table_region_migration_by_sql(
         .await
         .remove(0);
 
-    let expected = r#"\
+    let expected = "\
 +------+-------------------------+-----+
 | job  | ts                      | val |
 +------+-------------------------+-----+
