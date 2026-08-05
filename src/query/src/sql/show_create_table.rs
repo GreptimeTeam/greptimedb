@@ -71,11 +71,9 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
         options.insert(SKIP_WAL_KEY.to_string(), table_opts.skip_wal.to_string());
     }
 
-    for (k, v) in table_opts
-        .extra_options
-        .iter()
-        .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_OVERRIDE_KEY)
-    {
+    for (k, v) in table_opts.extra_options.iter().filter(|(k, _)| {
+        k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_KEY && k != &SKIP_WAL_OVERRIDE_KEY
+    }) {
         options.insert(k.clone(), v.clone());
     }
     options
@@ -436,7 +434,18 @@ WITH(
         );
 
         let mut table_meta = info.meta.clone();
+        table_meta.options.skip_wal = true;
+        table_meta
+            .options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), false.to_string());
+        assert_eq!(
+            Some("true"),
+            create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)
+        );
+
         table_meta.options.skip_wal = false;
+        table_meta.options.extra_options.remove(SKIP_WAL_KEY);
         table_meta
             .options
             .extra_options

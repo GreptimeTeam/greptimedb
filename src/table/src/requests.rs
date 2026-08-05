@@ -234,7 +234,7 @@ impl fmt::Display for TableOptions {
         }
 
         for (k, v) in &self.extra_options {
-            if k == SKIP_WAL_OVERRIDE_KEY {
+            if k == SKIP_WAL_KEY || k == SKIP_WAL_OVERRIDE_KEY {
                 continue;
             }
             key_vals.push(format!("{}={}", k, v));
@@ -259,7 +259,12 @@ impl From<&TableOptions> for HashMap<String, String> {
         if opts.skip_wal || opts.extra_options.contains_key(SKIP_WAL_OVERRIDE_KEY) {
             let _ = res.insert(SKIP_WAL_KEY.to_string(), opts.skip_wal.to_string());
         }
-        res.extend(opts.extra_options.clone());
+        res.extend(
+            opts.extra_options
+                .iter()
+                .filter(|(key, _)| key.as_str() != SKIP_WAL_KEY)
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         res
     }
 }
@@ -605,6 +610,18 @@ mod tests {
         );
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), false.to_string())]),
+            skip_wal: true,
+            ..Default::default()
+        };
+        let serialized_map = HashMap::from(&options);
+        assert_eq!(
+            Some("true"),
+            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
+        );
+        assert_eq!("skip_wal=true", options.to_string());
     }
 
     #[test]
