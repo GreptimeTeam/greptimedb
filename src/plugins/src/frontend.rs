@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
 use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
+use frontend::heartbeat::FrontendHeartbeatExtensions;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
 use snafu::ResultExt;
@@ -61,6 +64,20 @@ pub async fn setup_frontend_plugins_post_build(
     _plugin_options: &[PluginOptions],
     _builder: &FrontendBuilder,
 ) -> Result<()> {
+    Ok(())
+}
+
+/// Sets up heartbeat extensions after the frontend [`Instance`] is available.
+///
+/// Implementations may use the instance to construct extensions and register them in the
+/// [`FrontendHeartbeatExtensions`] stored in `plugins`. Registrations must be idempotent because
+/// plugin setup can be invoked more than once.
+pub async fn setup_frontend_heartbeat_extensions(
+    plugins: &mut Plugins,
+    _plugin_options: &[PluginOptions],
+    _instance: &Arc<Instance>,
+) -> Result<()> {
+    plugins.get_or_insert(FrontendHeartbeatExtensions::default);
     Ok(())
 }
 
