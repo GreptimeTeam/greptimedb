@@ -768,6 +768,7 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .await;
     let create = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
         .build();
     let column_schemas = create
         .column_metadatas
@@ -981,12 +982,10 @@ async fn test_compaction_region_with_format(flat_format: bool) {
     //                [20....29]
     //          -[15.........29]- (delete)
     //           [15.....24]
-    // Output:
-    // [0..9]
-    //       [10............29] (contains delete)
-    //           [15....24]
+    // Count-first compaction consumes the first 4 SSTs as soon as the trigger is reached.
+    // The compacted output and final flush leave 2 SSTs.
     assert_eq!(
-        3,
+        2,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -1381,6 +1380,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
         .build();
 
     let column_schemas = request
@@ -1465,6 +1465,7 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
         .build();
     let column_schemas = request
         .column_metadatas
