@@ -243,7 +243,7 @@ mod tests {
             .await
             .unwrap();
 
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
 
         let layer = Arc::new(AccessLayer::new(
             sst_dir,
@@ -309,7 +309,7 @@ mod tests {
             .await
             .unwrap();
 
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
 
         let layer = Arc::new(AccessLayer::new(
             sst_dir,

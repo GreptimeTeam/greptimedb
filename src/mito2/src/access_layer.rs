@@ -656,7 +656,7 @@ pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     clean_dir(&old_atomic_temp_dir).await?;
 
     let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
-    let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
+    let store = ObjectStore::new(builder).context(OpenDalSnafu)?;
 
     Ok(with_instrument_layers(store, false))
 }

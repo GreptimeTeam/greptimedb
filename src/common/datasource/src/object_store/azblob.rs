@@ -53,9 +53,7 @@ pub fn build_azblob_backend(
         builder = builder.sas_token(sas_token);
     }
 
-    let object_store = ObjectStore::new(builder)
-        .context(error::BuildBackendSnafu)?
-        .finish();
+    let object_store = ObjectStore::new(builder).context(error::BuildBackendSnafu)?;
     Ok(with_instrument_layers(
         with_retry_layers(object_store),
         true,

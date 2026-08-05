@@ -15,7 +15,6 @@
 use std::{fs, path};
 
 use common_telemetry::info;
-use opendal::layers::HttpClientLayer;
 #[cfg(feature = "mysql-object-store")]
 use opendal::services::Mysql;
 use opendal::services::{Fs, Gcs, Oss, S3};
@@ -26,7 +25,7 @@ use crate::config::MysqlConfig;
 use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config};
 use crate::error::{self, Result};
 use crate::services::Azblob;
-use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
+use crate::util::{build_http_context, clean_temp_dir, join_dir, normalize_dir};
 use crate::{ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR, ObjectStore, util};
 
 pub async fn new_raw_object_store(
@@ -55,9 +54,7 @@ pub async fn new_mysql_object_store(mysql_config: &MysqlConfig) -> Result<Object
     );
 
     let builder = Mysql::from(mysql_config);
-    let operator = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu)?
-        .finish();
+    let operator = ObjectStore::new(builder).context(error::InitBackendSnafu)?;
 
     Ok(operator)
 }
@@ -79,9 +76,7 @@ pub fn new_fs_object_store(data_home: &str, _file_config: &FileConfig) -> Result
         .root(data_home)
         .atomic_write_dir(&atomic_write_dir);
 
-    let object_store = ObjectStore::new(builder)
-        .context(error::InitBackendSnafu)?
-        .finish();
+    let object_store = ObjectStore::new(builder).context(error::InitBackendSnafu)?;
 
     Ok(object_store)
 }
@@ -93,12 +88,11 @@ pub async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<Obj
         azblob_config.connection.container, &root
     );
 
-    let client = build_http_client(&azblob_config.http_client)?;
+    let ctx = build_http_context(&azblob_config.http_client)?;
     let builder = Azblob::from(&azblob_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .layer(HttpClientLayer::new(client))
-        .finish();
+        .with_context(ctx);
 
     Ok(operator)
 }
@@ -110,12 +104,11 @@ pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore>
         gcs_config.connection.bucket, &root
     );
 
-    let client = build_http_client(&gcs_config.http_client)?;
+    let ctx = build_http_context(&gcs_config.http_client)?;
     let builder = Gcs::from(&gcs_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .layer(HttpClientLayer::new(client))
-        .finish();
+        .with_context(ctx);
 
     Ok(operator)
 }
@@ -127,12 +120,11 @@ pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore>
         oss_config.connection.bucket, &root
     );
 
-    let client = build_http_client(&oss_config.http_client)?;
+    let ctx = build_http_context(&oss_config.http_client)?;
     let builder = Oss::from(&oss_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .layer(HttpClientLayer::new(client))
-        .finish();
+        .with_context(ctx);
 
     Ok(operator)
 }
@@ -144,12 +136,11 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
         s3_config.connection.bucket, &root
     );
 
-    let client = build_http_client(&s3_config.http_client)?;
+    let ctx = build_http_context(&s3_config.http_client)?;
     let builder = S3::from(&s3_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .layer(HttpClientLayer::new(client))
-        .finish();
+        .with_context(ctx);
 
     Ok(operator)
 }

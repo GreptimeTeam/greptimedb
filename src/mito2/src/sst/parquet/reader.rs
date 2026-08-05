@@ -2541,9 +2541,7 @@ mod tests {
         // Persist the complete nested schema to an in-memory Parquet file so the projection is
         // exercised through parquet-rs rather than a mock.
 
-        let object_store = ObjectStore::new(Memory::default())
-            .map_err(|e| e.to_string())?
-            .finish();
+        let object_store = ObjectStore::new(Memory::default()).map_err(|e| e.to_string())?;
         let file_handle = sst_file_handle(0, 1);
         let file_path = file_handle.file_path("test_table", PathType::Bare);
 
@@ -2658,7 +2656,7 @@ mod tests {
             }
         }
 
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_handle = sst_file_handle(0, 1);
         let table_dir = "test_table".to_string();
         let path_type = PathType::Bare;
@@ -2786,7 +2784,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_has_row_level_selection() {
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_path = "row_level_selection.parquet";
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef;

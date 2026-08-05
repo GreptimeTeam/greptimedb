@@ -83,7 +83,7 @@ fn parquet_file_data_inner(key_value_metadata: Option<Vec<KeyValue>>) -> Vec<u8>
 
 pub(crate) fn new_fs_store(path: &str) -> ObjectStore {
     let builder = Fs::default();
-    ObjectStore::new(builder.root(path)).unwrap().finish()
+    ObjectStore::new(builder.root(path)).unwrap()
 }
 
 pub(crate) fn assert_parquet_metadata_equal(x: Arc<ParquetMetaData>, y: Arc<ParquetMetaData>) {

@@ -339,9 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_remote_region_index() {
-        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
-            .unwrap()
-            .finish();
+        let operator =
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap();
 
         let path = default_index_file(0);
         let encoder = JsonIndexEncoder::default();
