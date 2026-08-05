@@ -271,6 +271,98 @@ gh workflow run query-regression.yml \
 The selected ARC scale set must already be deployed with the runner-image
 digest built from the current query-regression Dockerfile.
 
+## Write-throughput scenario
+
+`scenario.kind = "write_throughput"` measures pure write ingestion throughput
+and latency on base vs candidate. It reuses the same remote-write ingestion
+machinery as `prom_remote_write_then_query` (distributed cluster +
+`query_perf_fixture prom-remote-write` + periodic physical-table flushes) but
+skips the query phase: no `[scenario.queries]` section is required, and the
+metric table is only created implicitly by the first remote-write request.
+
+The scenario validates the scheduler's work-conserving behavior under a
+single-class write backlog: with the candidate scheduler enabled, write
+throughput must not regress relative to base.
+
+```toml
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+database = "public"
+metric = "write_throughput_scheduler"
+physical_table = "greptime_physical_table"
+series_count = 2048
+samples_per_series = 3600
+sample_chunk_size = 180
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000
+step_millis = 1000
+chunk_series_count = 256
+timeout_seconds = 120
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 1000000
+max_concurrent_flushes = 256
+
+[scenario.write_measure]
+duration_seconds = 60   # nominal measurement window
+window_seconds = 5      # per-window RPS bucket; must divide duration_seconds
+target_rps = 0          # 0 = max throughput (achieved rate is measured)
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05              # per-target failed chunk fraction
+max_mean_rps_regression_pct = 10     # (base_rps - candidate_rps) / base_rps * 100
+max_p99_latency_regression_pct = 10  # (candidate_p99 - base_p99) / base_p99 * 100
+min_rps_absolute = 50000             # optional per-target mean RPS floor
+```
+
+All remote-write fields (`metric`, `database`, `series_count`,
+`samples_per_series`, `sample_chunk_size`, `flush_every_sample_chunks`,
+`start_unix_millis`, `step_millis`, `chunk_series_count`, `timeout_seconds`,
+`prom_store`, `value`) follow the `prom_remote_write_then_query` contract and
+defaults. Rust owns the schema: `duration_seconds`/`window_seconds` are
+positive integers, `window_seconds` must divide `duration_seconds`,
+`target_rps` and every threshold must be finite and non-negative, and
+`max_failure_rate` must be in `[0, 1]`. Unknown fields are rejected by
+`query_perf_fixture plan`.
+
+For each target the runner writes all sample chunks, flushes the physical
+table, and computes:
+
+- `rows` / `elapsed_seconds` / `mean_rps` from the per-chunk generator
+  summaries;
+- `windows`: the first `duration_seconds` of the write timeline split into
+  `window_seconds` buckets, each with `rows` and `rps` (chunk rows are spread
+  uniformly over the chunk's own elapsed time);
+- `p50_latency_ms` / `p99_latency_ms`: percentiles of per-chunk generator
+  durations (each chunk is a sequential set of remote-write requests, so this
+  is a consistent base-vs-candidate proxy for write-request latency);
+- `failure_rate`: failed chunks / total chunks.
+
+Threshold enforcement follows the OTLP conventions: positive regression
+`actual_pct` is a candidate regression, negative is an improvement; per-target
+`max_failure_rate` and optional `min_rps_absolute` run for both base and
+candidate. A chunk whose generator exits non-zero is recorded as failed and
+counted by `max_failure_rate` instead of aborting the run. Run it locally the
+same way as the OTLP case, using `--dry-run` first for planning:
+
+```bash
+python3 tests/perf/query_regression_runner.py \
+  --case tests/perf/query_cases/write_throughput_scheduler/case.toml \
+  --base-bin /path/to/base/target/nightly/greptime \
+  --candidate-bin /path/to/candidate/target/nightly/greptime \
+  --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
+  --work-dir "$(mktemp -d /tmp/query-perf-write.XXXXXX)" \
+  --output /tmp/query-perf-write/report.json
+```
+
+`target_rps` is validated and reported but not yet used for pacing; set it to 0
+for a max-throughput run. For local results, run the case at least three times
+on an otherwise idle machine and compare median regressions rather than relying
+on one run.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:

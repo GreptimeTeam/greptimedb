@@ -32,6 +32,8 @@ pub(super) enum Scenario {
     PromRemoteWriteThenQuery(PromRemoteWriteThenQueryScenario),
     #[serde(rename = "otlp_trace_load")]
     OtlpTraceLoad(OtlpTraceLoadScenario),
+    #[serde(rename = "write_throughput")]
+    WriteThroughput(WriteThroughputScenario),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -76,6 +78,102 @@ pub(super) struct OtlpTraceLoadThresholds {
     pub(super) max_candidate_throughput_regression_pct: f64,
     pub(super) max_candidate_mean_latency_regression_pct: f64,
     pub(super) max_failure_count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteThroughputScenario {
+    pub(super) remote_write: PromRemoteWritePlan,
+    pub(super) write_measure: WriteMeasureConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteMeasureConfig {
+    /// Nominal measurement window in wall-clock seconds. `window_seconds` must
+    /// divide it; the runner buckets per-window RPS over the first
+    /// `duration_seconds` of the ingestion timeline.
+    pub(super) duration_seconds: NonZeroU64,
+    /// Per-window RPS bucket size in seconds.
+    pub(super) window_seconds: NonZeroU64,
+    /// Optional target ingest rate in rows/second; 0 = max throughput
+    /// (the generator writes as fast as it can and the achieved rate is
+    /// measured). Pacing is not implemented; this value is validated,
+    /// normalized, and reported for future use.
+    #[serde(default)]
+    pub(super) target_rps: f64,
+    pub(super) thresholds: WriteThroughputThresholds,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteThroughputThresholds {
+    /// Max fraction of failed write chunks per target, in [0, 1] (0.05 = 5%).
+    pub(super) max_failure_rate: f64,
+    /// Max candidate-vs-base mean RPS regression percent:
+    /// `(base_mean_rps - candidate_mean_rps) / base_mean_rps * 100`.
+    pub(super) max_mean_rps_regression_pct: f64,
+    /// Max candidate-vs-base write-request p99 latency regression percent:
+    /// `(candidate_p99_ms - base_p99_ms) / base_p99_ms * 100`.
+    pub(super) max_p99_latency_regression_pct: f64,
+    /// Optional absolute floor on each target's mean RPS.
+    #[serde(default)]
+    pub(super) min_rps_absolute: Option<f64>,
+}
+
+impl WriteMeasureConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.duration_seconds.get() % self.window_seconds.get() != 0 {
+            return Err(
+                "scenario.write_measure.duration_seconds must be a positive multiple of window_seconds"
+                    .to_string(),
+            );
+        }
+        if !self.target_rps.is_finite() || self.target_rps < 0.0 {
+            return Err(
+                "scenario.write_measure.target_rps must be a finite non-negative number"
+                    .to_string(),
+            );
+        }
+        self.thresholds.validate()
+    }
+}
+
+impl WriteThroughputThresholds {
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("max_failure_rate", self.max_failure_rate),
+            (
+                "max_mean_rps_regression_pct",
+                self.max_mean_rps_regression_pct,
+            ),
+            (
+                "max_p99_latency_regression_pct",
+                self.max_p99_latency_regression_pct,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "scenario.write_measure.thresholds.{name} must be a finite non-negative number"
+                ));
+            }
+        }
+        if self.max_failure_rate > 1.0 {
+            return Err(
+                "scenario.write_measure.thresholds.max_failure_rate must be <= 1.0 (a rate in [0, 1])"
+                    .to_string(),
+            );
+        }
+        if let Some(min_rps) = self.min_rps_absolute
+            && (!min_rps.is_finite() || min_rps < 0.0)
+        {
+            return Err(
+                "scenario.write_measure.thresholds.min_rps_absolute must be a finite non-negative number"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -442,6 +540,7 @@ impl Scenario {
             Scenario::DirectReadableSst(_) => "direct_readable_sst",
             Scenario::PromRemoteWriteThenQuery(_) => "prom_remote_write_then_query",
             Scenario::OtlpTraceLoad(_) => "otlp_trace_load",
+            Scenario::WriteThroughput(_) => "write_throughput",
         }
     }
 
@@ -499,4 +598,161 @@ pub(super) struct LayoutConfig {
     pub(super) step_nanos: i64,
     pub(super) time_range_layout: String,
     pub(super) series_layout: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// Repository root, derived from the cmd crate manifest (`src/cmd`).
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cmd crate lives at src/cmd")
+            .parent()
+            .expect("repo root is the parent of src")
+            .to_path_buf()
+    }
+
+    fn builtin_write_throughput_case() -> PathBuf {
+        repo_root().join("tests/perf/query_cases/write_throughput_scheduler/case.toml")
+    }
+
+    fn parse_case(text: &str) -> Result<CaseFile, toml::de::Error> {
+        toml::from_str(text)
+    }
+
+    fn write_throughput_scenario(text: &str) -> WriteThroughputScenario {
+        let case = parse_case(text).expect("case must parse");
+        match case.scenario {
+            Scenario::WriteThroughput(scenario) => scenario,
+            other => panic!("expected write_throughput scenario, got {:?}", other.kind()),
+        }
+    }
+
+    const MINIMAL_CASE: &str = r#"
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+metric = "write_throughput_test"
+
+[scenario.write_measure]
+duration_seconds = 60
+window_seconds = 5
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05
+max_mean_rps_regression_pct = 10.0
+max_p99_latency_regression_pct = 10.0
+"#;
+
+    #[test]
+    fn parses_builtin_write_throughput_case() {
+        let text = std::fs::read_to_string(builtin_write_throughput_case())
+            .expect("built-in write_throughput case.toml must exist");
+        let case = parse_case(&text).expect("built-in write_throughput case must parse");
+        assert_eq!(case.scenario.kind(), "write_throughput");
+        let scenario = write_throughput_scenario(&text);
+        assert_eq!(scenario.remote_write.series_count, 2048);
+        assert_eq!(scenario.remote_write.samples_per_series, 3600);
+        assert_eq!(scenario.write_measure.duration_seconds.get(), 60);
+        assert_eq!(scenario.write_measure.window_seconds.get(), 5);
+        assert_eq!(scenario.write_measure.target_rps, 0.0);
+        assert_eq!(scenario.write_measure.thresholds.max_failure_rate, 0.05);
+        assert_eq!(
+            scenario
+                .write_measure
+                .thresholds
+                .max_mean_rps_regression_pct,
+            10.0
+        );
+        assert_eq!(
+            scenario
+                .write_measure
+                .thresholds
+                .max_p99_latency_regression_pct,
+            10.0
+        );
+        scenario
+            .write_measure
+            .validate()
+            .expect("built-in case must validate");
+    }
+
+    #[test]
+    fn minimal_case_uses_defaults_and_validates() {
+        let scenario = write_throughput_scenario(MINIMAL_CASE);
+        assert_eq!(scenario.remote_write.series_count, 8);
+        assert_eq!(scenario.remote_write.samples_per_series, 30);
+        assert_eq!(scenario.write_measure.target_rps, 0.0);
+        assert!(scenario.write_measure.thresholds.min_rps_absolute.is_none());
+        scenario
+            .write_measure
+            .validate()
+            .expect("minimal case must validate");
+    }
+
+    #[test]
+    fn rejects_bad_types() {
+        // window_seconds must be an integer, not a string.
+        let bad_type = MINIMAL_CASE.replace("window_seconds = 5", "window_seconds = \"five\"");
+        assert!(parse_case(&bad_type).is_err());
+
+        // duration_seconds must be positive; NonZeroU64 rejects zero.
+        let zero_duration = MINIMAL_CASE.replace("duration_seconds = 60", "duration_seconds = 0");
+        assert!(parse_case(&zero_duration).is_err());
+
+        // duration_seconds must be an integer, not a float.
+        let float_duration =
+            MINIMAL_CASE.replace("duration_seconds = 60", "duration_seconds = 60.5");
+        assert!(parse_case(&float_duration).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let unknown = MINIMAL_CASE.replace(
+            "duration_seconds = 60",
+            "duration_seconds = 60\nbogus_field = 1",
+        );
+        let err = parse_case(&unknown).expect_err("unknown field must be rejected");
+        assert!(err.to_string().contains("bogus_field"));
+    }
+
+    #[test]
+    fn rejects_inconsistent_window_and_duration() {
+        let inconsistent = MINIMAL_CASE.replace("window_seconds = 5", "window_seconds = 7");
+        let scenario = write_throughput_scenario(&inconsistent);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("window_seconds must divide duration_seconds");
+        assert!(err.contains("window_seconds"), "{err}");
+    }
+
+    #[test]
+    fn rejects_negative_or_non_finite_thresholds() {
+        let negative_rps = MINIMAL_CASE.replace(
+            "max_mean_rps_regression_pct = 10.0",
+            "max_mean_rps_regression_pct = -1.0",
+        );
+        let scenario = write_throughput_scenario(&negative_rps);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("negative regression limit must be rejected");
+        assert!(err.contains("max_mean_rps_regression_pct"), "{err}");
+
+        // max_failure_rate is a rate in [0, 1].
+        let oversized_rate =
+            MINIMAL_CASE.replace("max_failure_rate = 0.05", "max_failure_rate = 1.5");
+        let scenario = write_throughput_scenario(&oversized_rate);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("max_failure_rate above 1.0 must be rejected");
+        assert!(err.contains("max_failure_rate"), "{err}");
+    }
 }
