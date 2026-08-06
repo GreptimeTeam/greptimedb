@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_010_prepared_plan_revalidated_after_schema_change() {
+    async fn prepared_plan_revalidated_after_schema_change() {
         let table_v1 = mem_table("t", &["a"], &[1_i64]);
         let table_v2 = mem_table("t", &["a", "b"], &[1_i64, 2_i64]);
 
@@ -1341,7 +1341,7 @@ mod tests {
         let mut shim =
             MysqlInstanceShim::create(handler, None, "127.0.0.1:3306".parse().unwrap(), 1, 1024);
         let query_ctx = QueryContext::arc();
-        let stmt_key = "qp_010".to_string();
+        let stmt_key = "prepared_plan".to_string();
 
         // Prepare against the v1 schema and cache the plan.
         shim.do_prepare("SELECT * FROM t", query_ctx.clone(), stmt_key.clone())

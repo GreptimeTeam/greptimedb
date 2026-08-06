@@ -807,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_010_postgres_prepared_plan_revalidated_after_schema_change() {
+    async fn postgres_prepared_plan_revalidated_after_schema_change() {
         let cached_plan = pg_plan_for(&MemTable::default_numbers_table());
         // The "fresh" plan differs from the cached plan so we can tell them
         // apart below.

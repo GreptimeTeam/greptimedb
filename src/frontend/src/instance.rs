@@ -2636,7 +2636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_010_prepared_plan_revalidated_after_schema_change() -> TestResult<()> {
+    async fn prepared_plan_revalidated_after_schema_change() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
@@ -2713,7 +2713,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_010_prepared_plan_errors_after_table_dropped() -> TestResult<()> {
+    async fn prepared_plan_errors_after_table_dropped() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
