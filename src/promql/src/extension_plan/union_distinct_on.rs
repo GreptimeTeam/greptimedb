@@ -62,14 +62,15 @@ use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 ///
 /// Dedup uses **columnar null-safe hashing**: each (compare_keys, ts) column is hashed
 /// with `create_hashes` semantics (first column assigns, later columns combine) under
-/// two independent [`RandomState`]s, whose 64-bit outputs are combined into a 128-bit
-/// signature stored in a `HashSet<u128>` (16B/row, no per-row allocation). Nulls are
-/// never skipped: a null in column `i` combines a per-column distinct marker (the hash
-/// of a fixed byte pattern encoding the column position), so null placement is part of
-/// the signature — unlike the plain `create_hashes` path, two rows that merely swap a
-/// null and a value between columns cannot collide. Only genuine 128-bit random
-/// collisions remain (probability n1*n2/2^128). This replaces an earlier RowConverter
-/// based implementation that materialized every row's encoded bytes (2-3x slower).
+/// a single [`RandomState`], producing a 64-bit per-row signature stored in a
+/// `HashSet<u64>` (8B/row, no per-row allocation). Nulls are never skipped: a null in
+/// column `i` combines a per-column distinct marker (the hash of a fixed byte pattern
+/// encoding the column position), so null placement is part of the signature — unlike
+/// the plain `create_hashes` path, two rows that merely swap a null and a value
+/// between columns cannot collide. Only genuine 64-bit random collisions remain
+/// (probability n1*n2/2^64); this is a known limitation that collision hardening may
+/// address later. This replaces an earlier RowConverter based implementation that
+/// materialized every row's encoded bytes (2-3x slower).
 ///
 /// Supported compare-key types: all arrow primitive arrays (Int/UInt/Float/etc.),
 /// `Utf8`, `Utf8View` and `Null`; other types return `NotImplemented`.
@@ -197,8 +198,7 @@ impl UnionDistinctOn {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            hash_state_a: RandomState::new(),
-            hash_state_b: RandomState::new(),
+            hash_state: RandomState::new(),
         })
     }
 
@@ -366,10 +366,8 @@ pub struct UnionDistinctOnExec {
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 
-    /// Two independent 64-bit hash functions whose outputs are combined into a
-    /// 128-bit per-row signature, making false dedup collisions negligible.
-    hash_state_a: RandomState,
-    hash_state_b: RandomState,
+    /// A single 64-bit hash function whose output forms the per-row signature.
+    hash_state: RandomState,
 }
 
 impl ExecutionPlan for UnionDistinctOnExec {
@@ -409,8 +407,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
             properties: self.properties.clone(),
-            hash_state_a: self.hash_state_a.clone(),
-            hash_state_b: self.hash_state_b.clone(),
+            hash_state: self.hash_state.clone(),
         }))
     }
 
@@ -423,13 +420,10 @@ impl ExecutionPlan for UnionDistinctOnExec {
 
         let mut key_indices = self.compare_key_indices.clone();
         key_indices.push(self.ts_col_idx);
-        // Per-column distinct null markers per hash state: hashes of fixed byte
-        // patterns that encode the column position. See `null_marker_bytes`.
-        let null_markers_a = (0..key_indices.len())
-            .map(|col_idx| self.hash_state_a.hash_one(null_marker_bytes(col_idx)))
-            .collect();
-        let null_markers_b = (0..key_indices.len())
-            .map(|col_idx| self.hash_state_b.hash_one(null_marker_bytes(col_idx)))
+        // Per-column distinct null markers: hashes of fixed byte patterns that
+        // encode the column position. See `null_marker_bytes`.
+        let null_markers = (0..key_indices.len())
+            .map(|col_idx| self.hash_state.hash_one(null_marker_bytes(col_idx)))
             .collect();
 
         Ok(Box::pin(UnionDistinctOnStream {
@@ -440,10 +434,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
             right: None,
             compare_keys: key_indices,
             output_schema: self.output_schema.clone(),
-            hash_state_a: self.hash_state_a.clone(),
-            hash_state_b: self.hash_state_b.clone(),
-            null_markers_a,
-            null_markers_b,
+            hash_state: self.hash_state.clone(),
+            null_markers,
             lhs_signatures: HashSet::default(),
             phase: StreamPhase::Left,
             metric: BaselineMetrics::new(&self.metric, partition),
@@ -487,22 +479,17 @@ pub struct UnionDistinctOnStream {
     /// Encodes the (compare_keys, ts) columns of an input batch into null-safe,
     /// deterministic row bytes. Two distinct rows never encode to the same bytes,
     /// A single 64-bit hash function applied to each key column's values.
-    /// Two independent 64-bit hash functions applied to each key column's values;
-    /// each row's pair is combined into a 128-bit signature.
-    hash_state_a: RandomState,
-    hash_state_b: RandomState,
-    /// Per-column null markers per hash state: hashes of fixed byte patterns
-    /// encoding the column position. A null in column `i` contributes
-    /// `null_markers_[a|b][i]` instead of a value hash, so null placement is part
-    /// of the signature (fixing the base implementation's null structural-collision
-    /// bug).
-    null_markers_a: Vec<u64>,
-    null_markers_b: Vec<u64>,
-    /// 128-bit signatures of every row observed on the left input. Rows from the
+    hash_state: RandomState,
+    /// Per-column null markers: hashes of fixed byte patterns encoding the column
+    /// position. A null in column `i` contributes `null_markers[i]` instead of a
+    /// value hash, so null placement is part of the signature (fixing the base
+    /// implementation's null structural-collision bug).
+    null_markers: Vec<u64>,
+    /// 64-bit signatures of every row observed on the left input. Rows from the
     /// right input whose signature is present here are suppressed. Signature
-    /// equality is exact only up to genuine 128-bit hash collisions
-    /// (probability n1*n2/2^128).
-    lhs_signatures: HashSet<u128>,
+    /// equality is exact only up to genuine 64-bit hash collisions
+    /// (probability n1*n2/2^64).
+    lhs_signatures: HashSet<u64>,
     phase: StreamPhase,
     metric: BaselineMetrics,
 }
@@ -516,36 +503,23 @@ enum StreamPhase {
 
 impl UnionDistinctOnStream {
     /// Columnar null-safe hash of the (compare_keys, ts) columns of `batch`: one
-    /// 128-bit signature per row, built by running the `create_hashes`-semantics
-    /// columnar loop twice — once per independent hash state — then combining each
-    /// row's two 64-bit hashes into a u128. Each state's nulls combine a per-column
+    /// 64-bit signature per row, built with `create_hashes` semantics (first column
+    /// assigns, later columns combine) except that nulls combine a per-column
     /// distinct marker instead of being skipped, so null placement is part of the
-    /// signature under both states.
-    fn hash_batch(&self, batch: &RecordBatch) -> DataFusionResult<Vec<u128>> {
+    /// signature.
+    fn hash_batch(&self, batch: &RecordBatch) -> DataFusionResult<Vec<u64>> {
         let num_rows = batch.num_rows();
-        let mut hashes_a = vec![0u64; num_rows];
-        let mut hashes_b = vec![0u64; num_rows];
+        let mut hashes = vec![0u64; num_rows];
         for (col_idx, key_idx) in self.compare_keys.iter().enumerate() {
             hash_array_null_safe(
                 batch.column(*key_idx),
-                &self.hash_state_a,
-                self.null_markers_a[col_idx],
-                &mut hashes_a,
-                col_idx > 0,
-            )?;
-            hash_array_null_safe(
-                batch.column(*key_idx),
-                &self.hash_state_b,
-                self.null_markers_b[col_idx],
-                &mut hashes_b,
+                &self.hash_state,
+                self.null_markers[col_idx],
+                &mut hashes,
                 col_idx > 0,
             )?;
         }
-        Ok(hashes_a
-            .iter()
-            .zip(hashes_b.iter())
-            .map(|(a, b)| ((*a as u128) << 64) | (*b as u128))
-            .collect())
+        Ok(hashes)
     }
 
     fn filter_rhs_batch(&self, batch: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
@@ -1176,8 +1150,7 @@ mod test {
         output_schema: SchemaRef,
     ) -> UnionDistinctOnStream {
         let metrics = ExecutionPlanMetricsSet::new();
-        let hash_state_a = RandomState::new();
-        let hash_state_b = RandomState::new();
+        let hash_state = RandomState::new();
         UnionDistinctOnStream {
             left,
             right_plan: right,
@@ -1186,14 +1159,10 @@ mod test {
             right: None,
             compare_keys: vec![1, 0],
             output_schema,
-            hash_state_a: hash_state_a.clone(),
-            hash_state_b: hash_state_b.clone(),
-            // Two columns -> two per-column null markers per state.
-            null_markers_a: (0..2)
-                .map(|col_idx| hash_state_a.hash_one(null_marker_bytes(col_idx)))
-                .collect(),
-            null_markers_b: (0..2)
-                .map(|col_idx| hash_state_b.hash_one(null_marker_bytes(col_idx)))
+            hash_state: hash_state.clone(),
+            // Two columns -> two per-column null markers.
+            null_markers: (0..2)
+                .map(|col_idx| hash_state.hash_one(null_marker_bytes(col_idx)))
                 .collect(),
             lhs_signatures: HashSet::default(),
             phase: StreamPhase::Left,
