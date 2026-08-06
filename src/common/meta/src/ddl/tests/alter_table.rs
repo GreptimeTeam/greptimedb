@@ -670,6 +670,7 @@ async fn test_skip_wal_rejects_mixed_table_options() {
                 })),
             },
         },
+        TriggerContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -698,8 +699,13 @@ async fn test_skip_wal_rejects_logical_table() {
         },
     };
 
-    let mut procedure =
-        AlterTableProcedure::new(logical_table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        logical_table_id,
+        task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     let error = procedure.on_prepare().await.unwrap_err();
     assert_matches!(error, Error::Unsupported { .. });
 
@@ -745,7 +751,13 @@ async fn test_skip_wal_rejects_file_engine_table() {
         },
     };
 
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        task,
+        TriggerContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     let error = procedure.on_prepare().await.unwrap_err();
     assert_matches!(error, Error::Unsupported { .. });
 
@@ -782,6 +794,7 @@ fn test_skip_wal_holds_region_locks() {
     let procedure = AlterTableProcedure::new_with_region_locks(
         table_id,
         task,
+        TriggerContext::default(),
         region_ids.clone(),
         context.clone(),
     )
@@ -833,6 +846,7 @@ async fn test_skip_wal_detects_region_route_change() {
     let mut procedure = AlterTableProcedure::new_with_region_locks(
         table_id,
         alter_task,
+        TriggerContext::default(),
         stale_region_locks,
         ddl_context.clone(),
     )
@@ -893,6 +907,7 @@ async fn test_skip_wal_updates_metadata_before_all_replicas() {
     let mut procedure = AlterTableProcedure::new_with_region_locks(
         table_id,
         alter_task,
+        TriggerContext::default(),
         region_locks,
         ddl_context.clone(),
     )
