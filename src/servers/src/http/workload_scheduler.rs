@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
+use axum::Json;
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use common_telemetry::info;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::error::{InvalidParameterSnafu, Result};
@@ -30,6 +33,35 @@ pub struct WeightParams {
 #[derive(Debug, Deserialize)]
 pub struct MaxPollsParams {
     max_concurrent_polls: usize,
+}
+
+/// Per-class scheduler counters, mirroring catio's `ClassStats` with the
+/// admission wait converted to milliseconds for JSON serialization (catio does
+/// not depend on serde).
+#[derive(Debug, Serialize)]
+pub struct ClassStatusDto {
+    weight: u32,
+    queued: usize,
+    tasks: u64,
+    wakes: u64,
+    polls: u64,
+    completed: u64,
+    cancelled: u64,
+    admitted: u64,
+    total_admission_wait_ms: f64,
+}
+
+/// Point-in-time snapshot of the workload scheduler. When the scheduler is
+/// disabled `enabled` is `false` and the remaining fields are omitted.
+#[derive(Debug, Serialize)]
+pub struct SchedulerStatusDto {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_concurrent_polls: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_polls: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classes: Option<BTreeMap<String, ClassStatusDto>>,
 }
 
 #[axum_macros::debug_handler]
@@ -82,4 +114,57 @@ pub async fn set_max_concurrent_polls_handler(
     );
     info!("{}", change_note);
     Ok((StatusCode::OK, change_note))
+}
+
+/// Returns the current workload scheduler state (weights, concurrency limits,
+/// and per-class counters). Always returns 200, with `enabled=false` when the
+/// scheduler is not enabled, so operators can distinguish "disabled" from a
+/// failed request.
+#[axum_macros::debug_handler]
+pub async fn get_status_handler() -> Result<impl IntoResponse> {
+    let Some(stats) = common_runtime::workload_scheduler_stats() else {
+        return Ok(Json(SchedulerStatusDto {
+            enabled: false,
+            max_concurrent_polls: None,
+            active_polls: None,
+            classes: None,
+        }));
+    };
+
+    // Classes are keyed by catio's `TaskClass` (ordered by id). ids 1 and 2 are
+    // the query and write classes; any additional class falls back to a
+    // `class-{id}` label.
+    let classes = stats
+        .classes
+        .iter()
+        .map(|(class, class_stats)| {
+            let label = match class.id() {
+                1 => "query".to_string(),
+                2 => "write".to_string(),
+                id => format!("class-{id}"),
+            };
+            (
+                label,
+                ClassStatusDto {
+                    weight: class_stats.weight,
+                    queued: class_stats.queued,
+                    tasks: class_stats.tasks,
+                    wakes: class_stats.wakes,
+                    polls: class_stats.polls,
+                    completed: class_stats.completed,
+                    cancelled: class_stats.cancelled,
+                    admitted: class_stats.admitted,
+                    total_admission_wait_ms: class_stats.total_admission_wait.as_secs_f64()
+                        * 1000.0,
+                },
+            )
+        })
+        .collect();
+
+    Ok(Json(SchedulerStatusDto {
+        enabled: true,
+        max_concurrent_polls: Some(stats.max_concurrent_polls),
+        active_polls: Some(stats.active_polls),
+        classes: Some(classes),
+    }))
 }
