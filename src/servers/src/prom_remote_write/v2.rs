@@ -90,8 +90,7 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
 
     let mut sample_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
     let mut histogram_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
-    let mut sample_metrics = HashSet::<(PromCtx, String)>::new();
-    let mut histogram_metrics = HashSet::<(PromCtx, String)>::new();
+    let mut label_names = HashSet::new();
     let mut sample_count_total = 0;
     let mut histogram_count_total = 0;
 
@@ -103,31 +102,27 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
             continue;
         }
 
-        let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
+        let (prom_ctx, table_name, tags) =
+            resolve_series_labels(&symbols, &series, &mut label_names)?;
         ensure_no_internal_histogram_labels(&tags)?;
-        let metric_key = (prom_ctx.clone(), table_name.clone());
-        if sample_count > 0 {
-            ensure!(
-                !histogram_metrics.contains(&metric_key),
-                error::InvalidPromRemoteRequestSnafu {
-                    msg: format!(
-                        "remote write v2 metric `{table_name}` contains both samples and native histograms"
-                    ),
-                }
-            );
-            sample_metrics.insert(metric_key.clone());
-        }
-        if histogram_count > 0 {
-            ensure!(
-                !sample_metrics.contains(&metric_key),
-                error::InvalidPromRemoteRequestSnafu {
-                    msg: format!(
-                        "remote write v2 metric `{table_name}` contains both samples and native histograms"
-                    ),
-                }
-            );
-            histogram_metrics.insert(metric_key);
-        }
+        let has_other_value_type = if sample_count > 0 {
+            histogram_count > 0
+                || histogram_tables
+                    .get(&prom_ctx)
+                    .is_some_and(|tables| tables.contains_key(&table_name))
+        } else {
+            sample_tables
+                .get(&prom_ctx)
+                .is_some_and(|tables| tables.contains_key(&table_name))
+        };
+        ensure!(
+            !has_other_value_type,
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "remote write v2 metric `{table_name}` contains both samples and native histograms"
+                ),
+            }
+        );
 
         if sample_count > 0 && histogram_count == 0 {
             // Fast path for regular sample-only series. Move the resolved labels into
@@ -745,7 +740,11 @@ fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
     Ok(())
 }
 
-fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<ResolvedSeriesLabels> {
+fn resolve_series_labels<'a>(
+    symbols: &'a [String],
+    series: &TimeSeries,
+    label_names: &mut HashSet<&'a str>,
+) -> Result<ResolvedSeriesLabels> {
     ensure!(
         series.labels_refs.len().is_multiple_of(2),
         error::InvalidPromRemoteRequestSnafu {
@@ -756,7 +755,7 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
     let mut prom_ctx = PromCtx::default();
     let mut table_name = None;
     let mut tags = Vec::with_capacity(series.labels_refs.len() / 2);
-    let mut label_names = HashSet::with_capacity(series.labels_refs.len() / 2);
+    label_names.clear();
 
     for pair in series.labels_refs.chunks_exact(2) {
         let name = symbol_ref(symbols, pair[0], "label name")?;
@@ -1449,6 +1448,26 @@ mod tests {
 
         assert_invalid(
             "same metric samples and histograms",
+            request,
+            "contains both samples and native histograms",
+        );
+
+        let mut request = test_util::request_with_labels_and_samples(
+            vec![(METRIC_NAME_LABEL, "metric")],
+            vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            }],
+        );
+        request.timeseries.push(TimeSeries {
+            labels_refs: request.timeseries[0].labels_refs.clone(),
+            histograms: vec![Histogram::default()],
+            ..Default::default()
+        });
+
+        assert_invalid(
+            "same metric samples and histograms across series",
             request,
             "contains both samples and native histograms",
         );

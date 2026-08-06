@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use ahash::{HashMap as AHashMap, HashMapExt};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
@@ -37,7 +38,7 @@ use crate::error::{
 pub struct TableData {
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
-    column_indexes: HashMap<String, usize>,
+    column_indexes: AHashMap<String, usize>,
 }
 
 impl TableData {
@@ -45,7 +46,7 @@ impl TableData {
         Self {
             schema: Vec::with_capacity(num_columns),
             rows: Vec::with_capacity(num_rows),
-            column_indexes: HashMap::with_capacity(num_columns),
+            column_indexes: AHashMap::with_capacity(num_columns),
         }
     }
 
