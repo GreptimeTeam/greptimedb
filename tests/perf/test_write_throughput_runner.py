@@ -36,6 +36,13 @@ sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 
+class _FakeProc:
+    """Minimal stand-in for a live subprocess (poll() returns None = running)."""
+
+    def poll(self) -> None:
+        return None
+
+
 def make_remote(**overrides):
     remote = {
         "database": "public",
@@ -230,6 +237,120 @@ class WriteThroughputThresholdTest(unittest.TestCase):
         self.assertEqual([p["threshold"] for p in planned], ["max_failure_rate", "max_mean_rps_regression_pct", "max_p99_latency_regression_pct"])
 
 
+class WriteThroughputSchedulerEnvTest(unittest.TestCase):
+    """Scheduler on/off env derivation and datanode spawn plumbing."""
+
+    PREFIX = "GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER"
+    SCHEDULER = {"max_concurrent_polls": 16, "query_weight": 2, "write_weight": 8}
+
+    def test_scheduler_env_absent_section_disables_both(self) -> None:
+        self.assertEqual(runner.scheduler_env(False, None), {})
+        self.assertEqual(runner.scheduler_env(True, None), {})
+
+    def test_scheduler_env_derivation_base_disables_candidate_enables(self) -> None:
+        base_env = runner.scheduler_env(False, self.SCHEDULER)
+        self.assertEqual(base_env, {f"{self.PREFIX}__ENABLE": "false"})
+        candidate_env = runner.scheduler_env(True, self.SCHEDULER)
+        self.assertEqual(
+            candidate_env,
+            {
+                f"{self.PREFIX}__ENABLE": "true",
+                f"{self.PREFIX}__MAX_CONCURRENT_POLLS": "16",
+                f"{self.PREFIX}__QUERY_WEIGHT": "2",
+                f"{self.PREFIX}__WRITE_WEIGHT": "8",
+            },
+        )
+
+    def test_make_target_populates_scheduler_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = runner.make_target(
+                "base", Path("/bin/true"), root, list(range(10_000, 10_008)),
+                scheduler_env=runner.scheduler_env(False, self.SCHEDULER),
+            )
+            candidate = runner.make_target(
+                "candidate", Path("/bin/true"), root, list(range(10_008, 10_016)),
+                scheduler_env=runner.scheduler_env(True, self.SCHEDULER),
+            )
+            no_scheduler = runner.make_target(
+                "candidate", Path("/bin/true"), root, list(range(10_016, 10_024)),
+            )
+            self.assertEqual(base.scheduler_env, {f"{self.PREFIX}__ENABLE": "false"})
+            self.assertEqual(candidate.scheduler_env[f"{self.PREFIX}__ENABLE"], "true")
+            self.assertEqual(candidate.scheduler_env[f"{self.PREFIX}__MAX_CONCURRENT_POLLS"], "16")
+            self.assertEqual(candidate.scheduler_env[f"{self.PREFIX}__QUERY_WEIGHT"], "2")
+            self.assertEqual(candidate.scheduler_env[f"{self.PREFIX}__WRITE_WEIGHT"], "8")
+            self.assertEqual(no_scheduler.scheduler_env, {})
+
+    def test_start_datanode_passes_scheduler_env(self) -> None:
+        def spawn_env(target: runner.RunTarget) -> dict[str, str] | None:
+            cluster = runner.DistributedCluster(target)
+            cluster.procs["metasrv"] = _FakeProc()
+            with (
+                patch.object(runner.subprocess, "Popen") as popen,
+                patch.object(runner, "wait_health"),
+            ):
+                cluster.start_datanode()
+            popen.assert_called_once()
+            return popen.call_args.kwargs.get("env")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = runner.make_target(
+                "base", Path("/bin/true"), root, list(range(10_000, 10_008)),
+                scheduler_env=runner.scheduler_env(False, self.SCHEDULER),
+            )
+            candidate = runner.make_target(
+                "candidate", Path("/bin/true"), root, list(range(10_008, 10_016)),
+                scheduler_env=runner.scheduler_env(True, self.SCHEDULER),
+            )
+            base_env = spawn_env(base)
+            self.assertIsNotNone(base_env)
+            self.assertEqual(base_env[f"{self.PREFIX}__ENABLE"], "false")
+            candidate_env = spawn_env(candidate)
+            self.assertIsNotNone(candidate_env)
+            self.assertEqual(candidate_env[f"{self.PREFIX}__ENABLE"], "true")
+            self.assertEqual(candidate_env[f"{self.PREFIX}__MAX_CONCURRENT_POLLS"], "16")
+            self.assertEqual(candidate_env[f"{self.PREFIX}__QUERY_WEIGHT"], "2")
+            self.assertEqual(candidate_env[f"{self.PREFIX}__WRITE_WEIGHT"], "8")
+            # The scheduler env is merged over os.environ so the datanode keeps
+            # PATH and friends.
+            self.assertIn("PATH", candidate_env)
+
+    def test_metasrv_and_frontend_do_not_receive_scheduler_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate = runner.make_target(
+                "candidate", Path("/bin/true"), root, list(range(10_008, 10_016)),
+                scheduler_env=runner.scheduler_env(True, self.SCHEDULER),
+            )
+            cluster = runner.DistributedCluster(candidate)
+            cluster.procs["metasrv"] = _FakeProc()
+            with (
+                patch.object(runner.subprocess, "Popen") as popen,
+                patch.object(runner, "wait_health"),
+            ):
+                popen.return_value = _FakeProc()
+                cluster.start_metasrv()
+                cluster.start_frontend()
+            self.assertEqual(popen.call_count, 2)
+            for call in popen.call_args_list:
+                self.assertIsNone(call.kwargs.get("env"))
+
+    def test_scheduler_report_entry(self) -> None:
+        self.assertEqual(
+            runner.scheduler_report_entry("base", self.SCHEDULER),
+            {"enabled": False, "max_concurrent_polls": 16, "query_weight": 2, "write_weight": 8},
+        )
+        self.assertEqual(
+            runner.scheduler_report_entry("candidate", self.SCHEDULER),
+            {"enabled": True, "max_concurrent_polls": 16, "query_weight": 2, "write_weight": 8},
+        )
+        disabled = {"enabled": False, "max_concurrent_polls": 0, "query_weight": 2, "write_weight": 8}
+        self.assertEqual(runner.scheduler_report_entry("base", None), disabled)
+        self.assertEqual(runner.scheduler_report_entry("candidate", None), disabled)
+
+
 class WriteThroughputScenarioDryRunTest(unittest.TestCase):
     def test_dry_run_plans_without_subprocess(self) -> None:
         events = []
@@ -277,6 +398,10 @@ class WriteThroughputScenarioDryRunTest(unittest.TestCase):
             self.assertEqual(report["targets"][0]["write_measurement"]["status"], "planned")
             self.assertEqual(len(report["thresholds"]), 4)
             self.assertTrue(all(t["status"] == "planned" for t in report["thresholds"]))
+            # No [scenario.scheduler] section: both targets run scheduler-disabled.
+            disabled = {"enabled": False, "max_concurrent_polls": 0, "query_weight": 2, "write_weight": 8}
+            self.assertEqual(report["targets"][0]["scheduler"], disabled)
+            self.assertEqual(report["targets"][1]["scheduler"], disabled)
             # The dry-run report file for each target is written under the work dir.
             self.assertTrue(targets[0].report_path.exists())
 

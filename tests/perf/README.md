@@ -288,6 +288,17 @@ throughput must not regress relative to base.
 [scenario]
 kind = "write_throughput"
 
+[scenario.scheduler]
+# Optional. The runner derives the enable flag per target and injects it into
+# the datanode as environment variables: the base datanode always starts with
+# GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER__ENABLE=false
+# and the candidate datanode with ENABLE=true plus the values below
+# (max_concurrent_polls 0 = 4 * global_rt_size). Without this section both
+# targets run with the scheduler disabled.
+max_concurrent_polls = 16
+query_weight = 2
+write_weight = 8
+
 [scenario.remote_write]
 database = "public"
 metric = "write_throughput_scheduler"
@@ -327,6 +338,18 @@ positive integers, `window_seconds` must divide `duration_seconds`,
 `target_rps` and every threshold must be finite and non-negative, and
 `max_failure_rate` must be in `[0, 1]`. Unknown fields are rejected by
 `query_perf_fixture plan`.
+
+The optional `[scenario.scheduler]` section (deny-unknown-fields) configures
+the datanode workload scheduler: `enable` (default false, derived by the
+runner rather than set in the case), `max_concurrent_polls` (default 0 =
+4 * `global_rt_size`), and `query_weight`/`write_weight` (defaults 2 and 8)
+which must be positive. The runner injects the scheduler into the datanode via
+environment variables (`GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER__ENABLE`
+etc.) because the datanode is spawned with CLI args only and no
+`--config-file`; metasrv and frontend never receive scheduler env. Scheduler
+on/off is the base/candidate axis of this case: base = off, candidate = on,
+and each target report entry records the applied `scheduler` config under
+`{enabled, max_concurrent_polls, query_weight, write_weight}`.
 
 For each target the runner writes all sample chunks, flushes the physical
 table, and computes:

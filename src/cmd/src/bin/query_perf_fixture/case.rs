@@ -85,6 +85,56 @@ pub(super) struct OtlpTraceLoadThresholds {
 pub(super) struct WriteThroughputScenario {
     pub(super) remote_write: PromRemoteWritePlan,
     pub(super) write_measure: WriteMeasureConfig,
+    /// Workload-scheduler configuration injected into the datanode via
+    /// environment variables. When absent the runner leaves both targets on
+    /// the datanode default (scheduler disabled). `enable` is not used by the
+    /// runner for derivation: the base target always runs with the scheduler
+    /// disabled and the candidate target always runs with it enabled when this
+    /// section is present.
+    #[serde(default)]
+    pub(super) scheduler: Option<WorkloadSchedulerCaseConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkloadSchedulerCaseConfig {
+    /// Enables policy-controlled query and write task spawning. Mirrors the
+    /// datanode `runtime.experimental_workload_scheduler.enable` option; the
+    /// runner derives the per-target value (base = false, candidate = true)
+    /// and ignores this field for derivation.
+    #[serde(default)]
+    pub(super) enable: bool,
+    /// Maximum polls admitted to Tokio at once. Zero uses four times
+    /// `global_rt_size`, consistent with the runtime default.
+    #[serde(default)]
+    pub(super) max_concurrent_polls: u64,
+    /// Relative share for query polls while writes are also backlogged.
+    #[serde(default = "default_scheduler_query_weight")]
+    pub(super) query_weight: u64,
+    /// Relative share for write polls while queries are also backlogged.
+    #[serde(default = "default_scheduler_write_weight")]
+    pub(super) write_weight: u64,
+}
+
+pub(super) fn default_scheduler_query_weight() -> u64 {
+    2
+}
+pub(super) fn default_scheduler_write_weight() -> u64 {
+    8
+}
+
+impl WorkloadSchedulerCaseConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("query_weight", self.query_weight),
+            ("write_weight", self.write_weight),
+        ] {
+            if value == 0 {
+                return Err(format!("scenario.scheduler.{name} must be positive"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -649,6 +699,28 @@ max_mean_rps_regression_pct = 10.0
 max_p99_latency_regression_pct = 10.0
 "#;
 
+    const SCHEDULER_CASE: &str = r#"
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+metric = "write_throughput_test"
+
+[scenario.write_measure]
+duration_seconds = 60
+window_seconds = 5
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05
+max_mean_rps_regression_pct = 10.0
+max_p99_latency_regression_pct = 10.0
+
+[scenario.scheduler]
+max_concurrent_polls = 16
+query_weight = 2
+write_weight = 8
+"#;
+
     #[test]
     fn parses_builtin_write_throughput_case() {
         let text = std::fs::read_to_string(builtin_write_throughput_case())
@@ -676,6 +748,16 @@ max_p99_latency_regression_pct = 10.0
                 .max_p99_latency_regression_pct,
             10.0
         );
+        let scheduler = scenario
+            .scheduler
+            .expect("built-in case must declare a scheduler section");
+        assert!(!scheduler.enable);
+        assert_eq!(scheduler.max_concurrent_polls, 16);
+        assert_eq!(scheduler.query_weight, 2);
+        assert_eq!(scheduler.write_weight, 8);
+        scheduler
+            .validate()
+            .expect("built-in scheduler must validate");
         scenario
             .write_measure
             .validate()
@@ -688,11 +770,58 @@ max_p99_latency_regression_pct = 10.0
         assert_eq!(scenario.remote_write.series_count, 8);
         assert_eq!(scenario.remote_write.samples_per_series, 30);
         assert_eq!(scenario.write_measure.target_rps, 0.0);
+        assert!(scenario.scheduler.is_none());
         assert!(scenario.write_measure.thresholds.min_rps_absolute.is_none());
         scenario
             .write_measure
             .validate()
             .expect("minimal case must validate");
+    }
+
+    #[test]
+    fn write_throughput_parses_scheduler_section() {
+        let scenario = write_throughput_scenario(SCHEDULER_CASE);
+        let scheduler = scenario
+            .scheduler
+            .expect("scheduler section must parse into Some");
+        assert!(!scheduler.enable);
+        assert_eq!(scheduler.max_concurrent_polls, 16);
+        assert_eq!(scheduler.query_weight, 2);
+        assert_eq!(scheduler.write_weight, 8);
+        scheduler
+            .validate()
+            .expect("scheduler config must validate");
+    }
+
+    #[test]
+    fn write_throughput_rejects_invalid_scheduler_weights() {
+        let zero_query = SCHEDULER_CASE.replace("query_weight = 2", "query_weight = 0");
+        let scenario = write_throughput_scenario(&zero_query);
+        let err = scenario
+            .scheduler
+            .unwrap()
+            .validate()
+            .expect_err("zero query_weight must be rejected");
+        assert!(err.contains("query_weight"), "{err}");
+
+        let zero_write = SCHEDULER_CASE.replace("write_weight = 8", "write_weight = 0");
+        let scenario = write_throughput_scenario(&zero_write);
+        let err = scenario
+            .scheduler
+            .unwrap()
+            .validate()
+            .expect_err("zero write_weight must be rejected");
+        assert!(err.contains("write_weight"), "{err}");
+    }
+
+    #[test]
+    fn write_throughput_rejects_unknown_scheduler_fields() {
+        let unknown = SCHEDULER_CASE.replace(
+            "max_concurrent_polls = 16",
+            "max_concurrent_polls = 16\nbogus_scheduler_field = 1",
+        );
+        let err = parse_case(&unknown).expect_err("unknown scheduler field must be rejected");
+        assert!(err.to_string().contains("bogus_scheduler_field"), "{err}");
     }
 
     #[test]

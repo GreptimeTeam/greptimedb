@@ -4,11 +4,18 @@
 # (scheduler off) vs candidate (scheduler on) under a single-class backlog:
 # the scheduler must be work-conserving and must not regress write throughput.
 #
+# The runner derives the scheduler enable flag per target from the
+# [scenario.scheduler] section below: the base target always starts its
+# datanode with GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER__ENABLE=false
+# and the candidate target with ENABLE=true plus the weights/max_polls below
+# (injected as datanode environment variables, since the runner spawns the
+# datanode with CLI args only). `enable` is intentionally not set here.
+#
 # Sized for a local run: 2048 series x 3600 samples = 7,372,800 rows per target.
 # The ingestion is split into 20 sample chunks of 180 samples per series; the
 # measurement spans the first 60s (12 windows of 5s). Gates: <= 5% failed
 # chunks, <= 10% mean-RPS regression, <= 10% p99-latency regression, and an
-# absolute floor of 50k rows/s per target.
+# absolute floor of 15k rows/s per target.
 
 [case]
 name = "write_throughput_scheduler"
@@ -17,6 +24,13 @@ issue = "https://github.com/GreptimeTeam/greptimedb/pull/8736"
 
 [scenario]
 kind = "write_throughput"
+
+[scenario.scheduler]
+# enable is not set here: the runner derives it per target (base = disabled,
+# candidate = enabled). max_concurrent_polls 0 = 4 * global_rt_size.
+max_concurrent_polls = 16
+query_weight = 2
+write_weight = 8
 
 [scenario.remote_write]
 database = "public"

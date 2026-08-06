@@ -34,7 +34,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,7 @@ class RunTarget:
     datanode_rpc_port: int
     datanode_http_port: int
     datanode_data_dir: Path
+    scheduler_env: dict[str, str] = field(default_factory=dict)
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +127,7 @@ def allocate_ports(n: int) -> list[int]:
             s.close()
 
 
-def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_dir: Path | None = None) -> RunTarget:
+def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_dir: Path | None = None, scheduler_env: dict[str, str] | None = None) -> RunTarget:
     work_dir = root / name
     return RunTarget(
         name,
@@ -144,7 +145,53 @@ def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_d
         ports[2],
         ports[3],
         work_dir / "datanode-0" / "data",
+        scheduler_env or {},
     )
+
+
+def scheduler_env(enable: bool, scheduler: dict[str, Any] | None) -> dict[str, str]:
+    """Derive the datanode workload-scheduler environment variables for a target.
+
+    The datanode is spawned with CLI args only (no --config-file), so the
+    scheduler must be injected via environment. Config env vars use the
+    `PREFIX__KEY__SUBKEY` form (see src/common/config/src/config.rs
+    load_layered_options), and the datanode env prefix defaults to
+    `GREPTIMEDB_DATANODE`; the scheduler lives at
+    `runtime.experimental_workload_scheduler`.
+
+    Returns an empty dict when the case has no `[scenario.scheduler]` section:
+    both base and candidate then run with the datanode default (scheduler
+    disabled). When the section is present the base target only pins
+    `ENABLE=false` while the candidate pins `ENABLE=true` and forwards the
+    scheduler weights/max-polls so both targets are configured identically
+    except for the enable flag.
+    """
+    if scheduler is None:
+        return {}
+    prefix = "GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER"
+    env = {f"{prefix}__ENABLE": "true" if enable else "false"}
+    if enable:
+        for key in ("max_concurrent_polls", "query_weight", "write_weight"):
+            if key in scheduler:
+                env[f"{prefix}__{key.upper()}"] = str(scheduler[key])
+    return env
+
+
+def scheduler_report_entry(target_name: str, scheduler: dict[str, Any] | None) -> dict[str, Any]:
+    """Scheduler configuration applied to a target, for the target report entry.
+
+    The base target always runs with the scheduler disabled; the candidate
+    runs with it enabled iff the case has a `[scenario.scheduler]` section.
+    Defaults mirror the datanode runtime defaults (max_concurrent_polls 0 =
+    four times global_rt_size, query_weight 2, write_weight 8).
+    """
+    enabled = target_name == "candidate" and scheduler is not None
+    return {
+        "enabled": enabled,
+        "max_concurrent_polls": int(scheduler["max_concurrent_polls"]) if scheduler else 0,
+        "query_weight": int(scheduler["query_weight"]) if scheduler else 2,
+        "write_weight": int(scheduler["write_weight"]) if scheduler else 8,
+    }
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> dict[str, Any]:
@@ -340,11 +387,11 @@ class DistributedCluster:
             },
         }
 
-    def _spawn(self, name: str, args: list[str]) -> None:
+    def _spawn(self, name: str, args: list[str], env: dict[str, str] | None = None) -> None:
         logs = self.target.work_dir / "logs" / name
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / "stdout.log").open("ab") as out, (logs / "stderr.log").open("ab") as err:
-            self.procs[name] = subprocess.Popen(args, stdout=out, stderr=err)
+            self.procs[name] = subprocess.Popen(args, stdout=out, stderr=err, env=env)
 
     def _ensure_metasrv_alive(self) -> None:
         proc = self.procs.get("metasrv")
@@ -400,6 +447,9 @@ class DistributedCluster:
                 "--metasrv-addrs",
                 f"127.0.0.1:{self.target.metasrv_rpc_port}",
             ],
+            env=None
+            if not self.target.scheduler_env
+            else {**os.environ, **self.target.scheduler_env},
         )
         wait_health(self.target.datanode_http_port)
 
@@ -1764,6 +1814,7 @@ def run_write_throughput_scenario(args: argparse.Namespace, case: dict[str, Any]
                 "remote_write": rw,
                 "flushes": flushes,
                 "flush": flushes[-1] if flushes else None,
+                "scheduler": scheduler_report_entry(target.name, scenario_config.get("scheduler")),
                 "write_measurement": measurement,
             }
             flushes_ok = all(flush.get("ok") for flush in flushes)
@@ -1861,7 +1912,11 @@ def main() -> int:
     if scenario_kind == "direct_readable_sst" and not args.dry_run and args.fixture_generator is None:
         raise ValueError("--fixture-generator is required unless --dry-run is set")
     ports = allocate_ports(16)
-    targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
+    scheduler_cfg = scenario_config.get("scheduler")
+    targets = [
+        make_target("base", args.base_bin.resolve(), work_root, ports[:8], scheduler_env=scheduler_env(False, scheduler_cfg)),
+        make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:], scheduler_env=scheduler_env(True, scheduler_cfg)),
+    ]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
     fixture_dir = fixture_root(work_root, case_path, case, args.fixture_cache_dir)
     reuse_fixture = args.reuse_fixture or args.fixture_cache_dir is not None
