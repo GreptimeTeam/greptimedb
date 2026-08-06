@@ -125,7 +125,10 @@ bucket and count monotonicity. Counter `rate` and `increase` also use the first
 histogram's start timestamp as a synthetic zero when it is nonzero and strictly
 inside the query window before the first sample. This permits the same
 single-sample calculation as Prometheus and prevents left extrapolation past the
-known start.
+known start. When no usable start timestamp exists, a positive histogram-count
+increase lets counter extrapolation infer a zero point from the first count to
+cap left extrapolation; a synthetic zero uses its known timestamp instead of
+that heuristic.
 
 This behavior is native-histogram-only. GreptimeDB does not persist start
 timestamps for float samples, so float `rate` and `increase` still require two
