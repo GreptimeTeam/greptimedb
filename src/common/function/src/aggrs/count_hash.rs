@@ -35,7 +35,6 @@ use datafusion_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, EmitTo, GroupsAccumulator, ReversedUDAF,
     SetMonotonicity, Signature, TypeSignature, Volatility,
 };
-use datafusion_functions_aggregate_common::aggregate::groups_accumulator::nulls::filtered_null_mask;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, Int64Array, ListArray, UInt64Array,
@@ -343,31 +342,6 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         Ok(vec![Arc::new(list_array) as _])
     }
 
-    fn convert_to_state(
-        &self,
-        values: &[ArrayRef],
-        opt_filter: Option<&BooleanArray>,
-    ) -> Result<Vec<ArrayRef>> {
-        // For a single hash value per row, create a list array with that value
-        assert_eq!(values.len(), 1, "count_hash expects a single argument");
-        let values = ArrayRef::clone(&values[0]);
-
-        let offsets = OffsetBuffer::new(ScalarBuffer::from_iter(0..values.len() as i32 + 1));
-        let nulls = filtered_null_mask(opt_filter, &values);
-        let list_array = ListArray::new(
-            Arc::new(Field::new_list_field(DataType::UInt64, true)),
-            offsets,
-            values,
-            nulls,
-        );
-
-        Ok(vec![Arc::new(list_array)])
-    }
-
-    fn supports_convert_to_state(&self) -> bool {
-        true
-    }
-
     fn size(&self) -> usize {
         // Base size of the struct
         let mut size = size_of::<Self>();
@@ -470,8 +444,22 @@ impl Accumulator for CountHashAccumulator {
 }
 
 #[cfg(test)]
+#[path = "count_hash/hash_v1_fixture.rs"]
+mod hash_v1_fixture;
+
+#[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::{Array, BooleanArray, Int32Array, Int64Array};
+    use std::collections::BTreeMap;
+
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_expr::aggregate::AggregateExprBuilder;
+    use datafusion::physical_expr::expressions::col;
+    use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+    use datafusion::physical_plan::{ExecutionPlan, collect, collect_partitioned};
+    use datatypes::arrow::array::{Array, BooleanArray, Int32Array, Int64Array, StringArray};
+    use datatypes::arrow::datatypes::Schema;
+    use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
 
@@ -553,6 +541,194 @@ mod tests {
 
     fn create_test_group_accumulator() -> CountHashGroupAccumulator {
         CountHashGroupAccumulator::new()
+    }
+
+    async fn execute_partial_final_count_hash(
+        input_partitions: &[Vec<RecordBatch>],
+        schema: Arc<Schema>,
+    ) -> Result<(BTreeMap<i32, i64>, usize)> {
+        let mut context = TaskContext::default();
+        let mut config = context.session_config().clone();
+        config = config.set(
+            "datafusion.execution.skip_partial_aggregation_probe_rows_threshold",
+            &ScalarValue::UInt64(Some(4)),
+        );
+        config = config.set(
+            "datafusion.execution.skip_partial_aggregation_probe_ratio_threshold",
+            &ScalarValue::Float64(Some(0.75)),
+        );
+        context = context.with_session_config(config);
+        let context = Arc::new(context);
+
+        let group_by = PhysicalGroupBy::new_single(vec![(col("group", &schema)?, "group".into())]);
+        let aggregate = Arc::new(
+            AggregateExprBuilder::new(
+                Arc::new(CountHash::udf_impl()),
+                vec![col("value", &schema)?],
+            )
+            .schema(Arc::clone(&schema))
+            .alias("count_hash")
+            .build()?,
+        );
+        let partial_input =
+            MemorySourceConfig::try_new_exec(input_partitions, Arc::clone(&schema), None)?;
+        let partial = Arc::new(AggregateExec::try_new(
+            AggregateMode::Partial,
+            group_by,
+            vec![Arc::clone(&aggregate)],
+            vec![Some(col("filter", &schema)?)],
+            partial_input,
+            Arc::clone(&schema),
+        )?);
+        let partial_batches = collect_partitioned(Arc::clone(&partial) as _, Arc::clone(&context))
+            .await?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let skipped_rows = partial
+            .metrics()
+            .and_then(|metrics| metrics.sum_by_name("skipped_aggregation_rows"))
+            .map(|metric| metric.as_usize())
+            .unwrap_or(0);
+
+        let final_input =
+            MemorySourceConfig::try_new_exec(&[partial_batches], partial.schema(), None)?;
+        let final_group_by =
+            PhysicalGroupBy::new_single(vec![(col("group", &partial.schema())?, "group".into())]);
+        let final_aggregate = Arc::new(
+            AggregateExprBuilder::new(
+                Arc::new(CountHash::udf_impl()),
+                vec![col("value", &schema)?],
+            )
+            .schema(Arc::clone(&schema))
+            .alias("count_hash")
+            .build()?,
+        );
+        let final_exec = Arc::new(AggregateExec::try_new(
+            AggregateMode::Final,
+            final_group_by,
+            vec![final_aggregate],
+            vec![None],
+            final_input,
+            schema,
+        )?);
+        let batches = collect(final_exec, context).await?;
+        let mut results = BTreeMap::new();
+        for batch in batches {
+            let groups = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let counts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                results.insert(groups.value(row), counts.value(row));
+            }
+        }
+        Ok((results, skipped_rows))
+    }
+
+    fn count_hash_probe_batches(schema: Arc<Schema>) -> Result<Vec<Vec<RecordBatch>>> {
+        let batch = || {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                    Arc::new(UInt64Array::from(vec![
+                        Some(7),
+                        Some(8),
+                        None,
+                        Some(9),
+                        Some(10),
+                    ])),
+                    Arc::new(BooleanArray::from(vec![
+                        Some(true),
+                        Some(true),
+                        Some(true),
+                        Some(false),
+                        None,
+                    ])),
+                ],
+            )
+        };
+        Ok(vec![vec![batch()?, batch()?], vec![batch()?, batch()?]])
+    }
+
+    fn count_hash_string_probe_batches(schema: Arc<Schema>) -> Result<Vec<Vec<RecordBatch>>> {
+        let batch = || {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                    Arc::new(StringArray::from(vec![
+                        Some("same"),
+                        Some("other"),
+                        None,
+                        Some("filtered"),
+                        Some("null-filter"),
+                    ])),
+                    Arc::new(BooleanArray::from(vec![
+                        Some(true),
+                        Some(true),
+                        Some(true),
+                        Some(false),
+                        None,
+                    ])),
+                ],
+            )
+        };
+        Ok(vec![vec![batch()?, batch()?], vec![batch()?, batch()?]])
+    }
+
+    #[tokio::test]
+    async fn test_count_hash_row_hash_partial_final_skip_contract() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("group", DataType::Int32, false),
+            Field::new("value", DataType::UInt64, true),
+            Field::new("filter", DataType::Boolean, true),
+        ]));
+        let (results, skipped_rows) = execute_partial_final_count_hash(
+            &count_hash_probe_batches(Arc::clone(&schema))?,
+            schema,
+        )
+        .await?;
+        assert!(!create_test_group_accumulator().supports_convert_to_state());
+        assert_eq!(skipped_rows, 0);
+        assert_eq!(
+            results,
+            BTreeMap::from([(1, 1), (2, 1), (3, 0), (4, 0), (5, 0)])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_count_hash_row_hash_partial_final_skip_contract_non_uint64() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("group", DataType::Int32, false),
+            Field::new("value", DataType::Utf8, true),
+            Field::new("filter", DataType::Boolean, true),
+        ]));
+        let (results, skipped_rows) = execute_partial_final_count_hash(
+            &count_hash_string_probe_batches(Arc::clone(&schema))?,
+            schema,
+        )
+        .await?;
+        assert_eq!(skipped_rows, 0);
+        assert_eq!(
+            results,
+            BTreeMap::from([(1, 1), (2, 1), (3, 0), (4, 0), (5, 0)])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_hash_group_accumulator_does_not_support_convert_to_state() {
+        let acc = create_test_group_accumulator();
+        assert!(!acc.supports_convert_to_state());
     }
 
     #[test]
@@ -643,5 +819,87 @@ mod tests {
         let acc = create_test_group_accumulator();
         // Just test it doesn't crash and returns a value.
         assert!(acc.size() > 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression harness: on this fixed branch convert_to_state is
+    // unsupported (overrides were deleted, the GroupsAccumulator trait
+    // defaults return false / Err), so the double-count case and the
+    // false-filter case skip via the Err arm and the non-UInt64 case observes
+    // the unwrap panic — all three must PASS here.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn convert_to_state_merge_double_counts_normal_skip() -> Result<()> {
+        // A partial (hashed) state merged together with a convert_to_state
+        // state double-counts every input row: raw values {1,2,3} are treated
+        // as additional distinct hashes on top of {hash(1), hash(2), hash(3)}.
+        let mut acc = create_test_group_accumulator();
+        let values = Arc::new(UInt64Array::from(vec![1u64, 2, 3])) as ArrayRef;
+        acc.update_batch(&[values.clone()], &[0, 0, 0], None, 1)?;
+        // Hashed state: distinct_sets[0] = {hash(1), hash(2), hash(3)}
+        let hashed_state = acc.state(EmitTo::All)?;
+
+        let converter = create_test_group_accumulator();
+        let raw_state = match converter.convert_to_state(&[values], None) {
+            Ok(state) => state,
+            // Fixed builds no longer support convert_to_state: nothing to check.
+            Err(_) => return Ok(()),
+        };
+
+        let mut merged = create_test_group_accumulator();
+        merged.merge_batch(&hashed_state, &[0], None, 1)?;
+        merged.merge_batch(&raw_state, &[0], None, 1)?;
+
+        let result = merged.evaluate(EmitTo::All)?;
+        let result = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        // BUG: raw {1,2,3} are inserted as hashes -> count is 6, not 3.
+        assert_eq!(result.value(0), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn convert_to_state_non_uint64_panics() {
+        // convert_to_state accepts any input type and builds a ListArray whose
+        // field claims UInt64 while the inner array is Int32. The mismatch
+        // panics (ListArray construction assert, or the unchecked UInt64
+        // downcast inside merge_batch). A fixed build rejects
+        // convert_to_state outright, and unwrapping that Err also panics.
+        let mut acc = create_test_group_accumulator();
+        let values = Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = acc.convert_to_state(&[values], None).unwrap();
+            // If construction did not panic, merging must hit the typed unwrap.
+            let _ = acc.merge_batch(&state, &[0], None, 1);
+        }));
+        assert!(
+            result.is_err(),
+            "expected a panic for non-UInt64 convert_to_state input"
+        );
+    }
+
+    #[test]
+    fn convert_to_state_false_filter_not_applied() -> Result<()> {
+        // convert_to_state encodes the filter as a null mask, but merge_batch
+        // never checks outer list validity; with the dense offsets built by
+        // convert_to_state, the filtered-out row's value still lands in the
+        // distinct set.
+        let acc = create_test_group_accumulator();
+        let values = Arc::new(UInt64Array::from(vec![1u64, 2, 3])) as ArrayRef;
+        let filter = BooleanArray::from(vec![true, false, true]);
+        let raw_state = match acc.convert_to_state(&[values], Some(&filter)) {
+            Ok(state) => state,
+            // Fixed builds no longer support convert_to_state: nothing to check.
+            Err(_) => return Ok(()),
+        };
+
+        let mut merged = create_test_group_accumulator();
+        merged.merge_batch(&raw_state, &[0, 0, 0], None, 1)?;
+
+        let result = merged.evaluate(EmitTo::All)?;
+        let result = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        // Only rows 0 and 2 pass the filter -> expected 2; buggy build yields 3.
+        assert_eq!(result.value(0), 2);
+        Ok(())
     }
 }
