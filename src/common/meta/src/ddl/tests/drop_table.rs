@@ -179,7 +179,7 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
     assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
     assert_eq!(
         recovered_data["trigger_context"],
-        serde_json::json!({"reason": "unknown", "protocol": "unknown"})
+        serde_json::json!({"reason": "unknown"})
     );
 }
 
