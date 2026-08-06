@@ -510,11 +510,12 @@ impl Stream for InstantManipulateStream {
 }
 
 impl InstantManipulateStream {
-    // Refer to Prometheus `vectorSelectorSingle` / lookback semantics.
-    //
-    // Prometheus `v3.9.1` uses a start-exclusive lookback window:
-    //   (eval_ts - lookback_delta, eval_ts]
-    // i.e. a sample at exactly `eval_ts - lookback_delta` is considered too old.
+    /// Manipulates one complete series sorted by timestamp. The planner enforces
+    /// this input contract with a sort followed by [`SeriesDivide`].
+    ///
+    /// Prometheus `v3.9.1`'s `vectorSelectorSingle` uses a start-exclusive
+    /// lookback window `(eval_ts - lookback_delta, eval_ts]`; a sample at exactly
+    /// `eval_ts - lookback_delta` is too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let ts_column = input
             .column(self.time_index)
@@ -1387,7 +1388,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn prometheus_stale_nan_suppresses_exact_and_lookback() {
+    async fn prometheus_stale_nan_selects_before_and_suppresses_after_marker() {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 TIME_INDEX_COLUMN,
@@ -1411,10 +1412,10 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(InstantManipulateExec {
-            start: 1_000,
+            start: 750,
             end: 1_500,
             lookback_delta: 1_001,
-            interval: 500,
+            interval: 250,
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
@@ -1427,11 +1428,24 @@ mod test {
             .await
             .unwrap();
 
+        let row_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
+        let timestamp = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .value(0);
+        let value = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0);
         assert_eq!(
-            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
-            0,
-            "the stale marker must suppress both the exact and lookback selections rather than \
-             falling back to 42.0"
+            (row_count, timestamp, value),
+            (1, 750, 42.0),
+            "only the evaluation before the stale marker should select 42.0"
         );
     }
 
