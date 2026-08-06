@@ -1656,15 +1656,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_count_first_prefers_more_files_over_smaller_overlap() {
+    #[tokio::test]
+    async fn test_count_first_prefers_more_files_over_smaller_overlap() {
         let files = [
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 2, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 40, 50, 0, 3, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 5, 15, 0, 4, 10),
         ];
-        let mut windows = assign_to_windows(files.iter(), 100);
+        let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 2,
             time_window_seconds: Some(100),
@@ -1674,20 +1674,23 @@ mod tests {
             time_range: None,
         };
 
-        let output = picker.build_output(RegionId::from_u64(1), &mut windows, Some(0));
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(4, output[0].inputs.len());
     }
 
-    #[test]
-    fn test_count_first_trigger_counts_actual_ssts() {
+    #[tokio::test]
+    async fn test_count_first_trigger_counts_actual_ssts() {
         let files = [
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 2, 10),
         ];
-        let mut windows = assign_to_windows(files.iter(), 100);
+        let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 3,
             time_window_seconds: Some(100),
@@ -1697,19 +1700,22 @@ mod tests {
             time_range: None,
         };
 
-        let output = picker.build_output(RegionId::from_u64(1), &mut windows, Some(0));
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(3, output[0].inputs.len());
     }
 
-    #[test]
-    fn test_count_first_does_not_compact_overlap_below_trigger() {
+    #[tokio::test]
+    async fn test_count_first_does_not_compact_overlap_below_trigger() {
         let files = [
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 20, 0, 1, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 10, 30, 0, 2, 10),
         ];
-        let mut windows = assign_to_windows(files.iter(), 100);
+        let windows = assign_to_windows(files.iter(), 100);
         let picker = TwcsPicker {
             trigger_file_num: 3,
             time_window_seconds: Some(100),
@@ -1719,13 +1725,16 @@ mod tests {
             time_range: None,
         };
 
-        let output = picker.build_output(RegionId::from_u64(1), &mut windows, Some(0));
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
 
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_filter_deleted_is_false_when_selected_files_overlap_unselected_file() {
+    #[tokio::test]
+    async fn test_filter_deleted_is_false_when_selected_files_overlap_unselected_file() {
         let mut files = (0..32)
             .map(|idx| {
                 new_file_handle_with_size_and_sequence(
@@ -1746,7 +1755,7 @@ mod tests {
             33,
             10,
         ));
-        let mut windows = assign_to_windows(files.iter(), 1000);
+        let windows = assign_to_windows(files.iter(), 1000);
         let picker = TwcsPicker {
             trigger_file_num: 2,
             time_window_seconds: Some(1000),
@@ -1756,7 +1765,10 @@ mod tests {
             time_range: None,
         };
 
-        let output = picker.build_output(RegionId::from_u64(1), &mut windows, Some(0));
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
 
         assert_eq!(1, output.len());
         assert_eq!(DEFAULT_MAX_INPUT_FILE_NUM, output[0].inputs.len());
