@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,10 @@ pub struct HeartbeatAccumulator {
     pub stat: Option<Stat>,
     pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
+    /// Arbitrary response extensions accumulated by handlers. Customized
+    /// handlers can write private key/value payloads here; the group copies
+    /// the whole map into [`HeartbeatResponse::extensions`].
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl HeartbeatAccumulator {
@@ -384,6 +388,7 @@ impl HeartbeatHandlerGroup {
         }
         let header = std::mem::take(&mut acc.header);
         let mailbox_message = acc.take_mailbox_message();
+        let extensions = std::mem::take(&mut acc.extensions);
 
         // Populate heartbeat_config during handshake
         let heartbeat_config = if is_handshake {
@@ -405,6 +410,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             mailbox_message,
             heartbeat_config,
+            extensions,
         };
         Ok(res)
     }
@@ -883,7 +889,7 @@ impl HeartbeatHandlerGroupBuilderCustomizer for DefaultHeartbeatHandlerGroupBuil
 mod tests {
 
     use std::assert_matches;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -957,6 +963,49 @@ mod tests {
         assert_eq!(message.subject, "req-test".to_string());
 
         (mailbox, receiver)
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_extension_reaches_response() {
+        use api::v1::meta::HeartbeatRequest;
+        use meta_srv::handler::test_utils::TestEnv;
+        use meta_srv::metasrv::Context;
+
+        struct ExtensionWriter;
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for ExtensionWriter {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Frontend
+            }
+
+            async fn handle(
+                &self,
+                _req: &HeartbeatRequest,
+                _ctx: &mut Context,
+                acc: &mut super::HeartbeatAccumulator,
+            ) -> Result<super::HandleControl> {
+                acc.extensions
+                    .insert("custom.key".to_string(), b"custom-value".to_vec());
+                Ok(super::HandleControl::Continue)
+            }
+        }
+
+        let mut builder = HeartbeatHandlerGroupBuilder::new(Pushers::default());
+        builder.add_handler_last(ExtensionWriter);
+        let group = builder.build().unwrap();
+
+        let mut request = HeartbeatRequest::default();
+        request.header = Some(api::v1::meta::RequestHeader::new(
+            1,
+            Role::Frontend,
+            HashMap::new(),
+        ));
+        let response = group.handle(request, TestEnv::new().ctx()).await.unwrap();
+        assert_eq!(
+            response.extensions.get("custom.key"),
+            Some(&b"custom-value".to_vec())
+        );
     }
 
     #[test]
