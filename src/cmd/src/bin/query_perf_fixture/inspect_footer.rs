@@ -319,7 +319,7 @@ mod tests {
         // and a zero-size fake file.
         let table = dir.join("data/table");
         fs::create_dir_all(&table).expect("create table dir");
-        fs::create_dir_all(&table.join("metadata")).expect("create metadata dir");
+        fs::create_dir_all(table.join("metadata")).expect("create metadata dir");
         write_parquet_file(&table.join("0001.parquet"), 3);
         write_parquet_file(&table.join("0002.parquet"), 5);
         write_parquet_file(&table.join("metadata/0001.parquet"), 7);
