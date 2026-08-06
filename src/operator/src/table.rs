@@ -132,4 +132,16 @@ impl TableMutationHandler for TableMutationOperator {
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
     }
+
+    async fn discard_unflushed_data(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_unflushed_data(region_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
 }

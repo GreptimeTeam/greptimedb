@@ -171,6 +171,14 @@ impl FunctionState {
             ) -> Result<AffectedRows> {
                 Ok(ROWS)
             }
+
+            async fn discard_unflushed_data(
+                &self,
+                _region_id: RegionId,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
         }
 
         #[async_trait]

@@ -18,6 +18,7 @@ use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
     BuildIndexRequest, CompactRequest, CompactionTimeRange, FlushRequest, RegionRequestHeader,
+    TruncateRequest, Unflushed, truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
@@ -206,6 +207,21 @@ impl Requester {
         info!("Handle region manual compaction request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
     }
+
+    /// Discard all unflushed data from the region.
+    pub async fn handle_discard_unflushed_data(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let request = RegionRequestBody::Truncate(TruncateRequest {
+            region_id: region_id.into(),
+            kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+        });
+
+        info!("Handle region discard unflushed data request: {region_id}");
+        self.do_request(vec![request], None, &ctx).await
+    }
 }
 
 fn to_pb_compaction_time_range(range: TimestampRange) -> Result<CompactionTimeRange> {
@@ -291,6 +307,7 @@ impl Requester {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
             RegionRequestBody::BuildIndex(req) => req.region_id,
+            RegionRequestBody::Truncate(req) => req.region_id,
             _ => {
                 error!("Unsupported region request: {:?}", req);
                 return UnsupportedRegionRequestSnafu {}.fail();

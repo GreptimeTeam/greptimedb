@@ -458,6 +458,10 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
                 RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
             )])
         }
+        Some(truncate_request::Kind::Unflushed(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )]),
     }
 }
 
@@ -1801,6 +1805,41 @@ mod tests {
                 .unwrap()
             ),
             request.time_range
+        );
+    }
+
+    #[test]
+    fn test_make_region_truncate_unflushed() {
+        let region_id = RegionId::new(42, 3);
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: region_id.as_u64(),
+                kind: Some(truncate_request::Kind::Unflushed(
+                    api::v1::region::Unflushed {},
+                )),
+            }))
+            .unwrap();
+
+        assert_eq!(region_id, requests[0].0);
+        assert!(matches!(
+            requests[0].1,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+        ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_requires_kind() {
+        let error =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: RegionId::new(42, 3).as_u64(),
+                kind: None,
+            }))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing kind in TruncateRequest")
         );
     }
 
