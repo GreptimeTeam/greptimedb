@@ -1715,7 +1715,7 @@ dependencies = [
 [[package]]
 name = "catio"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/catio.git?rev=464b419cd7063e968db724ee619f796f37aeb2c0#464b419cd7063e968db724ee619f796f37aeb2c0"
+source = "git+https://github.com/GreptimeTeam/catio.git?rev=9f4b0286dddcce230d2e06764a8fc4a35e7c5767#9f4b0286dddcce230d2e06764a8fc4a35e7c5767"
 dependencies = [
  "tokio",
 ]
