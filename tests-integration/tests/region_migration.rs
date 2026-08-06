@@ -1369,7 +1369,7 @@ async fn check_region_migration_events_system_table(
 +---------------------------------+-----------------+-------------------+------------------------------------------+
 | region_migration_trigger_reason | procedure_state | procedure_trigger | trigger_context                          |
 +---------------------------------+-----------------+-------------------+------------------------------------------+
-| Manual                          | Running         | Submitted         | {\"protocol\":\"unknown\",\"reason\":\"manual\"} |
+| Manual                          | Running         | Submitted         | {\"reason\":\"manual\"}                    |
 | Manual                          | Done            | Succeeded         |                                          |
 +---------------------------------+-----------------+-------------------+------------------------------------------+";
     check_output_stream(result.unwrap().data, expected).await;

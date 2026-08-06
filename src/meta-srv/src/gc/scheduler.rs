@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
@@ -218,10 +218,7 @@ impl GcScheduler {
         }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
         let report = self
-            .trigger_gc(TriggerContext::new(
-                TriggerReason::ScheduledGc,
-                UNKNOWN_TRIGGER_PROTOCOL,
-            ))
+            .trigger_gc(TriggerContext::new(TriggerReason::ScheduledGc))
             .instrument(span)
             .await?;
 
@@ -308,10 +305,7 @@ impl GcScheduler {
         // No specific regions, use default tick behavior
         let Some(regions) = region_ids else {
             let report = self
-                .trigger_gc(TriggerContext::new(
-                    TriggerReason::Manual,
-                    UNKNOWN_TRIGGER_PROTOCOL,
-                ))
+                .trigger_gc(TriggerContext::new(TriggerReason::Manual))
                 .await?;
             info!("Finished manual gc request");
             return Ok(report);
@@ -359,7 +353,7 @@ impl GcScheduler {
                     full_listing,
                     gc_timeout,
                     Region2Peers::new(),
-                    TriggerContext::new(TriggerReason::Manual, UNKNOWN_TRIGGER_PROTOCOL),
+                    TriggerContext::new(TriggerReason::Manual),
                 )
                 .await?;
             combined_report.merge(report);
@@ -373,7 +367,7 @@ impl GcScheduler {
                     true,
                     gc_timeout,
                     dropped_routes_override,
-                    TriggerContext::new(TriggerReason::Manual, UNKNOWN_TRIGGER_PROTOCOL),
+                    TriggerContext::new(TriggerReason::Manual),
                 )
                 .await?;
             combined_report.merge(report);

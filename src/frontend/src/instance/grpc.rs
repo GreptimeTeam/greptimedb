@@ -38,7 +38,6 @@ use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
 use futures::Stream;
 use futures::stream::StreamExt;
-use operator::utils::with_trigger_reason;
 use query::parser::PromQuery;
 use servers::error as server_error;
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
@@ -178,10 +177,14 @@ impl GrpcQueryHandler for Instance {
 
                     match expr {
                         DdlExpr::CreateTable(mut expr) => {
-                            let ctx = with_trigger_reason(ctx.clone(), TriggerReason::Manual);
                             let _ = self
                                 .statement_executor
-                                .create_table_inner(&mut expr, None, ctx)
+                                .create_table_inner(
+                                    &mut expr,
+                                    None,
+                                    ctx.clone(),
+                                    TriggerReason::Manual,
+                                )
                                 .await?;
                             Output::new_with_affected_rows(0)
                         }
@@ -193,9 +196,8 @@ impl GrpcQueryHandler for Instance {
                             Output::new_with_affected_rows(0)
                         }
                         DdlExpr::AlterTable(expr) => {
-                            let ctx = with_trigger_reason(ctx.clone(), TriggerReason::Manual);
                             self.statement_executor
-                                .alter_table_inner(expr, ctx)
+                                .alter_table_inner(expr, ctx.clone(), TriggerReason::Manual)
                                 .await?
                         }
                         DdlExpr::CreateDatabase(expr) => {

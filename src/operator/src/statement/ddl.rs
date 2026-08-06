@@ -116,7 +116,10 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
+use crate::utils::{
+    to_meta_query_context_with_origin_frontend_and_trigger_reason,
+    to_meta_query_context_with_trigger_reason,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -270,7 +273,6 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let ctx = crate::utils::with_trigger_reason(ctx, TriggerReason::Manual);
         let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
@@ -301,7 +303,7 @@ impl StatementExecutor {
             }
         }
 
-        self.create_table_inner(create_expr, stmt.partitions, ctx)
+        self.create_table_inner(create_expr, stmt.partitions, ctx, TriggerReason::Manual)
             .await
     }
 
@@ -311,7 +313,6 @@ impl StatementExecutor {
         stmt: CreateTableLike,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let ctx = crate::utils::with_trigger_reason(ctx, TriggerReason::Manual);
         let (catalog, schema, table) = table_idents_to_full_name(&stmt.source_name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
@@ -359,7 +360,8 @@ impl StatementExecutor {
         );
 
         let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
-        self.create_table_inner(create_expr, partitions, ctx).await
+        self.create_table_inner(create_expr, partitions, ctx, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -368,11 +370,11 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let ctx = crate::utils::with_trigger_reason(ctx, TriggerReason::Manual);
         let create_expr =
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;
-        self.create_table_inner(create_expr, None, ctx).await
+        self.create_table_inner(create_expr, None, ctx, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -381,6 +383,7 @@ impl StatementExecutor {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
         ensure!(
             !is_readonly_schema(&create_table.schema_name),
@@ -401,16 +404,20 @@ impl StatementExecutor {
                     .await?;
             }
             // Create logical tables
-            self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
-                .await?
-                .into_iter()
-                .next()
-                .context(error::UnexpectedSnafu {
-                    violated: "expected to create logical tables",
-                })
+            self.create_logical_tables(
+                std::slice::from_ref(create_table),
+                query_ctx,
+                trigger_reason,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected to create logical tables",
+            })
         } else {
             // Create other normal table
-            self.create_non_logic_table(create_table, partitions, query_ctx)
+            self.create_non_logic_table(create_table, partitions, query_ctx, trigger_reason)
                 .await
         }
     }
@@ -421,6 +428,7 @@ impl StatementExecutor {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
 
@@ -489,6 +497,7 @@ impl StatementExecutor {
                 partitions,
                 table_info.clone(),
                 query_ctx,
+                trigger_reason,
             )
             .await?;
 
@@ -516,6 +525,7 @@ impl StatementExecutor {
         &self,
         create_table_exprs: &[CreateTableExpr],
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Vec<TableRef>> {
         let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
         ensure!(
@@ -546,7 +556,7 @@ impl StatementExecutor {
             .collect::<Vec<_>>();
 
         let resp = self
-            .create_logical_tables_procedure(tables_data, query_context.clone())
+            .create_logical_tables_procedure(tables_data, query_context.clone(), trigger_reason)
             .await?;
 
         let table_ids = resp.table_ids;
@@ -709,10 +719,7 @@ impl StatementExecutor {
         .context(error::InvalidExprSnafu)?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_trigger(task),
         );
 
@@ -776,10 +783,7 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_flow(task),
         );
 
@@ -1092,10 +1096,7 @@ impl StatementExecutor {
         };
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                ctx,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(ctx, TriggerReason::Manual),
             DdlTask::new_create_view(expr, view_info.clone()),
         );
 
@@ -1181,10 +1182,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_flow(expr),
         );
 
@@ -1219,10 +1217,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_trigger(expr),
         );
 
@@ -1303,10 +1298,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_view(expr),
         );
 
@@ -1321,6 +1313,7 @@ impl StatementExecutor {
         &self,
         alter_table_exprs: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Output> {
         let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
         ensure!(
@@ -1366,7 +1359,8 @@ impl StatementExecutor {
         // Submit procedure for each physical table
         let mut handles = Vec::with_capacity(groups.len());
         for (_physical_table_id, exprs) in groups {
-            let fut = self.alter_logical_tables_procedure(exprs, query_context.clone());
+            let fut =
+                self.alter_logical_tables_procedure(exprs, query_context.clone(), trigger_reason);
             handles.push(fut);
         }
         let _results = futures::future::try_join_all(handles).await?;
@@ -1393,7 +1387,6 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
             ensure!(
@@ -1507,7 +1500,6 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
         ensure!(
             !is_readonly_schema(&table_name.schema_name),
             SchemaReadOnlySnafu {
@@ -1541,7 +1533,6 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
         if matches!(
             alter_table.alter_operation(),
             AlterTableOperation::Repartition { .. } | AlterTableOperation::Partition { .. }
@@ -1551,7 +1542,8 @@ impl StatementExecutor {
         }
 
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
-        self.alter_table_inner(expr, query_context).await
+        self.alter_table_inner(expr, query_context, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -1789,8 +1781,10 @@ impl StatementExecutor {
             source: Some(source),
             ..Default::default()
         };
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context.clone(), TriggerReason::Manual);
         let mut req = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context.clone()),
+            meta_query_context,
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
@@ -1845,6 +1839,7 @@ impl StatementExecutor {
         &self,
         expr: AlterTableExpr,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Output> {
         ensure!(
             !is_readonly_schema(&expr.schema_name),
@@ -1899,12 +1894,12 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
+
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
-                DdlTask::new_alter_table(expr),
-            );
+            let req = SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_alter_table(expr));
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1915,7 +1910,7 @@ impl StatementExecutor {
         } else {
             // This is logical table
             let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
+                meta_query_context,
                 DdlTask::new_alter_logical_tables(vec![expr]),
             );
 
@@ -2029,6 +2024,7 @@ impl StatementExecutor {
         partitions: Vec<PartitionExpr>,
         table_info: TableInfo,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions
             .into_iter()
@@ -2036,7 +2032,11 @@ impl StatementExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
+            to_meta_query_context_with_origin_frontend_and_trigger_reason(
+                query_context,
+                &self.origin_frontend_addr,
+                trigger_reason,
+            ),
             DdlTask::new_create_table(create_table, partitions, table_info),
         );
 
@@ -2050,9 +2050,14 @@ impl StatementExecutor {
         &self,
         tables_data: Vec<(CreateTableExpr, TableInfo)>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
+            to_meta_query_context_with_origin_frontend_and_trigger_reason(
+                query_context,
+                &self.origin_frontend_addr,
+                trigger_reason,
+            ),
             DdlTask::new_create_logical_tables(tables_data),
         );
 
@@ -2066,9 +2071,12 @@ impl StatementExecutor {
         &self,
         tables_data: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            meta_query_context,
             DdlTask::new_alter_logical_tables(tables_data),
         );
 
@@ -2086,10 +2094,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2113,10 +2118,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         );
 
@@ -2132,10 +2134,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_alter_database(alter_expr),
         );
 
@@ -2152,8 +2151,10 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            meta_query_context,
             DdlTask::new_truncate_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2245,10 +2246,7 @@ impl StatementExecutor {
         creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
         );
 
@@ -2783,9 +2781,10 @@ async fn execute_undrop_table(
             table_name: table_name.to_string(),
         })?;
 
-    let query_context = crate::utils::with_trigger_reason(query_context, TriggerReason::Manual);
+    let meta_query_context =
+        to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
     let request = SubmitDdlTaskRequest::new(
-        to_meta_query_context(query_context),
+        meta_query_context,
         DdlTask::new_undrop_table(dropped.table_id),
     );
     procedure_executor

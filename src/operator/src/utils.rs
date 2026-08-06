@@ -14,19 +14,14 @@
 
 use std::sync::{Arc, RwLock};
 
-use common_meta::rpc::ddl::{TRIGGER_REASON_EXTENSION_KEY, TriggerReason};
+use common_meta::rpc::ddl::{
+    ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TRIGGER_REASON_EXTENSION_KEY, TriggerReason,
+};
 use common_time::Timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
 
 use crate::error::{Error, InvalidTimezoneSnafu};
-
-/// Adds an explicit trigger reason to a query context for a DDL operation.
-pub fn with_trigger_reason(ctx: QueryContextRef, reason: TriggerReason) -> QueryContextRef {
-    let mut ctx = ctx.as_ref().clone();
-    ctx.set_extension(TRIGGER_REASON_EXTENSION_KEY, reason.as_ref());
-    Arc::new(ctx)
-}
 
 pub fn to_meta_query_context(
     query_context: QueryContextRef,
@@ -42,13 +37,28 @@ pub fn to_meta_query_context(
     }
 }
 
-pub fn to_meta_query_context_with_origin_frontend(
+/// Converts a session query context and records the DDL trigger reason.
+pub fn to_meta_query_context_with_trigger_reason(
     query_context: QueryContextRef,
-    origin_frontend_addr: &str,
+    trigger_reason: TriggerReason,
 ) -> common_meta::rpc::ddl::QueryContext {
     let mut meta_query_context = to_meta_query_context(query_context);
     meta_query_context.extensions.insert(
-        common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
+        TRIGGER_REASON_EXTENSION_KEY.to_string(),
+        trigger_reason.as_ref().to_string(),
+    );
+    meta_query_context
+}
+
+pub fn to_meta_query_context_with_origin_frontend_and_trigger_reason(
+    query_context: QueryContextRef,
+    origin_frontend_addr: &str,
+    trigger_reason: TriggerReason,
+) -> common_meta::rpc::ddl::QueryContext {
+    let mut meta_query_context =
+        to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
+    meta_query_context.extensions.insert(
+        ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
         origin_frontend_addr.to_string(),
     );
     meta_query_context
@@ -77,12 +87,14 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 
-    use common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY;
+    use common_meta::rpc::ddl::{
+        ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TRIGGER_REASON_EXTENSION_KEY, TriggerReason,
+    };
     use common_time::Timezone;
     use session::context::QueryContextBuilder;
 
     use super::{
-        to_meta_query_context, to_meta_query_context_with_origin_frontend,
+        to_meta_query_context, to_meta_query_context_with_origin_frontend_and_trigger_reason,
         try_to_session_query_context,
     };
 
@@ -120,7 +132,11 @@ mod tests {
                 .build(),
         );
 
-        let meta_ctx = to_meta_query_context_with_origin_frontend(session_ctx, "127.0.0.1:4000");
+        let meta_ctx = to_meta_query_context_with_origin_frontend_and_trigger_reason(
+            session_ctx,
+            "127.0.0.1:4000",
+            TriggerReason::Manual,
+        );
 
         assert_eq!(
             meta_ctx
@@ -128,6 +144,13 @@ mod tests {
                 .get(ORIGIN_FRONTEND_ADDR_EXTENSION_KEY)
                 .map(String::as_str),
             Some("127.0.0.1:4000")
+        );
+        assert_eq!(
+            meta_ctx
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY)
+                .map(String::as_str),
+            Some("manual")
         );
     }
 }

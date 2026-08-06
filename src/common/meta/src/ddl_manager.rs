@@ -70,6 +70,8 @@ use crate::rpc::ddl::DdlTask::{
     DropTable, DropView, PurgeDroppedTable, TruncateTable, UndropTable,
 };
 #[cfg(feature = "enterprise")]
+use crate::rpc::ddl::TriggerReason;
+#[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::DropTriggerTask;
@@ -79,8 +81,6 @@ use crate::rpc::ddl::{
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TriggerContext, TruncateTableTask, UndropTableTask,
 };
-#[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
 
 const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
 
@@ -669,7 +669,7 @@ impl DdlManager {
             let procedure = PurgeDroppedTableProcedure::new_if_expired(
                 purge_dropped_table_task,
                 context,
-                TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+                TriggerContext::new(TriggerReason::ScheduledGc),
             );
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -869,8 +869,7 @@ impl DdlManager {
             timeout,
             task,
         } = request;
-        let trigger_context =
-            TriggerContext::from_query_context(&query_context, query_context.channel_protocol());
+        let trigger_context = TriggerContext::from_query_context(&query_context);
         let ddl_options = DdlOptions { wait, timeout };
         async move {
             debug!("Submitting Ddl task: {:?}", task);

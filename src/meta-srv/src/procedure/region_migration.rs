@@ -45,7 +45,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -148,15 +148,36 @@ impl PersistentContext {
             region_ids,
             timeout,
             trigger_reason,
-            trigger_context: TriggerContext::new(
-                match trigger_reason {
-                    RegionMigrationTriggerReason::Manual => TriggerReason::Manual,
-                    RegionMigrationTriggerReason::AutoRebalance => TriggerReason::AutoRebalance,
-                    RegionMigrationTriggerReason::Failover => TriggerReason::RegionFailover,
-                    RegionMigrationTriggerReason::Unknown => TriggerReason::Unknown,
-                },
-                UNKNOWN_TRIGGER_PROTOCOL,
-            ),
+            trigger_context: TriggerContext::new(trigger_reason.to_trigger_reason()),
+        }
+    }
+
+    fn normalize_trigger_reasons(&mut self) {
+        if self.trigger_reason != RegionMigrationTriggerReason::Unknown {
+            self.trigger_context.reason = self.trigger_reason.to_trigger_reason();
+        } else if self.trigger_context.reason != TriggerReason::Unknown {
+            self.trigger_reason =
+                RegionMigrationTriggerReason::from_trigger_reason(self.trigger_context.reason);
+        }
+    }
+}
+
+impl RegionMigrationTriggerReason {
+    fn to_trigger_reason(self) -> TriggerReason {
+        match self {
+            Self::Manual => TriggerReason::Manual,
+            Self::AutoRebalance => TriggerReason::AutoRebalance,
+            Self::Failover => TriggerReason::RegionFailover,
+            Self::Unknown => TriggerReason::Unknown,
+        }
+    }
+
+    fn from_trigger_reason(reason: TriggerReason) -> Self {
+        match reason {
+            TriggerReason::Manual => Self::Manual,
+            TriggerReason::AutoRebalance => Self::AutoRebalance,
+            TriggerReason::RegionFailover => Self::Failover,
+            _ => Self::Unknown,
         }
     }
 }
@@ -830,9 +851,10 @@ impl RegionMigrationProcedure {
         tracker: RegionMigrationProcedureTracker,
     ) -> ProcedureResult<Self> {
         let RegionMigrationDataOwned {
-            persistent_ctx,
+            mut persistent_ctx,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
+        persistent_ctx.normalize_trigger_reasons();
         let guards = persistent_ctx
             .region_ids
             .iter()
@@ -1040,7 +1062,7 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, vec![]);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown","trigger_context":{"reason":"unknown","protocol":"unknown"}},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown","trigger_context":{"reason":"unknown"}},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
@@ -1097,6 +1119,28 @@ mod tests {
 
         assert_eq!(persistent_ctx, deserialized);
         assert_eq!(deserialized.trigger_context, TriggerContext::default());
+    }
+
+    #[test]
+    fn test_normalize_trigger_reasons() {
+        let mut context = new_persistent_context();
+        context.trigger_reason = RegionMigrationTriggerReason::Manual;
+        context.trigger_context = TriggerContext::default();
+        context.normalize_trigger_reasons();
+        assert_eq!(context.trigger_context.reason, TriggerReason::Manual);
+
+        context.trigger_reason = RegionMigrationTriggerReason::Unknown;
+        context.trigger_context = TriggerContext::new(TriggerReason::RegionFailover);
+        context.normalize_trigger_reasons();
+        assert_eq!(
+            context.trigger_reason,
+            RegionMigrationTriggerReason::Failover
+        );
+
+        context.trigger_reason = RegionMigrationTriggerReason::Manual;
+        context.trigger_context = TriggerContext::new(TriggerReason::RegionFailover);
+        context.normalize_trigger_reasons();
+        assert_eq!(context.trigger_context.reason, TriggerReason::Manual);
     }
 
     #[derive(Debug, Serialize, Deserialize, Default)]

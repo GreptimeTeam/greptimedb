@@ -39,7 +39,6 @@ use operator::insert::{
     AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
 };
 use operator::statement::StatementExecutor;
-use operator::utils::with_trigger_reason;
 use prost::Message;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
@@ -231,8 +230,6 @@ impl PendingRowsSchemaAlterer for Instance {
             return Ok(());
         }
 
-        let ctx = with_trigger_reason(ctx, TriggerReason::AutoCreate);
-
         let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
         if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
             self.create_metric_physical_table_if_missing(
@@ -283,7 +280,7 @@ impl PendingRowsSchemaAlterer for Instance {
             AutoCreateTableType::Logical(_) => {
                 // Use the batch API for logical tables.
                 self.statement_executor
-                    .create_logical_tables(&create_exprs, ctx)
+                    .create_logical_tables(&create_exprs, ctx, TriggerReason::AutoCreate)
                     .await
                     .map_err(BoxedError::new)
                     .context(error::ExecuteGrpcQuerySnafu)?;
@@ -294,7 +291,7 @@ impl PendingRowsSchemaAlterer for Instance {
                     expr.table_options
                         .insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
                     self.statement_executor
-                        .create_table_inner(&mut expr, None, ctx.clone())
+                        .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::ExecuteGrpcQuerySnafu)?;
@@ -360,10 +357,8 @@ impl PendingRowsSchemaAlterer for Instance {
             return Ok(());
         }
 
-        let ctx = with_trigger_reason(ctx, TriggerReason::AutoAlter);
-
         self.statement_executor
-            .alter_logical_tables(alter_exprs, ctx)
+            .alter_logical_tables(alter_exprs, ctx, TriggerReason::AutoAlter)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -615,7 +610,7 @@ impl Instance {
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx)
+            .create_table_inner(&mut create_table_expr, None, ctx, TriggerReason::AutoCreate)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;

@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use table::table_name::TableName;
 
 use crate::error;
-use crate::utils::{to_meta_query_context, with_trigger_reason};
+use crate::utils::to_meta_query_context_with_trigger_reason;
 
 /// The operator for procedures which implements [`ProcedureServiceHandler`].
 #[derive(Clone)]
@@ -76,8 +76,10 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             })
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?;
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_ctx, TriggerReason::Manual);
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(with_trigger_reason(query_ctx, TriggerReason::Manual)),
+            meta_query_context,
             DdlTask::new_purge_dropped_table(dropped.table_id),
         );
         self.procedure_executor

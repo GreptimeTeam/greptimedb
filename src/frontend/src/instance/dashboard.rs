@@ -34,7 +34,6 @@ use datafusion::logical_expr::col;
 use datafusion::sql::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan, lit};
 use datatypes::arrow::array::{Array, AsArray};
-use operator::utils::with_trigger_reason;
 use servers::error::{
     CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
     TableNotFoundSnafu,
@@ -170,7 +169,8 @@ impl Instance {
             .create_table_inner(
                 &mut create_table_expr,
                 None,
-                with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
+                ctx.clone(),
+                TriggerReason::AutoCreate,
             )
             .await
             .map_err(BoxedError::new)

@@ -29,8 +29,6 @@ use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
 };
-#[cfg(feature = "enterprise")]
-use common_meta::rpc::ddl::UNKNOWN_TRIGGER_PROTOCOL;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
@@ -381,7 +379,6 @@ async fn test_table_ddl_procedure_events() {
                 common_meta::rpc::ddl::UndropTableTask { table_id },
                 common_meta::rpc::ddl::TriggerContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
-                    UNKNOWN_TRIGGER_PROTOCOL,
                 ),
             )
             .await
@@ -422,7 +419,6 @@ async fn test_table_ddl_procedure_events() {
                 common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
                 common_meta::rpc::ddl::TriggerContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
-                    UNKNOWN_TRIGGER_PROTOCOL,
                 ),
             )
             .await

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL};
+use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -189,10 +189,7 @@ async fn test_handle_tick() {
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
     assert_eq!(
         ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
-        &[TriggerContext::new(
-            TriggerReason::ScheduledGc,
-            UNKNOWN_TRIGGER_PROTOCOL,
-        )]
+        &[TriggerContext::new(TriggerReason::ScheduledGc)]
     );
 
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -252,9 +249,6 @@ async fn test_handle_manual_gc_without_regions_records_manual_trigger_context() 
 
     assert_eq!(
         ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
-        &[TriggerContext::new(
-            TriggerReason::Manual,
-            UNKNOWN_TRIGGER_PROTOCOL,
-        )]
+        &[TriggerContext::new(TriggerReason::Manual)]
     );
 }

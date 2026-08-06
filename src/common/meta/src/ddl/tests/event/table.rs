@@ -54,9 +54,7 @@ use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::{DropTableTask, QueryContext, TriggerContext, TruncateTableTask};
 #[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{
-    PurgeDroppedTableTask, TriggerReason, UNKNOWN_TRIGGER_PROTOCOL, UndropTableTask,
-};
+use crate::rpc::ddl::{PurgeDroppedTableTask, TriggerReason, UndropTableTask};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 struct EventCase {
@@ -423,7 +421,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
     let purge_dropped_table = PurgeDroppedTableProcedure::new_if_expired(
         PurgeDroppedTableTask { table_id: 46 },
         test_context(),
-        TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+        TriggerContext::new(TriggerReason::ScheduledGc),
     );
     let truncate_table = truncate_procedure(TruncateTableTask {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -505,7 +503,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             rows: vec![submitted_table_locator_values_with_trigger_context(
                 None,
                 Some(46),
-                TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
+                TriggerContext::new(TriggerReason::ScheduledGc),
             )],
         },
         ProcedureCase {

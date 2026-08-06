@@ -657,13 +657,7 @@ impl Inserter {
                 if !alter_tables.is_empty() {
                     // Alter logical tables in batch.
                     statement_executor
-                        .alter_logical_tables(
-                            alter_tables,
-                            crate::utils::with_trigger_reason(
-                                ctx.clone(),
-                                TriggerReason::AutoAlter,
-                            ),
-                        )
+                        .alter_logical_tables(alter_tables, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -684,13 +678,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(
-                            alter_expr,
-                            crate::utils::with_trigger_reason(
-                                ctx.clone(),
-                                TriggerReason::AutoAlter,
-                            ),
-                        )
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -799,13 +787,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(
-                            alter_expr,
-                            crate::utils::with_trigger_reason(
-                                ctx.clone(),
-                                TriggerReason::AutoAlter,
-                            ),
-                        )
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -894,7 +876,8 @@ impl Inserter {
             .create_table_inner(
                 create_table_expr,
                 None,
-                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
+                ctx.clone(),
+                TriggerReason::AutoCreate,
             )
             .await;
 
@@ -1086,7 +1069,8 @@ impl Inserter {
             .create_table_inner(
                 &mut create_table_expr,
                 partitions,
-                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
+                ctx.clone(),
+                TriggerReason::AutoCreate,
             )
             .await;
 
@@ -1118,10 +1102,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
         let res = statement_executor
-            .create_logical_tables(
-                &create_table_exprs,
-                crate::utils::with_trigger_reason(ctx.clone(), TriggerReason::AutoCreate),
-            )
+            .create_logical_tables(&create_table_exprs, ctx.clone(), TriggerReason::AutoCreate)
             .await;
 
         match res {

@@ -129,7 +129,7 @@ async fn test_batch_gc_event() {
         false,
         Duration::from_secs(10),
         Default::default(),
-        TriggerContext::new(TriggerReason::Manual, "unknown"),
+        TriggerContext::new(TriggerReason::Manual),
     );
     let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-00000000bac0").unwrap();
     let mut watcher = cluster
@@ -153,7 +153,7 @@ WHERE type = 'batch_gc'
   AND json_get_string(procedure_trigger, 'type') = 'Submitted'"#,
     );
     assert_eq!(
-        r#"{"protocol":"unknown","reason":"manual"}"#,
+        r#"{"reason":"manual"}"#,
         find_eventually_string(instance, &submitted, "trigger_context").await
     );
 

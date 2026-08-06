@@ -69,9 +69,6 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
 /// Reserved query-context extension key for the trigger reason supplied by frontend.
 pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
-/// Protocol recorded when the trigger does not originate from a frontend protocol.
-pub const UNKNOWN_TRIGGER_PROTOCOL: &str = "unknown";
-
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -1672,23 +1669,23 @@ pub struct QueryContext {
 
 impl QueryContext {
     /// Returns the protocol name represented by the wire channel value.
-    pub fn channel_protocol(&self) -> &'static str {
+    pub fn channel_protocol(&self) -> Option<&'static str> {
         match self.channel {
-            1 => "mysql",
-            2 => "postgres",
-            3 => "httpsql",
-            4 => "prometheus",
-            5 => "otlp",
-            6 => "grpc",
-            7 => "influx",
-            8 => "opentsdb",
-            9 => "loki",
-            10 => "elasticsearch",
-            11 => "jaeger",
-            12 => "log",
-            13 => "promql",
-            14 => "splunk",
-            _ => UNKNOWN_TRIGGER_PROTOCOL,
+            1 => Some("mysql"),
+            2 => Some("postgres"),
+            3 => Some("httpsql"),
+            4 => Some("prometheus"),
+            5 => Some("otlp"),
+            6 => Some("grpc"),
+            7 => Some("influx"),
+            8 => Some("opentsdb"),
+            9 => Some("loki"),
+            10 => Some("elasticsearch"),
+            11 => Some("jaeger"),
+            12 => Some("log"),
+            13 => Some("promql"),
+            14 => Some("splunk"),
+            _ => None,
         }
     }
 }
@@ -1697,35 +1694,47 @@ impl QueryContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerContext {
     pub reason: TriggerReason,
-    pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 impl TriggerContext {
     /// Creates a trigger context with no additional extensions.
-    pub fn new(reason: TriggerReason, protocol: impl Into<String>) -> Self {
+    pub fn new(reason: TriggerReason) -> Self {
         Self {
             reason,
-            protocol: protocol.into(),
+            protocol: None,
             extensions: Default::default(),
         }
     }
 
+    /// Adds the protocol that originated the trigger.
+    pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
+        self.protocol = Some(protocol.into());
+        self
+    }
+
     /// Builds a trigger context from frontend query context metadata.
-    pub fn from_query_context(query_context: &QueryContext, protocol: impl Into<String>) -> Self {
+    pub fn from_query_context(query_context: &QueryContext) -> Self {
         let reason = query_context
             .extensions
             .get(TRIGGER_REASON_EXTENSION_KEY)
             .map(|reason| TriggerReason::from_extension(reason))
             .unwrap_or_default();
-        Self::new(reason, protocol)
+        let context = Self::new(reason);
+        if let Some(protocol) = query_context.channel_protocol() {
+            context.with_protocol(protocol)
+        } else {
+            context
+        }
     }
 }
 
 impl Default for TriggerContext {
     fn default() -> Self {
-        Self::new(TriggerReason::default(), UNKNOWN_TRIGGER_PROTOCOL)
+        Self::new(TriggerReason::default())
     }
 }
 
@@ -2328,7 +2337,7 @@ mod tests {
 
     #[test]
     fn test_trigger_context_serialization() {
-        let context = TriggerContext::new(TriggerReason::Manual, "mysql");
+        let context = TriggerContext::new(TriggerReason::Manual).with_protocol("mysql");
 
         assert_eq!(
             serde_json::json!({
@@ -2336,6 +2345,11 @@ mod tests {
                 "protocol": "mysql",
             }),
             serde_json::to_value(context).unwrap()
+        );
+
+        assert_eq!(
+            serde_json::json!({ "reason": "manual" }),
+            serde_json::to_value(TriggerContext::new(TriggerReason::Manual)).unwrap()
         );
     }
 
@@ -2346,11 +2360,12 @@ mod tests {
             TRIGGER_REASON_EXTENSION_KEY.to_string(),
             TriggerReason::AutoCreate.as_ref().to_string(),
         );
+        query_context.channel = 4;
 
-        let trigger_context = TriggerContext::from_query_context(&query_context, "prometheus");
+        let trigger_context = TriggerContext::from_query_context(&query_context);
 
         assert_eq!(trigger_context.reason, TriggerReason::AutoCreate);
-        assert_eq!(trigger_context.protocol, "prometheus");
+        assert_eq!(trigger_context.protocol.as_deref(), Some("prometheus"));
         assert_eq!(
             query_context
                 .extensions

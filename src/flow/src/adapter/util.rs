@@ -26,7 +26,6 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use itertools::Itertools;
 use operator::expr_helper;
-use operator::utils::with_trigger_reason;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
@@ -133,11 +132,7 @@ impl StreamingEngine {
                 .build(),
         );
         stmt_exec
-            .create_table_inner(
-                &mut create_table,
-                None,
-                with_trigger_reason(ctx, TriggerReason::AutoCreate),
-            )
+            .create_table_inner(&mut create_table, None, ctx, TriggerReason::AutoCreate)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
