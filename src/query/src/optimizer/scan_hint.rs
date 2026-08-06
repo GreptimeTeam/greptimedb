@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
@@ -22,8 +23,10 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
+use datafusion_expr::logical_plan::TableScan;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use promql::extension_plan::InstantManipulate;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -63,6 +66,10 @@ impl ScanHintRule {
         let _ = plan.visit(&mut visitor)?;
 
         if visitor.need_rewrite() {
+            // The hint-setting pass walks the plan in the same order as the
+            // visitor pass, so restart the per-node sequence to make the
+            // lookups in `set_hints` match the ids recorded by `f_down`.
+            visitor.table_scan_seq = 0;
             plan.transform_down(&mut |plan| Self::set_hints(plan, &mut visitor))
         } else {
             Ok(Transformed::no(plan))
@@ -73,8 +80,10 @@ impl ScanHintRule {
         plan: LogicalPlan,
         visitor: &mut ScanHintVisitor,
     ) -> Result<Transformed<LogicalPlan>> {
-        match &plan {
-            LogicalPlan::TableScan(table_scan) => {
+        match plan {
+            LogicalPlan::TableScan(mut table_scan) => {
+                let node_id = visitor.table_scan_seq;
+                visitor.table_scan_seq += 1;
                 let mut transformed = false;
                 if let Some(source) = table_scan
                     .source
@@ -87,37 +96,67 @@ impl ScanHintRule {
                         .as_any()
                         .downcast_ref::<DummyTableProvider>()
                     {
-                        // set order_hint
-                        if let Some(order_expr) = &visitor.order_expr {
-                            Self::set_order_hint(adapter, order_expr);
-                        }
-
-                        // set time series selector hint
-                        if let Some((group_by_cols, order_by_col)) = &visitor.ts_row_selector {
-                            Self::set_time_series_row_selector_hint(
-                                adapter,
-                                group_by_cols,
-                                order_by_col,
-                            );
-                        }
-
-                        #[cfg(feature = "vector_index")]
-                        if let Some(vector_request) = visitor
-                            .vector_search
-                            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
-                        {
-                            adapter.with_vector_search_hint(vector_request);
+                        let provider = adapter as *const DummyTableProvider as usize;
+                        // The LastRow hint is qualified per TableScan node: it is only valid
+                        // when this node is scanned under a single-evaluation instant selector
+                        // and is never scanned outside one. When several TableScan nodes share
+                        // the same provider (e.g. the same table on both sides of a join/binary
+                        // expression or a reused `with` subquery), the per-node decision must
+                        // not leak into the shared provider, so hints are applied to a per-node
+                        // fork instead of mutating the shared provider.
+                        let last_row = visitor.instant_last_row_scans.contains(&node_id)
+                            && !visitor.non_instant_scans.contains(&node_id);
+                        let shared = visitor
+                            .provider_scan_nodes
+                            .get(&provider)
+                            .is_some_and(|nodes| nodes.len() > 1);
+                        if shared {
+                            let fork = adapter.fork();
+                            Self::apply_hints(&fork, &table_scan, last_row, visitor);
+                            table_scan.source = Arc::new(DefaultTableSource::new(Arc::new(fork)));
+                        } else {
+                            Self::apply_hints(adapter, &table_scan, last_row, visitor);
                         }
                         transformed = true;
                     }
                 }
                 if transformed {
-                    Ok(Transformed::yes(plan))
+                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
                 } else {
-                    Ok(Transformed::no(plan))
+                    Ok(Transformed::no(LogicalPlan::TableScan(table_scan)))
                 }
             }
             _ => Ok(Transformed::no(plan)),
+        }
+    }
+
+    #[cfg_attr(not(feature = "vector_index"), allow(unused_variables))]
+    fn apply_hints(
+        adapter: &DummyTableProvider,
+        table_scan: &TableScan,
+        last_row: bool,
+        visitor: &mut ScanHintVisitor,
+    ) {
+        // set order_hint
+        if let Some(order_expr) = &visitor.order_expr {
+            Self::set_order_hint(adapter, order_expr);
+        }
+
+        // set time series selector hint
+        if let Some((group_by_cols, order_by_col)) = &visitor.ts_row_selector {
+            Self::set_time_series_row_selector_hint(adapter, group_by_cols, order_by_col);
+        }
+
+        if last_row {
+            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
+        }
+
+        #[cfg(feature = "vector_index")]
+        if let Some(vector_request) = visitor
+            .vector_search
+            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
+        {
+            adapter.with_vector_search_hint(vector_request);
         }
     }
 
@@ -235,6 +274,20 @@ struct ScanHintVisitor {
     /// This field stores saved `group_by` columns when all aggregate functions are `last_value`
     /// and the `order_by` column which should be time index.
     ts_row_selector: Option<(HashSet<Column>, Column)>,
+    /// Nesting depth of single-evaluation PromQL instant selectors.
+    instant_selector_depth: usize,
+    /// TableScan nodes scanned under a single-evaluation instant selector,
+    /// identified by their plan node address.
+    instant_last_row_scans: HashSet<usize>,
+    /// TableScan nodes also scanned outside a single-evaluation instant selector.
+    non_instant_scans: HashSet<usize>,
+    /// Distinct TableScan nodes per provider, to detect providers shared by
+    /// several scans that need per-node hint state.
+    provider_scan_nodes: HashMap<usize, HashSet<usize>>,
+    /// Traversal-order sequence number for TableScan nodes. Both the visitor
+    /// pass and the hint-setting pass walk the plan in the same order, so the
+    /// sequence is a stable per-node identity.
+    table_scan_seq: usize,
     #[cfg(feature = "vector_index")]
     vector_search: VectorSearchState,
 }
@@ -243,6 +296,13 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
+        if let LogicalPlan::Extension(extension) = node
+            && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
+            && instant.is_single_evaluation()
+        {
+            self.instant_selector_depth += 1;
+        }
+
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::Limit(limit) = node {
             // Track LIMIT so vector hint k can be derived within the same input chain.
@@ -349,6 +409,31 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
+        if let LogicalPlan::TableScan(table_scan) = node {
+            let node_id = self.table_scan_seq;
+            self.table_scan_seq += 1;
+            if let Some(source) = table_scan
+                .source
+                .as_any()
+                .downcast_ref::<DefaultTableSource>()
+                && let Some(adapter) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DummyTableProvider>()
+            {
+                let provider = adapter as *const DummyTableProvider as usize;
+                if self.instant_selector_depth > 0 {
+                    self.instant_last_row_scans.insert(node_id);
+                } else {
+                    self.non_instant_scans.insert(node_id);
+                }
+                self.provider_scan_nodes
+                    .entry(provider)
+                    .or_default()
+                    .insert(node_id);
+            }
+        }
+
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::Filter(filter) = node {
             self.vector_search.on_filter_enter(&filter.predicate);
@@ -364,6 +449,13 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     }
 
     fn f_up(&mut self, _node: &Self::Node) -> Result<TreeNodeRecursion> {
+        if let LogicalPlan::Extension(extension) = _node
+            && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
+            && instant.is_single_evaluation()
+        {
+            self.instant_selector_depth -= 1;
+        }
+
         #[cfg(feature = "vector_index")]
         match _node {
             LogicalPlan::Limit(_) => {
@@ -392,7 +484,9 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
 
 impl ScanHintVisitor {
     fn need_rewrite(&self) -> bool {
-        let base = self.order_expr.is_some() || self.ts_row_selector.is_some();
+        let base = self.order_expr.is_some()
+            || self.ts_row_selector.is_some()
+            || !self.instant_last_row_scans.is_empty();
         #[cfg(feature = "vector_index")]
         {
             base || self.vector_search.need_rewrite()
@@ -443,6 +537,7 @@ fn has_non_inlineable_ops(plan: &LogicalPlan) -> bool {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
@@ -517,6 +612,151 @@ mod test {
 
         let scan_req = provider.scan_request();
         let _ = scan_req.series_row_selector.unwrap();
+    }
+
+    #[test]
+    fn single_evaluation_uses_last_row_only_for_instant_selector() {
+        let single_provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
+        let single_source = Arc::new(DefaultTableSource::new(single_provider.clone()));
+        let single_input = LogicalPlanBuilder::scan("single", single_source, None)
+            .unwrap()
+            .sort(vec![
+                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                col("ts").sort(true, true),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let single = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                single_input,
+            )),
+        });
+
+        let range_provider = Arc::new(mock_table_provider(RegionId::new(2, 1)));
+        let range_source = Arc::new(DefaultTableSource::new(range_provider.clone()));
+        let range_input = LogicalPlanBuilder::scan("range", range_source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let range = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec!["k0".to_string()],
+                Some("v0".to_string()),
+                range_input,
+            )),
+        });
+
+        ScanHintRule
+            .rewrite(single, &OptimizerContext::default())
+            .unwrap();
+        ScanHintRule
+            .rewrite(range, &OptimizerContext::default())
+            .unwrap();
+
+        let single_request = single_provider.scan_request();
+        assert_eq!(
+            Some(TimeSeriesRowSelector::LastRow),
+            single_request.series_row_selector
+        );
+        assert_eq!(
+            Some(TimeSeriesDistribution::PerSeries),
+            single_request.distribution
+        );
+        assert_eq!(None, range_provider.scan_request().series_row_selector);
+    }
+
+    #[test]
+    fn shared_provider_hints_last_row_per_scan_node() {
+        let provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
+        let source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let instant_input = LogicalPlanBuilder::scan("instant", source.clone(), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let instant = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                instant_input,
+            )),
+        });
+        let range_input = LogicalPlanBuilder::scan("range", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let range = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                range_input,
+            )),
+        });
+        let plan = LogicalPlanBuilder::from(instant)
+            .union(range)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        // The shared provider itself is left untouched: the per-node decision is
+        // applied to a fork per TableScan node instead.
+        assert_eq!(None, provider.scan_request().series_row_selector);
+
+        let mut selectors = HashMap::new();
+        rewritten
+            .apply(|node| {
+                if let LogicalPlan::TableScan(table_scan) = node
+                    && let Some(source) = table_scan
+                        .source
+                        .as_any()
+                        .downcast_ref::<DefaultTableSource>()
+                    && let Some(adapter) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DummyTableProvider>()
+                {
+                    selectors.insert(
+                        table_scan.table_name.to_string(),
+                        adapter.scan_request().series_row_selector,
+                    );
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+
+        // The instant node keeps the LastRow hint while the range node does not.
+        assert_eq!(
+            Some(TimeSeriesRowSelector::LastRow),
+            selectors.get("instant").copied().flatten()
+        );
+        assert_eq!(None, selectors.get("range").copied().flatten());
     }
 
     #[test]

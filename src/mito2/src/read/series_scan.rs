@@ -53,6 +53,7 @@ use crate::read::scan_util::{
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -227,7 +228,8 @@ impl SeriesScan {
             return;
         }
 
-        let (senders, receivers) = new_channel_list(self.properties.num_partitions());
+        let channel_size = 1 + usize::from(self.stream_ctx.input.is_focused_last_row());
+        let (senders, receivers) = new_channel_list(self.properties.num_partitions(), channel_size);
         let mut distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
@@ -319,10 +321,10 @@ impl SeriesScan {
     }
 }
 
-fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
+fn new_channel_list(num_partitions: usize, channel_size: usize) -> (SenderList, ReceiverList) {
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = mpsc::channel(channel_size);
             (Some(sender), Some(receiver))
         })
         .unzip();
@@ -557,6 +559,9 @@ impl SeriesDistributor {
         let mut metrics = SeriesDistributorMetrics::default();
 
         let mut divider = FlatSeriesBatchDivider::default();
+        let balance_last_rows = self.stream_ctx.input.is_focused_last_row();
+        let last_row_batch_size =
+            DEFAULT_READ_BATCH_SIZE.div_ceil(self.senders.senders.len().max(1));
         while let Some(record_batch) = reader.try_next().await? {
             metrics.scan_cost += fetch_start.elapsed();
             metrics.num_batches += 1;
@@ -568,9 +573,36 @@ impl SeriesDistributor {
                 continue;
             }
 
-            // Use divider to split series
+            if balance_last_rows {
+                for offset in (0..record_batch.num_rows()).step_by(last_row_batch_size) {
+                    let mut batch = FlatSeriesBatch::default();
+                    batch.batches.push(record_batch.slice(
+                        offset,
+                        last_row_batch_size.min(record_batch.num_rows() - offset),
+                    ));
+                    let yield_start = Instant::now();
+                    self.senders.send_batch(SeriesBatch::Flat(batch)).await?;
+                    metrics.yield_cost += yield_start.elapsed();
+                }
+            } else {
+                let divider_start = Instant::now();
+                let series_batch = divider.push(record_batch);
+                metrics.divider_cost += divider_start.elapsed();
+                if let Some(series_batch) = series_batch {
+                    let yield_start = Instant::now();
+                    self.senders
+                        .send_batch(SeriesBatch::Flat(series_batch))
+                        .await?;
+                    metrics.yield_cost += yield_start.elapsed();
+                }
+            }
+            fetch_start = Instant::now();
+        }
+
+        // Send any remaining batch in the divider
+        if !balance_last_rows {
             let divider_start = Instant::now();
-            let series_batch = divider.push(record_batch);
+            let series_batch = divider.finish();
             metrics.divider_cost += divider_start.elapsed();
             if let Some(series_batch) = series_batch {
                 let yield_start = Instant::now();
@@ -579,19 +611,6 @@ impl SeriesDistributor {
                     .await?;
                 metrics.yield_cost += yield_start.elapsed();
             }
-            fetch_start = Instant::now();
-        }
-
-        // Send any remaining batch in the divider
-        let divider_start = Instant::now();
-        let series_batch = divider.finish();
-        metrics.divider_cost += divider_start.elapsed();
-        if let Some(series_batch) = series_batch {
-            let yield_start = Instant::now();
-            self.senders
-                .send_batch(SeriesBatch::Flat(series_batch))
-                .await?;
-            metrics.yield_cost += yield_start.elapsed();
         }
 
         metrics.scan_cost += fetch_start.elapsed();
