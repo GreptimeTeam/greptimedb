@@ -7,15 +7,27 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+# Gate for optional benchmark/test-only binaries; empty on purpose.
+test = []
+
 [[bin]]
 name = "common-runtime-bin"
 path = "src/bin.rs"
+
+[[bench]]
+name = "workload-scheduler-micro-bench"
+path = "benches/workload_scheduler.rs"
+harness = false
+required-features = ["test"]
 
 [lints]
 workspace = true
 
 [dependencies]
 async-trait.workspace = true
+catio.workspace = true
 clap.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

@@ -271,6 +271,181 @@ gh workflow run query-regression.yml \
 The selected ARC scale set must already be deployed with the runner-image
 digest built from the current query-regression Dockerfile.
 
+## Write-throughput scenario
+
+`scenario.kind = "write_throughput"` measures pure write ingestion throughput
+and latency on base vs candidate. It reuses the same remote-write ingestion
+machinery as `prom_remote_write_then_query` (distributed cluster +
+`query_perf_fixture prom-remote-write` + periodic physical-table flushes) but
+skips the query phase: no `[scenario.queries]` section is required, and the
+metric table is only created implicitly by the first remote-write request.
+
+The scenario validates the scheduler's work-conserving behavior under a
+single-class write backlog: with the candidate scheduler enabled, write
+throughput must not regress relative to base.
+
+```toml
+[scenario]
+kind = "write_throughput"
+
+[scenario.scheduler]
+# Optional. The runner derives the enable flag per target and injects it into
+# the datanode as environment variables: the base datanode always starts with
+# GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER__ENABLE=false
+# and the candidate datanode with ENABLE=true plus the values below
+# (max_concurrent_polls 0 = 4 * global_rt_size). Without this section both
+# targets run with the scheduler disabled.
+max_concurrent_polls = 16
+query_weight = 2
+write_weight = 8
+
+[scenario.remote_write]
+database = "public"
+metric = "write_throughput_scheduler"
+physical_table = "greptime_physical_table"
+series_count = 2048
+samples_per_series = 3600
+sample_chunk_size = 180
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000
+step_millis = 1000
+chunk_series_count = 256
+timeout_seconds = 120
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 1000000
+max_concurrent_flushes = 256
+
+[scenario.write_measure]
+duration_seconds = 60   # nominal measurement window
+window_seconds = 5      # per-window RPS bucket; must divide duration_seconds
+target_rps = 0          # 0 = max throughput (achieved rate is measured)
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05              # per-target failed chunk fraction
+max_mean_rps_regression_pct = 10     # (base_rps - candidate_rps) / base_rps * 100
+max_p99_latency_regression_pct = 10  # (candidate_p99 - base_p99) / base_p99 * 100
+min_rps_absolute = 50000             # optional per-target mean RPS floor
+```
+
+All remote-write fields (`metric`, `database`, `series_count`,
+`samples_per_series`, `sample_chunk_size`, `flush_every_sample_chunks`,
+`start_unix_millis`, `step_millis`, `chunk_series_count`, `timeout_seconds`,
+`prom_store`, `value`) follow the `prom_remote_write_then_query` contract and
+defaults. Rust owns the schema: `duration_seconds`/`window_seconds` are
+positive integers, `window_seconds` must divide `duration_seconds`,
+`target_rps` and every threshold must be finite and non-negative, and
+`max_failure_rate` must be in `[0, 1]`. Unknown fields are rejected by
+`query_perf_fixture plan`.
+
+The optional `[scenario.scheduler]` section (deny-unknown-fields) configures
+the datanode workload scheduler: `enable` (default false, derived by the
+runner rather than set in the case), `max_concurrent_polls` (default 0 =
+4 * `global_rt_size`), and `query_weight`/`write_weight` (defaults 2 and 8)
+which must be positive. The runner injects the scheduler into the datanode via
+environment variables (`GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER__ENABLE`
+etc.) because the datanode is spawned with CLI args only and no
+`--config-file`; metasrv and frontend never receive scheduler env. Scheduler
+on/off is the base/candidate axis of this case: base = off, candidate = on,
+and each target report entry records the applied `scheduler` config under
+`{enabled, max_concurrent_polls, query_weight, write_weight}`.
+
+For each target the runner writes all sample chunks, flushes the physical
+table, and computes:
+
+- `rows` / `elapsed_seconds` / `mean_rps` from the per-chunk generator
+  summaries;
+- `windows`: the first `duration_seconds` of the write timeline split into
+  `window_seconds` buckets, each with `rows` and `rps` (chunk rows are spread
+  uniformly over the chunk's own elapsed time);
+- `p50_latency_ms` / `p99_latency_ms`: percentiles of per-chunk generator
+  durations (each chunk is a sequential set of remote-write requests, so this
+  is a consistent base-vs-candidate proxy for write-request latency);
+- `failure_rate`: failed chunks / total chunks.
+
+Threshold enforcement follows the OTLP conventions: positive regression
+`actual_pct` is a candidate regression, negative is an improvement; per-target
+`max_failure_rate` and optional `min_rps_absolute` run for both base and
+candidate. A chunk whose generator exits non-zero is recorded as failed and
+counted by `max_failure_rate` instead of aborting the run. Run it locally the
+same way as the OTLP case, using `--dry-run` first for planning:
+
+```bash
+python3 tests/perf/query_regression_runner.py \
+  --case tests/perf/query_cases/write_throughput_scheduler/case.toml \
+  --base-bin /path/to/base/target/nightly/greptime \
+  --candidate-bin /path/to/candidate/target/nightly/greptime \
+  --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
+  --work-dir "$(mktemp -d /tmp/query-perf-write.XXXXXX)" \
+  --output /tmp/query-perf-write/report.json
+```
+
+`target_rps` is validated and reported but not yet used for pacing; set it to 0
+for a max-throughput run. For local results, run the case at least three times
+on an otherwise idle machine and compare median regressions rather than relying
+on one run.
+
+### Mixed read/write (saturated) measurement
+
+Adding `[scenario.write_measure.mix]` turns the pure-write scenario into a
+concurrent read+write ("mix") measurement: the runner spawns the chunked
+remote-write ingestion in a background thread (each chunk is still its own
+`query_perf_fixture prom-remote-write` subprocess) and, while it runs, drives
+`query_parallelism` query-loop threads against the same frontend HTTP
+`/v1/sql` endpoint for `duration_seconds`, then joins the ingestion. Both
+streams hit the same frontend/datanode, so query tasks and write tasks
+genuinely contend on the datanode runtime under a dual backlog — the
+workload-scheduler 2:8 allocation can be observed end to end.
+
+```toml
+[scenario.write_measure.mix]
+# Default query is `SELECT count(*) FROM greptime_physical_table` (the
+# physical table where every remote-write row lands); override with query_sql.
+# query_interval_ms is the per-thread wall-clock interval between queries.
+query_interval_ms = 100
+query_parallelism = 2
+
+[scenario.write_measure.mix.thresholds]
+max_query_failure_rate = 0.05        # per-target failed query attempt fraction
+max_query_p99_regression_pct = 10.0  # (candidate_p99 - base_p99) / base_p99 * 100
+```
+
+Rust owns the mix schema: `query_interval_ms` (default 100) and
+`query_parallelism` (default 1) are positive integers (zero is rejected at
+parse time), `query_sql` when present must be non-empty, and the mix
+thresholds follow the same finite/non-negative rules as the write thresholds
+with `max_query_failure_rate` in `[0, 1]`. Unknown mix fields are rejected by
+`query_perf_fixture plan`.
+
+For each target the mixed run records the existing `write_measurement` plus:
+
+- `query_measurement`: `{samples, failures, failure_rate, p50_ms, p99_ms,
+  mean_ms, latency_samples}`. Latency percentiles/mean cover every attempt
+  that recorded a latency, including failed ones, so timeouts show up in p99.
+- `scheduler_poll_deltas`: best-effort deltas of the datanode cumulative
+  `greptime_workload_scheduler_polls{workload="query"|"write"}` counters over
+  the window, scraped from `http://127.0.0.1:<datanode_http_port>/metrics`.
+  This is a diagnostic only, never a gate: the base target runs with the
+  scheduler disabled and typically exposes no such samples, and a workload
+  whose counter is missing or reset (decreased) is reported as `null`.
+
+Threshold enforcement combines the existing write gates with the query gates:
+per-target `max_query_failure_rate` and base-vs-candidate
+`max_query_p99_regression_pct` (positive `actual_pct` is a candidate
+regression, negative is an improvement). The case gates that neither side
+collapses — it does not gate on the 80% write poll share, which is the
+scheduler micro-benchmark's job.
+
+`tests/perf/query_cases/write_read_mixed_scheduler/case.toml` is the built-in
+mixed case: the same 2048 series × 3600 samples remote-write sizing as
+`write_throughput_scheduler`, a 60s measurement window, mix query
+`SELECT count(*) FROM greptime_physical_table` at 100ms interval with
+parallelism 2, and gates of ≤ 5% write/query failure, ≤ 10% write RPS
+regression, ≤ 10% write and query p99 regression, and a 15k rows/s absolute
+floor. It is opt-in (not part of the default CI case set); run it the same way
+as the pure write-throughput case, substituting the case path.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:

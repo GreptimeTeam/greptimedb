@@ -147,6 +147,16 @@ fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    if let Scenario::WriteThroughput(s) = &case.scenario {
+        if let Err(message) = s.write_measure.validate() {
+            return Err(message.into());
+        }
+        if let Some(scheduler) = &s.scheduler
+            && let Err(message) = scheduler.validate()
+        {
+            return Err(message.into());
+        }
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({"schema_version": 1, "scenario": case.scenario}))?

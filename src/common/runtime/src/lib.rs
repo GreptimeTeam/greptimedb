@@ -25,7 +25,7 @@ pub use global::{
     create_runtime, global_runtime, ingest_runtime, init_datanode_runtimes, init_global_runtimes,
     query_runtime, spawn_blocking_compact, spawn_blocking_global, spawn_blocking_hb,
     spawn_blocking_ingest, spawn_blocking_query, spawn_compact, spawn_global, spawn_hb,
-    spawn_ingest, spawn_query,
+    spawn_ingest, spawn_query, workload_scheduler_stats,
 };
 
 pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};

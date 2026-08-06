@@ -29,12 +29,13 @@ import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,9 @@ OTLP_TRACE_METRICS = {
     "greptime_servers_http_otlp_traces_elapsed_count",
 }
 PROMETHEUS_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{.*\})?\s+([^\s]+)(?:\s+.*)?$")
+# Workload-scheduler cumulative poll counters on the datanode /metrics
+# endpoint, e.g. greptime_workload_scheduler_polls{workload="write"} 1234.
+SCHEDULER_POLL_RE = re.compile(r'^greptime_workload_scheduler_polls\{[^}]*workload="(query|write)"[^}]*\}\s+(\d+)(?:\s+.*)?$')
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,7 @@ class RunTarget:
     datanode_rpc_port: int
     datanode_http_port: int
     datanode_data_dir: Path
+    scheduler_env: dict[str, str] = field(default_factory=dict)
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +131,7 @@ def allocate_ports(n: int) -> list[int]:
             s.close()
 
 
-def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_dir: Path | None = None) -> RunTarget:
+def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_dir: Path | None = None, scheduler_env: dict[str, str] | None = None) -> RunTarget:
     work_dir = root / name
     return RunTarget(
         name,
@@ -144,7 +149,53 @@ def make_target(name: str, binary: Path, root: Path, ports: list[int], fixture_d
         ports[2],
         ports[3],
         work_dir / "datanode-0" / "data",
+        scheduler_env or {},
     )
+
+
+def scheduler_env(enable: bool, scheduler: dict[str, Any] | None) -> dict[str, str]:
+    """Derive the datanode workload-scheduler environment variables for a target.
+
+    The datanode is spawned with CLI args only (no --config-file), so the
+    scheduler must be injected via environment. Config env vars use the
+    `PREFIX__KEY__SUBKEY` form (see src/common/config/src/config.rs
+    load_layered_options), and the datanode env prefix defaults to
+    `GREPTIMEDB_DATANODE`; the scheduler lives at
+    `runtime.experimental_workload_scheduler`.
+
+    Returns an empty dict when the case has no `[scenario.scheduler]` section:
+    both base and candidate then run with the datanode default (scheduler
+    disabled). When the section is present the base target only pins
+    `ENABLE=false` while the candidate pins `ENABLE=true` and forwards the
+    scheduler weights/max-polls so both targets are configured identically
+    except for the enable flag.
+    """
+    if scheduler is None:
+        return {}
+    prefix = "GREPTIMEDB_DATANODE__RUNTIME__EXPERIMENTAL_WORKLOAD_SCHEDULER"
+    env = {f"{prefix}__ENABLE": "true" if enable else "false"}
+    if enable:
+        for key in ("max_concurrent_polls", "query_weight", "write_weight"):
+            if key in scheduler:
+                env[f"{prefix}__{key.upper()}"] = str(scheduler[key])
+    return env
+
+
+def scheduler_report_entry(target_name: str, scheduler: dict[str, Any] | None) -> dict[str, Any]:
+    """Scheduler configuration applied to a target, for the target report entry.
+
+    The base target always runs with the scheduler disabled; the candidate
+    runs with it enabled iff the case has a `[scenario.scheduler]` section.
+    Defaults mirror the datanode runtime defaults (max_concurrent_polls 0 =
+    four times global_rt_size, query_weight 2, write_weight 8).
+    """
+    enabled = target_name == "candidate" and scheduler is not None
+    return {
+        "enabled": enabled,
+        "max_concurrent_polls": int(scheduler["max_concurrent_polls"]) if scheduler else 0,
+        "query_weight": int(scheduler["query_weight"]) if scheduler else 2,
+        "write_weight": int(scheduler["write_weight"]) if scheduler else 8,
+    }
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> dict[str, Any]:
@@ -170,7 +221,7 @@ def scenario(case: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("case requires [scenario] with a supported kind")
     kind = value.get("kind")
-    supported = ("direct_readable_sst", "prom_remote_write_then_query", "otlp_trace_load")
+    supported = ("direct_readable_sst", "prom_remote_write_then_query", "otlp_trace_load", "write_throughput")
     if kind not in supported:
         raise ValueError(f"unsupported scenario kind {kind!r}; supported: {', '.join(supported)}")
     return value
@@ -181,7 +232,7 @@ def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     if value.get("kind") == "otlp_trace_load":
         load = value["load"]
         return [{"database": load["database"], "name": load["table"], "engine": "trace", "validate_show_create_engine": False}]
-    if value.get("kind") == "prom_remote_write_then_query":
+    if value.get("kind") in ("prom_remote_write_then_query", "write_throughput"):
         remote = value["remote_write"]
         metric = remote["metric"]
         database = remote["database"]
@@ -340,11 +391,11 @@ class DistributedCluster:
             },
         }
 
-    def _spawn(self, name: str, args: list[str]) -> None:
+    def _spawn(self, name: str, args: list[str], env: dict[str, str] | None = None) -> None:
         logs = self.target.work_dir / "logs" / name
         logs.mkdir(parents=True, exist_ok=True)
         with (logs / "stdout.log").open("ab") as out, (logs / "stderr.log").open("ab") as err:
-            self.procs[name] = subprocess.Popen(args, stdout=out, stderr=err)
+            self.procs[name] = subprocess.Popen(args, stdout=out, stderr=err, env=env)
 
     def _ensure_metasrv_alive(self) -> None:
         proc = self.procs.get("metasrv")
@@ -400,6 +451,9 @@ class DistributedCluster:
                 "--metasrv-addrs",
                 f"127.0.0.1:{self.target.metasrv_rpc_port}",
             ],
+            env=None
+            if not self.target.scheduler_env
+            else {**os.environ, **self.target.scheduler_env},
         )
         wait_health(self.target.datanode_http_port)
 
@@ -1075,6 +1129,55 @@ def metric_delta(after: dict[str, Any], before: dict[str, Any], name: str) -> fl
     return delta
 
 
+def parse_scheduler_poll_metrics(text: str) -> dict[str, int]:
+    """Parse `greptime_workload_scheduler_polls{workload="..."}` samples.
+
+    Returns {workload: cumulative polls} for the workloads the datanode
+    scheduler tracks ("query", "write"); workloads absent from the scrape are
+    omitted (the base target runs with the scheduler disabled and typically
+    exposes no such samples at all).
+    """
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        match = SCHEDULER_POLL_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    return values
+
+
+def scrape_scheduler_polls(target: RunTarget, http_timeout: float) -> dict[str, Any]:
+    """Best-effort datanode scheduler-poll snapshot (never a gate).
+
+    Returns {"captured_monotonic_seconds", "values": {workload: polls}} on
+    success or {"error", "values": {}} when the datanode /metrics endpoint is
+    unreachable or the scheduler metric is absent.
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{target.datanode_http_port}/metrics", timeout=http_timeout) as response:
+            text = response.read().decode()
+        return {"captured_monotonic_seconds": time.monotonic(), "values": parse_scheduler_poll_metrics(text)}
+    except Exception as e:  # noqa: BLE001 - best-effort diagnostic
+        return {"error": repr(e), "values": {}}
+
+
+def scheduler_poll_deltas(after: dict[str, Any], before: dict[str, Any]) -> dict[str, Any]:
+    """Delta of cumulative scheduler polls between two snapshots, per workload.
+
+    A workload whose counter is missing in either snapshot, or that decreased
+    (counter reset/restart), is reported as None because its delta is unknown.
+    """
+    result: dict[str, Any] = {}
+    for workload in ("query", "write"):
+        before_value = before.get("values", {}).get(workload)
+        after_value = after.get("values", {}).get(workload)
+        if before_value is None or after_value is None:
+            result[workload] = None
+        else:
+            delta = after_value - before_value
+            result[workload] = delta if delta >= 0 else None
+    return result
+
+
 def otelgen_command(otelgen_bin: Path, target: RunTarget, load: dict[str, Any]) -> list[str]:
     return [
         str(otelgen_bin),
@@ -1232,11 +1335,7 @@ def write_frontend_prom_config(target: RunTarget, remote: dict[str, Any]) -> Pat
     return path
 
 
-def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
-    if generator is None:
-        if not dry_run:
-            raise ValueError("--fixture-generator query_perf_fixture is required for prom_remote_write_then_query")
-        generator = Path("query_perf_fixture")
+def remote_write_command(generator: Path, target: RunTarget, remote: dict[str, Any]) -> list[str]:
     metric = remote["metric"]
     physical_table = remote["physical_table"]
     cmd = [
@@ -1267,6 +1366,15 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
         cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
     if "total_samples_per_series" in remote:
         cmd.extend(["--value-total-samples-per-series", str(int(remote["total_samples_per_series"]))])
+    return cmd
+
+
+def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    if generator is None:
+        if not dry_run:
+            raise ValueError("--fixture-generator query_perf_fixture is required for prom_remote_write_then_query")
+        generator = Path("query_perf_fixture")
+    cmd = remote_write_command(generator, target, remote)
     if dry_run:
         return {"status": "dry-run", "cmd": cmd}
     result = run_command(cmd)
@@ -1277,6 +1385,30 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
         result["summary"] = json.loads(result["stdout"])
     except json.JSONDecodeError:
         result["summary_parse_error"] = result["stdout"]
+    return result
+
+
+def run_remote_write_capture(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    """Remote-write helper invocation that records failures instead of raising.
+
+    The write_throughput scenario measures a failure rate, so a failed chunk is
+    kept in the chunk list with status "failed" (and no summary) rather than
+    aborting the whole run.
+    """
+    if generator is None:
+        if not dry_run:
+            raise ValueError("--fixture-generator query_perf_fixture is required for write_throughput")
+        generator = Path("query_perf_fixture")
+    cmd = remote_write_command(generator, target, remote)
+    if dry_run:
+        return {"status": "dry-run", "cmd": cmd}
+    result = run_command(cmd)
+    result["status"] = "ok" if result["returncode"] == 0 else "failed"
+    if result["returncode"] == 0:
+        try:
+            result["summary"] = json.loads(result["stdout"])
+        except json.JSONDecodeError:
+            result["summary_parse_error"] = result["stdout"]
     return result
 
 
@@ -1360,6 +1492,428 @@ def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote
 
 def expected_remote_write_rows(remote: dict[str, Any]) -> int:
     return int(remote["series_count"]) * int(remote["samples_per_series"])
+
+
+def run_write_throughput_ingestion(generator: Path | None, target: RunTarget, remote: dict[str, Any], args: argparse.Namespace, *, dry_run: bool) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Sample-chunked remote-write ingestion for the write_throughput scenario.
+
+    Mirrors run_remote_write_ingestion but records failed chunks instead of
+    raising, so the runner can compute a failure rate and per-window stats from
+    the per-chunk results. Each chunk result keeps its rows/elapsed so the
+    measurement functions below can bucket RPS over the measurement window.
+    """
+    sample_chunk_size = remote["sample_chunk_size"]
+    db = remote["database"]
+    physical_table = remote["physical_table"]
+    if sample_chunk_size is None:
+        rw = run_remote_write_capture(generator, target, remote, dry_run=dry_run)
+        flush = flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final")
+        return rw, [flush]
+
+    total_samples = int(remote["samples_per_series"])
+    chunk_samples = int(sample_chunk_size)
+    if chunk_samples <= 0:
+        raise ValueError("scenario.remote_write.sample_chunk_size must be positive")
+    flush_every = int(remote["flush_every_sample_chunks"])
+    if flush_every <= 0:
+        raise ValueError("scenario.remote_write.flush_every_sample_chunks must be positive")
+    start = int(remote["start_unix_millis"])
+    step = int(remote["step_millis"])
+    chunks: list[dict[str, Any]] = []
+    flushes: list[dict[str, Any]] = []
+    chunk_index = 0
+    last_flushed_chunk = 0
+    for offset in range(0, total_samples, chunk_samples):
+        current = min(chunk_samples, total_samples - offset)
+        chunk_index += 1
+        chunk_remote = dict(remote)
+        chunk_remote["samples_per_series"] = current
+        chunk_remote["start_unix_millis"] = start + offset * step
+        chunk_remote["sample_offset"] = offset
+        chunk_remote["total_samples_per_series"] = total_samples
+        result = run_remote_write_capture(generator, target, chunk_remote, dry_run=dry_run)
+        result["sample_offset"] = offset
+        result["samples_per_series"] = current
+        result["chunk_index"] = chunk_index
+        chunks.append(result)
+        if chunk_index % flush_every == 0:
+            flushes.append(flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="periodic", chunk_index=chunk_index))
+            last_flushed_chunk = chunk_index
+    if last_flushed_chunk != chunk_index:
+        flushes.append(flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final", chunk_index=chunk_index))
+    aggregate = summarize_remote_write_chunks(chunks)
+    if dry_run:
+        series_count = int(remote["series_count"])
+        chunk_series_count = int(remote["chunk_series_count"])
+        aggregate["rows"] = series_count * total_samples
+        aggregate["samples_written"] = aggregate["rows"]
+        aggregate["batches"] = chunk_index * ((series_count + chunk_series_count - 1) // chunk_series_count)
+    return {
+        "status": "dry-run" if dry_run else ("ok" if all(chunk.get("status") == "ok" for chunk in chunks) else "failed"),
+        "mode": "sample-chunked",
+        "sample_chunk_size": chunk_samples,
+        "flush_every_sample_chunks": flush_every,
+        "chunks": chunks,
+        "aggregate": aggregate,
+    }, flushes
+
+
+def write_chunk_rows(chunk: dict[str, Any]) -> int:
+    summary = chunk.get("summary") or {}
+    if "rows" in summary:
+        return int(summary["rows"])
+    return int(chunk.get("rows", 0))
+
+
+def write_chunk_elapsed_seconds(chunk: dict[str, Any]) -> float:
+    summary = chunk.get("summary") or {}
+    if "elapsed_seconds" in summary:
+        return float(summary["elapsed_seconds"])
+    return float(chunk.get("elapsed_seconds", 0.0))
+
+
+def write_throughput_windows(chunks: list[dict[str, Any]], duration_seconds: int, window_seconds: int) -> list[dict[str, Any]]:
+    """Bucket chunk rows into per-window write stats.
+
+    Chunks are written sequentially; each chunk spreads its rows uniformly over
+    its own elapsed time. The measurement spans the first `duration_seconds` of
+    the combined timeline and is split into consecutive `window_seconds` buckets
+    (`duration_seconds` must be a multiple of `window_seconds`). Returns windows
+    ordered by start offset, each with {"index", "start_offset", "rows", "rps"}.
+    """
+    window_count = max(1, duration_seconds // window_seconds)
+    rows_in_window = [0.0] * window_count
+    position = 0.0
+    for chunk in chunks:
+        elapsed = write_chunk_elapsed_seconds(chunk)
+        rows = float(write_chunk_rows(chunk))
+        if elapsed <= 0.0 or rows <= 0.0:
+            continue
+        start = position
+        end = position + elapsed
+        for idx in range(window_count):
+            window_start = idx * window_seconds
+            window_end = window_start + window_seconds
+            overlap = min(end, window_end) - max(start, window_start)
+            if overlap > 0.0:
+                rows_in_window[idx] += rows * (overlap / elapsed)
+        position = end
+        if position >= duration_seconds:
+            break
+    return [
+        {"index": idx, "start_offset": idx * window_seconds, "rows": rows_in_window[idx], "rps": rows_in_window[idx] / window_seconds}
+        for idx in range(window_count)
+    ]
+
+
+def write_throughput_measurement(rw: dict[str, Any], write_measure: dict[str, Any]) -> dict[str, Any]:
+    """Compute write throughput/latency/failure stats from ingestion results.
+
+    Rows and elapsed come from each chunk's generator summary; mean RPS is
+    total rows over total write elapsed. Per-window RPS buckets the chunk rows
+    over the first `duration_seconds`. p50/p99 write-request latency is computed
+    from per-chunk generator durations (each chunk is a sequential set of
+    remote-write requests, so this is a consistent base-vs-candidate proxy).
+    """
+    chunks = rw.get("chunks")
+    if chunks is None:
+        # Single non-chunked invocation: the ingestion result is the one chunk.
+        chunks = [rw]
+    duration_seconds = int(write_measure["duration_seconds"])
+    window_seconds = int(write_measure["window_seconds"])
+    rows = sum(write_chunk_rows(chunk) for chunk in chunks)
+    elapsed_seconds = sum(write_chunk_elapsed_seconds(chunk) for chunk in chunks)
+    failed = sum(1 for chunk in chunks if chunk.get("status") != "ok")
+    total_chunks = len(chunks)
+    latencies_ms = [
+        write_chunk_elapsed_seconds(chunk) * 1000.0
+        for chunk in chunks
+        if chunk.get("status") == "ok" and write_chunk_elapsed_seconds(chunk) > 0.0
+    ]
+    return {
+        "rows": rows,
+        "elapsed_seconds": elapsed_seconds,
+        "mean_rps": rows / elapsed_seconds if elapsed_seconds > 0 else None,
+        "windows": write_throughput_windows(chunks, duration_seconds, window_seconds),
+        "p50_latency_ms": percentile(latencies_ms, 50) if latencies_ms else None,
+        "p99_latency_ms": percentile(latencies_ms, 99) if latencies_ms else None,
+        "failed_chunks": failed,
+        "total_chunks": total_chunks,
+        "failure_rate": failed / total_chunks if total_chunks else None,
+        "target_rps": write_measure.get("target_rps", 0.0),
+    }
+
+
+def planned_write_throughput_measurement(remote: dict[str, Any], write_measure: dict[str, Any]) -> dict[str, Any]:
+    """Dry-run measurement: no subprocess ran, so report planned values."""
+    rows = expected_remote_write_rows(remote)
+    duration_seconds = int(write_measure["duration_seconds"])
+    window_seconds = int(write_measure["window_seconds"])
+    return {
+        "status": "planned",
+        "planned_rows": rows,
+        "rows": rows,
+        "elapsed_seconds": None,
+        "mean_rps": None,
+        "windows": [
+            {"index": idx, "start_offset": idx * window_seconds, "rows": 0.0, "rps": 0.0}
+            for idx in range(duration_seconds // window_seconds)
+        ],
+        "p50_latency_ms": None,
+        "p99_latency_ms": None,
+        "failed_chunks": 0,
+        "total_chunks": 0,
+        "failure_rate": None,
+        "target_rps": write_measure.get("target_rps", 0.0),
+    }
+
+
+def planned_write_throughput_thresholds(write_measure: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = write_measure["thresholds"]
+    planned = [
+        {"threshold": "max_failure_rate", "status": "planned", "limit": thresholds["max_failure_rate"]},
+        {"threshold": "max_mean_rps_regression_pct", "status": "planned", "limit_pct": thresholds["max_mean_rps_regression_pct"]},
+        {"threshold": "max_p99_latency_regression_pct", "status": "planned", "limit_pct": thresholds["max_p99_latency_regression_pct"]},
+    ]
+    if thresholds.get("min_rps_absolute") is not None:
+        planned.append({"threshold": "min_rps_absolute", "status": "planned", "limit": thresholds["min_rps_absolute"]})
+    return planned
+
+
+def enforce_write_throughput_thresholds(write_measure: dict[str, Any], base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Enforce write_throughput gates.
+
+    Per-target: `max_failure_rate` (failed chunk fraction) and optional
+    `min_rps_absolute` (mean RPS floor). Base-vs-candidate: mean RPS regression
+    pct `(base - candidate) / base * 100` and p99 latency regression pct
+    `(candidate - base) / base * 100`; positive actual means a candidate
+    regression, negative is an improvement.
+    """
+    thresholds = write_measure["thresholds"]
+    results: list[dict[str, Any]] = []
+    for target_name, measurement in (("base", base), ("candidate", candidate)):
+        failure_rate = measurement.get("failure_rate")
+        failure_limit = float(thresholds["max_failure_rate"])
+        results.append({"target": target_name, "threshold": "max_failure_rate", "status": "passed" if failure_rate is not None and failure_rate <= failure_limit else "failed", "actual": failure_rate, "limit": failure_limit})
+        min_rps = thresholds.get("min_rps_absolute")
+        if min_rps is not None:
+            mean_rps = measurement.get("mean_rps")
+            results.append({"target": target_name, "threshold": "min_rps_absolute", "status": "passed" if mean_rps is not None and mean_rps >= float(min_rps) else "failed", "actual": mean_rps, "limit": min_rps})
+
+    base_rps = base.get("mean_rps")
+    candidate_rps = candidate.get("mean_rps")
+    rps_limit = float(thresholds["max_mean_rps_regression_pct"])
+    if base_rps in (None, 0) or candidate_rps is None:
+        results.append({"threshold": "max_mean_rps_regression_pct", "status": "failed", "reason": "missing or zero mean RPS", "base": base_rps, "candidate": candidate_rps})
+    else:
+        actual = (base_rps - candidate_rps) / base_rps * 100.0
+        results.append({"threshold": "max_mean_rps_regression_pct", "status": "passed" if actual <= rps_limit else "failed", "actual_pct": actual, "limit_pct": rps_limit, "base": base_rps, "candidate": candidate_rps})
+
+    base_p99 = base.get("p99_latency_ms")
+    candidate_p99 = candidate.get("p99_latency_ms")
+    p99_limit = float(thresholds["max_p99_latency_regression_pct"])
+    if base_p99 in (None, 0) or candidate_p99 is None:
+        results.append({"threshold": "max_p99_latency_regression_pct", "status": "failed", "reason": "missing or zero p99 latency", "base": base_p99, "candidate": candidate_p99})
+    else:
+        actual = (candidate_p99 - base_p99) / base_p99 * 100.0
+        results.append({"threshold": "max_p99_latency_regression_pct", "status": "passed" if actual <= p99_limit else "failed", "actual_pct": actual, "limit_pct": p99_limit, "base": base_p99, "candidate": candidate_p99})
+    return results
+
+
+def mix_query_sql(mix: dict[str, Any], remote: dict[str, Any]) -> str:
+    """Resolve the mixed-scenario query SQL.
+
+    Defaults to a count(*) over the remote-write physical table, which scans
+    every ingested row and therefore contends with the write path on the
+    datanode runtime.
+    """
+    sql = mix.get("query_sql")
+    if sql:
+        return str(sql)
+    return f"SELECT count(*) FROM {sql_ident(remote['physical_table'])}"
+
+
+def expected_mix_query_attempts(duration_seconds: int, interval_ms: int, parallelism: int) -> int:
+    """Per-thread attempt count for a query loop: queries at t=0, interval,
+    2*interval, ... while t < duration. Wall-clock jitter may drop at most one
+    trailing query per thread, so the observed count is
+    [expected - parallelism, expected]."""
+    per_thread = math.ceil(max(0.0, float(duration_seconds)) * 1000.0 / max(1, int(interval_ms)))
+    return per_thread * max(1, int(parallelism))
+
+
+def run_mix_query_loop(target: RunTarget, mix: dict[str, Any], db: str, duration_seconds: int, http_timeout: float, remote: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run `query_parallelism` query-loop threads for `duration_seconds`.
+
+    Each thread issues the mix query via HTTP SQL every `query_interval_ms`
+    (per-thread wall clock; if a query itself takes longer than the interval
+    the thread does not sleep). Returns the collected attempt results in
+    completion order; every attempt carries `ok`, `status`, `latency_ms`, and
+    `sql` from `http_post_sql`.
+    """
+    query_sql = mix_query_sql(mix, remote)
+    interval_ms = int(mix.get("query_interval_ms", 100))
+    parallelism = max(1, int(mix.get("query_parallelism", 1)))
+    attempts: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    stop = threading.Event()
+    deadline = time.monotonic() + max(0.0, float(duration_seconds))
+    threads = []
+    for _ in range(parallelism):
+        thread = threading.Thread(
+            target=_mix_query_worker,
+            args=(target, query_sql, db, interval_ms, deadline, http_timeout, attempts, lock, stop),
+            daemon=True,
+        )
+        threads.append(thread)
+        thread.start()
+    for thread in threads:
+        # Bounded join: workers may be stuck in a slow HTTP call beyond the
+        # deadline; their daemon status keeps process exit unblocked.
+        thread.join(timeout=max(10.0, float(interval_ms) / 1000.0 + 2.0))
+    return attempts
+
+
+def _mix_query_worker(
+    target: RunTarget,
+    query_sql: str,
+    db: str,
+    interval_ms: int,
+    deadline: float,
+    http_timeout: float,
+    attempts: list[dict[str, Any]],
+    lock: threading.Lock,
+    stop: threading.Event,
+) -> None:
+    interval_seconds = float(interval_ms) / 1000.0
+    while not stop.is_set():
+        started = time.monotonic()
+        if started >= deadline:
+            return
+        result = http_post_sql(target.http_port, query_sql, db, http_timeout)
+        with lock:
+            attempts.append(result)
+        remaining = interval_seconds - (time.monotonic() - started)
+        if remaining > 0 and stop.wait(remaining):
+            return
+
+
+def mix_query_measurement(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate query-loop attempts into {samples, failures, failure_rate,
+    p50_ms, p99_ms, mean_ms, latency_samples}.
+
+    Latency percentiles/mean cover every attempt that recorded a latency
+    (including failed ones, so timeouts show up in p99). `latency_samples`
+    counts those attempts. The input is snapshotted so a still-running daemon
+    query worker cannot mutate it mid-aggregation.
+    """
+    attempts = list(attempts)
+    total = len(attempts)
+    failures = sum(1 for a in attempts if not a.get("ok"))
+    latencies = [float(a["latency_ms"]) for a in attempts if a.get("latency_ms") is not None]
+    return {
+        "samples": total,
+        "failures": failures,
+        "failure_rate": failures / total if total else None,
+        "p50_ms": percentile(latencies, 50) if latencies else None,
+        "p99_ms": percentile(latencies, 99) if latencies else None,
+        "mean_ms": statistics.mean(latencies) if latencies else None,
+        "latency_samples": len(latencies),
+    }
+
+
+def planned_mix_query_measurement(mix: dict[str, Any], write_measure: dict[str, Any]) -> dict[str, Any]:
+    """Dry-run query measurement: no query loop ran, so report planned counts."""
+    duration_seconds = int(write_measure["duration_seconds"])
+    interval_ms = int(mix.get("query_interval_ms", 100))
+    parallelism = int(mix.get("query_parallelism", 1))
+    return {
+        "status": "planned",
+        "planned_attempts": expected_mix_query_attempts(duration_seconds, interval_ms, parallelism),
+        "query_interval_ms": interval_ms,
+        "query_parallelism": parallelism,
+        "samples": 0,
+        "failures": 0,
+        "failure_rate": None,
+        "p50_ms": None,
+        "p99_ms": None,
+        "mean_ms": None,
+        "latency_samples": 0,
+    }
+
+
+def run_mixed_ingestion_and_queries(generator: Path | None, target: RunTarget, remote: dict[str, Any], args: argparse.Namespace, mix: dict[str, Any], write_measure: dict[str, Any], *, dry_run: bool) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run remote-write ingestion in a background thread while a query loop
+    hammers the same frontend concurrently for `duration_seconds`, then join.
+
+    The ingestion is the same chunked `run_write_throughput_ingestion`
+    machinery, just executed from a thread; each chunk is its own
+    `query_perf_fixture prom-remote-write` subprocess (generate+send in one
+    shot), and the query loop issues HTTP /v1/sql requests from the main
+    process, so both hit the same frontend/datanode and genuinely contend on
+    the datanode runtime. Returns (rw, flushes, query_attempts); in dry-run
+    mode no thread and no query loop is started and attempts is empty.
+    """
+    if dry_run:
+        rw, flushes = run_write_throughput_ingestion(generator, target, remote, args, dry_run=True)
+        return rw, flushes, []
+
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def ingest() -> None:
+        try:
+            results["rw"], results["flushes"] = run_write_throughput_ingestion(generator, target, remote, args, dry_run=False)
+        except BaseException as e:  # noqa: BLE001 - re-raised in the caller
+            errors.append(e)
+
+    thread = threading.Thread(target=ingest, name=f"{target.name}-ingest", daemon=True)
+    thread.start()
+    try:
+        attempts = run_mix_query_loop(target, mix, remote["database"], int(write_measure["duration_seconds"]), args.http_timeout, remote)
+    finally:
+        thread.join()
+        if thread.is_alive():
+            # The datanode may be wedged; the ingestion thread is daemon so it
+            # cannot block process exit, but surface the lack of results.
+            raise RuntimeError(f"write ingestion thread did not finish for {target.name}")
+    if errors:
+        raise errors[0]
+    return results["rw"], results["flushes"], attempts
+
+
+def planned_mix_query_thresholds(mix: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = mix["thresholds"]
+    return [
+        {"threshold": "max_query_failure_rate", "status": "planned", "limit": thresholds["max_query_failure_rate"]},
+        {"threshold": "max_query_p99_regression_pct", "status": "planned", "limit_pct": thresholds["max_query_p99_regression_pct"]},
+    ]
+
+
+def enforce_mix_query_thresholds(mix: dict[str, Any], base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Enforce the query-side gates of the mixed read/write scenario.
+
+    Per-target: `max_query_failure_rate` (failed query attempts / total).
+    Base-vs-candidate: `max_query_p99_regression_pct`
+    `(candidate_p99_ms - base_p99_ms) / base_p99_ms * 100`; positive actual
+    means a candidate regression, negative is an improvement.
+    """
+    thresholds = mix["thresholds"]
+    results: list[dict[str, Any]] = []
+    failure_limit = float(thresholds["max_query_failure_rate"])
+    for target_name, measurement in (("base", base), ("candidate", candidate)):
+        failure_rate = measurement.get("failure_rate")
+        results.append({"target": target_name, "threshold": "max_query_failure_rate", "status": "passed" if failure_rate is not None and failure_rate <= failure_limit else "failed", "actual": failure_rate, "limit": failure_limit})
+
+    base_p99 = base.get("p99_ms")
+    candidate_p99 = candidate.get("p99_ms")
+    p99_limit = float(thresholds["max_query_p99_regression_pct"])
+    if base_p99 in (None, 0) or candidate_p99 is None:
+        results.append({"threshold": "max_query_p99_regression_pct", "status": "failed", "reason": "missing or zero query p99 latency", "base": base_p99, "candidate": candidate_p99})
+    else:
+        actual = (candidate_p99 - base_p99) / base_p99 * 100.0
+        results.append({"threshold": "max_query_p99_regression_pct", "status": "passed" if actual <= p99_limit else "failed", "actual_pct": actual, "limit_pct": p99_limit, "base": base_p99, "candidate": candidate_p99})
+    return results
 
 
 def extract_count_value(result: dict[str, Any]) -> int | None:
@@ -1471,6 +2025,96 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             cluster.stop_all()
 
 
+def run_write_throughput_scenario(args: argparse.Namespace, case: dict[str, Any], case_path: Path, targets: list[RunTarget], report: dict[str, Any]) -> None:
+    scenario_config = scenario(case)
+    remote = scenario_config["remote_write"]
+    write_measure = scenario_config["write_measure"]
+    if args.fixture_only:
+        raise ValueError("--fixture-only is not supported for write_throughput; use --dry-run for planning")
+    helper = args.fixture_generator or args.remote_write_generator
+    if helper is not None:
+        require_binary(helper, "query_perf_fixture", dry_run=args.dry_run)
+    elif not args.dry_run:
+        raise ValueError("--fixture-generator is required for write_throughput")
+
+    clusters: list[DistributedCluster] = []
+    measurements: list[dict[str, Any]] = []
+    query_measurements: list[dict[str, Any]] = []
+    try:
+        for target in targets:
+            target.work_dir.mkdir(parents=True, exist_ok=True)
+            config_path = write_frontend_prom_config(target, remote)
+            cluster = DistributedCluster(target)
+            clusters.append(cluster)
+            if not args.dry_run:
+                cluster.start_all(config_path)
+            db = remote["database"]
+            create_database: dict[str, Any] = {"status": "dry-run", "database": db}
+            if not args.dry_run:
+                create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
+            mix = write_measure.get("mix")
+            scheduler_polls_before: dict[str, Any] | None = None
+            scheduler_polls_after: dict[str, Any] | None = None
+            if mix is not None and not args.dry_run:
+                scheduler_polls_before = scrape_scheduler_polls(target, args.http_timeout)
+            if mix is not None:
+                rw, flushes, query_attempts = run_mixed_ingestion_and_queries(helper, target, remote, args, mix, write_measure, dry_run=args.dry_run)
+                query_measurement = planned_mix_query_measurement(mix, write_measure) if args.dry_run else mix_query_measurement(query_attempts)
+                if not args.dry_run:
+                    scheduler_polls_after = scrape_scheduler_polls(target, args.http_timeout)
+            else:
+                rw, flushes = run_write_throughput_ingestion(helper, target, remote, args, dry_run=args.dry_run)
+                query_measurement = None
+            measurement = planned_write_throughput_measurement(remote, write_measure) if args.dry_run else write_throughput_measurement(rw, write_measure)
+            tr = {
+                "name": target.name,
+                "binary": str(target.binary),
+                "work_dir": str(target.work_dir),
+                "components": cluster.component_report(),
+                "frontend_config": str(config_path),
+                "create_database": create_database,
+                "remote_write": rw,
+                "flushes": flushes,
+                "flush": flushes[-1] if flushes else None,
+                "scheduler": scheduler_report_entry(target.name, scenario_config.get("scheduler")),
+                "write_measurement": measurement,
+            }
+            if query_measurement is not None:
+                tr["query_measurement"] = query_measurement
+            if mix is not None:
+                tr["mix"] = mix
+                tr["scheduler_poll_deltas"] = scheduler_poll_deltas(scheduler_polls_after, scheduler_polls_before) if scheduler_polls_after is not None else {"status": "planned"}
+            flushes_ok = all(flush.get("ok") for flush in flushes)
+            measurement_ok = measurement.get("mean_rps") not in (None, 0)
+            query_ok = query_measurement is None or query_measurement.get("samples", 0) > 0
+            checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and measurement_ok and query_ok)
+            if not checks_ok and not args.dry_run:
+                validation = {"phase": "write_throughput", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "measurement_ok": measurement_ok, "mean_rps": measurement.get("mean_rps"), "failure_rate": measurement.get("failure_rate")}
+                if query_measurement is not None:
+                    validation["query_ok"] = query_ok
+                    validation["query_samples"] = query_measurement.get("samples")
+                tr.setdefault("validation_errors", []).append(validation)
+            tr["status"] = "planned" if args.dry_run else ("measured" if checks_ok else "failed")
+            write_json(target.report_path, tr)
+            report["targets"].append(tr)
+            measurements.append(measurement)
+            if query_measurement is not None:
+                query_measurements.append(query_measurement)
+            cluster.stop_all()
+        if args.dry_run:
+            report["thresholds"] = planned_write_throughput_thresholds(write_measure)
+            if write_measure.get("mix") is not None:
+                report["thresholds"] += planned_mix_query_thresholds(write_measure["mix"])
+        else:
+            report["thresholds"] = enforce_write_throughput_thresholds(write_measure, measurements[0], measurements[1])
+            if write_measure.get("mix") is not None:
+                report["thresholds"] += enforce_mix_query_thresholds(write_measure["mix"], query_measurements[0], query_measurements[1])
+        report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t.get("status") == "failed" for t in report["targets"]) else "ok")
+    finally:
+        for cluster in reversed(clusters):
+            cluster.stop_all()
+
+
 def run_otlp_trace_load_scenario(args: argparse.Namespace, case: dict[str, Any], targets: list[RunTarget], report: dict[str, Any]) -> None:
     load = scenario(case)["load"]
     if args.fixture_only:
@@ -1549,7 +2193,11 @@ def main() -> int:
     if scenario_kind == "direct_readable_sst" and not args.dry_run and args.fixture_generator is None:
         raise ValueError("--fixture-generator is required unless --dry-run is set")
     ports = allocate_ports(16)
-    targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
+    scheduler_cfg = scenario_config.get("scheduler")
+    targets = [
+        make_target("base", args.base_bin.resolve(), work_root, ports[:8], scheduler_env=scheduler_env(False, scheduler_cfg)),
+        make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:], scheduler_env=scheduler_env(True, scheduler_cfg)),
+    ]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
     fixture_dir = fixture_root(work_root, case_path, case, args.fixture_cache_dir)
     reuse_fixture = args.reuse_fixture or args.fixture_cache_dir is not None
@@ -1568,6 +2216,16 @@ def main() -> int:
     if scenario_kind == "prom_remote_write_then_query":
         try:
             run_remote_write_scenario(args, case, case_path, targets, report)
+        except Exception as e:  # noqa: BLE001 - write machine-readable failure report
+            report["status"] = "failed"
+            report["error"] = repr(e)
+        write_json(work_root / "query-regression-report.json", report)
+        output_report(report, args.output)
+        return 1 if report["status"] == "failed" else 0
+
+    if scenario_kind == "write_throughput":
+        try:
+            run_write_throughput_scenario(args, case, case_path, targets, report)
         except Exception as e:  # noqa: BLE001 - write machine-readable failure report
             report["status"] = "failed"
             report["error"] = repr(e)
