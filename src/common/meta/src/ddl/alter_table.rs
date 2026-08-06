@@ -97,7 +97,6 @@ fn build_executor_from_alter_expr(alter_data: &AlterTableData) -> AlterTableExec
 impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
-<<<<<<< HEAD
     pub fn new(
         table_id: TableId,
         task: AlterTableTask,
