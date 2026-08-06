@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::datatypes::DataType as ArrowDataType;
+use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
-    InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, UnsupportedInputDataTypeSnafu,
+    InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, TableMutationSnafu,
+    UnsupportedInputDataTypeSnafu,
 };
-use datafusion_expr::{Signature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
-use snafu::ensure;
+use session::table_name::table_name_to_full_name;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use table::table_name::TableName;
 
 use crate::handlers::TableMutationHandlerRef;
 use crate::helper::cast_u64;
@@ -49,31 +54,51 @@ pub(crate) async fn discard_unflushed_data(
         }
     );
 
-    let Some(region_id) = cast_u64(&params[0])? else {
-        return UnsupportedInputDataTypeSnafu {
-            function: "discard_unflushed_data",
-            datatypes: params
-                .iter()
-                .map(|value| value.data_type())
-                .collect::<Vec<_>>(),
+    let affected_rows = match params[0] {
+        ValueRef::String(table_name) => {
+            let (catalog_name, schema_name, table_name) =
+                table_name_to_full_name(table_name, query_ctx)
+                    .map_err(BoxedError::new)
+                    .context(TableMutationSnafu)?;
+            table_mutation_handler
+                .discard_unflushed_data_by_table(
+                    TableName::new(catalog_name, schema_name, table_name),
+                    query_ctx.clone(),
+                )
+                .await?
         }
-        .fail();
+        _ => {
+            let Some(region_id) = cast_u64(&params[0])? else {
+                return UnsupportedInputDataTypeSnafu {
+                    function: "discard_unflushed_data",
+                    datatypes: params
+                        .iter()
+                        .map(|value| value.data_type())
+                        .collect::<Vec<_>>(),
+                }
+                .fail();
+            };
+            table_mutation_handler
+                .discard_unflushed_data(RegionId::from_u64(region_id), query_ctx.clone())
+                .await?
+        }
     };
-
-    let affected_rows = table_mutation_handler
-        .discard_unflushed_data(RegionId::from_u64(region_id), query_ctx.clone())
-        .await?;
 
     Ok(Value::from(affected_rows as u64))
 }
 
 fn signature() -> Signature {
-    Signature::uniform(
-        1,
-        ConcreteDataType::numerics()
-            .into_iter()
-            .map(|data_type| data_type.as_arrow_type())
-            .collect(),
+    Signature::one_of(
+        vec![
+            TypeSignature::Uniform(
+                1,
+                ConcreteDataType::numerics()
+                    .into_iter()
+                    .map(|data_type| data_type.as_arrow_type())
+                    .collect(),
+            ),
+            TypeSignature::Exact(vec![ArrowDataType::Utf8]),
+        ],
         Volatility::Immutable,
     )
 }
@@ -82,7 +107,7 @@ fn signature() -> Signature {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::UInt64Array;
+    use arrow::array::{StringArray, UInt64Array};
     use arrow::datatypes::{DataType, Field};
     use datafusion_expr::{ColumnarValue, TypeSignature};
 
@@ -111,16 +136,22 @@ mod tests {
         assert!(matches!(
             function.signature(),
             Signature {
-                type_signature: TypeSignature::Uniform(1, valid_types),
+                type_signature: TypeSignature::OneOf(valid_types),
                 volatility: Volatility::Immutable,
                 ..
-            } if valid_types == &ConcreteDataType::numerics()
-                .into_iter()
-                .map(|data_type| {
-                    use datatypes::data_type::DataType;
-                    data_type.as_arrow_type()
-                })
-                .collect::<Vec<_>>()
+            } if valid_types == &vec![
+                TypeSignature::Uniform(
+                    1,
+                    ConcreteDataType::numerics()
+                        .into_iter()
+                        .map(|data_type| {
+                            use datatypes::data_type::DataType;
+                            data_type.as_arrow_type()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                TypeSignature::Exact(vec![DataType::Utf8]),
+            ]
         ));
     }
 
@@ -131,6 +162,33 @@ mod tests {
         let args = datafusion::logical_expr::ScalarFunctionArgs {
             args: vec![ColumnarValue::Array(Arc::new(UInt64Array::from(vec![99])))],
             arg_fields: vec![Arc::new(Field::new("arg_0", DataType::UInt64, false))],
+            return_field: Arc::new(Field::new("result", DataType::UInt64, false)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let result = function
+            .as_async()
+            .unwrap()
+            .invoke_async_with_args(args)
+            .await
+            .unwrap();
+        let ColumnarValue::Array(array) = result else {
+            panic!("expected array output");
+        };
+        let array = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(42, array.value(0));
+    }
+
+    #[tokio::test]
+    async fn test_discard_unflushed_data_by_table() {
+        let factory: ScalarFunctionFactory = DiscardUnflushedDataFunction::factory().into();
+        let function = factory.provide(FunctionContext::mock());
+        let args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "my_table",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
             return_field: Arc::new(Field::new("result", DataType::UInt64, false)),
             number_rows: 1,
             config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),

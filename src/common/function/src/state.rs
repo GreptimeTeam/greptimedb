@@ -48,6 +48,7 @@ impl FunctionState {
             BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest,
             InsertRequest,
         };
+        use table::table_name::TableName;
 
         use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
         struct MockProcedureServiceHandler;
@@ -175,6 +176,14 @@ impl FunctionState {
             async fn discard_unflushed_data(
                 &self,
                 _region_id: RegionId,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn discard_unflushed_data_by_table(
+                &self,
+                _table_name: TableName,
                 _ctx: QueryContextRef,
             ) -> Result<AffectedRows> {
                 Ok(ROWS)

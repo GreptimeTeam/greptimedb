@@ -1,0 +1,59 @@
+CREATE TABLE discard_unflushed_data_test (
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO discard_unflushed_data_test VALUES ('persisted', 1, 1);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('discard_unflushed_data_test');
+
++--------------------------------------------------+
+| ADMIN FLUSH_TABLE('discard_unflushed_data_test') |
++--------------------------------------------------+
+| 0                                                |
++--------------------------------------------------+
+
+INSERT INTO discard_unflushed_data_test VALUES ('unflushed', 2, 2);
+
+Affected Rows: 1
+
+ADMIN discard_unflushed_data('discard_unflushed_data_test');
+
++-------------------------------------------------------------+
+| ADMIN discard_unflushed_data('discard_unflushed_data_test') |
++-------------------------------------------------------------+
+| 0                                                           |
++-------------------------------------------------------------+
+
+-- Repeating the operation is idempotent.
+ADMIN discard_unflushed_data('discard_unflushed_data_test');
+
++-------------------------------------------------------------+
+| ADMIN discard_unflushed_data('discard_unflushed_data_test') |
++-------------------------------------------------------------+
+| 0                                                           |
++-------------------------------------------------------------+
+
+SELECT host, val FROM discard_unflushed_data_test ORDER BY host;
+
++-----------+-----+
+| host      | val |
++-----------+-----+
+| persisted | 1.0 |
++-----------+-----+
+
+-- The function must only be available through ADMIN.
+SELECT discard_unflushed_data(0);
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'discard_unflushed_data'.
+Did you mean 'list_push_back'?
+
+DROP TABLE discard_unflushed_data_test;
+
+Affected Rows: 0
+

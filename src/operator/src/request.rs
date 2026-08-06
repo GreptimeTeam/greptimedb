@@ -35,6 +35,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::storage::RegionId;
 use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
+use table::table_name::TableName;
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, FindTablePartitionRuleSnafu, JoinTaskSnafu,
@@ -221,6 +222,42 @@ impl Requester {
 
         info!("Handle region discard unflushed data request: {region_id}");
         self.do_request(vec![request], None, &ctx).await
+    }
+
+    /// Discard all unflushed data from all regions of the table.
+    pub async fn handle_discard_unflushed_data_by_table(
+        &self,
+        table_name: TableName,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let partitions = &self
+            .get_table_partition_info(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .await?
+            .partitions;
+        let requests = partitions
+            .iter()
+            .map(|partition| {
+                RegionRequestBody::Truncate(TruncateRequest {
+                    region_id: partition.id.into(),
+                    kind: Some(truncate_request::Kind::Unflushed(Unflushed {})),
+                })
+            })
+            .collect();
+
+        info!("Handle table discard unflushed data request: {table_name}");
+        self.do_request(
+            requests,
+            Some(build_db_string(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+            )),
+            &ctx,
+        )
+        .await
     }
 }
 
