@@ -270,8 +270,6 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
-
     use api::v1::SemanticType;
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
@@ -306,16 +304,16 @@ mod test {
             "Alter request to physical region is forbidden".to_string()
         );
 
-        // alter physical region's option should work
+        // skip WAL on the physical region should be forwarded to the data region
         let alter_region_option_request = RegionAlterRequest {
             kind: AlterKind::SetRegionOptions {
-                options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
+                options: vec![SetRegionOption::SkipWal],
             },
         };
-        let result = engine_inner
-            .alter_physical_region(physical_region_id, alter_region_option_request.clone())
-            .await;
-        assert!(result.is_ok());
+        engine_inner
+            .alter_physical_region(physical_region_id, alter_region_option_request)
+            .await
+            .unwrap();
 
         // alter logical region
         let metadata_region = env.metadata_region();

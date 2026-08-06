@@ -27,12 +27,12 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::TableId;
+use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_enables_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
@@ -79,6 +79,8 @@ use crate::rpc::ddl::{
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask, UndropTableTask,
 };
+
+const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
 
 /// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
@@ -417,12 +419,60 @@ impl DdlManager {
                 .await;
         }
 
-        let context = self.create_context();
-        let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
+        let lock_regions = alter_table_task
+            .alter_table
+            .kind
+            .as_ref()
+            .is_some_and(only_enables_skip_wal);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let mut route_change_retries = 0;
+        loop {
+            // Hold the same physical region locks as migration while validating that
+            // this route snapshot is still the one the procedure will mutate.
+            let region_ids_to_lock = if lock_regions {
+                let (_, route) = self
+                    .table_metadata_manager()
+                    .table_route_manager()
+                    .get_physical_table_route(table_id)
+                    .await?;
+                route
+                    .region_routes
+                    .iter()
+                    .map(|route| route.region.id)
+                    .collect::<Vec<RegionId>>()
+            } else {
+                vec![]
+            };
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            let context = self.create_context();
+            let procedure = AlterTableProcedure::new_with_region_locks(
+                table_id,
+                alter_table_task.clone(),
+                region_ids_to_lock,
+                context,
+            )?;
+
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+            let result = self.execute_procedure_and_wait(procedure_with_id).await?;
+            if result
+                .1
+                .as_ref()
+                .is_some_and(|output| output.is::<RegionRouteChanged>())
+            {
+                if route_change_retries == MAX_REGION_ROUTE_CHANGE_RETRIES {
+                    let source = error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Region route kept changing while altering table {table_id}"
+                        ),
+                    }
+                    .build();
+                    return Err(error::Error::retry_later(source));
+                }
+                route_change_retries += 1;
+                continue;
+            }
+            return Ok(result);
+        }
     }
 
     /// Submits and executes a create table task.
