@@ -701,8 +701,7 @@ async fn assert_trigger_context(
         "trigger_context",
     )
     .await;
-    let expected =
-        format!(r#"{{"reason":{{"type":"{reason}"}},"protocol":"{protocol}","extensions":{{}}}}"#);
+    let expected = format!(r#"{{"protocol":"{protocol}","reason":"{reason}"}}"#);
     assert_eq!(expected, actual);
 }
 

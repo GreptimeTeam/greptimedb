@@ -2068,10 +2068,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(crate::utils::with_trigger_reason(
-                query_context,
-                TriggerReason::Manual,
-            )),
+            to_meta_query_context(query_context),
             DdlTask::new_alter_logical_tables(tables_data),
         );
 

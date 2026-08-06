@@ -439,9 +439,8 @@ mod tests {
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
                     jsonb_value(&serde_json::json!({
-                        "reason": {"type": "unknown"},
                         "protocol": "unknown",
-                        "extensions": {},
+                        "reason": "unknown",
                     })),
                 ],
             }],
@@ -698,9 +697,8 @@ mod tests {
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
                     jsonb_value(&serde_json::json!({
-                        "reason": {"type": "unknown"},
                         "protocol": "unknown",
-                        "extensions": {},
+                        "reason": "unknown",
                     })),
                 ],
             }],
