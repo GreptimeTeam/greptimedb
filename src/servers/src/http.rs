@@ -108,6 +108,7 @@ pub mod result;
 pub mod splunk;
 mod timeout;
 pub mod utils;
+pub mod workload_scheduler;
 
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
@@ -1072,6 +1073,14 @@ impl HttpServer {
             Router::new()
                 // handler for changing log level dynamically
                 .route("/log_level", routing::post(dyn_log::dyn_log_handler))
+                .route(
+                    "/workload_scheduler/weights",
+                    routing::post(workload_scheduler::set_weights_handler),
+                )
+                .route(
+                    "/workload_scheduler/max_concurrent_polls",
+                    routing::post(workload_scheduler::set_max_concurrent_polls_handler),
+                )
                 .route("/enable_trace", routing::post(dyn_trace::dyn_trace_handler))
                 .nest(
                     "/prof",
