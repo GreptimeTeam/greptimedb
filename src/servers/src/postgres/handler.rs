@@ -461,6 +461,16 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
             .start_timer();
 
+        // The statement store is immutable after parse: pgwire hands `do_query` a
+        // `&Portal` whose statement is an `Arc<StoredStatement>`, so there is no
+        // way to write a refreshed plan back. Once the session's catalog/schema
+        // (the planning context below) diverges from the one captured at parse
+        // time, every subsequent Execute of this prepared statement re-plans from
+        // scratch until the context matches again or the statement is re-parsed.
+        // This only applies to statements that produced a logical plan, and the
+        // cost is one describe + logical-plan step per Execute (no parameter
+        // binding or execution). search_path / USE changes are rare enough that
+        // we accept this instead of adding mutable state to the stored statement.
         let refreshed_plan = if let PgSqlPlan {
             plan: SqlPlan::Plan(_, stmt),
             copy_to_stdout_format,
@@ -628,9 +638,10 @@ fn validate_cached_plan_contract(
     let (SqlPlan::Plan(original_plan, _), SqlPlan::Plan(refreshed_plan, _)) =
         (original_sql_plan, refreshed_sql_plan)
     else {
-        return Err(cached_plan_error(
-            "cached plan must not change parameter type",
-        ));
+        // The refreshed plan is not a describable logical plan (e.g. it became
+        // a statement or empty plan after re-planning), so its parameter types
+        // and result schema cannot be compared with the cached one.
+        return Err(cached_plan_error("cached plan is no longer valid"));
     };
 
     let original_parameter_types = DfLogicalPlanner::get_inferred_parameter_types(original_plan)

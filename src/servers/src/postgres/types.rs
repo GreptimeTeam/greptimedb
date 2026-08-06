@@ -85,7 +85,7 @@ pub(super) fn schema_to_pg(
 
 /// Maps `datafusion-pg-catalog` OID-alias metadata to PostgreSQL wire types.
 ///
-/// Version 0.18.1 exposes static catalog aliases as `Utf8` and dynamic aliases
+/// Version 0.18.3 exposes static catalog aliases as `Utf8` and dynamic aliases
 /// as `Int32`, so this must run before the ordinary `INT4`/`VARCHAR` fallbacks.
 /// The catalog crate only exposes named constants for the aliases it uses in
 /// dynamic catalog tables; keep the remaining aliases here for compatibility
