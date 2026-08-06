@@ -70,14 +70,22 @@ jobs:
 
       - name: Validate updater on main
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
           python3 -m py_compile .github/scripts/update-compat-versions.py
+          # Log-only: a stale window is expected here (it is exactly what the
+          # updater fixes below), so a stale --check must not fail the job.
+          python3 .github/scripts/update-compat-versions.py --check --published-only || true
+          python3 .github/scripts/update-compat-versions.py --check-anchors
 
       - name: Prepare updater branch
         id: prepare
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
           git fetch origin main
@@ -89,7 +97,7 @@ jobs:
           fi
           git checkout -B "${BRANCH}" origin/main
           git reset --hard origin/main
-          python3 .github/scripts/update-compat-versions.py --update
+          python3 .github/scripts/update-compat-versions.py --update --published-only
           if git diff --quiet -- tests/compatibility/ci.toml; then
             echo "Compatibility version window is already current."
             exit 0
@@ -125,4 +133,4 @@ jobs:
             --head "${BRANCH}" \
             --title "chore(ci): update compatibility versions" \
             --reviewer "GreptimeTeam/db-approver" \
-            --body $'I hereby agree to the terms of the [GreptimeDB CLA](https://github.com/GreptimeTeam/.github/blob/main/CLA.md).\n\n## Refer to a related PR or issue link (optional)\n\nAutomated after a stable release or the daily fallback.\n\n## What\047s changed and what\047s your intention?\n\nUpdates `tests/compatibility/ci.toml` from checked-out `main` tags and exact compatibility-case anchors.\n\n## PR Checklist\n\n- [ ] I have written the necessary rustdoc comments.\n- [ ] I have added the necessary unit tests and integration tests.\n- [ ] This PR requires documentation updates.\n- [x] API changes are backward compatible.\n- [x] Schema or data changes are backward compatible.'
+            --body $'I hereby agree to the terms of the [GreptimeDB CLA](https://github.com/GreptimeTeam/.github/blob/main/CLA.md).\n\n## Refer to a related PR or issue link (optional)\n\nAutomated after a stable release or the daily fallback.\n\n## What\047s changed and what\047s your intention?\n\nUpdates `tests/compatibility/ci.toml` from checked-out `main` tags that have published release assets. The PR window keeps the latest patch of the two most recent stable minor lines; exact `=vX.Y.Z` case anchors are validated nightly instead of being added to the PR window.\n\n## PR Checklist\n\n- [ ] I have written the necessary rustdoc comments.\n- [ ] I have added the necessary unit tests and integration tests.\n- [ ] This PR requires documentation updates.\n- [x] API changes are backward compatible.\n- [x] Schema or data changes are backward compatible.'

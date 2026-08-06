@@ -16,8 +16,10 @@
 import contextlib
 import importlib.util
 import io
+import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -68,12 +70,19 @@ class UpdateCompatVersionsTest(unittest.TestCase):
         with self.assertRaisesRegex(UPDATER.CompatVersionError, "No stable release tags"):
             UPDATER.sliding_versions(["v1.1.0-rc.1", "v1.1.0-nightly-20260101"])
 
-    def test_exact_anchors_are_preserved_with_sliding_versions(self) -> None:
+    def test_effective_versions_returns_only_the_sliding_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_case(root, "historical", '["=v1.0.2", ">=v1.1.0"]')
+            versions = UPDATER.effective_versions(["v1.0.2", "v1.1.0", "v1.1.1", "v1.1.3"])
+        self.assertEqual(["v1.0.2", "v1.1.3"], versions)
+
+    def test_nightly_versions_includes_anchors_and_sliding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.write_case(root, "historical", '["=v1.0.2", ">=v1.1.0"]')
             self.write_case(root, "more_history", '["=v1.1.0", "=v1.1.1"]')
-            versions = UPDATER.effective_versions(
+            versions = UPDATER.nightly_versions(
                 ["v1.0.2", "v1.1.0", "v1.1.1", "v1.1.3"],
                 root / "tests" / "compatibility" / "cases",
             )
@@ -146,7 +155,7 @@ class UpdateCompatVersionsTest(unittest.TestCase):
             root = Path(directory)
             self.write_case(root, "historical", '["=v1.0.2"]')
             with self.assertRaisesRegex(UPDATER.CompatVersionError, "unavailable"):
-                UPDATER.effective_versions(
+                UPDATER.nightly_versions(
                     ["v1.1.0"], root / "tests" / "compatibility" / "cases"
                 )
 
@@ -170,6 +179,153 @@ class UpdateCompatVersionsTest(unittest.TestCase):
             self.write_case(root, "historical", '[">=v1.0"]')
             with self.assertRaisesRegex(UPDATER.CompatVersionError, "Malformed version"):
                 UPDATER.extract_pinned_anchors(root / "tests" / "compatibility" / "cases")
+
+    def test_published_only_excludes_failed_release_tags(self) -> None:
+        self.assertEqual(
+            ["v1.0.2", "v1.1.3"],
+            UPDATER.effective_versions(
+                ["v1.0.2", "v1.1.3", "v1.1.4"], published={"v1.0.2", "v1.1.3"}
+            ),
+        )
+
+    def test_published_only_empty_intersection_raises(self) -> None:
+        with self.assertRaisesRegex(UPDATER.CompatVersionError, "published release assets"):
+            UPDATER.effective_versions(["v1.0.2"], published={"v1.1.4"})
+
+    def test_required_asset_names(self) -> None:
+        self.assertEqual(
+            {
+                "greptime-linux-amd64-v1.1.4.tar.gz",
+                "greptime-linux-amd64-v1.1.4.sha256sum",
+            },
+            UPDATER.required_asset_names("v1.1.4"),
+        )
+
+    class _FakeResponse:
+        def __init__(self, payload) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _release(self, tag: str, *, draft=False, prerelease=False, assets=()) -> dict:
+        return {
+            "tag_name": tag,
+            "draft": draft,
+            "prerelease": prerelease,
+            "assets": [{"name": name} for name in assets],
+        }
+
+    def test_published_release_tags_parses_and_filters(self) -> None:
+        required = {
+            "greptime-linux-amd64-v1.1.4.tar.gz",
+            "greptime-linux-amd64-v1.1.4.sha256sum",
+        }
+        page_one = [
+            self._release(f"preview-{i}", assets=required) for i in range(96)
+        ] + [
+            self._release("v1.1.4", assets=required),
+            self._release("v1.1.3", draft=True, assets=required),
+            self._release("v1.1.2", prerelease=True, assets=UPDATER.required_asset_names("v1.1.2")),
+            self._release("v1.1.1", assets={"greptime-linux-amd64-v1.1.1.tar.gz"}),
+        ]
+        self.assertEqual(100, len(page_one))
+        page_two = [
+            self._release("v1.0.2", assets=UPDATER.required_asset_names("v1.0.2")),
+            self._release("v1.0.1-beta", assets=required),
+        ]
+        calls: list[str] = []
+
+        def fake_urlopen(request, *args, **kwargs):
+            calls.append(request.full_url)
+            payload = page_two if "page=2" in request.full_url else page_one
+            return self._FakeResponse(payload)
+
+        with mock.patch.object(UPDATER.urllib.request, "urlopen", side_effect=fake_urlopen):
+            published = UPDATER.published_release_tags("GreptimeTeam", "greptimedb", None)
+        # Draft releases are excluded; prerelease releases with the required
+        # assets are included; releases missing assets or with non-stable tags
+        # are excluded.
+        self.assertEqual({"v1.1.4", "v1.1.2", "v1.0.2"}, published)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all("per_page=100" in url for url in calls))
+
+    def test_published_release_tags_http_error_raises(self) -> None:
+        with mock.patch.object(
+            UPDATER.urllib.request,
+            "urlopen",
+            side_effect=urllib.error.HTTPError(
+                "https://api.github.com/repos/GreptimeTeam/greptimedb/releases",
+                403,
+                "Forbidden",
+                None,
+                None,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                UPDATER.CompatVersionError, "Unable to fetch published releases"
+            ):
+                UPDATER.published_release_tags("GreptimeTeam", "greptimedb", None)
+
+    def test_check_anchors_rejects_unpublished_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_case(root, "historical", '["=v1.0.2", "=v1.1.0"]')
+            with mock.patch.object(UPDATER, "git_tags", return_value=["v1.0.2", "v1.1.0"]):
+                with mock.patch.object(
+                    UPDATER, "published_release_tags", return_value={"v1.0.2"}
+                ):
+                    result = UPDATER.main(["--check-anchors", "--repo-root", str(root)])
+        self.assertEqual(2, result)
+
+    def test_check_anchors_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_case(root, "historical", '["=v1.0.2", "=v1.1.0"]')
+            with mock.patch.object(UPDATER, "git_tags", return_value=["v1.0.2", "v1.1.0"]):
+                with mock.patch.object(
+                    UPDATER, "published_release_tags", return_value={"v1.0.2", "v1.1.0"}
+                ):
+                    result = UPDATER.main(["--check-anchors", "--repo-root", str(root)])
+        self.assertEqual(0, result)
+
+    def test_nightly_window_prints_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_case(root, "historical", '["=v1.0.2"]')
+            self.write_case(root, "more_history", '["=v1.1.0", "=v1.1.1"]')
+            stdout = io.StringIO()
+            with mock.patch.object(
+                UPDATER, "git_tags", return_value=["v1.0.2", "v1.1.0", "v1.1.1", "v1.1.3"]
+            ):
+                with contextlib.redirect_stdout(stdout):
+                    result = UPDATER.main(["--nightly-window", "--repo-root", str(root)])
+        self.assertEqual(0, result)
+        self.assertEqual("v1.0.2,v1.1.0,v1.1.1,v1.1.3\n", stdout.getvalue())
+
+    def test_update_with_published_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.write_config(root, '["v1.0.2"]')
+            self.write_case(root, "historical", '["=v1.0.2"]')
+            with mock.patch.object(
+                UPDATER, "git_tags", return_value=["v1.0.2", "v1.1.3", "v1.1.4"]
+            ):
+                with mock.patch.object(
+                    UPDATER, "published_release_tags", return_value={"v1.0.2", "v1.1.3"}
+                ):
+                    result = UPDATER.main(
+                        ["--update", "--published-only", "--repo-root", str(root)]
+                    )
+            updated = config.read_text(encoding="utf-8")
+        self.assertEqual(0, result)
+        self.assertIn('from_versions = ["v1.0.2", "v1.1.3"]', updated)
 
 
 if __name__ == "__main__":

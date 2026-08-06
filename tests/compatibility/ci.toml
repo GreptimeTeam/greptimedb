@@ -1,10 +1,12 @@
 # Compatibility CI version window.
 #
-# The generated sliding portion keeps the latest patch in each of the two most
-# recent stable minor lines. Exact =vX.Y.Z `from_range` anchors in case.toml
-# files are also retained so historical compatibility coverage is not dropped.
-# Run .github/scripts/update-compat-versions.py --update after release tags land.
-from_versions = ["v1.0.2", "v1.1.0", "v1.1.1", "v1.1.2", "v1.1.3"]
+# The PR window keeps the latest patch in each of the two most recent stable
+# minor lines whose tags have published release assets. Exact =vX.Y.Z
+# `from_range` anchors in case.toml are validated by --check-anchors and
+# exercised by nightly runs (--nightly-window); they are not retained in the PR
+# window. Run .github/scripts/update-compat-versions.py --update --published-only
+# after release tags land.
+from_versions = ["v1.0.2", "v1.1.4"]
 
 # Recent releases that must be able to reopen tables written by the PR build.
 downgrade_to_versions = ["v1.1.4"]
