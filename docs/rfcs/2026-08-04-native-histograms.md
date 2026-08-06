@@ -153,7 +153,7 @@ The rejected alternative is Prometheus's direct-sum/Kahan-compensation design
 with an overflow-triggered mode change. It offers closer rounding parity but
 requires additional state and substantially more merge logic.
 
-## Equality and changes
+## Equality, changes, and resets
 
 Equality follows Prometheus's represented-layout semantics. Histograms compare
 equal only when their represented bucket-index sequences and bucket value bit
@@ -165,6 +165,9 @@ and reset hints and start timestamps remain excluded.
 Custom bucket bounds use ordinary floating-point equality rather than bitwise
 equality, matching Prometheus's `CustomBucketBoundsMatch`. Histogram payload
 values continue to use bitwise equality so NaN payloads behave deterministically.
+
+`resets()` counts ordinary counter resets and, unlike Prometheus, also counts
+each transition between gauge and non-gauge native histograms as one reset.
 
 ## Annotations
 
