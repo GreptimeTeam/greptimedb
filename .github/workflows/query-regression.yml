@@ -575,16 +575,17 @@ jobs:
           uv run --no-project python tests/perf/test_query_regression_summary_otlp.py
           uv run --no-project python tests/perf/test_query_regression_case_selection.py
 
-      - name: Build candidate greptime and fixture generators
+      - name: Build candidate greptime and query regression helpers
         working-directory: src
         run: |
           set -euo pipefail
           SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
           candidate_build_elapsed="${SECONDS}"
-          printf 'Candidate greptime and fixture generator cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
-          printf -- '- Candidate greptime and fixture generator cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          printf 'Candidate greptime and query regression helper cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
+          printf -- '- Candidate greptime and query regression helper cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
           sccache --show-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
@@ -595,6 +596,8 @@ jobs:
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner"
 
       - name: Run query regression
         id: run
@@ -609,6 +612,7 @@ jobs:
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
           OTELGEN_BIN: /usr/local/bin/otelgen
           SUMMARY_SCRIPT: ${{ github.event_name == 'pull_request' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
+          QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src
