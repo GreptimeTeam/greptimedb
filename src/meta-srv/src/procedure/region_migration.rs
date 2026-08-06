@@ -136,7 +136,7 @@ impl PersistentContext {
         to_peer: Peer,
         region_ids: Vec<RegionId>,
         timeout: Duration,
-        trigger_reason: RegionMigrationTriggerReason,
+        trigger_context: TriggerContext,
     ) -> Self {
         #[allow(deprecated)]
         Self {
@@ -147,8 +147,10 @@ impl PersistentContext {
             to_peer,
             region_ids,
             timeout,
-            trigger_reason,
-            trigger_context: TriggerContext::new(trigger_reason.to_trigger_reason()),
+            trigger_reason: RegionMigrationTriggerReason::from_trigger_reason(
+                trigger_context.reason,
+            ),
+            trigger_context,
         }
     }
 
@@ -1119,6 +1121,30 @@ mod tests {
 
         assert_eq!(persistent_ctx, deserialized);
         assert_eq!(deserialized.trigger_context, TriggerContext::default());
+    }
+
+    #[test]
+    fn test_new_persistent_context_keeps_trigger_context() {
+        let mut trigger_context =
+            TriggerContext::new(TriggerReason::AutoRebalance).with_protocol("internal");
+        trigger_context
+            .extensions
+            .insert("scheduler".into(), serde_json::json!("load_based"));
+
+        let context = PersistentContext::new(
+            vec![("greptime".into(), "public".into())],
+            Peer::empty(1),
+            Peer::empty(2),
+            vec![RegionId::new(1024, 1)],
+            Duration::from_secs(10),
+            trigger_context.clone(),
+        );
+
+        assert_eq!(
+            context.trigger_reason,
+            RegionMigrationTriggerReason::AutoRebalance
+        );
+        assert_eq!(context.trigger_context, trigger_context);
     }
 
     #[test]
