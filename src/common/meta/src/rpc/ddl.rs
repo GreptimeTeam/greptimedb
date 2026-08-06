@@ -339,7 +339,6 @@ impl TryFrom<Task> for DdlTask {
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
     pub query_context: QueryContext,
-    pub trigger_context: TriggerContext,
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
@@ -350,7 +349,6 @@ impl SubmitDdlTaskRequest {
     pub fn new(query_context: QueryContext, task: DdlTask) -> Self {
         Self {
             query_context,
-            trigger_context: TriggerContext::default(),
             wait: Self::default_wait(),
             timeout: Self::default_timeout(),
             task,
@@ -382,7 +380,6 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let SubmitDdlTaskRequest {
             mut query_context,
-            trigger_context: _,
             wait,
             timeout,
             task,
@@ -1716,14 +1713,11 @@ impl TriggerContext {
     }
 
     /// Builds a trigger context from frontend query context metadata.
-    pub fn from_query_context(
-        query_context: &mut QueryContext,
-        protocol: impl Into<String>,
-    ) -> Self {
+    pub fn from_query_context(query_context: &QueryContext, protocol: impl Into<String>) -> Self {
         let reason = query_context
             .extensions
-            .remove(TRIGGER_REASON_EXTENSION_KEY)
-            .map(|reason| TriggerReason::from_extension(&reason))
+            .get(TRIGGER_REASON_EXTENSION_KEY)
+            .map(|reason| TriggerReason::from_extension(reason))
             .unwrap_or_default();
         Self::new(reason, protocol)
     }
@@ -2342,6 +2336,27 @@ mod tests {
                 "protocol": "mysql",
             }),
             serde_json::to_value(context).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_trigger_context_from_query_context_preserves_extensions() {
+        let mut query_context = QueryContext::default();
+        query_context.extensions.insert(
+            TRIGGER_REASON_EXTENSION_KEY.to_string(),
+            TriggerReason::AutoCreate.as_ref().to_string(),
+        );
+
+        let trigger_context = TriggerContext::from_query_context(&query_context, "prometheus");
+
+        assert_eq!(trigger_context.reason, TriggerReason::AutoCreate);
+        assert_eq!(trigger_context.protocol, "prometheus");
+        assert_eq!(
+            query_context
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY)
+                .map(String::as_str),
+            Some("auto_create")
         );
     }
 }

@@ -25,12 +25,14 @@ use common_event_recorder::event_table::{
     PROCEDURE_ID_COLUMN as EVENT_TABLE_PROCEDURE_ID_COLUMN,
     PROCEDURE_STATE_COLUMN as EVENT_TABLE_PROCEDURE_STATE_COLUMN,
     PROCEDURE_TRIGGER_COLUMN as EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN,
-    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, jsonb_value,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 
-use super::test_util::assert_event_filter;
+use super::test_util::{
+    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
+};
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
@@ -299,7 +301,7 @@ fn assert_event_locator(
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
                 if catalog_name.is_some() {
-                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                    default_trigger_context_value()
                 } else {
                     Value { value_data: None }
                 },
@@ -341,7 +343,7 @@ fn assert_procedure_event_contract(
                 Value {
                     value_data: Some(ValueData::StringValue(String::new())),
                 },
-                jsonb_value(&serde_json::json!({"type": procedure_trigger})),
+                procedure_trigger_value(procedure_trigger),
                 Value {
                     value_data: catalog_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
@@ -349,7 +351,7 @@ fn assert_procedure_event_contract(
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
                 if catalog_name.is_some() {
-                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                    default_trigger_context_value()
                 } else {
                     Value { value_data: None }
                 },

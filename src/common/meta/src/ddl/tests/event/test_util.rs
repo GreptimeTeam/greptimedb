@@ -15,8 +15,20 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::Value;
 use common_event_recorder::EventTypeFilter;
+use common_event_recorder::event_table::jsonb_value;
 use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState};
+
+use crate::rpc::ddl::TriggerContext;
+
+pub(crate) fn default_trigger_context_value() -> Value {
+    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+}
+
+pub(crate) fn procedure_trigger_value(trigger: &str) -> Value {
+    jsonb_value(&serde_json::json!({"type": trigger}))
+}
 
 pub(crate) fn assert_event_filter(procedure: &dyn Procedure, event_type: &str) {
     let state = ProcedureState::Running;

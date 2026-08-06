@@ -1096,6 +1096,7 @@ mod tests {
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);
+        assert_eq!(deserialized.trigger_context, TriggerContext::default());
     }
 
     #[derive(Debug, Serialize, Deserialize, Default)]

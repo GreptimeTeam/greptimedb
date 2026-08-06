@@ -19,7 +19,7 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, VIEW_ID_COLUMN,
-    VIEW_NAME_COLUMN, jsonb_value,
+    VIEW_NAME_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -28,7 +28,9 @@ use common_procedure::{
     ProcedureId, ProcedureState, RetryPhase,
 };
 
-use super::test_util::assert_event_filter;
+use super::test_util::{
+    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
+};
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::event::view::{
@@ -281,7 +283,7 @@ impl ViewEventLocator<'_> {
                 .map(Into::into)
                 .unwrap_or_default(),
             if self.catalog_name.is_some() {
-                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                default_trigger_context_value()
             } else {
                 Value { value_data: None }
             },
@@ -334,7 +336,7 @@ fn assert_procedure_event_contract(
         ValueData::StringValue(event.procedure_id.to_string()).into(),
         ValueData::StringValue(state.to_string()).into(),
         ValueData::StringValue(String::new()).into(),
-        jsonb_value(&serde_json::json!({"type": trigger})),
+        procedure_trigger_value(trigger),
     ];
     values.extend(locator.values());
 

@@ -169,6 +169,7 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
         .unwrap()
         .remove("soft_drop_enabled");
     old_data.as_object_mut().unwrap().remove("dropped_at");
+    old_data.as_object_mut().unwrap().remove("trigger_context");
 
     let recovered = DropTableProcedure::from_json(&old_data.to_string(), runtime_context).unwrap();
     let recovered_data: serde_json::Value =
@@ -176,6 +177,10 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
 
     assert_eq!(recovered_data["soft_drop_enabled"], false);
     assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
+    assert_eq!(
+        recovered_data["trigger_context"],
+        serde_json::json!({"reason": "unknown", "protocol": "unknown"})
+    );
 }
 
 #[test]

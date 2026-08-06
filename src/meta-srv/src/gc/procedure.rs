@@ -1208,6 +1208,16 @@ mod tests {
         assert!(report.need_retry_regions.contains(&region_id));
     }
 
+    #[test]
+    fn test_batch_gc_data_defaults_missing_trigger_context() {
+        let mut data = serde_json::to_value(&batch_gc_procedure().data).unwrap();
+        data.as_object_mut().unwrap().remove("trigger_context");
+
+        let recovered: BatchGcData = serde_json::from_value(data).unwrap();
+
+        assert_eq!(recovered.trigger_context, TriggerContext::default());
+    }
+
     #[tokio::test]
     async fn test_send_gc_instructions_preserves_partial_report() {
         let first_region = RegionId::new(1024, 1);

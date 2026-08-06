@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_persistent_context_partition_metadata_update_serde_default() {
+    fn test_persistent_context_serde_defaults_for_new_fields() {
         let json = r#"{
             "catalog_name":"test_catalog",
             "schema_name":"test_schema",
@@ -1391,7 +1391,10 @@ mod tests {
 
         let persistent_ctx: PersistentContext = serde_json::from_str(json).unwrap();
 
+        assert!(persistent_ctx.failed_procedures.is_empty());
+        assert!(persistent_ctx.unknown_procedures.is_empty());
         assert!(persistent_ctx.partition_metadata_update.is_none());
+        assert_eq!(persistent_ctx.trigger_context, TriggerContext::default());
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, CreateTableExpr, DdlRequest,
-    Row, RowInsertRequest, RowInsertRequests, SemanticType, alter_table_expr,
+    Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType, alter_table_expr,
 };
 use client::OutputData;
 use common_catalog::consts::MITO_ENGINE;
@@ -84,55 +84,7 @@ async fn test_table_ddl_procedure_events() {
         .await;
     let frontend = cluster.fe_instance().clone();
 
-    frontend
-        .handle_row_inserts(
-            RowInsertRequests {
-                inserts: vec![RowInsertRequest {
-                    table_name: AUTO_TABLE.to_string(),
-                    rows: Some(api::v1::Rows {
-                        schema: vec![
-                            api::v1::ColumnSchema {
-                                column_name: "host".to_string(),
-                                datatype: ColumnDataType::String as i32,
-                                semantic_type: SemanticType::Tag as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                            api::v1::ColumnSchema {
-                                column_name: "ts".to_string(),
-                                datatype: ColumnDataType::TimestampMillisecond as i32,
-                                semantic_type: SemanticType::Timestamp as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                            api::v1::ColumnSchema {
-                                column_name: "val".to_string(),
-                                datatype: ColumnDataType::Float64 as i32,
-                                semantic_type: SemanticType::Field as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                        ],
-                        rows: vec![Row {
-                            values: vec![
-                                ValueData::StringValue("host".to_string()).into(),
-                                ValueData::TimestampMillisecondValue(0).into(),
-                                ValueData::F64Value(1.0).into(),
-                            ],
-                        }],
-                    }),
-                }],
-            },
-            Arc::new(QueryContext::with_channel(
-                "greptime",
-                "public",
-                Channel::Prometheus,
-            )),
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+    auto_create_table(&frontend, AUTO_TABLE, Channel::Prometheus).await;
     let auto_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", AUTO_TABLE).await;
     assert_trigger_context(
@@ -144,55 +96,7 @@ async fn test_table_ddl_procedure_events() {
     )
     .await;
 
-    frontend
-        .handle_row_inserts(
-            RowInsertRequests {
-                inserts: vec![RowInsertRequest {
-                    table_name: AUTO_INFLUX_TABLE.to_string(),
-                    rows: Some(api::v1::Rows {
-                        schema: vec![
-                            api::v1::ColumnSchema {
-                                column_name: "host".to_string(),
-                                datatype: ColumnDataType::String as i32,
-                                semantic_type: SemanticType::Tag as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                            api::v1::ColumnSchema {
-                                column_name: "ts".to_string(),
-                                datatype: ColumnDataType::TimestampMillisecond as i32,
-                                semantic_type: SemanticType::Timestamp as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                            api::v1::ColumnSchema {
-                                column_name: "val".to_string(),
-                                datatype: ColumnDataType::Float64 as i32,
-                                semantic_type: SemanticType::Field as i32,
-                                datatype_extension: None,
-                                options: None,
-                            },
-                        ],
-                        rows: vec![Row {
-                            values: vec![
-                                ValueData::StringValue("host".to_string()).into(),
-                                ValueData::TimestampMillisecondValue(0).into(),
-                                ValueData::F64Value(1.0).into(),
-                            ],
-                        }],
-                    }),
-                }],
-            },
-            Arc::new(QueryContext::with_channel(
-                "greptime",
-                "public",
-                Channel::Influx,
-            )),
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+    auto_create_table(&frontend, AUTO_INFLUX_TABLE, Channel::Influx).await;
     let auto_influx_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", AUTO_INFLUX_TABLE).await;
     assert_trigger_context(
@@ -662,6 +566,54 @@ async fn test_table_ddl_procedure_events() {
 
 async fn run_sql(instance: &Arc<Instance>, sql: &str) {
     run_sql_with_context(instance, sql, QueryContext::arc()).await;
+}
+
+async fn auto_create_table(instance: &Arc<Instance>, table_name: &str, channel: Channel) {
+    instance
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: table_name.to_string(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            api::v1::ColumnSchema {
+                                column_name: "host".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "ts".to_string(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "val".to_string(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                ValueData::StringValue("host".to_string()).into(),
+                                ValueData::TimestampMillisecondValue(0).into(),
+                                ValueData::F64Value(1.0).into(),
+                            ],
+                        }],
+                    }),
+                }],
+            },
+            Arc::new(QueryContext::with_channel("greptime", "public", channel)),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
 }
 
 async fn run_sql_with_context(

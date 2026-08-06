@@ -863,105 +863,82 @@ impl DdlManager {
             .map(TracingContext::from_w3c)
             .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
-        let ddl_options = DdlOptions {
-            wait: request.wait,
-            timeout: request.timeout,
-        };
+        let SubmitDdlTaskRequest {
+            query_context,
+            wait,
+            timeout,
+            task,
+        } = request;
+        let trigger_context =
+            TriggerContext::from_query_context(&query_context, query_context.channel_protocol());
+        let ddl_options = DdlOptions { wait, timeout };
         async move {
-            debug!("Submitting Ddl task: {:?}", request.task);
-            match request.task {
+            debug!("Submitting Ddl task: {:?}", task);
+            match task {
                 CreateTable(create_table_task) => {
                     handle_create_table_task(
                         self,
                         create_table_task,
-                        request.query_context,
-                        request.trigger_context,
+                        query_context,
+                        trigger_context,
                     )
                     .await
                 }
                 DropTable(drop_table_task) => {
-                    handle_drop_table_task(self, drop_table_task, request.trigger_context).await
+                    handle_drop_table_task(self, drop_table_task, trigger_context).await
                 }
                 UndropTable(undrop_table_task) => {
-                    handle_undrop_table_task(self, undrop_table_task, request.trigger_context).await
+                    handle_undrop_table_task(self, undrop_table_task, trigger_context).await
                 }
                 PurgeDroppedTable(purge_dropped_table_task) => {
-                    handle_purge_dropped_table_task(
-                        self,
-                        purge_dropped_table_task,
-                        request.trigger_context,
-                    )
-                    .await
-                }
-                AlterTable(alter_table_task) => {
-                    handle_alter_table_task(
-                        self,
-                        alter_table_task,
-                        ddl_options,
-                        request.trigger_context,
-                    )
-                    .await
-                }
-                TruncateTable(truncate_table_task) => {
-                    handle_truncate_table_task(self, truncate_table_task, request.trigger_context)
+                    handle_purge_dropped_table_task(self, purge_dropped_table_task, trigger_context)
                         .await
                 }
+                AlterTable(alter_table_task) => {
+                    handle_alter_table_task(self, alter_table_task, ddl_options, trigger_context)
+                        .await
+                }
+                TruncateTable(truncate_table_task) => {
+                    handle_truncate_table_task(self, truncate_table_task, trigger_context).await
+                }
                 CreateLogicalTables(create_table_tasks) => {
-                    handle_create_logical_table_tasks(
-                        self,
-                        create_table_tasks,
-                        request.trigger_context,
-                    )
-                    .await
+                    handle_create_logical_table_tasks(self, create_table_tasks, trigger_context)
+                        .await
                 }
                 AlterLogicalTables(alter_table_tasks) => {
-                    handle_alter_logical_table_tasks(
-                        self,
-                        alter_table_tasks,
-                        request.trigger_context,
-                    )
-                    .await
+                    handle_alter_logical_table_tasks(self, alter_table_tasks, trigger_context).await
                 }
                 DropLogicalTables(_) => todo!(),
                 CreateDatabase(create_database_task) => {
-                    handle_create_database_task(self, create_database_task, request.trigger_context)
-                        .await
+                    handle_create_database_task(self, create_database_task, trigger_context).await
                 }
                 DropDatabase(drop_database_task) => {
-                    handle_drop_database_task(self, drop_database_task, request.trigger_context)
-                        .await
+                    handle_drop_database_task(self, drop_database_task, trigger_context).await
                 }
                 AlterDatabase(alter_database_task) => {
-                    handle_alter_database_task(self, alter_database_task, request.trigger_context)
-                        .await
+                    handle_alter_database_task(self, alter_database_task, trigger_context).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(
-                        self,
-                        create_flow_task,
-                        request.query_context,
-                        request.trigger_context,
-                    )
-                    .await
+                    handle_create_flow_task(self, create_flow_task, query_context, trigger_context)
+                        .await
                 }
                 DropFlow(drop_flow_task) => {
-                    handle_drop_flow_task(self, drop_flow_task, request.trigger_context).await
+                    handle_drop_flow_task(self, drop_flow_task, trigger_context).await
                 }
                 CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task, request.trigger_context).await
+                    handle_create_view_task(self, create_view_task, trigger_context).await
                 }
                 DropView(drop_view_task) => {
-                    handle_drop_view_task(self, drop_view_task, request.trigger_context).await
+                    handle_drop_view_task(self, drop_view_task, trigger_context).await
                 }
                 CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
-                    handle_create_trigger_task(self, create_trigger_task, request.query_context)
-                        .await
+                    handle_create_trigger_task(self, create_trigger_task, query_context).await
                 }
                 #[cfg(feature = "enterprise")]
                 DropTrigger(drop_trigger_task) => {
-                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context).await
+                    handle_drop_trigger_task(self, drop_trigger_task, query_context).await
                 }
             }
         }

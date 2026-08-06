@@ -21,13 +21,14 @@ use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
     PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, TRIGGER_CONTEXT_COLUMN,
-    jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 use table::table_name::TableName;
 
-use super::test_util::assert_event_filter;
+use super::test_util::{
+    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
+};
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::event::flow::{
@@ -61,7 +62,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
-                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap()),
+                default_trigger_context_value(),
             ],
         }],
     );
@@ -87,7 +88,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
-                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap()),
+                default_trigger_context_value(),
             ],
         }],
     );
@@ -250,7 +251,7 @@ fn assert_procedure_event_contract(
                 ValueData::StringValue(event.procedure_id.to_string()).into(),
                 ValueData::StringValue(state.to_string()).into(),
                 ValueData::StringValue(String::new()).into(),
-                jsonb_value(&serde_json::json!({"type": trigger})),
+                procedure_trigger_value(trigger),
                 optional_string(locator.catalog_name),
                 optional_string(locator.flow_name),
                 locator
@@ -259,7 +260,7 @@ fn assert_procedure_event_contract(
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
                 if locator.catalog_name.is_some() {
-                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                    default_trigger_context_value()
                 } else {
                     Value { value_data: None }
                 },
