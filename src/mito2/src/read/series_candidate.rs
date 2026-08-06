@@ -110,9 +110,14 @@ impl SeriesCandidateScanner {
                 reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
             }
         );
-        debug_assert!(
+        ensure!(
             !pruner.predicate_prefilter_enabled(),
-            "candidate-series scan requires a pruner without predicate prefiltering"
+            UnexpectedSnafu {
+                reason: format!(
+                    "candidate-series scan for region {} requires a pruner without predicate prefiltering",
+                    stream_ctx.input.region_metadata().region_id
+                ),
+            }
         );
         let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
         pruner.add_partition_ranges(&all_ranges);
@@ -564,6 +569,8 @@ fn decode_metric_series(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{ArrayRef, DictionaryArray, UInt32Array};
@@ -573,7 +580,54 @@ mod tests {
     use table::predicate::Predicate;
 
     use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::scan_region::ScanInput;
+    use crate::read::scan_util::PartitionMetrics;
+    use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+
+    #[tokio::test]
+    async fn candidate_scanner_rejects_predicate_prefilter_pruner() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mapper =
+            FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len()).unwrap();
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(ScanInput::new(
+            env.access_layer.clone(),
+            mapper,
+        )));
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), 1));
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = PartitionMetrics::new(
+            metadata.region_id,
+            0,
+            "candidate-test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        );
+
+        let error = SeriesCandidateScanner::try_new(
+            stream_ctx,
+            Vec::new(),
+            pruner,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(UnboundedMemoryPool::default()),
+            metrics_set,
+            part_metrics,
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, crate::error::Error::Unexpected { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a pruner without predicate prefiltering")
+        );
+    }
 
     fn binary_batch(values: &[&[u8]]) -> RecordBatch {
         RecordBatch::try_new(

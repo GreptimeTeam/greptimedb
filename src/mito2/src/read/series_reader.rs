@@ -248,6 +248,11 @@ pub(crate) struct SeriesReader {
 impl SeriesReader {
     /// Creates a reader for the series assigned to one data partition.
     ///
+    /// `partition_pruner` must come from the candidate scanner's pruner, which
+    /// has predicate prefiltering disabled. The file read path applies precise
+    /// filters with tag filtering skipped because candidate discovery has already
+    /// enforced tag predicates through the exact assigned-series set.
+    ///
     /// A single `range_semaphore` covers both the range-build phase and the final
     /// merge.
     pub(crate) fn try_new(
