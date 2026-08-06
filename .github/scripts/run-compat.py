@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass --preserve-state to the real compat run for artifact upload.",
     )
+    parser.add_argument(
+        "--from-versions-extra",
+        help="Comma-separated extra from-versions appended to the ci.toml window (for nightly runs).",
+    )
     return parser.parse_args()
 
 
@@ -105,6 +109,28 @@ def load_versions(
         validated.append(version)
 
     return validated
+
+
+def load_extra_versions(raw: str | None, window: list[str]) -> list[str]:
+    """Parse --from-versions-extra, skipping versions already in the window.
+
+    Each entry must match VERSION_RE; like load_versions, no version may appear
+    twice in the effective list, so window entries and duplicates are skipped.
+    Order is preserved.
+    """
+    if not raw:
+        return []
+    extra: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(","):
+        version = item.strip()
+        if VERSION_RE.fullmatch(version) is None:
+            raise SystemExit(f"Invalid compat from-versions-extra version: {version!r}")
+        if version in window or version in seen:
+            continue
+        seen.add(version)
+        extra.append(version)
+    return extra
 
 
 def check_inputs(runner: Path, to_bins_dir: Path) -> None:
@@ -215,6 +241,7 @@ def main() -> int:
 
     check_inputs(runner, to_bins_dir)
     from_versions = load_versions(config_path, "from_versions")
+    extra_versions = load_extra_versions(args.from_versions_extra, from_versions)
     downgrade_to_versions = load_versions(
         config_path, "downgrade_to_versions", required=False
     )
@@ -222,8 +249,10 @@ def main() -> int:
     print("Compatibility from-version window:", flush=True)
     for version in from_versions:
         print(f"  - {version}", flush=True)
+    for version in extra_versions:
+        print(f"  - {version} (nightly extra)", flush=True)
 
-    for from_version in from_versions:
+    for from_version in [*from_versions, *extra_versions]:
         run_for_version(
             runner=runner,
             to_bins_dir=to_bins_dir,

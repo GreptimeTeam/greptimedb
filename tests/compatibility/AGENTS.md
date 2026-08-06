@@ -54,9 +54,12 @@ would be selected before a real run.
 
 ## CI Version Window
 
-- `tests/compatibility/ci.toml` controls the small sliding window of recent
-  released versions used by the CI job. Do not hard-code old versions
-  directly in workflow YAML.
+- `tests/compatibility/ci.toml` controls the small PR window: the latest patch
+  of the two most recent stable minor lines whose tags have published release
+  assets. Do not hard-code old versions directly in workflow YAML.
+- Exact `=vX.Y.Z` `from_range` anchors in case.toml are not retained in the PR
+  window; `--check-anchors` validates that they are released tags and
+  `--nightly-window` exercises them on nightly schedule runs.
 - Keep the PR/merge-queue window short; wider compatibility coverage belongs in
   nightly or release-validation workflows.
 - Case `from_range` / `to_range` metadata still controls whether each case runs
