@@ -140,6 +140,7 @@ const DB_COLUMN_MATCHER: &str = "__database__";
 const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
 const OR_FLOAT_FIELD_PREFIX: &str = "__promql_or_float_";
 const OR_HISTOGRAM_FIELD_PREFIX: &str = "__promql_or_histogram_";
+const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
 
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
@@ -1516,42 +1517,77 @@ impl PromPlanner {
         let normalize = self
             .selector_to_series_normalize_plan(offset, matchers, false)
             .await?;
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
 
-        let normalize = if timestamp_fn {
-            // If evaluating the PromQL `timestamp()` function, project the time index column as the value column
-            // before wrapping with [`InstantManipulate`], so the output matches PromQL's `timestamp()` semantics.
-            self.create_timestamp_func_plan(normalize)?
+        let (normalize, timestamp_value_column) = if timestamp_fn {
+            // Keep the original sample for stale-marker detection while carrying
+            // its timestamp through InstantManipulate in a private value column.
+            let occupied = normalize
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<HashSet<_>>();
+            let mut timestamp_value_column = TIMESTAMP_VALUE_PREFIX.to_string();
+            while occupied.contains(timestamp_value_column.as_str()) {
+                timestamp_value_column.push('_');
+            }
+            let mut project_exprs = normalize
+                .schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+                })
+                .collect::<Vec<_>>();
+            project_exprs
+                .push(build_special_time_expr(&time_index_column).alias(&timestamp_value_column));
+            let normalize = LogicalPlanBuilder::from(normalize)
+                .project(project_exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+            (normalize, Some(timestamp_value_column))
         } else {
-            normalize
+            (normalize, None)
         };
 
+        let field_column = self.ctx.field_columns.first().cloned();
         let manipulate = InstantManipulate::new(
             self.ctx.start,
             self.ctx.end,
             self.ctx.lookback_delta,
             self.ctx.interval,
-            self.ctx
-                .time_index_column
-                .clone()
-                .expect("time index should be set in `setup_context`"),
+            time_index_column,
             if self.ctx.use_tsid {
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
             } else {
                 self.ctx.tag_columns.clone()
             },
-            self.ctx.field_columns.first().cloned(),
+            field_column,
             normalize,
         );
-        Ok(LogicalPlan::Extension(Extension {
+        let manipulate = LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
-        }))
+        });
+        if let Some(timestamp_value_column) = timestamp_value_column {
+            self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
+        } else {
+            Ok(manipulate)
+        }
     }
 
     /// Builds a projection plan for the PromQL `timestamp()` function.
     /// Projects the time index column as the value column for each row.
     ///
     /// # Arguments
-    /// * `normalize` - Input [`LogicalPlan`] for the normalized series.
+    /// * `input` - Input [`LogicalPlan`] after instant-vector selection.
+    /// * `timestamp_value_column` - Private column containing each selected sample's timestamp.
     ///
     /// # Returns
     /// Returns a [`Result<LogicalPlan>`] where the resulting logical plan projects the timestamp
@@ -1568,16 +1604,19 @@ impl PromPlanner {
     /// # Side Effects
     /// Updates the planner context's field columns to the timestamp column name.
     ///
-    fn create_timestamp_func_plan(&mut self, normalize: LogicalPlan) -> Result<LogicalPlan> {
-        let time_expr = build_special_time_expr(self.ctx.time_index_column.as_ref().unwrap())
-            .alias(DEFAULT_FIELD_COLUMN);
+    fn create_timestamp_func_plan(
+        &mut self,
+        input: LogicalPlan,
+        timestamp_value_column: &str,
+    ) -> Result<LogicalPlan> {
+        let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
         project_exprs.push(time_expr);
         project_exprs.extend(self.create_tag_column_exprs()?);
 
-        LogicalPlanBuilder::from(normalize)
+        LogicalPlanBuilder::from(input)
             .project(project_exprs)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -6740,9 +6779,32 @@ mod test {
     }
 
     #[tokio::test]
-    #[should_panic]
-    async fn single_timestamp() {
-        do_single_instant_function_call("timestamp", "").await;
+    async fn single_timestamp_plan_preserves_source_value() {
+        let eval_stmt = build_eval_stmt(r#"timestamp(some_metric{tag_0!="bar"})"#);
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let expected = String::from(
+            "Filter: value IS NOT NULL [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, value AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
+            \n    Projection: some_metric.timestamp, __promql_timestamp_value_ AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
+            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(some_metric.timestamp AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        );
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
     #[tokio::test]
