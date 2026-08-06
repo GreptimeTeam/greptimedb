@@ -356,13 +356,16 @@ pub fn recordbatches_to_timeseries(
     table_name: &str,
     recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
+    let recordbatches = recordbatches.take();
+    let multiple_batches = recordbatches.len() > 1;
+
     let mut timeseries: Vec<TimeSeries> = Vec::new();
     // Maps a labelset to the index of its TimeSeries in `timeseries`, so that
     // series split across RecordBatch boundaries are merged into a single
     // TimeSeries instead of being emitted once per batch.
     let mut timeseries_by_labels: HashMap<Vec<Label>, usize> = HashMap::new();
 
-    for recordbatch in recordbatches.take() {
+    for recordbatch in recordbatches {
         let batch_timeseries = recordbatch_to_timeseries(table_name, recordbatch)?;
         for series in batch_timeseries {
             match timeseries_by_labels.entry(series.labels.clone()) {
@@ -381,14 +384,18 @@ pub fn recordbatches_to_timeseries(
     timeseries
         .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
 
-    // Samples accumulated from multiple RecordBatches (which may arrive in any
-    // order from parallel scan partitions) must be ordered by timestamp
-    // ascending, as required by the Prometheus remote read protocol. A stable
-    // sort keeps insertion order for equal timestamps.
-    for series in &mut timeseries {
-        series
-            .samples
-            .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+    // When samples from multiple RecordBatches are merged, the batches may
+    // arrive in any order (parallel scan partitions), so the accumulated
+    // samples must be ordered by timestamp ascending, as required by the
+    // Prometheus remote read protocol. A single batch is already in row order
+    // within the batch, so no sorting is needed. A stable sort keeps insertion
+    // order for equal timestamps.
+    if multiple_batches {
+        for series in &mut timeseries {
+            series
+                .samples
+                .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+        }
     }
 
     Ok(timeseries)
