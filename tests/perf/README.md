@@ -386,6 +386,66 @@ for a max-throughput run. For local results, run the case at least three times
 on an otherwise idle machine and compare median regressions rather than relying
 on one run.
 
+### Mixed read/write (saturated) measurement
+
+Adding `[scenario.write_measure.mix]` turns the pure-write scenario into a
+concurrent read+write ("mix") measurement: the runner spawns the chunked
+remote-write ingestion in a background thread (each chunk is still its own
+`query_perf_fixture prom-remote-write` subprocess) and, while it runs, drives
+`query_parallelism` query-loop threads against the same frontend HTTP
+`/v1/sql` endpoint for `duration_seconds`, then joins the ingestion. Both
+streams hit the same frontend/datanode, so query tasks and write tasks
+genuinely contend on the datanode runtime under a dual backlog — the
+workload-scheduler 2:8 allocation can be observed end to end.
+
+```toml
+[scenario.write_measure.mix]
+# Default query is `SELECT count(*) FROM greptime_physical_table` (the
+# physical table where every remote-write row lands); override with query_sql.
+# query_interval_ms is the per-thread wall-clock interval between queries.
+query_interval_ms = 100
+query_parallelism = 2
+
+[scenario.write_measure.mix.thresholds]
+max_query_failure_rate = 0.05        # per-target failed query attempt fraction
+max_query_p99_regression_pct = 10.0  # (candidate_p99 - base_p99) / base_p99 * 100
+```
+
+Rust owns the mix schema: `query_interval_ms` (default 100) and
+`query_parallelism` (default 1) are positive integers (zero is rejected at
+parse time), `query_sql` when present must be non-empty, and the mix
+thresholds follow the same finite/non-negative rules as the write thresholds
+with `max_query_failure_rate` in `[0, 1]`. Unknown mix fields are rejected by
+`query_perf_fixture plan`.
+
+For each target the mixed run records the existing `write_measurement` plus:
+
+- `query_measurement`: `{samples, failures, failure_rate, p50_ms, p99_ms,
+  mean_ms, latency_samples}`. Latency percentiles/mean cover every attempt
+  that recorded a latency, including failed ones, so timeouts show up in p99.
+- `scheduler_poll_deltas`: best-effort deltas of the datanode cumulative
+  `greptime_workload_scheduler_polls{workload="query"|"write"}` counters over
+  the window, scraped from `http://127.0.0.1:<datanode_http_port>/metrics`.
+  This is a diagnostic only, never a gate: the base target runs with the
+  scheduler disabled and typically exposes no such samples, and a workload
+  whose counter is missing or reset (decreased) is reported as `null`.
+
+Threshold enforcement combines the existing write gates with the query gates:
+per-target `max_query_failure_rate` and base-vs-candidate
+`max_query_p99_regression_pct` (positive `actual_pct` is a candidate
+regression, negative is an improvement). The case gates that neither side
+collapses — it does not gate on the 80% write poll share, which is the
+scheduler micro-benchmark's job.
+
+`tests/perf/query_cases/write_read_mixed_scheduler/case.toml` is the built-in
+mixed case: the same 2048 series × 3600 samples remote-write sizing as
+`write_throughput_scheduler`, a 60s measurement window, mix query
+`SELECT count(*) FROM greptime_physical_table` at 100ms interval with
+parallelism 2, and gates of ≤ 5% write/query failure, ≤ 10% write RPS
+regression, ≤ 10% write and query p99 regression, and a 15k rows/s absolute
+floor. It is opt-in (not part of the default CI case set); run it the same way
+as the pure write-throughput case, substituting the case path.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:

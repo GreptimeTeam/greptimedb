@@ -23,6 +23,7 @@ dry-run path. No live database, cluster, or generator subprocess is started.
 import importlib.util
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -77,6 +78,19 @@ def make_write_measure(**overrides):
     }
     write_measure.update(overrides)
     return write_measure
+
+
+def make_mix(**overrides):
+    mix = {
+        "query_interval_ms": 100,
+        "query_parallelism": 2,
+        "thresholds": {
+            "max_query_failure_rate": 0.05,
+            "max_query_p99_regression_pct": 10.0,
+        },
+    }
+    mix.update(overrides)
+    return mix
 
 
 class WriteThroughputDispatchTest(unittest.TestCase):
@@ -404,6 +418,240 @@ class WriteThroughputScenarioDryRunTest(unittest.TestCase):
             self.assertEqual(report["targets"][1]["scheduler"], disabled)
             # The dry-run report file for each target is written under the work dir.
             self.assertTrue(targets[0].report_path.exists())
+
+
+class WriteThroughputMixQueryTest(unittest.TestCase):
+    """Pure-function coverage for the mixed read/write query loop."""
+
+    def test_expected_attempts_math(self) -> None:
+        self.assertEqual(runner.expected_mix_query_attempts(60, 100, 2), 1200)
+        self.assertEqual(runner.expected_mix_query_attempts(10, 3000, 1), 4)
+        self.assertEqual(runner.expected_mix_query_attempts(60, 1000, 4), 240)
+        # Degenerate parallelism is clamped to 1 (interval is already
+        # guaranteed > 0 by the Rust schema; the clamp is defensive).
+        self.assertEqual(runner.expected_mix_query_attempts(60, 100, 0), 600)
+
+    def test_mix_query_sql_default_and_override(self) -> None:
+        remote = make_remote(physical_table="greptime_physical_table")
+        mix = make_mix()
+        self.assertEqual(runner.mix_query_sql(mix, remote), 'SELECT count(*) FROM "greptime_physical_table"')
+        mix["query_sql"] = "SELECT max(greptime_value) FROM greptime_physical_table"
+        self.assertEqual(runner.mix_query_sql(mix, remote), "SELECT max(greptime_value) FROM greptime_physical_table")
+
+    def test_query_loop_runs_and_collects_attempts(self) -> None:
+        target = runner.RunTarget("base", Path("/bin/true"), Path("/tmp/wt"), Path("/tmp/wt/data"), Path("/tmp/wt/fixture"), Path("/tmp/wt/report.json"), 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, Path("/tmp/wt/datanode/data"))
+        mix = make_mix(query_interval_ms=100, query_parallelism=2)
+
+        def fake_http(port, sql, db, timeout):
+            return {"ok": True, "status": 200, "latency_ms": 5.0, "response": {"data": []}, "sql": sql}
+
+        with patch.object(runner, "http_post_sql", side_effect=fake_http):
+            attempts = runner.run_mix_query_loop(target, mix, "public", duration_seconds=1, http_timeout=5.0, remote=make_remote())
+        # 1s at 100ms per thread = 10 attempts/thread; a delayed thread may
+        # drop its final query, but both threads must have run repeatedly.
+        self.assertGreaterEqual(len(attempts), 12)
+        self.assertLessEqual(len(attempts), 20)
+        self.assertTrue(all(a["ok"] for a in attempts))
+        self.assertTrue(all(a["sql"] == 'SELECT count(*) FROM "greptime_physical_table"' for a in attempts))
+
+    def test_mixed_ingestion_and_queries_join_thread(self) -> None:
+        target = runner.RunTarget("base", Path("/bin/true"), Path("/tmp/wt"), Path("/tmp/wt/data"), Path("/tmp/wt/fixture"), Path("/tmp/wt/report.json"), 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, Path("/tmp/wt/datanode/data"))
+        args = runner.argparse.Namespace(http_timeout=5.0)
+        remote = make_remote()
+
+        def fake_ingest(generator, target, remote, args, *, dry_run):
+            time.sleep(0.05)
+            return {"status": "ok", "chunks": []}, [{"ok": True}]
+
+        with (
+            patch.object(runner, "run_write_throughput_ingestion", side_effect=fake_ingest),
+            patch.object(runner, "run_mix_query_loop", return_value=[{"ok": True, "latency_ms": 1.0}]),
+        ):
+            rw, flushes, attempts = runner.run_mixed_ingestion_and_queries(None, target, remote, args, make_mix(), make_write_measure(), dry_run=False)
+        self.assertEqual(rw["status"], "ok")
+        self.assertEqual(flushes, [{"ok": True}])
+        self.assertEqual(attempts, [{"ok": True, "latency_ms": 1.0}])
+
+    def test_mixed_dry_run_skips_threads(self) -> None:
+        target = runner.RunTarget("base", Path("/bin/true"), Path("/tmp/wt"), Path("/tmp/wt/data"), Path("/tmp/wt/fixture"), Path("/tmp/wt/report.json"), 4000, 4001, 4002, 4003, 4004, 4005, 4006, 4007, Path("/tmp/wt/datanode/data"))
+        args = runner.argparse.Namespace(http_timeout=5.0)
+        with (
+            patch.object(runner, "run_write_throughput_ingestion", return_value=({"status": "ok"}, [{"ok": True}])) as ingest,
+            patch.object(runner.threading, "Thread") as thread_cls,
+        ):
+            rw, flushes, attempts = runner.run_mixed_ingestion_and_queries(None, target, make_remote(), args, make_mix(), make_write_measure(), dry_run=True)
+        thread_cls.assert_not_called()
+        ingest.assert_called_once()
+        self.assertEqual(attempts, [])
+
+
+class WriteThroughputMixMeasurementTest(unittest.TestCase):
+    def test_measurement_aggregates_latency_and_failures(self) -> None:
+        attempts = [
+            {"ok": True, "latency_ms": 10.0},
+            {"ok": True, "latency_ms": 20.0},
+            {"ok": True, "latency_ms": 30.0},
+            {"ok": False, "latency_ms": 40.0},
+            {"ok": False, "latency_ms": 50.0},
+        ]
+        measurement = runner.mix_query_measurement(attempts)
+        self.assertEqual(measurement["samples"], 5)
+        self.assertEqual(measurement["failures"], 2)
+        self.assertEqual(measurement["failure_rate"], 0.4)
+        self.assertEqual(measurement["latency_samples"], 5)
+        self.assertEqual(measurement["p50_ms"], 30.0)
+        self.assertEqual(measurement["p99_ms"], 50.0)
+        self.assertAlmostEqual(measurement["mean_ms"], 30.0)
+
+    def test_measurement_empty_attempts(self) -> None:
+        measurement = runner.mix_query_measurement([])
+        self.assertEqual(measurement["samples"], 0)
+        self.assertEqual(measurement["failures"], 0)
+        self.assertIsNone(measurement["failure_rate"])
+        self.assertIsNone(measurement["p50_ms"])
+        self.assertIsNone(measurement["p99_ms"])
+        self.assertIsNone(measurement["mean_ms"])
+
+    def test_planned_measurement_reports_expected_attempts(self) -> None:
+        measurement = runner.planned_mix_query_measurement(make_mix(), make_write_measure())
+        self.assertEqual(measurement["status"], "planned")
+        self.assertEqual(measurement["planned_attempts"], 1200)
+        self.assertEqual(measurement["query_interval_ms"], 100)
+        self.assertEqual(measurement["query_parallelism"], 2)
+        self.assertIsNone(measurement["p99_ms"])
+
+
+class WriteThroughputMixThresholdTest(unittest.TestCase):
+    def test_combined_write_and_query_gates(self) -> None:
+        write_base = {"mean_rps": 100_000, "p99_latency_ms": 50.0, "failure_rate": 0.0}
+        write_candidate = {"mean_rps": 90_000, "p99_latency_ms": 55.0, "failure_rate": 0.02}
+        query_base = {"p99_ms": 200.0, "failure_rate": 0.0}
+        query_candidate = {"p99_ms": 220.0, "failure_rate": 0.01}
+        write_results = runner.enforce_write_throughput_thresholds(make_write_measure(), write_base, write_candidate)
+        query_results = runner.enforce_mix_query_thresholds(make_mix(), query_base, query_candidate)
+        combined = write_results + query_results
+        by_key = {(r.get("target"), r["threshold"]): r for r in combined}
+        self.assertEqual(len(combined), 9)
+        # Write gates unchanged.
+        self.assertEqual(by_key[(None, "max_mean_rps_regression_pct")]["status"], "passed")
+        self.assertEqual(by_key[(None, "max_p99_latency_regression_pct")]["status"], "passed")
+        # Query gates pass within limits.
+        self.assertEqual(by_key[("base", "max_query_failure_rate")]["status"], "passed")
+        self.assertEqual(by_key[("candidate", "max_query_failure_rate")]["status"], "passed")
+        q99 = by_key[(None, "max_query_p99_regression_pct")]
+        self.assertEqual(q99["status"], "passed")
+        self.assertAlmostEqual(q99["actual_pct"], 10.0)
+        self.assertAlmostEqual(q99["limit_pct"], 10.0)
+
+    def test_query_gates_fail_on_regression_and_failures(self) -> None:
+        query_base = {"p99_ms": 200.0, "failure_rate": 0.0}
+        query_candidate = {"p99_ms": 260.0, "failure_rate": 0.10}
+        results = runner.enforce_mix_query_thresholds(make_mix(), query_base, query_candidate)
+        by_key = {(r.get("target"), r["threshold"]): r for r in results}
+        self.assertEqual(by_key[("candidate", "max_query_failure_rate")]["status"], "failed")
+        self.assertEqual(by_key[(None, "max_query_p99_regression_pct")]["status"], "failed")
+        self.assertAlmostEqual(by_key[(None, "max_query_p99_regression_pct")]["actual_pct"], 30.0)
+
+    def test_query_gates_fail_on_missing_base(self) -> None:
+        query_base = {"p99_ms": None, "failure_rate": None}
+        query_candidate = {"p99_ms": 260.0, "failure_rate": 0.0}
+        results = runner.enforce_mix_query_thresholds(make_mix(), query_base, query_candidate)
+        by_key = {(r.get("target"), r["threshold"]): r for r in results}
+        self.assertEqual(by_key[("base", "max_query_failure_rate")]["status"], "failed")
+        self.assertEqual(by_key[(None, "max_query_p99_regression_pct")]["status"], "failed")
+        self.assertEqual(by_key[(None, "max_query_p99_regression_pct")]["reason"], "missing or zero query p99 latency")
+
+    def test_planned_mix_query_thresholds(self) -> None:
+        planned = runner.planned_mix_query_thresholds(make_mix())
+        self.assertEqual([p["threshold"] for p in planned], ["max_query_failure_rate", "max_query_p99_regression_pct"])
+        self.assertTrue(all(p["status"] == "planned" for p in planned))
+
+
+class SchedulerPollMetricsTest(unittest.TestCase):
+    def test_parse_scheduler_poll_metrics(self) -> None:
+        text = (
+            "# HELP greptime_workload_scheduler_polls Cumulative task polls admitted by the workload scheduler\n"
+            "# TYPE greptime_workload_scheduler_polls gauge\n"
+            "greptime_workload_scheduler_polls{workload=\"query\"} 1234\n"
+            "greptime_workload_scheduler_polls{workload=\"write\"} 5678\n"
+            "greptime_workload_scheduler_queued_tasks{workload=\"query\"} 3\n"
+            "greptime_runtime_threads_alive{thread_name=\"global\"} 8\n"
+        )
+        self.assertEqual(runner.parse_scheduler_poll_metrics(text), {"query": 1234, "write": 5678})
+        # Scheduler disabled: no samples at all.
+        self.assertEqual(runner.parse_scheduler_poll_metrics("greptime_runtime_threads_alive 8\n"), {})
+
+    def test_scheduler_poll_deltas(self) -> None:
+        before = {"values": {"query": 100, "write": 900}}
+        after = {"values": {"query": 180, "write": 1780}}
+        self.assertEqual(runner.scheduler_poll_deltas(after, before), {"query": 80, "write": 880})
+
+    def test_scheduler_poll_deltas_unknown_on_missing_or_reset(self) -> None:
+        before = {"values": {"query": 100}}
+        after = {"values": {"query": 180, "write": 20}}
+        # write absent before -> unknown; write decreased -> unknown (reset).
+        self.assertEqual(runner.scheduler_poll_deltas(after, before), {"query": 80, "write": None})
+        before = {"values": {"query": 100, "write": 900}}
+        after = {"values": {}}
+        self.assertEqual(runner.scheduler_poll_deltas(after, before), {"query": None, "write": None})
+
+
+class WriteThroughputMixScenarioDryRunTest(unittest.TestCase):
+    def test_dry_run_with_mix_plans_write_and_query_gates(self) -> None:
+        events = []
+
+        class FakeCluster:
+            def __init__(self, target):
+                self.target = target
+                self.stopped = False
+                events.append(f"create:{self.target.name}")
+
+            def component_report(self):
+                return {}
+
+            def stop_all(self):
+                if not self.stopped:
+                    self.stopped = True
+                    events.append(f"stop:{self.target.name}")
+
+        args = runner.argparse.Namespace(
+            fixture_only=False,
+            fixture_generator=Path("query_perf_fixture"),
+            remote_write_generator=None,
+            dry_run=True,
+            http_timeout=1.0,
+        )
+        write_measure = make_write_measure()
+        write_measure["mix"] = make_mix()
+        case = {"scenario": {"kind": "write_throughput", "remote_write": make_remote(), "write_measure": write_measure}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            targets = [
+                runner.make_target("base", Path("/bin/true"), root, list(range(10_000, 10_008))),
+                runner.make_target("candidate", Path("/bin/true"), root, list(range(10_008, 10_016))),
+            ]
+            report = {"targets": []}
+            with (
+                patch.object(runner, "DistributedCluster", FakeCluster),
+                patch.object(runner, "run_command") as run_cmd,
+            ):
+                runner.run_write_throughput_scenario(args, case, Path("case.toml"), targets, report)
+
+            run_cmd.assert_not_called()
+            self.assertEqual(report["status"], "planned")
+            self.assertEqual(len(report["thresholds"]), 6)
+            self.assertTrue(all(t["status"] == "planned" for t in report["thresholds"]))
+            self.assertEqual(
+                [t["threshold"] for t in report["thresholds"]],
+                ["max_failure_rate", "max_mean_rps_regression_pct", "max_p99_latency_regression_pct", "min_rps_absolute", "max_query_failure_rate", "max_query_p99_regression_pct"],
+            )
+            for tr in report["targets"]:
+                self.assertEqual(tr["write_measurement"]["status"], "planned")
+                self.assertEqual(tr["query_measurement"]["status"], "planned")
+                self.assertEqual(tr["query_measurement"]["planned_attempts"], 1200)
+                self.assertEqual(tr["scheduler_poll_deltas"], {"status": "planned"})
+                self.assertEqual(tr["mix"]["query_parallelism"], 2)
 
 
 if __name__ == "__main__":

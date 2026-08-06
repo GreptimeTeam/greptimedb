@@ -29,6 +29,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
@@ -47,6 +48,9 @@ OTLP_TRACE_METRICS = {
     "greptime_servers_http_otlp_traces_elapsed_count",
 }
 PROMETHEUS_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{.*\})?\s+([^\s]+)(?:\s+.*)?$")
+# Workload-scheduler cumulative poll counters on the datanode /metrics
+# endpoint, e.g. greptime_workload_scheduler_polls{workload="write"} 1234.
+SCHEDULER_POLL_RE = re.compile(r'^greptime_workload_scheduler_polls\{[^}]*workload="(query|write)"[^}]*\}\s+(\d+)(?:\s+.*)?$')
 
 
 @dataclass(frozen=True)
@@ -1125,6 +1129,55 @@ def metric_delta(after: dict[str, Any], before: dict[str, Any], name: str) -> fl
     return delta
 
 
+def parse_scheduler_poll_metrics(text: str) -> dict[str, int]:
+    """Parse `greptime_workload_scheduler_polls{workload="..."}` samples.
+
+    Returns {workload: cumulative polls} for the workloads the datanode
+    scheduler tracks ("query", "write"); workloads absent from the scrape are
+    omitted (the base target runs with the scheduler disabled and typically
+    exposes no such samples at all).
+    """
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        match = SCHEDULER_POLL_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    return values
+
+
+def scrape_scheduler_polls(target: RunTarget, http_timeout: float) -> dict[str, Any]:
+    """Best-effort datanode scheduler-poll snapshot (never a gate).
+
+    Returns {"captured_monotonic_seconds", "values": {workload: polls}} on
+    success or {"error", "values": {}} when the datanode /metrics endpoint is
+    unreachable or the scheduler metric is absent.
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{target.datanode_http_port}/metrics", timeout=http_timeout) as response:
+            text = response.read().decode()
+        return {"captured_monotonic_seconds": time.monotonic(), "values": parse_scheduler_poll_metrics(text)}
+    except Exception as e:  # noqa: BLE001 - best-effort diagnostic
+        return {"error": repr(e), "values": {}}
+
+
+def scheduler_poll_deltas(after: dict[str, Any], before: dict[str, Any]) -> dict[str, Any]:
+    """Delta of cumulative scheduler polls between two snapshots, per workload.
+
+    A workload whose counter is missing in either snapshot, or that decreased
+    (counter reset/restart), is reported as None because its delta is unknown.
+    """
+    result: dict[str, Any] = {}
+    for workload in ("query", "write"):
+        before_value = before.get("values", {}).get(workload)
+        after_value = after.get("values", {}).get(workload)
+        if before_value is None or after_value is None:
+            result[workload] = None
+        else:
+            delta = after_value - before_value
+            result[workload] = delta if delta >= 0 else None
+    return result
+
+
 def otelgen_command(otelgen_bin: Path, target: RunTarget, load: dict[str, Any]) -> list[str]:
     return [
         str(otelgen_bin),
@@ -1667,6 +1720,202 @@ def enforce_write_throughput_thresholds(write_measure: dict[str, Any], base: dic
     return results
 
 
+def mix_query_sql(mix: dict[str, Any], remote: dict[str, Any]) -> str:
+    """Resolve the mixed-scenario query SQL.
+
+    Defaults to a count(*) over the remote-write physical table, which scans
+    every ingested row and therefore contends with the write path on the
+    datanode runtime.
+    """
+    sql = mix.get("query_sql")
+    if sql:
+        return str(sql)
+    return f"SELECT count(*) FROM {sql_ident(remote['physical_table'])}"
+
+
+def expected_mix_query_attempts(duration_seconds: int, interval_ms: int, parallelism: int) -> int:
+    """Per-thread attempt count for a query loop: queries at t=0, interval,
+    2*interval, ... while t < duration. Wall-clock jitter may drop at most one
+    trailing query per thread, so the observed count is
+    [expected - parallelism, expected]."""
+    per_thread = math.ceil(max(0.0, float(duration_seconds)) * 1000.0 / max(1, int(interval_ms)))
+    return per_thread * max(1, int(parallelism))
+
+
+def run_mix_query_loop(target: RunTarget, mix: dict[str, Any], db: str, duration_seconds: int, http_timeout: float, remote: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run `query_parallelism` query-loop threads for `duration_seconds`.
+
+    Each thread issues the mix query via HTTP SQL every `query_interval_ms`
+    (per-thread wall clock; if a query itself takes longer than the interval
+    the thread does not sleep). Returns the collected attempt results in
+    completion order; every attempt carries `ok`, `status`, `latency_ms`, and
+    `sql` from `http_post_sql`.
+    """
+    query_sql = mix_query_sql(mix, remote)
+    interval_ms = int(mix.get("query_interval_ms", 100))
+    parallelism = max(1, int(mix.get("query_parallelism", 1)))
+    attempts: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    stop = threading.Event()
+    deadline = time.monotonic() + max(0.0, float(duration_seconds))
+    threads = []
+    for _ in range(parallelism):
+        thread = threading.Thread(
+            target=_mix_query_worker,
+            args=(target, query_sql, db, interval_ms, deadline, http_timeout, attempts, lock, stop),
+            daemon=True,
+        )
+        threads.append(thread)
+        thread.start()
+    for thread in threads:
+        # Bounded join: workers may be stuck in a slow HTTP call beyond the
+        # deadline; their daemon status keeps process exit unblocked.
+        thread.join(timeout=max(10.0, float(interval_ms) / 1000.0 + 2.0))
+    return attempts
+
+
+def _mix_query_worker(
+    target: RunTarget,
+    query_sql: str,
+    db: str,
+    interval_ms: int,
+    deadline: float,
+    http_timeout: float,
+    attempts: list[dict[str, Any]],
+    lock: threading.Lock,
+    stop: threading.Event,
+) -> None:
+    interval_seconds = float(interval_ms) / 1000.0
+    while not stop.is_set():
+        started = time.monotonic()
+        if started >= deadline:
+            return
+        result = http_post_sql(target.http_port, query_sql, db, http_timeout)
+        with lock:
+            attempts.append(result)
+        remaining = interval_seconds - (time.monotonic() - started)
+        if remaining > 0 and stop.wait(remaining):
+            return
+
+
+def mix_query_measurement(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate query-loop attempts into {samples, failures, failure_rate,
+    p50_ms, p99_ms, mean_ms, latency_samples}.
+
+    Latency percentiles/mean cover every attempt that recorded a latency
+    (including failed ones, so timeouts show up in p99). `latency_samples`
+    counts those attempts. The input is snapshotted so a still-running daemon
+    query worker cannot mutate it mid-aggregation.
+    """
+    attempts = list(attempts)
+    total = len(attempts)
+    failures = sum(1 for a in attempts if not a.get("ok"))
+    latencies = [float(a["latency_ms"]) for a in attempts if a.get("latency_ms") is not None]
+    return {
+        "samples": total,
+        "failures": failures,
+        "failure_rate": failures / total if total else None,
+        "p50_ms": percentile(latencies, 50) if latencies else None,
+        "p99_ms": percentile(latencies, 99) if latencies else None,
+        "mean_ms": statistics.mean(latencies) if latencies else None,
+        "latency_samples": len(latencies),
+    }
+
+
+def planned_mix_query_measurement(mix: dict[str, Any], write_measure: dict[str, Any]) -> dict[str, Any]:
+    """Dry-run query measurement: no query loop ran, so report planned counts."""
+    duration_seconds = int(write_measure["duration_seconds"])
+    interval_ms = int(mix.get("query_interval_ms", 100))
+    parallelism = int(mix.get("query_parallelism", 1))
+    return {
+        "status": "planned",
+        "planned_attempts": expected_mix_query_attempts(duration_seconds, interval_ms, parallelism),
+        "query_interval_ms": interval_ms,
+        "query_parallelism": parallelism,
+        "samples": 0,
+        "failures": 0,
+        "failure_rate": None,
+        "p50_ms": None,
+        "p99_ms": None,
+        "mean_ms": None,
+        "latency_samples": 0,
+    }
+
+
+def run_mixed_ingestion_and_queries(generator: Path | None, target: RunTarget, remote: dict[str, Any], args: argparse.Namespace, mix: dict[str, Any], write_measure: dict[str, Any], *, dry_run: bool) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run remote-write ingestion in a background thread while a query loop
+    hammers the same frontend concurrently for `duration_seconds`, then join.
+
+    The ingestion is the same chunked `run_write_throughput_ingestion`
+    machinery, just executed from a thread; each chunk is its own
+    `query_perf_fixture prom-remote-write` subprocess (generate+send in one
+    shot), and the query loop issues HTTP /v1/sql requests from the main
+    process, so both hit the same frontend/datanode and genuinely contend on
+    the datanode runtime. Returns (rw, flushes, query_attempts); in dry-run
+    mode no thread and no query loop is started and attempts is empty.
+    """
+    if dry_run:
+        rw, flushes = run_write_throughput_ingestion(generator, target, remote, args, dry_run=True)
+        return rw, flushes, []
+
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def ingest() -> None:
+        try:
+            results["rw"], results["flushes"] = run_write_throughput_ingestion(generator, target, remote, args, dry_run=False)
+        except BaseException as e:  # noqa: BLE001 - re-raised in the caller
+            errors.append(e)
+
+    thread = threading.Thread(target=ingest, name=f"{target.name}-ingest", daemon=True)
+    thread.start()
+    try:
+        attempts = run_mix_query_loop(target, mix, remote["database"], int(write_measure["duration_seconds"]), args.http_timeout, remote)
+    finally:
+        thread.join()
+        if thread.is_alive():
+            # The datanode may be wedged; the ingestion thread is daemon so it
+            # cannot block process exit, but surface the lack of results.
+            raise RuntimeError(f"write ingestion thread did not finish for {target.name}")
+    if errors:
+        raise errors[0]
+    return results["rw"], results["flushes"], attempts
+
+
+def planned_mix_query_thresholds(mix: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = mix["thresholds"]
+    return [
+        {"threshold": "max_query_failure_rate", "status": "planned", "limit": thresholds["max_query_failure_rate"]},
+        {"threshold": "max_query_p99_regression_pct", "status": "planned", "limit_pct": thresholds["max_query_p99_regression_pct"]},
+    ]
+
+
+def enforce_mix_query_thresholds(mix: dict[str, Any], base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Enforce the query-side gates of the mixed read/write scenario.
+
+    Per-target: `max_query_failure_rate` (failed query attempts / total).
+    Base-vs-candidate: `max_query_p99_regression_pct`
+    `(candidate_p99_ms - base_p99_ms) / base_p99_ms * 100`; positive actual
+    means a candidate regression, negative is an improvement.
+    """
+    thresholds = mix["thresholds"]
+    results: list[dict[str, Any]] = []
+    failure_limit = float(thresholds["max_query_failure_rate"])
+    for target_name, measurement in (("base", base), ("candidate", candidate)):
+        failure_rate = measurement.get("failure_rate")
+        results.append({"target": target_name, "threshold": "max_query_failure_rate", "status": "passed" if failure_rate is not None and failure_rate <= failure_limit else "failed", "actual": failure_rate, "limit": failure_limit})
+
+    base_p99 = base.get("p99_ms")
+    candidate_p99 = candidate.get("p99_ms")
+    p99_limit = float(thresholds["max_query_p99_regression_pct"])
+    if base_p99 in (None, 0) or candidate_p99 is None:
+        results.append({"threshold": "max_query_p99_regression_pct", "status": "failed", "reason": "missing or zero query p99 latency", "base": base_p99, "candidate": candidate_p99})
+    else:
+        actual = (candidate_p99 - base_p99) / base_p99 * 100.0
+        results.append({"threshold": "max_query_p99_regression_pct", "status": "passed" if actual <= p99_limit else "failed", "actual_pct": actual, "limit_pct": p99_limit, "base": base_p99, "candidate": candidate_p99})
+    return results
+
+
 def extract_count_value(result: dict[str, Any]) -> int | None:
     body = result.get("response")
     if not isinstance(body, dict):
@@ -1790,6 +2039,7 @@ def run_write_throughput_scenario(args: argparse.Namespace, case: dict[str, Any]
 
     clusters: list[DistributedCluster] = []
     measurements: list[dict[str, Any]] = []
+    query_measurements: list[dict[str, Any]] = []
     try:
         for target in targets:
             target.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1802,7 +2052,19 @@ def run_write_throughput_scenario(args: argparse.Namespace, case: dict[str, Any]
             create_database: dict[str, Any] = {"status": "dry-run", "database": db}
             if not args.dry_run:
                 create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
-            rw, flushes = run_write_throughput_ingestion(helper, target, remote, args, dry_run=args.dry_run)
+            mix = write_measure.get("mix")
+            scheduler_polls_before: dict[str, Any] | None = None
+            scheduler_polls_after: dict[str, Any] | None = None
+            if mix is not None and not args.dry_run:
+                scheduler_polls_before = scrape_scheduler_polls(target, args.http_timeout)
+            if mix is not None:
+                rw, flushes, query_attempts = run_mixed_ingestion_and_queries(helper, target, remote, args, mix, write_measure, dry_run=args.dry_run)
+                query_measurement = planned_mix_query_measurement(mix, write_measure) if args.dry_run else mix_query_measurement(query_attempts)
+                if not args.dry_run:
+                    scheduler_polls_after = scrape_scheduler_polls(target, args.http_timeout)
+            else:
+                rw, flushes = run_write_throughput_ingestion(helper, target, remote, args, dry_run=args.dry_run)
+                query_measurement = None
             measurement = planned_write_throughput_measurement(remote, write_measure) if args.dry_run else write_throughput_measurement(rw, write_measure)
             tr = {
                 "name": target.name,
@@ -1817,17 +2079,36 @@ def run_write_throughput_scenario(args: argparse.Namespace, case: dict[str, Any]
                 "scheduler": scheduler_report_entry(target.name, scenario_config.get("scheduler")),
                 "write_measurement": measurement,
             }
+            if query_measurement is not None:
+                tr["query_measurement"] = query_measurement
+            if mix is not None:
+                tr["mix"] = mix
+                tr["scheduler_poll_deltas"] = scheduler_poll_deltas(scheduler_polls_after, scheduler_polls_before) if scheduler_polls_after is not None else {"status": "planned"}
             flushes_ok = all(flush.get("ok") for flush in flushes)
             measurement_ok = measurement.get("mean_rps") not in (None, 0)
-            checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and measurement_ok)
+            query_ok = query_measurement is None or query_measurement.get("samples", 0) > 0
+            checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and measurement_ok and query_ok)
             if not checks_ok and not args.dry_run:
-                tr.setdefault("validation_errors", []).append({"phase": "write_throughput", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "measurement_ok": measurement_ok, "mean_rps": measurement.get("mean_rps"), "failure_rate": measurement.get("failure_rate")})
+                validation = {"phase": "write_throughput", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "measurement_ok": measurement_ok, "mean_rps": measurement.get("mean_rps"), "failure_rate": measurement.get("failure_rate")}
+                if query_measurement is not None:
+                    validation["query_ok"] = query_ok
+                    validation["query_samples"] = query_measurement.get("samples")
+                tr.setdefault("validation_errors", []).append(validation)
             tr["status"] = "planned" if args.dry_run else ("measured" if checks_ok else "failed")
             write_json(target.report_path, tr)
             report["targets"].append(tr)
             measurements.append(measurement)
+            if query_measurement is not None:
+                query_measurements.append(query_measurement)
             cluster.stop_all()
-        report["thresholds"] = planned_write_throughput_thresholds(write_measure) if args.dry_run else enforce_write_throughput_thresholds(write_measure, measurements[0], measurements[1])
+        if args.dry_run:
+            report["thresholds"] = planned_write_throughput_thresholds(write_measure)
+            if write_measure.get("mix") is not None:
+                report["thresholds"] += planned_mix_query_thresholds(write_measure["mix"])
+        else:
+            report["thresholds"] = enforce_write_throughput_thresholds(write_measure, measurements[0], measurements[1])
+            if write_measure.get("mix") is not None:
+                report["thresholds"] += enforce_mix_query_thresholds(write_measure["mix"], query_measurements[0], query_measurements[1])
         report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t.get("status") == "failed" for t in report["targets"]) else "ok")
     finally:
         for cluster in reversed(clusters):
