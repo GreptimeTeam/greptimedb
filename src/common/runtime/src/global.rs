@@ -14,6 +14,7 @@
 
 //! Global runtimes
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::sync::{Mutex, Once};
 
 use catio::{Scheduler, SchedulerStats, TaskClass};
@@ -400,6 +401,60 @@ pub fn workload_scheduler_stats() -> Option<SchedulerStats> {
         .workload_scheduler
         .as_ref()
         .map(Scheduler::stats)
+}
+
+/// Dynamically adjusts the query and write weights of the experimental
+/// workload scheduler at runtime. Returns `false` and leaves the scheduler
+/// unchanged when the scheduler is disabled or either weight is zero.
+pub fn set_workload_scheduler_weights(query_weight: u32, write_weight: u32) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler is not enabled; ignoring query_weight={}, \
+             write_weight={}",
+            query_weight, write_weight
+        );
+        return false;
+    };
+
+    let Some(query_weight) = NonZeroU32::new(query_weight) else {
+        warn!("Refusing to set workload scheduler weights: query_weight must be greater than zero");
+        return false;
+    };
+    let Some(write_weight) = NonZeroU32::new(write_weight) else {
+        warn!("Refusing to set workload scheduler weights: write_weight must be greater than zero");
+        return false;
+    };
+
+    scheduler.set_weight(QUERY_TASK_CLASS, query_weight);
+    scheduler.set_weight(WRITE_TASK_CLASS, write_weight);
+    info!(
+        "Updated experimental workload scheduler weights: query_weight={query_weight}, \
+         write_weight={write_weight}"
+    );
+    true
+}
+
+/// Dynamically adjusts the maximum number of concurrent polls admitted to
+/// Tokio by the experimental workload scheduler at runtime. Returns `false`
+/// and leaves the scheduler unchanged when the scheduler is disabled or the
+/// limit is zero.
+pub fn set_workload_scheduler_max_concurrent_polls(limit: usize) -> bool {
+    let Some(scheduler) = GLOBAL_RUNTIMES.workload_scheduler.as_ref() else {
+        warn!(
+            "The experimental workload scheduler is not enabled; ignoring \
+             max_concurrent_polls={limit}"
+        );
+        return false;
+    };
+
+    if limit == 0 {
+        warn!("Refusing to set workload scheduler max_concurrent_polls to zero");
+        return false;
+    }
+
+    scheduler.set_max_concurrent_polls(limit);
+    info!("Updated experimental workload scheduler max_concurrent_polls to {limit}");
+    true
 }
 
 #[cfg(test)]
