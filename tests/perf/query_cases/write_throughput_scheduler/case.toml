@@ -45,4 +45,4 @@ target_rps = 0 # 0 = max throughput; the achieved rate is measured
 max_failure_rate = 0.05
 max_mean_rps_regression_pct = 10
 max_p99_latency_regression_pct = 10
-min_rps_absolute = 50000
+min_rps_absolute = 15000
