@@ -87,17 +87,7 @@ pub(crate) trait State: Send + Debug {
 impl DropDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropDatabase";
 
-    pub fn new(catalog: String, schema: String, drop_if_exists: bool, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(
-            catalog,
-            schema,
-            drop_if_exists,
-            TriggerContext::default(),
-            context,
-        )
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         catalog: String,
         schema: String,
         drop_if_exists: bool,
@@ -202,7 +192,7 @@ impl Procedure for DropDatabaseProcedure {
         }
 
         let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
-            DatabaseDdlEvent::drop_submitted_with_trigger_context(
+            DatabaseDdlEvent::drop_submitted(
                 &self.context.catalog,
                 &self.context.schema,
                 self.context.drop_if_exists,

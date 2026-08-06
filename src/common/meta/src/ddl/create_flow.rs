@@ -62,11 +62,7 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(task: CreateFlowTask, query_context: QueryContext, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, query_context, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         task: CreateFlowTask,
         query_context: QueryContext,
         trigger_context: TriggerContext,
@@ -420,7 +416,7 @@ impl Procedure for CreateFlowProcedure {
         }
 
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => FlowDdlEvent::create_submitted_with_trigger_context(
+            EventTrigger::Submitted => FlowDdlEvent::create_submitted(
                 &self.data.task.catalog_name,
                 &self.data.task.flow_name,
                 CreateFlowEventIntent {

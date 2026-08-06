@@ -74,15 +74,7 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(task: DropTableTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, context, TriggerContext::default())
-    }
-
-    pub fn new_with_trigger_context(
-        task: DropTableTask,
-        context: DdlContext,
-        trigger_context: TriggerContext,
-    ) -> Self {
+    pub fn new(task: DropTableTask, context: DdlContext, trigger_context: TriggerContext) -> Self {
         let data = DropTableData::new(
             task,
             cfg!(feature = "enterprise") && context.soft_drop_enabled,

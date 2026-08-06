@@ -48,15 +48,7 @@ pub struct DropViewProcedure {
 impl DropViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropView";
 
-    pub fn new(task: DropViewTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
-        task: DropViewTask,
-        trigger_context: TriggerContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: DropViewTask, trigger_context: TriggerContext, context: DdlContext) -> Self {
         Self {
             context,
             data: DropViewData {
@@ -230,7 +222,7 @@ impl Procedure for DropViewProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let table_ref = self.data.table_ref();
-                ViewDdlEvent::drop_submitted_with_trigger_context(
+                ViewDdlEvent::drop_submitted(
                     table_ref.catalog,
                     table_ref.schema,
                     table_ref.table,

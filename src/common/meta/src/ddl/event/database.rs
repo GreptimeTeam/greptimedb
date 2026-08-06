@@ -85,25 +85,7 @@ struct DatabaseOptionIntent {
 }
 
 impl DatabaseDdlEvent {
-    #[cfg(test)]
     pub(crate) fn create_submitted(
-        catalog_name: &str,
-        schema_name: &str,
-        create_if_not_exists: bool,
-        options: &HashMap<String, String>,
-    ) -> Self {
-        let mut event = Self::create_submitted_with_trigger_context(
-            catalog_name,
-            schema_name,
-            create_if_not_exists,
-            options,
-            TriggerContext::default(),
-        );
-        event.trigger_context = None;
-        event
-    }
-
-    pub(crate) fn create_submitted_with_trigger_context(
         catalog_name: &str,
         schema_name: &str,
         create_if_not_exists: bool,
@@ -132,23 +114,7 @@ impl DatabaseDdlEvent {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn alter_submitted(
-        catalog_name: &str,
-        schema_name: &str,
-        kind: &AlterDatabaseKind,
-    ) -> Self {
-        let mut event = Self::alter_submitted_with_trigger_context(
-            catalog_name,
-            schema_name,
-            kind,
-            TriggerContext::default(),
-        );
-        event.trigger_context = None;
-        event
-    }
-
-    pub(crate) fn alter_submitted_with_trigger_context(
         catalog_name: &str,
         schema_name: &str,
         kind: &AlterDatabaseKind,
@@ -195,23 +161,7 @@ impl DatabaseDdlEvent {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn drop_submitted(
-        catalog_name: &str,
-        schema_name: &str,
-        drop_if_exists: bool,
-    ) -> Self {
-        let mut event = Self::drop_submitted_with_trigger_context(
-            catalog_name,
-            schema_name,
-            drop_if_exists,
-            TriggerContext::default(),
-        );
-        event.trigger_context = None;
-        event
-    }
-
-    pub(crate) fn drop_submitted_with_trigger_context(
         catalog_name: &str,
         schema_name: &str,
         drop_if_exists: bool,

@@ -93,25 +93,6 @@ impl CreateDatabaseProcedure {
         create_if_not_exists: bool,
         options: HashMap<String, String>,
         creator: Option<CreatorGrantIntent>,
-        context: DdlContext,
-    ) -> Self {
-        Self::new_with_trigger_context(
-            catalog,
-            schema,
-            create_if_not_exists,
-            options,
-            creator,
-            TriggerContext::default(),
-            context,
-        )
-    }
-
-    pub fn new_with_trigger_context(
-        catalog: String,
-        schema: String,
-        create_if_not_exists: bool,
-        options: HashMap<String, String>,
-        creator: Option<CreatorGrantIntent>,
         trigger_context: TriggerContext,
         context: DdlContext,
     ) -> Self {
@@ -305,7 +286,7 @@ impl Procedure for CreateDatabaseProcedure {
         }
 
         let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
-            DatabaseDdlEvent::create_submitted_with_trigger_context(
+            DatabaseDdlEvent::create_submitted(
                 &self.data.catalog,
                 &self.data.schema,
                 self.data.create_if_not_exists,
@@ -439,6 +420,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
+            TriggerContext::default(),
             context,
         );
         (procedure, committer)
@@ -598,6 +580,7 @@ mod tests {
             false,
             HashMap::new(),
             None,
+            TriggerContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;
@@ -633,6 +616,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
+            TriggerContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;

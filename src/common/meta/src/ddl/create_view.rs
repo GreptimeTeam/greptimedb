@@ -46,15 +46,7 @@ pub struct CreateViewProcedure {
 impl CreateViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateView";
 
-    pub fn new(task: CreateViewTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
-        task: CreateViewTask,
-        trigger_context: TriggerContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: CreateViewTask, trigger_context: TriggerContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateViewData {
@@ -288,7 +280,7 @@ impl Procedure for CreateViewProcedure {
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
                 let expr = &self.data.task.create_view;
-                ViewDdlEvent::create_submitted_with_trigger_context(
+                ViewDdlEvent::create_submitted(
                     &expr.catalog_name,
                     &expr.schema_name,
                     &expr.view_name,

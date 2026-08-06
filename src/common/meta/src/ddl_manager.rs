@@ -511,11 +511,7 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure = CreateViewProcedure::new_with_trigger_context(
-            create_view_task,
-            trigger_context,
-            context,
-        );
+        let procedure = CreateViewProcedure::new(create_view_task, trigger_context, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -575,8 +571,7 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            DropTableProcedure::new_with_trigger_context(drop_table_task, context, trigger_context);
+        let procedure = DropTableProcedure::new(drop_table_task, context, trigger_context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -643,11 +638,8 @@ impl DdlManager {
         #[cfg(feature = "enterprise")]
         {
             let context = self.create_context();
-            let procedure = PurgeDroppedTableProcedure::new_with_trigger_context(
-                purge_dropped_table_task,
-                context,
-                trigger_context,
-            );
+            let procedure =
+                PurgeDroppedTableProcedure::new(purge_dropped_table_task, context, trigger_context);
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
             self.execute_procedure_and_wait(procedure_with_id).await
@@ -674,7 +666,7 @@ impl DdlManager {
         #[cfg(feature = "enterprise")]
         {
             let context = self.create_context();
-            let procedure = PurgeDroppedTableProcedure::new_if_expired_with_trigger_context(
+            let procedure = PurgeDroppedTableProcedure::new_if_expired(
                 purge_dropped_table_task,
                 context,
                 TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
@@ -699,7 +691,7 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateDatabaseProcedure::new_with_trigger_context(
+        let procedure = CreateDatabaseProcedure::new(
             catalog,
             schema,
             create_if_not_exists,
@@ -725,13 +717,8 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = DropDatabaseProcedure::new_with_trigger_context(
-            catalog,
-            schema,
-            drop_if_exists,
-            trigger_context,
-            context,
-        );
+        let procedure =
+            DropDatabaseProcedure::new(catalog, schema, drop_if_exists, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -743,11 +730,7 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = AlterDatabaseProcedure::new_with_trigger_context(
-            alter_database_task,
-            trigger_context,
-            context,
-        )?;
+        let procedure = AlterDatabaseProcedure::new(alter_database_task, trigger_context, context)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -762,12 +745,8 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateFlowProcedure::new_with_trigger_context(
-            create_flow,
-            query_context,
-            trigger_context,
-            context,
-        );
+        let procedure =
+            CreateFlowProcedure::new(create_flow, query_context, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -781,8 +760,7 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure =
-            DropFlowProcedure::new_with_trigger_context(drop_flow, trigger_context, context);
+        let procedure = DropFlowProcedure::new(drop_flow, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -796,8 +774,7 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure =
-            DropViewProcedure::new_with_trigger_context(drop_view, trigger_context, context);
+        let procedure = DropViewProcedure::new(drop_view, trigger_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -812,7 +789,7 @@ impl DdlManager {
         trigger_context: TriggerContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = TruncateTableProcedure::new_with_trigger_context(
+        let procedure = TruncateTableProcedure::new(
             truncate_table_task,
             table_info_value,
             context,

@@ -75,24 +75,7 @@ pub(crate) struct FlowDdlEvent {
 }
 
 impl FlowDdlEvent {
-    /// Builds the bounded event emitted when creating a Flow is submitted.
-    #[cfg(test)]
     pub(crate) fn create_submitted(
-        catalog_name: &str,
-        flow_name: &str,
-        intent: CreateFlowEventIntent,
-    ) -> Self {
-        let mut event = Self::create_submitted_with_trigger_context(
-            catalog_name,
-            flow_name,
-            intent,
-            TriggerContext::default(),
-        );
-        event.trigger_context = None;
-        event
-    }
-
-    pub(crate) fn create_submitted_with_trigger_context(
         catalog_name: &str,
         flow_name: &str,
         intent: CreateFlowEventIntent,
@@ -114,26 +97,7 @@ impl FlowDdlEvent {
         }
     }
 
-    /// Builds the bounded event emitted when dropping a Flow is submitted.
-    #[cfg(test)]
     pub(crate) fn drop_submitted(
-        catalog_name: &str,
-        flow_name: &str,
-        flow_id: u32,
-        drop_if_exists: bool,
-    ) -> Self {
-        let mut event = Self::drop_submitted_with_trigger_context(
-            catalog_name,
-            flow_name,
-            flow_id,
-            drop_if_exists,
-            TriggerContext::default(),
-        );
-        event.trigger_context = None;
-        event
-    }
-
-    pub(crate) fn drop_submitted_with_trigger_context(
         catalog_name: &str,
         flow_name: &str,
         flow_id: u32,

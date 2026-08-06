@@ -24,7 +24,7 @@ use crate::ddl::drop_view::{DropViewProcedure, DropViewState};
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::tests::create_view::{test_create_view_task, test_table_names};
 use crate::key::table_route::TableRouteValue;
-use crate::rpc::ddl::DropViewTask;
+use crate::rpc::ddl::{DropViewTask, TriggerContext};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 pub(crate) fn new_drop_view_task(
@@ -63,7 +63,7 @@ async fn test_on_prepare_view_not_exists_err() {
         .unwrap();
 
     let task = new_drop_view_task("bar", view_id, false);
-    let mut procedure = DropViewProcedure::new(task, ddl_context);
+    let mut procedure = DropViewProcedure::new(task, TriggerContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
 }
@@ -87,7 +87,7 @@ async fn test_on_prepare_not_view_err() {
         .unwrap();
 
     let task = new_drop_view_task(view_name, view_id, false);
-    let mut procedure = DropViewProcedure::new(task, ddl_context);
+    let mut procedure = DropViewProcedure::new(task, TriggerContext::default(), ddl_context);
     // It's not a view, expect error
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::InvalidArguments);
@@ -117,12 +117,13 @@ async fn test_on_prepare_success() {
 
     let task = new_drop_view_task("bar", view_id, true);
     // Drop if exists
-    let mut procedure = DropViewProcedure::new(task, ddl_context.clone());
+    let mut procedure =
+        DropViewProcedure::new(task, TriggerContext::default(), ddl_context.clone());
     procedure.on_prepare().await.unwrap();
 
     let task = new_drop_view_task(view_name, view_id, false);
     // Prepare success
-    let mut procedure = DropViewProcedure::new(task, ddl_context);
+    let mut procedure = DropViewProcedure::new(task, TriggerContext::default(), ddl_context);
     procedure.on_prepare().await.unwrap();
     assert_eq!(DropViewState::DeleteMetadata, procedure.state());
 }
@@ -161,7 +162,8 @@ async fn test_drop_view_success() {
 
     let task = new_drop_view_task(view_name, view_id, false);
     // Prepare success
-    let mut procedure = DropViewProcedure::new(task, ddl_context.clone());
+    let mut procedure =
+        DropViewProcedure::new(task, TriggerContext::default(), ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
     assert_eq!(DropViewState::InvalidateViewCache, procedure.state());
 
@@ -178,7 +180,7 @@ async fn test_drop_view_success() {
 
     // Drop again
     let task = new_drop_view_task(view_name, view_id, false);
-    let mut procedure = DropViewProcedure::new(task, ddl_context);
+    let mut procedure = DropViewProcedure::new(task, TriggerContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
 }

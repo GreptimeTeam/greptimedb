@@ -75,24 +75,7 @@ enum ViewDdlPayload {
 }
 
 impl ViewDdlEvent {
-    /// Builds the bounded event emitted when creating a View is submitted.
-    #[cfg(test)]
     pub(crate) fn create_submitted(
-        catalog_name: &str,
-        schema_name: &str,
-        view_name: &str,
-        intent: CreateViewEventIntent,
-    ) -> Self {
-        Self::create_submitted_with_trigger_context(
-            catalog_name,
-            schema_name,
-            view_name,
-            intent,
-            TriggerContext::default(),
-        )
-    }
-
-    pub(crate) fn create_submitted_with_trigger_context(
         catalog_name: &str,
         schema_name: &str,
         view_name: &str,
@@ -116,7 +99,7 @@ impl ViewDdlEvent {
         )
     }
 
-    pub(crate) fn drop_submitted_with_trigger_context(
+    pub(crate) fn drop_submitted(
         catalog_name: &str,
         schema_name: &str,
         view_name: &str,

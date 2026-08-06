@@ -56,11 +56,7 @@ pub struct UndropTableProcedure {
 impl UndropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::UndropTable";
 
-    pub fn new(task: UndropTableTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, context, TriggerContext::default())
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         task: UndropTableTask,
         context: DdlContext,
         trigger_context: TriggerContext,
@@ -647,7 +643,11 @@ mod tests {
     #[test]
     fn test_map_restore_metadata_error_without_table_name() {
         let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-        let procedure = UndropTableProcedure::new(UndropTableTask { table_id: 42 }, context);
+        let procedure = UndropTableProcedure::new(
+            UndropTableTask { table_id: 42 },
+            context,
+            TriggerContext::default(),
+        );
 
         let err = procedure.map_restore_metadata_error(
             error::TombstoneTargetAlreadyExistsSnafu {
@@ -662,8 +662,11 @@ mod tests {
     #[test]
     fn test_recovered_legacy_snapshot_reloads_tombstone_identity() {
         let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-        let mut procedure =
-            UndropTableProcedure::new(UndropTableTask { table_id: 42 }, context.clone());
+        let mut procedure = UndropTableProcedure::new(
+            UndropTableTask { table_id: 42 },
+            context.clone(),
+            TriggerContext::default(),
+        );
         procedure.data.state = UndropTableState::OpenRegions;
         let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
         let data = data.as_object_mut().unwrap();
@@ -688,7 +691,11 @@ mod tests {
 
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
-        let mut procedure = UndropTableProcedure::new(UndropTableTask { table_id }, context);
+        let mut procedure = UndropTableProcedure::new(
+            UndropTableTask { table_id },
+            context,
+            TriggerContext::default(),
+        );
         procedure.data.table_route_value = Some(TableRouteValue::physical(vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(1)),
@@ -727,7 +734,11 @@ mod tests {
 
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
-        let mut procedure = UndropTableProcedure::new(UndropTableTask { table_id }, context);
+        let mut procedure = UndropTableProcedure::new(
+            UndropTableTask { table_id },
+            context,
+            TriggerContext::default(),
+        );
         procedure.data.table_name = Some(TableName::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,

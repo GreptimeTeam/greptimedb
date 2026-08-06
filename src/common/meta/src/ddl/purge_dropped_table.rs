@@ -50,11 +50,7 @@ impl PurgeDroppedTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::PurgeDroppedTable";
     pub const EXPIRED_TYPE_NAME: &'static str = "metasrv-procedure::PurgeExpiredDroppedTable";
 
-    pub fn new(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, context, TriggerContext::default())
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         task: PurgeDroppedTableTask,
         context: DdlContext,
         trigger_context: TriggerContext,
@@ -65,11 +61,7 @@ impl PurgeDroppedTableProcedure {
         }
     }
 
-    pub fn new_if_expired(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
-        Self::new_if_expired_with_trigger_context(task, context, TriggerContext::default())
-    }
-
-    pub fn new_if_expired_with_trigger_context(
+    pub fn new_if_expired(
         task: PurgeDroppedTableTask,
         context: DdlContext,
         trigger_context: TriggerContext,

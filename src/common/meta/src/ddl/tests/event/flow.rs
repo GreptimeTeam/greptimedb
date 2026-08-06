@@ -36,6 +36,7 @@ use crate::ddl::event::flow::{
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::ddl::tests::create_flow::{test_create_flow_task, test_query_context};
 use crate::ddl::tests::drop_flow::test_drop_flow_task;
+use crate::rpc::ddl::TriggerContext;
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 #[test]
@@ -49,6 +50,7 @@ fn test_flow_submitted_event_contracts() {
             expire_after: Some(300),
             eval_interval_secs: Some(60),
         },
+        TriggerContext::default(),
     );
     assert_event_contract(
         &create,
@@ -59,7 +61,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
-                Value { value_data: None },
+                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap()),
             ],
         }],
     );
@@ -74,7 +76,8 @@ fn test_flow_submitted_event_contracts() {
         })
     );
 
-    let drop = FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true);
+    let drop =
+        FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true, TriggerContext::default());
     assert_event_contract(
         &drop,
         DROP_FLOW_EVENT_TYPE,
@@ -84,7 +87,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
-                Value { value_data: None },
+                jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap()),
             ],
         }],
     );
@@ -147,6 +150,7 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
                 expire_after: None,
                 eval_interval_secs: None,
             },
+            TriggerContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -192,6 +196,7 @@ fn test_create_flow_event_filter() {
             false,
         ),
         test_query_context(),
+        TriggerContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, CREATE_FLOW_EVENT_TYPE);
@@ -201,6 +206,7 @@ fn test_create_flow_event_filter() {
 fn test_drop_flow_event_filter() {
     let procedure = DropFlowProcedure::new(
         test_drop_flow_task("flow", 42, false),
+        TriggerContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, DROP_FLOW_EVENT_TYPE);
@@ -252,7 +258,11 @@ fn assert_procedure_event_contract(
                     .map(ValueData::U32Value)
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
-                Value { value_data: None },
+                if locator.catalog_name.is_some() {
+                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                } else {
+                    Value { value_data: None }
+                },
             ],
         }],
     );

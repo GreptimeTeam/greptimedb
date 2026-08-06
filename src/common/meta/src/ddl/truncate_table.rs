@@ -117,7 +117,7 @@ impl Procedure for TruncateTableProcedure {
 impl TruncateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTable";
 
-    pub(crate) fn new_with_trigger_context(
+    pub(crate) fn new(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         context: DdlContext,

@@ -54,15 +54,7 @@ pub struct DropFlowProcedure {
 impl DropFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropFlow";
 
-    pub fn new(task: DropFlowTask, context: DdlContext) -> Self {
-        Self::new_with_trigger_context(task, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
-        task: DropFlowTask,
-        trigger_context: TriggerContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: DropFlowTask, trigger_context: TriggerContext, context: DdlContext) -> Self {
         Self {
             context,
             data: DropFlowData {
@@ -237,7 +229,7 @@ impl Procedure for DropFlowProcedure {
         }
 
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => FlowDdlEvent::drop_submitted_with_trigger_context(
+            EventTrigger::Submitted => FlowDdlEvent::drop_submitted(
                 &self.data.task.catalog_name,
                 &self.data.task.flow_name,
                 self.data.task.flow_id,

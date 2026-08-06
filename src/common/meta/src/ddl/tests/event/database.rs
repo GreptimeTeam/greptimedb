@@ -39,7 +39,7 @@ use crate::ddl::event::database::{
     DatabaseDdlEvent,
 };
 use crate::rpc::ddl::{
-    AlterDatabaseKind, SetDatabaseOption, SetDatabaseOptions, UnsetDatabaseOption,
+    AlterDatabaseKind, SetDatabaseOption, SetDatabaseOptions, TriggerContext, UnsetDatabaseOption,
     UnsetDatabaseOptions,
 };
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -50,7 +50,13 @@ fn test_create_database_submitted_event_contract() {
         ("password".to_string(), "do-not-record".to_string()),
         ("compaction.type".to_string(), "twcs".to_string()),
     ]);
-    let event = DatabaseDdlEvent::create_submitted("greptime", "metrics", true, &options);
+    let event = DatabaseDdlEvent::create_submitted(
+        "greptime",
+        "metrics",
+        true,
+        &options,
+        TriggerContext::default(),
+    );
 
     assert_event_locator(
         &event,
@@ -87,6 +93,7 @@ fn test_alter_database_set_and_unset_event_contracts() {
             SetDatabaseOption::Other("secret_token".to_string(), "hidden".to_string()),
             SetDatabaseOption::Ttl(std::time::Duration::from_secs(3600).into()),
         ])),
+        TriggerContext::default(),
     );
     assert_event_locator(
         &set,
@@ -113,6 +120,7 @@ fn test_alter_database_set_and_unset_event_contracts() {
             UnsetDatabaseOption::Ttl,
             UnsetDatabaseOption::Other("compaction.type".to_string()),
         ])),
+        TriggerContext::default(),
     );
     assert_event_locator(
         &unset,
@@ -132,7 +140,8 @@ fn test_alter_database_set_and_unset_event_contracts() {
 
 #[test]
 fn test_drop_database_submitted_event_contract() {
-    let event = DatabaseDdlEvent::drop_submitted("greptime", "metrics", true);
+    let event =
+        DatabaseDdlEvent::drop_submitted("greptime", "metrics", true, TriggerContext::default());
 
     assert_event_locator(
         &event,
@@ -165,7 +174,14 @@ fn test_database_lifecycle_events_have_fixed_schema_and_null_intent() {
 
     assert_eq!(
         DatabaseDdlEvent::create_lifecycle().extra_schema(),
-        DatabaseDdlEvent::create_submitted("c", "s", false, &HashMap::new()).extra_schema()
+        DatabaseDdlEvent::create_submitted(
+            "c",
+            "s",
+            false,
+            &HashMap::new(),
+            TriggerContext::default()
+        )
+        .extra_schema()
     );
 }
 
@@ -179,6 +195,7 @@ fn test_database_events_preserve_procedure_envelope_contract() {
             "metrics",
             false,
             &HashMap::new(),
+            TriggerContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -217,6 +234,7 @@ fn test_create_database_event_filter() {
         false,
         HashMap::new(),
         None,
+        TriggerContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
@@ -237,6 +255,7 @@ fn test_alter_database_event_filter() {
                 )),
             },
         },
+        TriggerContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     )
     .unwrap();
@@ -250,6 +269,7 @@ fn test_drop_database_event_filter() {
         "greptime".to_string(),
         "metrics".to_string(),
         false,
+        TriggerContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
@@ -278,7 +298,11 @@ fn assert_event_locator(
                 Value {
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
-                Value { value_data: None },
+                if catalog_name.is_some() {
+                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                } else {
+                    Value { value_data: None }
+                },
             ],
         }],
     );
@@ -324,7 +348,11 @@ fn assert_procedure_event_contract(
                 Value {
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
-                Value { value_data: None },
+                if catalog_name.is_some() {
+                    jsonb_value(&serde_json::to_value(TriggerContext::default()).unwrap())
+                } else {
+                    Value { value_data: None }
+                },
             ],
         }],
     );

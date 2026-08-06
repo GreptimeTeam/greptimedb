@@ -73,18 +73,14 @@ fn build_new_schema_value(
 impl AlterDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterDatabase";
 
-    pub fn new(task: AlterDatabaseTask, context: DdlContext) -> Result<Self> {
-        Self::new_with_trigger_context(task, TriggerContext::default(), context)
-    }
-
-    pub fn new_with_trigger_context(
+    pub fn new(
         task: AlterDatabaseTask,
         trigger_context: TriggerContext,
         context: DdlContext,
     ) -> Result<Self> {
         Ok(Self {
             context,
-            data: AlterDatabaseData::new_with_trigger_context(task, trigger_context)?,
+            data: AlterDatabaseData::new(task, trigger_context)?,
         })
     }
 
@@ -190,7 +186,7 @@ impl Procedure for AlterDatabaseProcedure {
         }
 
         let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
-            DatabaseDdlEvent::alter_submitted_with_trigger_context(
+            DatabaseDdlEvent::alter_submitted(
                 self.data.catalog(),
                 self.data.schema(),
                 &self.data.kind,
@@ -223,14 +219,7 @@ pub struct AlterDatabaseData {
 }
 
 impl AlterDatabaseData {
-    pub fn new(task: AlterDatabaseTask) -> Result<Self> {
-        Self::new_with_trigger_context(task, TriggerContext::default())
-    }
-
-    pub fn new_with_trigger_context(
-        task: AlterDatabaseTask,
-        trigger_context: TriggerContext,
-    ) -> Result<Self> {
+    pub fn new(task: AlterDatabaseTask, trigger_context: TriggerContext) -> Result<Self> {
         Ok(Self {
             state: AlterDatabaseState::Prepare,
             kind: AlterDatabaseKind::try_from(task.alter_expr.kind.unwrap())?,

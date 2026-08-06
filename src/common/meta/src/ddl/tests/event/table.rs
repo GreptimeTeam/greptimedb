@@ -411,11 +411,16 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             drop_if_exists: true,
         },
         test_context(),
+        TriggerContext::default(),
     );
     #[cfg(feature = "enterprise")]
-    let undrop_table = UndropTableProcedure::new(UndropTableTask { table_id: 45 }, test_context());
+    let undrop_table = UndropTableProcedure::new(
+        UndropTableTask { table_id: 45 },
+        test_context(),
+        TriggerContext::default(),
+    );
     #[cfg(feature = "enterprise")]
-    let purge_dropped_table = PurgeDroppedTableProcedure::new_if_expired_with_trigger_context(
+    let purge_dropped_table = PurgeDroppedTableProcedure::new_if_expired(
         PurgeDroppedTableTask { table_id: 46 },
         test_context(),
         TriggerContext::new(TriggerReason::ScheduledGc, UNKNOWN_TRIGGER_PROTOCOL),
@@ -612,7 +617,7 @@ fn table_id_value(value: u32) -> Value {
 
 fn truncate_procedure(task: TruncateTableTask) -> TruncateTableProcedure {
     let table_info = test_create_table_task_with_id("metrics", task.table_id).table_info;
-    TruncateTableProcedure::new_with_trigger_context(
+    TruncateTableProcedure::new(
         task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
         test_context(),
