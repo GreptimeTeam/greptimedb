@@ -392,9 +392,7 @@ pub fn recordbatches_to_timeseries(
     // order for equal timestamps.
     if multiple_batches {
         for series in &mut timeseries {
-            series
-                .samples
-                .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+            series.samples.sort_by_key(|sample| sample.timestamp);
         }
     }
 
