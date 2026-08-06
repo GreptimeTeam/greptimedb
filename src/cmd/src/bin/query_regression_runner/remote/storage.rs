@@ -25,20 +25,28 @@ use crate::query_regression_runner::sql::{value_f64, value_u64};
 pub(super) fn run_storage_inspection(
     generator: &Path,
     data_home: &Path,
+    destination: Option<&Path>,
     storage: &StorageConfig,
 ) -> Result<Value> {
-    let root = storage
-        .root_suffix
-        .as_deref()
-        .map_or_else(|| data_home.to_path_buf(), |suffix| data_home.join(suffix));
     let mut command = vec![
         generator.to_string_lossy().to_string(),
         "inspect-footer".to_string(),
-        "--root".to_string(),
-        root.to_string_lossy().to_string(),
         "--column".to_string(),
         storage.column.clone(),
     ];
+    let root = if let Some(destination) = destination {
+        command.push("--destination".to_string());
+        command.push(destination.to_string_lossy().to_string());
+        data_home.to_path_buf()
+    } else {
+        let root = storage
+            .root_suffix
+            .as_deref()
+            .map_or_else(|| data_home.to_path_buf(), |suffix| data_home.join(suffix));
+        command.push("--root".to_string());
+        command.push(root.to_string_lossy().to_string());
+        root
+    };
     if storage.include_metadata_files {
         command.push("--include-metadata-files".to_string());
     }

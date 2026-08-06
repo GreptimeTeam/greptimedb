@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use self::read_bench::run_read_bench;
 use self::storage::{enforce_storage_thresholds, run_storage_inspection};
+use crate::query_regression_runner::model::DestinationConfig;
 use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::{
     FinalizeRemoteArgs, PrepareRemoteArgs, RenderRemoteConfigArgs, Result,
@@ -47,10 +48,41 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
             .get_mut("targets")
             .and_then(Value::as_array_mut)
             .ok_or("report has no targets array")?;
-        for (name, data_home) in [
-            ("base", &args.base_data_home),
-            ("candidate", &args.candidate_data_home),
+        for (name, data_home, destination) in [
+            (
+                "base",
+                args.base_data_home.as_deref(),
+                args.base_destination.as_deref(),
+            ),
+            (
+                "candidate",
+                args.candidate_data_home.as_deref(),
+                args.candidate_destination.as_deref(),
+            ),
         ] {
+            let (data_home, destination) = match (data_home, destination) {
+                (Some(data_home), None) => (data_home.to_path_buf(), None),
+                (None, Some(path)) => {
+                    let destination: DestinationConfig =
+                        toml::from_str(&fs::read_to_string(path)?)?;
+                    (
+                        PathBuf::from(destination.data_home),
+                        Some(path.to_path_buf()),
+                    )
+                }
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "{name}: --{name}-data-home and --{name}-destination are mutually exclusive"
+                    )
+                    .into());
+                }
+                (None, None) => {
+                    return Err(format!(
+                        "{name}: one of --{name}-data-home or --{name}-destination is required"
+                    )
+                    .into());
+                }
+            };
             let target = targets
                 .iter_mut()
                 .find(|target| target.get("name").and_then(Value::as_str) == Some(name))
@@ -65,11 +97,16 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
                     );
                 continue;
             };
-            let inspection = run_storage_inspection(&args.fixture_generator, data_home, storage)?;
+            let inspection = run_storage_inspection(
+                &args.fixture_generator,
+                &data_home,
+                destination.as_deref(),
+                storage,
+            )?;
             let bench_dir = bench_root.join(name).join("read_bench");
             let read_bench = run_read_bench(
                 &args.candidate_bin,
-                data_home,
+                &data_home,
                 &bench_dir,
                 remote.read_bench.as_ref(),
                 &inspection,

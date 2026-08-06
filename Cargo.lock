@@ -2189,6 +2189,8 @@ dependencies = [
  "mito2",
  "moka",
  "object-store",
+ "object_store",
+ "object_store_opendal",
  "parquet",
  "plugins",
  "pprof",

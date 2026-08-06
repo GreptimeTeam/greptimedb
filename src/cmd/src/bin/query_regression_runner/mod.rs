@@ -126,9 +126,13 @@ struct FinalizeRemoteArgs {
     #[arg(long, value_name = "PATH")]
     candidate_bin: PathBuf,
     #[arg(long, value_name = "PATH")]
-    base_data_home: PathBuf,
+    base_data_home: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
-    candidate_data_home: PathBuf,
+    candidate_data_home: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    base_destination: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    candidate_destination: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     report: PathBuf,
 }
