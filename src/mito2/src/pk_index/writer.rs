@@ -1,0 +1,941 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::cmp::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use datatypes::arrow::array::{
+    Array, ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt32Array,
+    UInt64Array,
+};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value::Value;
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
+use object_store::{ErrorKind, FuturesAsyncWriter, ObjectStore};
+use parquet::arrow::AsyncArrowWriter;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::file::properties::WriterProperties;
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
+use store_api::storage::consts::ReservedColumnId;
+use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
+
+use crate::access_layer::TempFileCleaner;
+use crate::error::{
+    DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
+    Result, WriteParquetSnafu,
+};
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
+use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+
+const MIN_TS_COLUMN: &str = "min_ts";
+const MAX_TS_COLUMN: &str = "max_ts";
+const ROW_COUNT_COLUMN: &str = "row_count";
+const TABLE_ID_COLUMN: &str = "__table_id";
+const TSID_COLUMN: &str = "__tsid";
+const WRITE_BATCH_SIZE: usize = 8 * 1024;
+
+type ParquetWriter = AsyncArrowWriter<Compat<FuturesAsyncWriter>>;
+
+/// Options for writing a primary-key index.
+#[derive(Debug, Clone)]
+pub struct PkIndexWriterOptions {
+    /// Maximum number of rows in a Parquet row group.
+    pub row_group_size: usize,
+}
+
+impl Default for PkIndexWriterOptions {
+    fn default() -> Self {
+        Self {
+            row_group_size: DEFAULT_ROW_GROUP_SIZE,
+        }
+    }
+}
+
+/// Metrics collected by a [`PkIndexWriter`].
+#[derive(Debug, Clone, Default)]
+pub struct PkIndexWriterMetrics {
+    /// Number of input record batches passed to the writer.
+    pub input_batches: usize,
+    /// Number of logical rows passed to the writer.
+    pub input_rows: usize,
+    /// Number of aggregated primary-key rows produced by the writer.
+    pub index_rows: usize,
+    /// Size of the committed index file. This remains zero for an aborted writer.
+    pub output_bytes: u64,
+    /// Time spent opening the object-store and Parquet writers.
+    pub open_elapsed: Duration,
+    /// Time spent validating, aggregating, and decoding primary keys.
+    pub aggregate_elapsed: Duration,
+    /// Time spent encoding and writing Parquet batches.
+    pub write_elapsed: Duration,
+    /// Time spent closing and statting a completed file.
+    pub finish_elapsed: Duration,
+    /// Time spent removing an incomplete output.
+    pub cleanup_elapsed: Duration,
+    /// Whether this writer was explicitly aborted.
+    pub aborted: bool,
+}
+
+impl PkIndexWriterMetrics {
+    /// Returns time spent by writer-owned work.
+    pub fn total_elapsed(&self) -> Duration {
+        self.open_elapsed
+            + self.aggregate_elapsed
+            + self.write_elapsed
+            + self.finish_elapsed
+            + self.cleanup_elapsed
+    }
+}
+
+#[derive(Debug)]
+struct PkIndexRow {
+    min_ts: i64,
+    max_ts: i64,
+    row_count: u64,
+    table_id: u32,
+    tsid: u64,
+    tags: Vec<Option<String>>,
+}
+
+/// Incrementally aggregates sorted flat record batches and writes `pk_columns` Parquet.
+pub struct PkIndexWriter {
+    codec: Arc<dyn PrimaryKeyCodec>,
+    tag_columns: Vec<(ColumnId, String)>,
+    schema: SchemaRef,
+    object_store: ObjectStore,
+    path: String,
+    writer: Option<ParquetWriter>,
+    current_primary_key: Option<Vec<u8>>,
+    current_row: Option<PkIndexRow>,
+    buffered_rows: Vec<PkIndexRow>,
+    metrics: PkIndexWriterMetrics,
+    failed: bool,
+}
+
+impl PkIndexWriter {
+    /// Creates a writer for `path` in `object_store`.
+    pub async fn try_new(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        path: impl Into<String>,
+        options: PkIndexWriterOptions,
+    ) -> Result<Self> {
+        let open_start = Instant::now();
+        ensure!(
+            options.row_group_size > 0,
+            InvalidMetaSnafu {
+                reason: "primary-key index row group size must be greater than zero",
+            }
+        );
+        let schema = pk_columns_schema(&metadata)?;
+        let tag_columns = tag_columns(&metadata);
+        let path = path.into();
+        let output = object_store
+            .writer_with(&path)
+            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .concurrent(DEFAULT_WRITE_CONCURRENCY)
+            .await
+            .context(OpenDalSnafu)?
+            .into_futures_async_write()
+            .compat_write();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_encoding(Encoding::PLAIN)
+            .set_max_row_group_row_count(Some(options.row_group_size))
+            .set_column_index_truncate_length(None)
+            .set_statistics_truncate_length(None)
+            .build();
+        let writer = AsyncArrowWriter::try_new(output, schema.clone(), Some(properties))
+            .context(WriteParquetSnafu)?;
+        let codec = build_primary_key_codec(&metadata);
+
+        Ok(Self {
+            codec,
+            tag_columns,
+            schema,
+            object_store,
+            path,
+            writer: Some(writer),
+            current_primary_key: None,
+            current_row: None,
+            buffered_rows: Vec::with_capacity(WRITE_BATCH_SIZE),
+            metrics: PkIndexWriterMetrics {
+                open_elapsed: open_start.elapsed(),
+                ..Default::default()
+            },
+            failed: false,
+        })
+    }
+
+    /// Returns the metrics collected so far.
+    pub fn metrics(&self) -> &PkIndexWriterMetrics {
+        &self.metrics
+    }
+
+    /// Aggregates one sorted flat record batch.
+    ///
+    /// After this method returns an error, callers must call [`Self::abort`].
+    pub async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(
+            !self.failed,
+            InvalidRecordBatchSnafu {
+                reason: "cannot write to a failed primary-key index writer",
+            }
+        );
+
+        self.metrics.input_batches += 1;
+        self.metrics.input_rows += batch.num_rows();
+        let aggregate_start = Instant::now();
+        let write_before = self.metrics.write_elapsed;
+        let result = self.write_inner(batch).await;
+        let write_cost = self.metrics.write_elapsed.saturating_sub(write_before);
+        self.metrics.aggregate_elapsed += aggregate_start.elapsed().saturating_sub(write_cost);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    /// Finishes and commits the index file.
+    pub async fn finish(mut self) -> Result<PkIndexWriterMetrics> {
+        if self.failed {
+            let error = InvalidRecordBatchSnafu {
+                reason: "cannot finish a failed primary-key index writer",
+            }
+            .build();
+            self.cleanup().await;
+            return Err(error);
+        }
+
+        let result = self.finish_inner().await;
+        if result.is_err() {
+            self.cleanup().await;
+        }
+        result.map(|_| self.metrics)
+    }
+
+    /// Aborts the writer and removes incomplete output files.
+    pub async fn abort(mut self) -> Result<PkIndexWriterMetrics> {
+        self.metrics.aborted = true;
+        self.cleanup().await;
+        Ok(self.metrics)
+    }
+
+    async fn write_inner(&mut self, batch: &RecordBatch) -> Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        ensure!(
+            batch.num_columns() >= 4,
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "primary-key index input has too few columns: {}",
+                    batch.num_columns()
+                ),
+            }
+        );
+
+        let pk_idx = primary_key_column_index(batch.num_columns());
+        let ts_idx = time_index_column_index(batch.num_columns());
+        let primary_keys = primary_key_values(batch.column(pk_idx))?;
+        let timestamps = timestamp_values(batch.column(ts_idx))?;
+        ensure!(
+            primary_keys.len() == batch.num_rows() && timestamps.len() == batch.num_rows(),
+            InvalidRecordBatchSnafu {
+                reason: "primary-key or timestamp array length does not match the batch",
+            }
+        );
+
+        for (primary_key, timestamp) in primary_keys.into_iter().zip(timestamps) {
+            self.update_primary_key(primary_key, *timestamp).await?;
+        }
+        Ok(())
+    }
+
+    async fn update_primary_key(&mut self, primary_key: &[u8], timestamp: i64) -> Result<()> {
+        if let Some(current) = self.current_primary_key.as_deref() {
+            match primary_key.cmp(current) {
+                Ordering::Less => {
+                    return InvalidRecordBatchSnafu {
+                        reason: "primary-key index input is not sorted by primary key",
+                    }
+                    .fail();
+                }
+                Ordering::Equal => {
+                    let row = self.current_row.as_mut().context(InvalidRecordBatchSnafu {
+                        reason: "primary-key index aggregation state is incomplete",
+                    })?;
+                    row.min_ts = row.min_ts.min(timestamp);
+                    row.max_ts = row.max_ts.max(timestamp);
+                    row.row_count += 1;
+                    return Ok(());
+                }
+                Ordering::Greater => self.finish_current_row().await?,
+            }
+        }
+
+        let row = decode_primary_key(
+            self.codec.as_ref(),
+            primary_key,
+            timestamp,
+            &self.tag_columns,
+        )?;
+        self.current_primary_key = Some(primary_key.to_vec());
+        self.current_row = Some(row);
+        Ok(())
+    }
+
+    async fn finish_current_row(&mut self) -> Result<()> {
+        self.current_primary_key = None;
+        if let Some(row) = self.current_row.take() {
+            self.buffered_rows.push(row);
+            self.metrics.index_rows += 1;
+        }
+        if self.buffered_rows.len() >= WRITE_BATCH_SIZE {
+            self.flush_rows().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_rows(&mut self) -> Result<()> {
+        if self.buffered_rows.is_empty() {
+            return Ok(());
+        }
+        let batch = rows_to_batch(&self.schema, &self.buffered_rows)?;
+        let start = Instant::now();
+        let result = self
+            .writer
+            .as_mut()
+            .context(InvalidRecordBatchSnafu {
+                reason: "primary-key index Parquet writer is closed",
+            })?
+            .write(&batch)
+            .await
+            .context(WriteParquetSnafu);
+        self.metrics.write_elapsed += start.elapsed();
+        result?;
+        self.buffered_rows.clear();
+        Ok(())
+    }
+
+    async fn finish_inner(&mut self) -> Result<()> {
+        let aggregate_start = Instant::now();
+        let write_before = self.metrics.write_elapsed;
+        self.finish_current_row().await?;
+        self.flush_rows().await?;
+        let write_cost = self.metrics.write_elapsed.saturating_sub(write_before);
+        self.metrics.aggregate_elapsed += aggregate_start.elapsed().saturating_sub(write_cost);
+
+        let finish_start = Instant::now();
+        let writer = self.writer.take().context(InvalidRecordBatchSnafu {
+            reason: "primary-key index Parquet writer is closed",
+        })?;
+        writer.close().await.context(WriteParquetSnafu)?;
+        self.metrics.output_bytes = self
+            .object_store
+            .stat(&self.path)
+            .await
+            .context(OpenDalSnafu)?
+            .content_length();
+        self.metrics.finish_elapsed += finish_start.elapsed();
+        Ok(())
+    }
+
+    async fn cleanup(&mut self) {
+        let start = Instant::now();
+        self.writer.take();
+        self.current_primary_key = None;
+        self.current_row = None;
+        self.buffered_rows.clear();
+
+        if let Err(error) = self.object_store.delete(&self.path).await
+            && error.kind() != ErrorKind::NotFound
+        {
+            common_telemetry::warn!(error; "Failed to delete incomplete primary-key index file: {}", self.path);
+        }
+        if let Some(file_name) = self.path.rsplit('/').next() {
+            TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[file_name]).await;
+        }
+        self.metrics.output_bytes = 0;
+        self.metrics.cleanup_elapsed += start.elapsed();
+    }
+}
+
+/// Returns the Arrow schema of a `pk_columns` primary-key index.
+pub fn pk_columns_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
+    validate_metadata(metadata)?;
+    let mut fields = vec![
+        Field::new(MIN_TS_COLUMN, DataType::Int64, false),
+        Field::new(MAX_TS_COLUMN, DataType::Int64, false),
+        Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
+        Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
+        Field::new(TSID_COLUMN, DataType::UInt64, false),
+    ];
+    fields.extend(
+        tag_columns(metadata)
+            .into_iter()
+            .map(|(_, name)| Field::new(name, DataType::Utf8, true)),
+    );
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
+    ensure!(
+        metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
+        InvalidMetaSnafu {
+            reason: "primary-key index only supports sparse primary-key encoding",
+        }
+    );
+    ensure!(
+        metadata
+            .primary_key
+            .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]),
+        InvalidMetaSnafu {
+            reason: "primary-key index requires (__table_id, __tsid) as the primary-key prefix",
+        }
+    );
+    let table_id = metadata
+        .column_by_id(ReservedColumnId::table_id())
+        .context(InvalidMetaSnafu {
+            reason: "primary-key index metadata is missing __table_id",
+        })?;
+    let tsid = metadata
+        .column_by_id(ReservedColumnId::tsid())
+        .context(InvalidMetaSnafu {
+            reason: "primary-key index metadata is missing __tsid",
+        })?;
+    ensure!(
+        table_id.column_schema.data_type == ConcreteDataType::uint32_datatype()
+            && tsid.column_schema.data_type == ConcreteDataType::uint64_datatype(),
+        InvalidMetaSnafu {
+            reason: "primary-key index requires UInt32 __table_id and UInt64 __tsid",
+        }
+    );
+    for column in metadata.primary_key_columns() {
+        if is_reserved_column(column.column_id) {
+            continue;
+        }
+        ensure!(
+            column.column_schema.data_type == ConcreteDataType::string_datatype(),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "primary-key index requires string tag column {}, got {}",
+                    column.column_schema.name, column.column_schema.data_type
+                ),
+            }
+        );
+    }
+    Ok(())
+}
+
+fn tag_columns(metadata: &RegionMetadataRef) -> Vec<(ColumnId, String)> {
+    metadata
+        .primary_key_columns()
+        .filter(|column| !is_reserved_column(column.column_id))
+        .map(|column| (column.column_id, column.column_schema.name.clone()))
+        .collect()
+}
+
+fn is_reserved_column(column_id: ColumnId) -> bool {
+    column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
+}
+
+fn primary_key_values(array: &ArrayRef) -> Result<Vec<&[u8]>> {
+    if let Some(array) = array.as_any().downcast_ref::<BinaryArray>() {
+        ensure!(
+            array.null_count() == 0,
+            InvalidRecordBatchSnafu {
+                reason: "primary-key index input contains null primary keys",
+            }
+        );
+        return Ok(array.iter().map(Option::unwrap).collect());
+    }
+    if let Some(array) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+        ensure!(
+            array.null_count() == 0,
+            InvalidRecordBatchSnafu {
+                reason: "primary-key index input contains null primary keys",
+            }
+        );
+        let values = array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .context(InvalidRecordBatchSnafu {
+                reason: "primary-key dictionary values are not binary",
+            })?;
+        return Ok(array
+            .keys()
+            .values()
+            .iter()
+            .map(|key| values.value(*key as usize))
+            .collect());
+    }
+    InvalidRecordBatchSnafu {
+        reason: format!(
+            "primary-key index requires Binary or Dictionary(UInt32, Binary) primary keys, got {:?}",
+            array.data_type()
+        ),
+    }
+    .fail()
+}
+
+fn timestamp_values(array: &ArrayRef) -> Result<&[i64]> {
+    macro_rules! timestamp_values {
+        ($ty:ty) => {
+            if let Some(array) = array.as_any().downcast_ref::<$ty>() {
+                ensure!(
+                    array.null_count() == 0,
+                    InvalidRecordBatchSnafu {
+                        reason: "primary-key index input contains null timestamps",
+                    }
+                );
+                return Ok(array.values());
+            }
+        };
+    }
+
+    timestamp_values!(Int64Array);
+    timestamp_values!(datatypes::arrow::array::TimestampSecondArray);
+    timestamp_values!(datatypes::arrow::array::TimestampMillisecondArray);
+    timestamp_values!(datatypes::arrow::array::TimestampMicrosecondArray);
+    timestamp_values!(datatypes::arrow::array::TimestampNanosecondArray);
+    InvalidRecordBatchSnafu {
+        reason: format!(
+            "primary-key index requires an Int64 or timestamp time index, got {:?}",
+            array.data_type()
+        ),
+    }
+    .fail()
+}
+
+fn decode_primary_key(
+    codec: &dyn PrimaryKeyCodec,
+    primary_key: &[u8],
+    timestamp: i64,
+    tag_columns: &[(ColumnId, String)],
+) -> Result<PkIndexRow> {
+    let CompositeValues::Sparse(values) = codec.decode(primary_key).context(DecodeSnafu)? else {
+        return InvalidRecordBatchSnafu {
+            reason: "decoded primary key is not sparse",
+        }
+        .fail();
+    };
+    let table_id = match values.get(&ReservedColumnId::table_id()) {
+        Some(Value::UInt32(value)) => *value,
+        value => {
+            return InvalidRecordBatchSnafu {
+                reason: format!("missing or invalid sparse __table_id: {value:?}"),
+            }
+            .fail();
+        }
+    };
+    let tsid = match values.get(&ReservedColumnId::tsid()) {
+        Some(Value::UInt64(value)) => *value,
+        value => {
+            return InvalidRecordBatchSnafu {
+                reason: format!("missing or invalid sparse __tsid: {value:?}"),
+            }
+            .fail();
+        }
+    };
+    let tags = tag_columns
+        .iter()
+        .map(|(column_id, _)| match values.get(column_id) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.as_utf8().to_string())),
+            value => InvalidRecordBatchSnafu {
+                reason: format!(
+                    "invalid sparse string tag value for column {column_id}: {value:?}"
+                ),
+            }
+            .fail(),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PkIndexRow {
+        min_ts: timestamp,
+        max_ts: timestamp,
+        row_count: 1,
+        table_id,
+        tsid,
+        tags,
+    })
+}
+
+fn rows_to_batch(schema: &SchemaRef, rows: &[PkIndexRow]) -> Result<RecordBatch> {
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from_iter_values(
+            rows.iter().map(|row| row.min_ts),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            rows.iter().map(|row| row.max_ts),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|row| row.row_count),
+        )),
+        Arc::new(UInt32Array::from_iter_values(
+            rows.iter().map(|row| row.table_id),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|row| row.tsid),
+        )),
+    ];
+    for tag_idx in 0..schema.fields().len() - 5 {
+        arrays.push(Arc::new(StringArray::from_iter(
+            rows.iter().map(|row| row.tags[tag_idx].as_deref()),
+        )));
+    }
+    RecordBatch::try_new(schema.clone(), arrays).context(NewRecordBatchSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::arrow::array::{BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array};
+    use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
+    use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
+    use object_store::services::Memory;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use store_api::codec::PrimaryKeyEncoding;
+
+    use super::*;
+    use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
+
+    fn object_store() -> ObjectStore {
+        ObjectStore::new(Memory::default()).unwrap().finish()
+    }
+
+    fn flat_schema(primary_key_type: DataType) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__primary_key", primary_key_type, false),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]))
+    }
+
+    fn binary_batch(primary_keys: &[&[u8]], timestamps: &[i64]) -> RecordBatch {
+        RecordBatch::try_new(
+            flat_schema(DataType::Binary),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+                Arc::new(BinaryArray::from_iter_values(primary_keys.iter().copied())),
+                Arc::new(UInt64Array::from(vec![1; timestamps.len()])),
+                Arc::new(UInt8Array::from(vec![0; timestamps.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn dictionary_batch(primary_keys: &[&[u8]], timestamps: &[i64]) -> RecordBatch {
+        let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for primary_key in primary_keys {
+            builder.append(*primary_key).unwrap();
+        }
+        RecordBatch::try_new(
+            flat_schema(DataType::Dictionary(
+                Box::new(DataType::UInt32),
+                Box::new(DataType::Binary),
+            )),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+                Arc::new(builder.finish()),
+                Arc::new(UInt64Array::from(vec![1; timestamps.len()])),
+                Arc::new(UInt8Array::from(vec![0; timestamps.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn read_index(store: &ObjectStore, path: &str) -> (usize, Vec<RecordBatch>) {
+        let bytes = store.read(path).await.unwrap().to_bytes();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        let row_groups = builder.metadata().num_row_groups();
+        let batches = builder
+            .build()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        (row_groups, batches)
+    }
+
+    #[test]
+    fn test_pk_columns_schema() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let schema = pk_columns_schema(&metadata).unwrap();
+        assert_eq!(
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "min_ts",
+                "max_ts",
+                "row_count",
+                "__table_id",
+                "__tsid",
+                "tag_0",
+                "tag_1",
+            ]
+        );
+        assert!(!schema.field(4).is_nullable());
+        assert!(schema.field(5).is_nullable());
+
+        let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
+        assert!(pk_columns_schema(&dense).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_batches_and_metrics() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let primary_key_1 = new_sparse_primary_key(&["a", "x"], &metadata, 1, 10);
+        let primary_key_2 = new_sparse_primary_key(&["b", "y"], &metadata, 1, 20);
+        let store = object_store();
+        let mut writer = PkIndexWriter::try_new(
+            metadata,
+            store.clone(),
+            "pk.parquet",
+            PkIndexWriterOptions { row_group_size: 2 },
+        )
+        .await
+        .unwrap();
+
+        writer
+            .write(&dictionary_batch(
+                &[primary_key_1.as_slice(), primary_key_1.as_slice()],
+                &[90, 100],
+            ))
+            .await
+            .unwrap();
+        writer
+            .write(&binary_batch(
+                &[primary_key_1.as_slice(), primary_key_2.as_slice()],
+                &[110, 200],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(writer.metrics().input_batches, 2);
+        assert_eq!(writer.metrics().input_rows, 4);
+
+        let metrics = writer.finish().await.unwrap();
+        assert_eq!(metrics.input_batches, 2);
+        assert_eq!(metrics.input_rows, 4);
+        assert_eq!(metrics.index_rows, 2);
+        assert!(metrics.output_bytes > 0);
+        assert!(!metrics.aborted);
+
+        let (row_groups, batches) = read_index(&store, "pk.parquet").await;
+        assert_eq!(row_groups, 1);
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap(),
+            &Int64Array::from(vec![90, 200])
+        );
+        assert_eq!(
+            batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap(),
+            &Int64Array::from(vec![110, 200])
+        );
+        assert_eq!(
+            batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap(),
+            &UInt64Array::from(vec![3, 1])
+        );
+        assert_eq!(
+            batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap(),
+            &UInt32Array::from(vec![1, 1])
+        );
+        assert_eq!(
+            batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap(),
+            &UInt64Array::from(vec![10, 20])
+        );
+        assert_eq!(
+            batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap(),
+            &StringArray::from(vec![Some("a"), Some("b")])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_group_size_and_empty_file() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let store = object_store();
+        let mut writer = PkIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            "groups.parquet",
+            PkIndexWriterOptions { row_group_size: 2 },
+        )
+        .await
+        .unwrap();
+        let keys = (0..5)
+            .map(|tsid| new_sparse_primary_key(&["a", "x"], &metadata, 1, tsid))
+            .collect::<Vec<_>>();
+        let key_refs = keys.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        writer
+            .write(&binary_batch(&key_refs, &[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+        let (row_groups, _) = read_index(&store, "groups.parquet").await;
+        assert_eq!(row_groups, 3);
+
+        let empty = PkIndexWriter::try_new(
+            metadata,
+            store.clone(),
+            "empty.parquet",
+            PkIndexWriterOptions::default(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+        assert_eq!(empty.input_rows, 0);
+        assert_eq!(empty.index_rows, 0);
+        assert!(empty.output_bytes > 0);
+        let (_, batches) = read_index(&store, "empty.parquet").await;
+        assert!(batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_abort_and_out_of_order_input() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let primary_key_1 = new_sparse_primary_key(&["a", "x"], &metadata, 1, 10);
+        let primary_key_2 = new_sparse_primary_key(&["b", "y"], &metadata, 1, 20);
+        let store = object_store();
+        let mut writer = PkIndexWriter::try_new(
+            metadata,
+            store.clone(),
+            "abort.parquet",
+            PkIndexWriterOptions { row_group_size: 1 },
+        )
+        .await
+        .unwrap();
+        let error = writer
+            .write(&binary_batch(
+                &[primary_key_2.as_slice(), primary_key_1.as_slice()],
+                &[1, 2],
+            ))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not sorted"), "{error}");
+        let metrics = writer.abort().await.unwrap();
+        assert!(metrics.aborted);
+        assert_eq!(metrics.output_bytes, 0);
+        assert_eq!(
+            store.stat("abort.parquet").await.unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nullable_tag_and_invalid_options() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let mut primary_key = Vec::new();
+        codec
+            .encode_value_refs(
+                &[
+                    (
+                        ReservedColumnId::table_id(),
+                        datatypes::value::ValueRef::UInt32(1),
+                    ),
+                    (
+                        ReservedColumnId::tsid(),
+                        datatypes::value::ValueRef::UInt64(10),
+                    ),
+                    (0, datatypes::value::ValueRef::String("a")),
+                ],
+                &mut primary_key,
+            )
+            .unwrap();
+        let store = object_store();
+        let mut writer = PkIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            "nullable.parquet",
+            PkIndexWriterOptions::default(),
+        )
+        .await
+        .unwrap();
+        writer
+            .write(&binary_batch(&[primary_key.as_slice()], &[1]))
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+        let (_, batches) = read_index(&store, "nullable.parquet").await;
+        let tag_1 = batches[0]
+            .column(6)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(tag_1.is_null(0));
+
+        assert!(
+            PkIndexWriter::try_new(
+                metadata,
+                store,
+                "invalid.parquet",
+                PkIndexWriterOptions { row_group_size: 0 },
+            )
+            .await
+            .is_err()
+        );
+    }
+}
