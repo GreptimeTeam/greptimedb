@@ -57,3 +57,44 @@ DROP TABLE discard_unflushed_data_test;
 
 Affected Rows: 0
 
+CREATE TABLE discard_unflushed_data_physical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE discard_unflushed_data_logical (
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX
+) ENGINE = metric WITH ("on_physical_table" = "discard_unflushed_data_physical");
+
+Affected Rows: 0
+
+INSERT INTO discard_unflushed_data_logical VALUES ('unflushed', 1, 1);
+
+Affected Rows: 1
+
+-- Logical Metric Engine tables share their physical regions with other logical tables.
+-- Discarding by logical table name must not truncate those shared regions.
+ADMIN discard_unflushed_data('discard_unflushed_data_logical');
+
+Error: 1002(Unexpected), Failed to execute admin function discard_unflushed_data: Execution error: Not supported: discarding unflushed data from a Metric Engine logical table
+
+SELECT host, val FROM discard_unflushed_data_logical;
+
++-----------+-----+
+| host      | val |
++-----------+-----+
+| unflushed | 1.0 |
++-----------+-----+
+
+DROP TABLE discard_unflushed_data_logical;
+
+Affected Rows: 0
+
+DROP TABLE discard_unflushed_data_physical;
+
+Affected Rows: 0
+

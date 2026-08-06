@@ -22,6 +22,7 @@ use api::v1::region::{
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
+use common_catalog::consts::METRIC_ENGINE;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
@@ -39,7 +40,8 @@ use table::table_name::TableName;
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, FindTablePartitionRuleSnafu, JoinTaskSnafu,
-    RequestRegionSnafu, Result, TableNotFoundSnafu, UnsupportedRegionRequestSnafu,
+    NotSupportedSnafu, RequestRegionSnafu, Result, TableNotFoundSnafu,
+    UnsupportedRegionRequestSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
 
@@ -230,13 +232,33 @@ impl Requester {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let partitions = &self
-            .get_table_partition_info(
+        let full_table_name = table_name.to_string();
+        let table = self
+            .catalog_manager
+            .table(
                 &table_name.catalog_name,
                 &table_name.schema_name,
                 &table_name.table_name,
+                None,
             )
-            .await?
+            .await
+            .context(CatalogSnafu)?;
+        let table = table.with_context(|| TableNotFoundSnafu {
+            table_name: full_table_name.clone(),
+        })?;
+        let table_info = table.table_info();
+        ensure_discard_unflushed_supported(
+            &table_info.meta.engine,
+            table_info.is_physical_table(),
+        )?;
+
+        let partitions = &self
+            .partition_manager
+            .find_physical_partition_info(table_info.ident.table_id)
+            .await
+            .with_context(|_| FindTablePartitionRuleSnafu {
+                table_name: full_table_name,
+            })?
             .partitions;
         let requests = partitions
             .iter()
@@ -383,6 +405,16 @@ impl Requester {
     }
 }
 
+fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> Result<()> {
+    ensure!(
+        engine != METRIC_ENGINE || is_physical_table,
+        NotSupportedSnafu {
+            feat: "discarding unflushed data from a Metric Engine logical table"
+        }
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::TimeUnit;
@@ -403,6 +435,15 @@ mod tests {
         assert_eq!(1, pb_range.start);
         assert_eq!(3, pb_range.end);
         assert_eq!(TimeUnit::Second as i32, pb_range.time_unit);
+    }
+
+    #[test]
+    fn test_discard_unflushed_rejects_metric_logical_table() {
+        let error = ensure_discard_unflushed_supported(METRIC_ENGINE, false).unwrap_err();
+        assert!(matches!(error, crate::error::Error::NotSupported { .. }));
+
+        ensure_discard_unflushed_supported(METRIC_ENGINE, true).unwrap();
+        ensure_discard_unflushed_supported("mito", false).unwrap();
     }
 
     #[test]
