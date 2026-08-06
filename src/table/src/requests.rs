@@ -161,8 +161,6 @@ pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";
 pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
 pub const SKIP_WAL_KEY: &str = store_api::mito_engine_options::SKIP_WAL_KEY;
-/// Internal marker that records an explicitly specified table-level `skip_wal`.
-pub const SKIP_WAL_OVERRIDE_KEY: &str = "skip_wal.override";
 pub const TRACE_TABLE_PARTITIONS_HINT_KEY: &str = "trace_table_partitions";
 pub const REPARTITION_COLUMN_HINT_KEY: &str = "repartition.column.hint";
 
@@ -211,7 +209,7 @@ impl TableOptions {
 
         options.extra_options = HashMap::from_iter(
             kvs.into_iter()
-                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY && k != SKIP_WAL_KEY),
+                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY),
         );
 
         Ok(options)
@@ -229,14 +227,11 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
-        if self.skip_wal || self.extra_options.contains_key(SKIP_WAL_OVERRIDE_KEY) {
+        if self.skip_wal && !self.extra_options.contains_key(SKIP_WAL_KEY) {
             key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
         for (k, v) in &self.extra_options {
-            if k == SKIP_WAL_KEY || k == SKIP_WAL_OVERRIDE_KEY {
-                continue;
-            }
             key_vals.push(format!("{}={}", k, v));
         }
 
@@ -256,15 +251,10 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
-        if opts.skip_wal || opts.extra_options.contains_key(SKIP_WAL_OVERRIDE_KEY) {
-            let _ = res.insert(SKIP_WAL_KEY.to_string(), opts.skip_wal.to_string());
+        if opts.skip_wal {
+            let _ = res.insert(SKIP_WAL_KEY.to_string(), true.to_string());
         }
-        res.extend(
-            opts.extra_options
-                .iter()
-                .filter(|(key, _)| key.as_str() != SKIP_WAL_KEY)
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+        res.extend(opts.extra_options.clone());
         res
     }
 }
@@ -567,7 +557,7 @@ mod tests {
         let options = TableOptions {
             write_buffer_size: None,
             ttl: None,
-            extra_options: HashMap::new(),
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), true.to_string())]),
             skip_wal: true,
         };
         let serialized_map = HashMap::from(&options);
@@ -599,29 +589,13 @@ mod tests {
         assert_eq!(options, serialized);
 
         let options = TableOptions {
-            extra_options: HashMap::from([(SKIP_WAL_OVERRIDE_KEY.to_string(), "true".to_string())]),
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), false.to_string())]),
             skip_wal: false,
             ..Default::default()
         };
         let serialized_map = HashMap::from(&options);
-        assert_eq!(
-            Some("false"),
-            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
-        );
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
-
-        let options = TableOptions {
-            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), false.to_string())]),
-            skip_wal: true,
-            ..Default::default()
-        };
-        let serialized_map = HashMap::from(&options);
-        assert_eq!(
-            Some("true"),
-            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
-        );
-        assert_eq!("skip_wal=true", options.to_string());
     }
 
     #[test]
@@ -664,7 +638,7 @@ mod tests {
         let options = TableOptions {
             write_buffer_size: None,
             ttl: None,
-            extra_options: HashMap::from([(SKIP_WAL_OVERRIDE_KEY.to_string(), "true".to_string())]),
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), "false".to_string())]),
             skip_wal: false,
         };
         assert_eq!("skip_wal=false", options.to_string());

@@ -39,8 +39,8 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, SKIP_WAL_OVERRIDE_KEY,
-    TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -67,14 +67,15 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
-    if table_opts.skip_wal || table_opts.extra_options.contains_key(SKIP_WAL_OVERRIDE_KEY) {
-        options.insert(SKIP_WAL_KEY.to_string(), table_opts.skip_wal.to_string());
-    }
-
-    for (k, v) in table_opts.extra_options.iter().filter(|(k, _)| {
-        k != &FILE_TABLE_META_KEY && k != &SKIP_WAL_KEY && k != &SKIP_WAL_OVERRIDE_KEY
-    }) {
+    for (k, v) in table_opts
+        .extra_options
+        .iter()
+        .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
+    {
         options.insert(k.clone(), v.clone());
+    }
+    if table_opts.skip_wal {
+        options.insert(SKIP_WAL_KEY.to_string(), true.to_string());
     }
     options
 }
@@ -434,22 +435,11 @@ WITH(
         );
 
         let mut table_meta = info.meta.clone();
-        table_meta.options.skip_wal = true;
+        table_meta.options.skip_wal = false;
         table_meta
             .options
             .extra_options
             .insert(SKIP_WAL_KEY.to_string(), false.to_string());
-        assert_eq!(
-            Some("true"),
-            create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)
-        );
-
-        table_meta.options.skip_wal = false;
-        table_meta.options.extra_options.remove(SKIP_WAL_KEY);
-        table_meta
-            .options
-            .extra_options
-            .insert(SKIP_WAL_OVERRIDE_KEY.to_string(), true.to_string());
         assert_eq!(
             Some("false"),
             create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)

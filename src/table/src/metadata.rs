@@ -403,9 +403,11 @@ impl TableMeta {
                 }
                 SetRegionOption::SkipWal => {
                     new_options.skip_wal = true;
-                    // Older table metadata also stored skip_wal in extra_options.
-                    // Remove it so the typed field is canonical after ALTER.
-                    new_options.extra_options.remove(SKIP_WAL_KEY);
+                    // Keep the explicit table option so it remains distinguishable
+                    // from a value inherited from the schema.
+                    new_options
+                        .extra_options
+                        .insert(SKIP_WAL_KEY.to_string(), true.to_string());
                 }
             }
         }
@@ -1694,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_skip_wal_updates_typed_option() {
+    fn test_set_skip_wal_updates_typed_and_extra_options() {
         let mut meta = TableMetaBuilder::empty()
             .schema(Arc::new(new_test_schema()))
             .primary_key_indices(vec![0])
@@ -1716,7 +1718,14 @@ mod tests {
             .unwrap();
 
         assert!(new_meta.options.skip_wal);
-        assert!(!new_meta.options.extra_options.contains_key(SKIP_WAL_KEY));
+        assert_eq!(
+            Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
     }
 
     #[test]
