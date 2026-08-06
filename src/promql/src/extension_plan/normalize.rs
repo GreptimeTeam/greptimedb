@@ -17,7 +17,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, BooleanArray};
+use common_query::native_histogram::{START_TIMESTAMP_FIELD, native_histogram_arrow_type};
+use datafusion::arrow::array::{Array, BooleanArray, StructArray};
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
@@ -33,7 +34,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::col;
 use datatypes::arrow::array::TimestampMillisecondArray;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -51,7 +52,7 @@ use crate::metrics::PROMQL_SERIES_COUNT;
 /// the input batch only contains sample points from one time series.
 ///
 /// Roughly speaking, this method does these things:
-/// - bias sample's timestamp by offset
+/// - bias sample and native histogram start timestamps by offset
 /// - sort the record batch based on timestamp column
 /// - remove Prometheus stale markers (optional)
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -397,16 +398,61 @@ impl SeriesNormalizeStream {
                 )
             })?;
 
+        let bias_timestamp = |timestamp: i64| {
+            timestamp.checked_add(self.offset).ok_or_else(|| {
+                DataFusionError::Execution("SeriesNormalize: timestamp offset overflow".into())
+            })
+        };
+
         // bias the timestamp column by offset
         let ts_column_biased = if self.offset == 0 {
             Arc::new(ts_column.clone()) as _
         } else {
-            Arc::new(TimestampMillisecondArray::from_iter(
-                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
-            ))
+            Arc::new(ts_column.try_unary::<_, TimestampMillisecondType, _>(&bias_timestamp)?)
         };
         let mut columns = input.columns().to_vec();
         columns[self.time_index] = ts_column_biased;
+
+        // Offset selectors move samples into the evaluation timeline. Keep native histogram
+        // start timestamps on the same timeline for rate and reset calculations.
+        if self.offset != 0 {
+            let native_histogram_type = native_histogram_arrow_type();
+            for column in &mut columns {
+                let Some((histograms, start_timestamp_index, start_timestamps)) = column
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .filter(|histograms| histograms.data_type() == &native_histogram_type)
+                    .and_then(|histograms| {
+                        let (index, _) = histograms.fields().find(START_TIMESTAMP_FIELD)?;
+                        let timestamps = histograms
+                            .column(index)
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()?;
+                        Some((histograms, index, timestamps))
+                    })
+                else {
+                    continue;
+                };
+                let start_timestamps = start_timestamps
+                    .try_unary::<_, TimestampMillisecondType, _>(|timestamp| {
+                        // Prometheus uses zero to mean that the start timestamp is unknown.
+                        if timestamp == 0 {
+                            Ok(0)
+                        } else {
+                            bias_timestamp(timestamp)
+                        }
+                    })?;
+                // Replace only the start timestamp child to preserve the histogram payload and
+                // null bitmap.
+                let mut children = histograms.columns().to_vec();
+                children[start_timestamp_index] = Arc::new(start_timestamps);
+                *column = Arc::new(StructArray::new(
+                    histograms.fields().clone(),
+                    children,
+                    histograms.nulls().cloned(),
+                ));
+            }
+        }
 
         let result_batch = RecordBatch::try_new(input.schema(), columns)?;
         if !self.filter_stale_markers {
@@ -664,11 +710,15 @@ mod test {
     }
 
     #[tokio::test]
-    async fn filters_native_histogram_stale_markers() {
+    async fn offsets_native_histogram_timestamps_and_filters_stale_markers() {
+        let mut regular = native_histogram(42.0);
+        regular.start_timestamp = Some(500);
+        let mut ordinary_nan = native_histogram(f64::NAN);
+        ordinary_nan.start_timestamp = Some(0);
         let histograms = build_histogram_array(&[
-            Some(native_histogram(42.0)),
+            Some(regular),
             Some(native_histogram(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))),
-            Some(native_histogram(f64::NAN)),
+            Some(ordinary_nan),
             None,
         ]);
         let schema = Arc::new(Schema::new(vec![
@@ -693,7 +743,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
         let exec = Arc::new(SeriesNormalizeExec {
-            offset: 0,
+            offset: 1_000,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             filter_stale_markers: true,
             tag_columns: Vec::new(),
@@ -712,8 +762,17 @@ mod test {
             .downcast_ref::<datafusion::arrow::array::StructArray>()
             .unwrap();
 
-        assert_eq!(read_histogram(values, 0).unwrap().unwrap().sum, 42.0);
-        assert!(read_histogram(values, 1).unwrap().unwrap().sum.is_nan());
+        let timestamps = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(timestamps.values(), &[2_000, 4_000, 5_000]);
+        let regular = read_histogram(values, 0).unwrap().unwrap();
+        assert_eq!((regular.sum, regular.start_timestamp), (42.0, Some(1_500)));
+        let ordinary_nan = read_histogram(values, 1).unwrap().unwrap();
+        assert!(ordinary_nan.sum.is_nan());
+        assert_eq!(ordinary_nan.start_timestamp, Some(0));
         assert!(read_histogram(values, 2).unwrap().is_none());
     }
 }
