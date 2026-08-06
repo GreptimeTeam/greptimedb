@@ -1336,8 +1336,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn qp_003_hash_collision_between_distinct_rows_keeps_rhs_row() {
-        // Regression test for QP-003: dedup was based only on the 64-bit hash of the
+    async fn hash_collision_between_distinct_rows_keeps_rhs_row() {
+        // Regression test: dedup was based only on the 64-bit hash of the
         // (compare_keys, ts) columns, without value-level verification. Two rows whose
         // hashes collide (but whose compare-key values differ) made the RHS row be
         // wrongly dropped.
