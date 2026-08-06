@@ -1320,7 +1320,7 @@ mod tests {
         let schema = Arc::new(Schema::new(column_schemas));
         let vectors: Vec<VectorRef> = columns
             .iter()
-            .map(|_| Arc::new(Int64Vector::from_slice(values.to_vec())) as VectorRef)
+            .map(|_| Arc::new(Int64Vector::from_slice(values)) as VectorRef)
             .collect();
         let recordbatch = RecordBatch::new(schema, vectors).unwrap();
         MemTable::table(name, recordbatch)
