@@ -3095,7 +3095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_015_view_target_expands_to_its_source_tables() -> TestResult<()> {
+    async fn view_target_expands_to_its_source_tables() -> TestResult<()> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
@@ -3144,7 +3144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_015_query_on_view_over_denied_source_is_rejected() -> TestResult<()> {
+    async fn query_on_view_over_denied_source_is_rejected() -> TestResult<()> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
@@ -3187,7 +3187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_015_flow_sink_target_expands_to_its_source_tables() -> TestResult<()> {
+    async fn flow_sink_target_expands_to_its_source_tables() -> TestResult<()> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
@@ -3237,7 +3237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qp_015_view_target_cycles_terminate() -> TestResult<()> {
+    async fn view_target_cycles_terminate() -> TestResult<()> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
