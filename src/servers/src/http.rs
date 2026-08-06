@@ -1074,6 +1074,10 @@ impl HttpServer {
                 // handler for changing log level dynamically
                 .route("/log_level", routing::post(dyn_log::dyn_log_handler))
                 .route(
+                    "/workload_scheduler",
+                    routing::get(workload_scheduler::get_status_handler),
+                )
+                .route(
                     "/workload_scheduler/weights",
                     routing::post(workload_scheduler::set_weights_handler),
                 )
