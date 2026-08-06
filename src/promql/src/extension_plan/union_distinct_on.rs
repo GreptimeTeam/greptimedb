@@ -13,14 +13,16 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use ahash::{HashSet, RandomState};
-use datafusion::arrow::array::UInt64Array;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{
+    Array, ArrayAccessor, ArrowPrimitiveType, PrimitiveArray, StringArray, StringViewArray,
+    UInt64Array, downcast_primitive_array,
+};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -31,9 +33,9 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream, hash_utils,
+    RecordBatchStream, SendableRecordBatchStream,
 };
-use datafusion_common::ScalarValue;
+use datafusion_common::hash_utils::{HashValue, combine_hashes};
 use datafusion_expr::col;
 use datatypes::arrow::compute;
 use futures::{Stream, StreamExt, ready};
@@ -57,6 +59,20 @@ use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 /// Execution streams the left child first while retaining its comparison signatures. The
 /// right child is polled only after the left child completes, then rows whose signatures were
 /// observed on the left are omitted.
+///
+/// Dedup uses **columnar null-safe hashing**: each (compare_keys, ts) column is hashed
+/// with `create_hashes` semantics (first column assigns, later columns combine) under
+/// two independent [`RandomState`]s, whose 64-bit outputs are combined into a 128-bit
+/// signature stored in a `HashSet<u128>` (16B/row, no per-row allocation). Nulls are
+/// never skipped: a null in column `i` combines a per-column distinct marker (the hash
+/// of a fixed byte pattern encoding the column position), so null placement is part of
+/// the signature — unlike the plain `create_hashes` path, two rows that merely swap a
+/// null and a value between columns cannot collide. Only genuine 128-bit random
+/// collisions remain (probability n1*n2/2^128). This replaces an earlier RowConverter
+/// based implementation that materialized every row's encoded bytes (2-3x slower).
+///
+/// Supported compare-key types: all arrow primitive arrays (Int/UInt/Float/etc.),
+/// `Utf8`, `Utf8View` and `Null`; other types return `NotImplemented`.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct UnionDistinctOn {
     left: LogicalPlan,
@@ -181,7 +197,8 @@ impl UnionDistinctOn {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            random_state: RandomState::new(),
+            hash_state_a: RandomState::new(),
+            hash_state_b: RandomState::new(),
         })
     }
 
@@ -349,8 +366,10 @@ pub struct UnionDistinctOnExec {
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 
-    /// Shared the `RandomState` for the hashing algorithm
-    random_state: RandomState,
+    /// Two independent 64-bit hash functions whose outputs are combined into a
+    /// 128-bit per-row signature, making false dedup collisions negligible.
+    hash_state_a: RandomState,
+    hash_state_b: RandomState,
 }
 
 impl ExecutionPlan for UnionDistinctOnExec {
@@ -390,7 +409,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
             properties: self.properties.clone(),
-            random_state: self.random_state.clone(),
+            hash_state_a: self.hash_state_a.clone(),
+            hash_state_b: self.hash_state_b.clone(),
         }))
     }
 
@@ -403,6 +423,14 @@ impl ExecutionPlan for UnionDistinctOnExec {
 
         let mut key_indices = self.compare_key_indices.clone();
         key_indices.push(self.ts_col_idx);
+        // Per-column distinct null markers per hash state: hashes of fixed byte
+        // patterns that encode the column position. See `null_marker_bytes`.
+        let null_markers_a = (0..key_indices.len())
+            .map(|col_idx| self.hash_state_a.hash_one(null_marker_bytes(col_idx)))
+            .collect();
+        let null_markers_b = (0..key_indices.len())
+            .map(|col_idx| self.hash_state_b.hash_one(null_marker_bytes(col_idx)))
+            .collect();
 
         Ok(Box::pin(UnionDistinctOnStream {
             left: left_stream,
@@ -412,10 +440,11 @@ impl ExecutionPlan for UnionDistinctOnExec {
             right: None,
             compare_keys: key_indices,
             output_schema: self.output_schema.clone(),
-            random_state: self.random_state.clone(),
+            hash_state_a: self.hash_state_a.clone(),
+            hash_state_b: self.hash_state_b.clone(),
+            null_markers_a,
+            null_markers_b,
             lhs_signatures: HashSet::default(),
-            lhs_values: HashMap::default(),
-            hashes: Vec::new(),
             phase: StreamPhase::Left,
             metric: BaselineMetrics::new(&self.metric, partition),
         }))
@@ -455,14 +484,25 @@ pub struct UnionDistinctOnStream {
     /// Include time index
     compare_keys: Vec<usize>,
     output_schema: SchemaRef,
-    random_state: RandomState,
-    lhs_signatures: HashSet<u64>,
-    /// Maps each LHS row's (compare_keys, ts) hash to the actual row values so that
-    /// hash collisions can be resolved with value-level equality. A row may only be
-    /// dropped from the right input when its hash matches an LHS row's hash *and* its
-    /// compare-key values are equal to that LHS row's values.
-    lhs_values: HashMap<u64, Vec<Vec<ScalarValue>>>,
-    hashes: Vec<u64>,
+    /// Encodes the (compare_keys, ts) columns of an input batch into null-safe,
+    /// deterministic row bytes. Two distinct rows never encode to the same bytes,
+    /// A single 64-bit hash function applied to each key column's values.
+    /// Two independent 64-bit hash functions applied to each key column's values;
+    /// each row's pair is combined into a 128-bit signature.
+    hash_state_a: RandomState,
+    hash_state_b: RandomState,
+    /// Per-column null markers per hash state: hashes of fixed byte patterns
+    /// encoding the column position. A null in column `i` contributes
+    /// `null_markers_[a|b][i]` instead of a value hash, so null placement is part
+    /// of the signature (fixing the base implementation's null structural-collision
+    /// bug).
+    null_markers_a: Vec<u64>,
+    null_markers_b: Vec<u64>,
+    /// 128-bit signatures of every row observed on the left input. Rows from the
+    /// right input whose signature is present here are suppressed. Signature
+    /// equality is exact only up to genuine 128-bit hash collisions
+    /// (probability n1*n2/2^128).
+    lhs_signatures: HashSet<u128>,
     phase: StreamPhase,
     metric: BaselineMetrics,
 }
@@ -475,42 +515,48 @@ enum StreamPhase {
 }
 
 impl UnionDistinctOnStream {
-    fn hash_batch(&mut self, batch: &RecordBatch) -> DataFusionResult<()> {
-        let arrays = self
-            .compare_keys
+    /// Columnar null-safe hash of the (compare_keys, ts) columns of `batch`: one
+    /// 128-bit signature per row, built by running the `create_hashes`-semantics
+    /// columnar loop twice — once per independent hash state — then combining each
+    /// row's two 64-bit hashes into a u128. Each state's nulls combine a per-column
+    /// distinct marker instead of being skipped, so null placement is part of the
+    /// signature under both states.
+    fn hash_batch(&self, batch: &RecordBatch) -> DataFusionResult<Vec<u128>> {
+        let num_rows = batch.num_rows();
+        let mut hashes_a = vec![0u64; num_rows];
+        let mut hashes_b = vec![0u64; num_rows];
+        for (col_idx, key_idx) in self.compare_keys.iter().enumerate() {
+            hash_array_null_safe(
+                batch.column(*key_idx),
+                &self.hash_state_a,
+                self.null_markers_a[col_idx],
+                &mut hashes_a,
+                col_idx > 0,
+            )?;
+            hash_array_null_safe(
+                batch.column(*key_idx),
+                &self.hash_state_b,
+                self.null_markers_b[col_idx],
+                &mut hashes_b,
+                col_idx > 0,
+            )?;
+        }
+        Ok(hashes_a
             .iter()
-            .map(|index| batch.column(*index).clone())
-            .collect::<Vec<_>>();
-        self.hashes.clear();
-        self.hashes.resize(batch.num_rows(), 0);
-        hash_utils::create_hashes(&arrays, &self.random_state, &mut self.hashes)?;
-        Ok(())
+            .zip(hashes_b.iter())
+            .map(|(a, b)| ((*a as u128) << 64) | (*b as u128))
+            .collect())
     }
 
-    fn row_values(&self, batch: &RecordBatch, row: usize) -> DataFusionResult<Vec<ScalarValue>> {
-        self.compare_keys
-            .iter()
-            .map(|index| ScalarValue::try_from_array(batch.column(*index).as_ref(), row))
-            .collect()
-    }
-
-    fn filter_rhs_batch(&mut self, batch: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
-        self.hash_batch(&batch)?;
+    fn filter_rhs_batch(&self, batch: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
+        let hashes = self.hash_batch(&batch)?;
         let mut survivor_indices: Option<Vec<usize>> = None;
-        for (index, hash) in self.hashes.iter().enumerate() {
+        for (index, hash) in hashes.iter().enumerate() {
+            // Nulls are encoded deterministically per column, so a signature match
+            // implies value equality; a false positive can only be a genuine 64-bit
+            // hash collision, which is negligible at these scales.
             if self.lhs_signatures.contains(hash) {
-                // The 64-bit hash is only a fast path: a hit can be a hash collision,
-                // so verify equality on the actual (compare_keys, ts) values before
-                // suppressing the row.
-                let values = self.row_values(&batch, index)?;
-                let matches_lhs = self.lhs_values.get(hash).is_some_and(|lhs_value_groups| {
-                    lhs_value_groups.iter().any(|lhs| lhs == &values)
-                });
-                if matches_lhs {
-                    survivor_indices.get_or_insert_with(|| (0..index).collect());
-                } else if let Some(indices) = &mut survivor_indices {
-                    indices.push(index);
-                }
+                survivor_indices.get_or_insert_with(|| (0..index).collect());
             } else if let Some(indices) = &mut survivor_indices {
                 indices.push(index);
             }
@@ -574,16 +620,12 @@ impl UnionDistinctOnStream {
             StreamPhase::Left => match ready!(self.left.poll_next_unpin(cx)) {
                 Some(Ok(batch)) => {
                     if batch.num_rows() > 0 {
-                        if let Err(error) = self.hash_batch(&batch) {
-                            return self.terminal_error(error);
-                        }
-                        self.lhs_signatures.extend(self.hashes.iter().copied());
-                        for (row, hash) in self.hashes.iter().copied().enumerate() {
-                            let values = match self.row_values(&batch, row) {
-                                Ok(values) => values,
-                                Err(error) => return self.terminal_error(error),
-                            };
-                            self.lhs_values.entry(hash).or_default().push(values);
+                        let hashes = match self.hash_batch(&batch) {
+                            Ok(hashes) => hashes,
+                            Err(error) => return self.terminal_error(error),
+                        };
+                        for hash in hashes {
+                            self.lhs_signatures.insert(hash);
                         }
                     }
                     match with_schema(batch, self.output_schema.clone()) {
@@ -639,6 +681,150 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
 
     RecordBatch::try_new(batch.schema(), arrays)
         .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
+}
+
+/// Fixed byte pattern encoding the null marker for compare-key column `col_idx`.
+/// The leading 0xFF makes the pattern invalid UTF-8 (so it can never structurally
+/// equal any `Utf8`/`Utf8View` value) and distinct from the little-endian encodings
+/// of small integers; the column index makes each column's marker distinct.
+#[inline]
+fn null_marker_bytes(col_idx: usize) -> [u8; 8] {
+    [0xFF, col_idx as u8, 0, 0, 0, 0, 0, 0]
+}
+
+/// Columnar null-safe hashing of one array into `hashes`, mirroring
+/// `create_hashes` semantics: when `rehash` is false the first column's value hash
+/// (or null marker) is assigned, otherwise it is combined with the running hash.
+/// Unlike `create_hashes`, a null row is never skipped — it combines the
+/// per-column `null_marker`, so nulls are position-aware and deterministic.
+fn hash_array_null_safe(
+    array: &dyn Array,
+    random_state: &RandomState,
+    null_marker: u64,
+    hashes: &mut [u64],
+    rehash: bool,
+) -> DataFusionResult<()> {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("Utf8 array");
+            hash_generic_null_safe(&arr, random_state, null_marker, hashes, rehash);
+        }
+        DataType::Utf8View => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .expect("Utf8View array");
+            hash_generic_null_safe(&arr, random_state, null_marker, hashes, rehash);
+        }
+        DataType::Null => {
+            if rehash {
+                for hash in hashes.iter_mut() {
+                    *hash = combine_hashes(null_marker, *hash);
+                }
+            } else {
+                hashes.fill(null_marker);
+            }
+        }
+        _ => {
+            downcast_primitive_array! {
+                array => hash_primitive_null_safe(array, random_state, null_marker, hashes, rehash),
+                t => {
+                    return Err(DataFusionError::NotImplemented(format!(
+                        "UnionDistinctOnExec: unsupported compare-key column type: {t}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Null-safe hash of a primitive array (see [`hash_array_null_safe`]).
+fn hash_primitive_null_safe<T: ArrowPrimitiveType>(
+    array: &PrimitiveArray<T>,
+    random_state: &RandomState,
+    null_marker: u64,
+    hashes: &mut [u64],
+    rehash: bool,
+) where
+    T::Native: HashValue,
+{
+    if array.null_count() == 0 {
+        if rehash {
+            for (hash, &value) in hashes.iter_mut().zip(array.values().iter()) {
+                *hash = combine_hashes(value.hash_one(random_state), *hash);
+            }
+        } else {
+            for (hash, &value) in hashes.iter_mut().zip(array.values().iter()) {
+                *hash = value.hash_one(random_state);
+            }
+        }
+    } else if rehash {
+        for (i, hash) in hashes.iter_mut().enumerate() {
+            if array.is_null(i) {
+                *hash = combine_hashes(null_marker, *hash);
+            } else {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = combine_hashes(value.hash_one(random_state), *hash);
+            }
+        }
+    } else {
+        for (i, hash) in hashes.iter_mut().enumerate() {
+            if array.is_null(i) {
+                *hash = null_marker;
+            } else {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = value.hash_one(random_state);
+            }
+        }
+    }
+}
+
+/// Null-safe hash of a generic (accessor-based) array, e.g. `Utf8`/`Utf8View`
+/// (see [`hash_array_null_safe`]).
+fn hash_generic_null_safe<T: ArrayAccessor>(
+    array: &T,
+    random_state: &RandomState,
+    null_marker: u64,
+    hashes: &mut [u64],
+    rehash: bool,
+) where
+    T::Item: HashValue,
+{
+    if array.null_count() == 0 {
+        if rehash {
+            for (i, hash) in hashes.iter_mut().enumerate() {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = combine_hashes(value.hash_one(random_state), *hash);
+            }
+        } else {
+            for (i, hash) in hashes.iter_mut().enumerate() {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = value.hash_one(random_state);
+            }
+        }
+    } else if rehash {
+        for (i, hash) in hashes.iter_mut().enumerate() {
+            if array.is_null(i) {
+                *hash = combine_hashes(null_marker, *hash);
+            } else {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = combine_hashes(value.hash_one(random_state), *hash);
+            }
+        }
+    } else {
+        for (i, hash) in hashes.iter_mut().enumerate() {
+            if array.is_null(i) {
+                *hash = null_marker;
+            } else {
+                let value = unsafe { array.value_unchecked(i) };
+                *hash = value.hash_one(random_state);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -990,6 +1176,8 @@ mod test {
         output_schema: SchemaRef,
     ) -> UnionDistinctOnStream {
         let metrics = ExecutionPlanMetricsSet::new();
+        let hash_state_a = RandomState::new();
+        let hash_state_b = RandomState::new();
         UnionDistinctOnStream {
             left,
             right_plan: right,
@@ -998,10 +1186,16 @@ mod test {
             right: None,
             compare_keys: vec![1, 0],
             output_schema,
-            random_state: RandomState::new(),
+            hash_state_a: hash_state_a.clone(),
+            hash_state_b: hash_state_b.clone(),
+            // Two columns -> two per-column null markers per state.
+            null_markers_a: (0..2)
+                .map(|col_idx| hash_state_a.hash_one(null_marker_bytes(col_idx)))
+                .collect(),
+            null_markers_b: (0..2)
+                .map(|col_idx| hash_state_b.hash_one(null_marker_bytes(col_idx)))
+                .collect(),
             lhs_signatures: HashSet::default(),
-            lhs_values: HashMap::default(),
-            hashes: Vec::new(),
             phase: StreamPhase::Left,
             metric: BaselineMetrics::new(&metrics, 0),
         }
@@ -1336,20 +1530,96 @@ mod test {
     }
 
     #[tokio::test]
-    async fn hash_collision_between_distinct_rows_keeps_rhs_row() {
-        // Regression test: dedup was based only on the 64-bit hash of the
-        // (compare_keys, ts) columns, without value-level verification. Two rows whose
-        // hashes collide (but whose compare-key values differ) made the RHS row be
-        // wrongly dropped.
-        //
-        // `datafusion_common::hash_utils::create_hashes` leaves the hash unchanged for
-        // null values, so the following two rows hash identically for ANY random state:
-        //   LHS: (ts=null, label=null, extra=7, value=1.0)
-        //        -> label null keeps 0; extra=7 => combine(hash(7), 0); ts null keeps it
-        //   RHS: (ts=7, label=null, extra=null, value=2.0)
-        //        -> label null keeps 0; extra null keeps 0; ts=7 => combine(hash(7), 0)
-        // Both rows end with the same combined hash, but their compare-key values
-        // (label, extra, ts) differ, so the RHS row must be preserved.
+    async fn null_value_rows_are_deduped_correctly() {
+        // Nulls must be handled exactly like any other value: a RHS row is suppressed
+        // only when its (compare_keys, ts) values are equal to an LHS row's. The
+        // columnar null-safe hash gives nulls a fixed, per-column deterministic
+        // marker, so rows whose compare keys contain nulls are matched by exact value
+        // equality and never conflated with rows that merely share null positions but
+        // differ elsewhere.
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, true),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("extra", DataType::Int64, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("rhs_ts", DataType::Int64, true),
+            Field::new("rhs_label", DataType::Utf8, true),
+            Field::new("rhs_extra", DataType::Int64, true),
+            Field::new("rhs_value", DataType::Float64, true),
+        ]));
+        let (left, right) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left, right, vec![1, 2], 0).unwrap();
+
+        // LHS: an all-null compare-key row (suppresses the identical RHS row) and a
+        // regular non-null row.
+        let lhs = RecordBatch::try_new(
+            left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![None::<i64>, Some(1)])),
+                Arc::new(StringArray::from(vec![None::<&str>, Some("k")])),
+                Arc::new(Int64Array::from(vec![None::<i64>, Some(2)])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(1.5)])),
+            ],
+        )
+        .unwrap();
+        // RHS:
+        //  - row 0 is value-equal to the LHS all-null row -> suppressed
+        //  - row 1 shares the null label but differs in `extra` and `ts` -> kept
+        //  - row 2 is fully non-null and unmatched -> kept
+        let rhs = RecordBatch::try_new(
+            right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![None::<i64>, Some(9), Some(3)])),
+                Arc::new(StringArray::from(vec![
+                    None::<&str>,
+                    None::<&str>,
+                    Some("other"),
+                ])),
+                Arc::new(Int64Array::from(vec![None::<i64>, Some(5), Some(6)])),
+                Arc::new(Float64Array::from(vec![Some(2.0), Some(2.5), Some(3.0)])),
+            ],
+        )
+        .unwrap();
+
+        let result = execute(&plan, lhs, rhs).await;
+        assert_eq!(
+            result.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            4,
+            "LHS rows are all kept, the identical all-null RHS row is deduped, and \
+             RHS rows whose compare keys differ (even in a null position) are preserved"
+        );
+        // The LHS null row itself is preserved.
+        let lhs_values = result[0]
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(lhs_values.values(), &[1.0, 1.5]);
+        // The filtered RHS batch keeps only the two non-matching rows, in order; the
+        // all-null duplicate is removed.
+        let rhs_values = result[1]
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(rhs_values.values(), &[2.5, 3.0]);
+    }
+
+    #[tokio::test]
+    async fn null_position_is_part_of_the_signature() {
+        // The base `create_hashes`-style hashing skips null columns, so the two rows
+        // below — LHS (label="v", extra=null, ts=6) and RHS (label="v", extra=6,
+        // ts=null) — produce the *same* hash: "v" in col0, the value 6 combined in
+        // position 1, and a null skipped in position 2 (for the LHS row it is the
+        // extra null at position 1 that is skipped, then 6 combined at position 2;
+        // for the RHS row 6 is combined at position 1 and the ts null skipped at
+        // position 2 — both end at combine(h(6), h("v"))). The rows are genuinely
+        // different (the value 6 lives in a different column) and the RHS row must
+        // be preserved. The columnar implementation combines a per-column distinct
+        // null marker instead of skipping, so the two chains differ and the RHS row
+        // is kept.
         let left_schema = Arc::new(Schema::new(vec![
             Field::new("ts", DataType::Int64, true),
             Field::new("label", DataType::Utf8, true),
@@ -1368,9 +1638,9 @@ mod test {
         let lhs = RecordBatch::try_new(
             left_schema,
             vec![
+                Arc::new(Int64Array::from(vec![Some(6)])),
+                Arc::new(StringArray::from(vec![Some("v")])),
                 Arc::new(Int64Array::from(vec![None::<i64>])),
-                Arc::new(StringArray::from(vec![None::<&str>])),
-                Arc::new(Int64Array::from(vec![Some(7)])),
                 Arc::new(Float64Array::from(vec![Some(1.0)])),
             ],
         )
@@ -1378,9 +1648,9 @@ mod test {
         let rhs = RecordBatch::try_new(
             right_schema,
             vec![
-                Arc::new(Int64Array::from(vec![Some(7)])),
-                Arc::new(StringArray::from(vec![None::<&str>])),
                 Arc::new(Int64Array::from(vec![None::<i64>])),
+                Arc::new(StringArray::from(vec![Some("v")])),
+                Arc::new(Int64Array::from(vec![Some(6)])),
                 Arc::new(Float64Array::from(vec![Some(2.0)])),
             ],
         )
@@ -1390,22 +1660,9 @@ mod test {
         assert_eq!(
             result.iter().map(RecordBatch::num_rows).sum::<usize>(),
             2,
-            "RHS row whose hash collides with an LHS row but whose compare-key values \
-             differ must not be deduped"
+            "the RHS row shares every value with the LHS row but the null sits in a \
+             different column, so it must NOT be deduped away"
         );
-        // LHS row: extra=7, value=1.0; RHS row: extra=null, value=2.0
-        let extra = result[1]
-            .column(2)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let values = result[1]
-            .column(3)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!(extra.is_null(0));
-        assert_eq!(values.value(0), 2.0);
     }
 
     #[tokio::test]
