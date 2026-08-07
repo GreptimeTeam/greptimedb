@@ -28,6 +28,8 @@ pub mod secure_fs;
 pub mod test_util;
 pub mod util;
 
+#[cfg(feature = "hdfs-object-store")]
+pub use config::HdfsConnection;
 pub use config::{AzblobConnection, GcsConnection, OssConnection, S3Connection};
 
 /// The default object cache directory name.

@@ -427,6 +427,13 @@ max_running_procedures = 128
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
+# Example of using HDFS as the storage with the native Rust client.
+# [storage]
+# type = "Hdfs"
+# root = "/greptimedb"
+# name_node = "hdfs://127.0.0.1:9000"
+# options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+
 ## The query engine options.
 [query]
 ## Parallelism of the query engine.
@@ -460,6 +467,7 @@ data_home = "./greptimedb_data"
 ## - `Gcs`: the data is stored in the Google Cloud Storage.
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
+## - `Hdfs`: the data is stored in the Hadoop Distributed File System.
 type = "File"
 
 ## The S3 bucket name.
@@ -467,10 +475,20 @@ type = "File"
 ## @toml2docs:none-default
 bucket = "greptimedb"
 
-## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
-## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## The directory or object prefix under which data is stored.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**.
 ## @toml2docs:none-default
 root = "greptimedb"
+
+## The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+name_node = "hdfs://127.0.0.1:9000"
+
+## Additional options passed to the native HDFS client.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+options = {}
 
 ## The access key id of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.

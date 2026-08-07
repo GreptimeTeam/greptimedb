@@ -10,6 +10,7 @@ test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
 enterprise = []
+hdfs-object-store = ["object-store/hdfs-object-store"]
 vector_index = ["dep:roaring", "index/vector_index"]
 
 [lints]
