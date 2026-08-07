@@ -212,6 +212,19 @@ impl CreateLogicalTablesProcedure {
     }
 }
 
+impl CreateLogicalTablesProcedure {
+    fn event_locators(&self) -> impl Iterator<Item = TableDdlLocator> + '_ {
+        self.data.tasks.iter().map(|task| {
+            TableDdlLocator::new(
+                &task.create_table.catalog_name,
+                &task.create_table.schema_name,
+                &task.create_table.table_name,
+            )
+            .with_physical_table_id(self.data.physical_table_id)
+        })
+    }
+}
+
 #[async_trait]
 impl Procedure for CreateLogicalTablesProcedure {
     fn type_name(&self) -> &str {
@@ -268,21 +281,11 @@ impl Procedure for CreateLogicalTablesProcedure {
             return None;
         }
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => {
-                let locators = self.data.tasks.iter().map(|task| {
-                    TableDdlLocator::new(
-                        &task.create_table.catalog_name,
-                        &task.create_table.schema_name,
-                        &task.create_table.table_name,
-                    )
-                    .with_physical_table_id(self.data.physical_table_id)
-                });
-                TableDdlEvent::create_logical_tables_submitted(
-                    locators,
-                    self.data.tasks.len(),
-                    self.data.event_context.clone(),
-                )
-            }
+            EventTrigger::Submitted => TableDdlEvent::create_logical_tables_submitted(
+                self.event_locators(),
+                self.data.tasks.len(),
+                self.data.event_context.clone(),
+            ),
             EventTrigger::Succeeded => match ctx.lifecycle_state {
                 ProcedureState::Done {
                     output: Some(output),
@@ -290,57 +293,26 @@ impl Procedure for CreateLogicalTablesProcedure {
                     .downcast_ref::<Vec<TableId>>()
                     .map(|table_ids| {
                         debug_assert_eq!(self.data.tasks.len(), table_ids.len());
-                        let locators =
-                            self.data
-                                .tasks
-                                .iter()
-                                .zip(table_ids)
-                                .map(|(task, table_id)| {
-                                    TableDdlLocator::new(
-                                        &task.create_table.catalog_name,
-                                        &task.create_table.schema_name,
-                                        &task.create_table.table_name,
-                                    )
-                                    .with_table_id(*table_id)
-                                    .with_physical_table_id(self.data.physical_table_id)
-                                });
+                        let locators = self
+                            .event_locators()
+                            .zip(table_ids)
+                            .map(|(locator, table_id)| locator.with_table_id(*table_id));
                         TableDdlEvent::create_logical_tables_succeeded(locators)
                     })
                     .unwrap_or_else(|| {
                         TableDdlEvent::lifecycle(
                             TableDdlEventType::CreateLogicalTables,
-                            self.data.tasks.iter().map(|task| {
-                                TableDdlLocator::new(
-                                    &task.create_table.catalog_name,
-                                    &task.create_table.schema_name,
-                                    &task.create_table.table_name,
-                                )
-                                .with_physical_table_id(self.data.physical_table_id)
-                            }),
+                            self.event_locators(),
                         )
                     }),
                 _ => TableDdlEvent::lifecycle(
                     TableDdlEventType::CreateLogicalTables,
-                    self.data.tasks.iter().map(|task| {
-                        TableDdlLocator::new(
-                            &task.create_table.catalog_name,
-                            &task.create_table.schema_name,
-                            &task.create_table.table_name,
-                        )
-                        .with_physical_table_id(self.data.physical_table_id)
-                    }),
+                    self.event_locators(),
                 ),
             },
             _ => TableDdlEvent::lifecycle(
                 TableDdlEventType::CreateLogicalTables,
-                self.data.tasks.iter().map(|task| {
-                    TableDdlLocator::new(
-                        &task.create_table.catalog_name,
-                        &task.create_table.schema_name,
-                        &task.create_table.table_name,
-                    )
-                    .with_physical_table_id(self.data.physical_table_id)
-                }),
+                self.event_locators(),
             ),
         };
 
