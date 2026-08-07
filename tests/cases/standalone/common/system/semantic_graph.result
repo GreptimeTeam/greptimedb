@@ -153,3 +153,111 @@ drop table graph_traces;
 
 Affected Rows: 0
 
+-- Declared edges: the physical table is created by the system on the first
+-- INSERT with its canonical schema. Re-asserting an edge stores a new revision;
+-- reads keep only the latest one per edge key.
+insert into greptime_private.semantic_relationships_declared
+  (observed_at, src_type, src_id, rel_type, dst_type, dst_id, provenance, scope, generation_id, confidence)
+values (now() - interval '10 minute', 'service', 'frontend', 'depends_on', 'service', 'users-db', 'declared', '', '', 0.5);
+
+Affected Rows: 1
+
+insert into greptime_private.semantic_relationships_declared
+  (observed_at, src_type, src_id, rel_type, dst_type, dst_id, provenance, scope, generation_id, confidence)
+values (now() - interval '5 minute', 'service', 'frontend', 'depends_on', 'service', 'users-db', 'declared', '', '', 1.0);
+
+Affected Rows: 1
+
+-- An old open-ended declaration stays valid until its row expires; an edge
+-- retired in the past must not appear.
+insert into greptime_private.semantic_relationships_declared
+  (observed_at, src_type, src_id, rel_type, dst_type, dst_id, provenance, scope, generation_id, valid_until)
+values
+  ('1970-01-01 00:00:01', 'service', 'legacy', 'depends_on', 'service', 'mainframe', 'declared', '', '', NULL),
+  ('1970-01-01 00:00:01', 'service', 'retired', 'depends_on', 'service', 'oldsys', 'declared', '', '', '2000-01-01 00:00:00');
+
+Affected Rows: 2
+
+select src_id, dst_id, rel_type, provenance, confidence
+from greptime_private.semantic_relationships
+order by src_id;
+
++----------+-----------+------------+------------+------------+
+| src_id   | dst_id    | rel_type   | provenance | confidence |
++----------+-----------+------------+------------+------------+
+| frontend | users-db  | depends_on | declared   | 1.0        |
+| legacy   | mainframe | depends_on | declared   |            |
++----------+-----------+------------+------------+------------+
+
+-- An explicit observed_at window replaces the default last hour; the emitted
+-- timestamps of declared edges are synthesized inside the queried window.
+select observed_at, window_start, fresh_until, src_id, dst_id
+from greptime_private.semantic_relationships
+where observed_at >= '2001-01-01 00:00:00' and observed_at < '2001-01-02 00:00:00'
+order by src_id;
+
++---------------------+---------------------+---------------------+--------+-----------+
+| observed_at         | window_start        | fresh_until         | src_id | dst_id    |
++---------------------+---------------------+---------------------+--------+-----------+
+| 2001-01-01T00:00:00 | 1970-01-01T00:00:01 | 2001-01-02T00:00:00 | legacy | mainframe |
++---------------------+---------------------+---------------------+--------+-----------+
+
+-- A lower bound alone is fine (the upper bound defaults to now)...
+select src_id, dst_id, provenance
+from greptime_private.semantic_relationships
+where observed_at >= now() - interval '30 minute'
+order by src_id;
+
++----------+-----------+------------+
+| src_id   | dst_id    | provenance |
++----------+-----------+------------+
+| frontend | users-db  | declared   |
+| legacy   | mainframe | declared   |
++----------+-----------+------------+
+
+-- ...but an upper bound alone would scan unbounded history: explicit error.
+select src_id from greptime_private.semantic_relationships
+where observed_at < '2001-01-02 00:00:00';
+
+Error: 3001(EngineExecuteQuery), Invalid SQL, error: the observed_at filter has no lower bound; the graph cannot derive over unbounded history — add e.g. observed_at >= '2026-01-01 00:00:00'
+
+-- The declared-edge table's definition is system-owned: user DDL is rejected
+-- (rows stay writable), and a physical table cannot be renamed into the name.
+create table greptime_private.semantic_relationships_declared (ts timestamp time index);
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+
+alter table greptime_private.semantic_relationships_declared add column extra string;
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+
+truncate table greptime_private.semantic_relationships_declared;
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+
+drop table greptime_private.semantic_relationships_declared;
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+
+create table greptime_private.declared_rename_probe (ts timestamp time index);
+
+Affected Rows: 0
+
+alter table greptime_private.declared_rename_probe rename semantic_relationships_declared;
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+
+drop table greptime_private.declared_rename_probe;
+
+Affected Rows: 0
+
+-- DELETE is plain DML and stays allowed; clean up all declared rows.
+delete from greptime_private.semantic_relationships_declared;
+
+Affected Rows: 4
+
+select src_id from greptime_private.semantic_relationships order by src_id;
+
+++
+++
+

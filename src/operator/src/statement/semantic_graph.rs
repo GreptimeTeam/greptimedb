@@ -1614,8 +1614,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, RELATIONSHIP_COLUMNS);
 
+        // (src_id, observed_at, window_start, window_end, fresh_until,
+        //  provenance, attributes)
+        type DeclaredRow = (String, i64, i64, i64, i64, String, Option<String>);
+
         let batches = collect(&ctx, plan).await;
-        let mut rows: Vec<(String, i64, i64, i64, i64, String, Option<String>)> = vec![];
+        let mut rows: Vec<DeclaredRow> = vec![];
         for batch in &batches {
             let observed = ts_values(batch, 0);
             let window_start = ts_values(batch, 1);
