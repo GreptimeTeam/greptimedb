@@ -27,8 +27,8 @@ use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
-    Procedure, ProcedureState, Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
+    LockKey, Procedure, ProcedureState, Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::tracing_context::TracingContext;
@@ -1072,7 +1072,10 @@ impl Procedure for BatchGcProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(BATCH_GC_EVENT_TYPE) {
             return None;
         }

@@ -24,7 +24,7 @@ use common_event_recorder::event_table::{
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Output, Procedure, ProcedureEvent,
+    ChildSubmissionOutcome, EventRuntimeContext, EventTrigger, Output, Procedure, ProcedureEvent,
     ProcedureId, ProcedureState, RetryPhase,
 };
 
@@ -357,7 +357,7 @@ fn event_for_state(
     lifecycle_state: &ProcedureState,
 ) -> Box<dyn Event> {
     procedure
-        .event(&EventContext {
+        .event(&EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,

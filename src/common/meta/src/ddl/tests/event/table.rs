@@ -24,8 +24,8 @@ use common_event_recorder::event_table::{
 };
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
-    RetryPhase,
+    ChildSubmissionOutcome, EventRuntimeContext, EventTrigger, Procedure, ProcedureId,
+    ProcedureState, RetryPhase,
 };
 use common_time::Timestamp;
 use serde_json::{Value as JsonValue, json};
@@ -637,7 +637,7 @@ fn event_for_state(
     lifecycle_state: &ProcedureState,
 ) -> Box<dyn Event> {
     procedure
-        .event(&EventContext {
+        .event(&EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,

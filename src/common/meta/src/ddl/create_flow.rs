@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureState, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
@@ -410,7 +410,10 @@ impl Procedure for CreateFlowProcedure {
         ])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(CREATE_FLOW_EVENT_TYPE) {
             return None;
         }

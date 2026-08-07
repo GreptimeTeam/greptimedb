@@ -20,7 +20,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context, EventContext, EventTrigger, LockKey, Procedure, Status};
+use common_procedure::{Context, EventRuntimeContext, EventTrigger, LockKey, Procedure, Status};
 use common_telemetry::{debug, error, info, warn};
 pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
@@ -322,7 +322,10 @@ impl Procedure for AlterLogicalTablesProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::AlterLogicalTables.as_str())

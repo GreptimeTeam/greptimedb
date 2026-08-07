@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
@@ -264,7 +264,10 @@ impl Procedure for PurgeDroppedTableProcedure {
         LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::PurgeDroppedTable.as_str())

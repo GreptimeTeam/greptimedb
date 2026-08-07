@@ -24,8 +24,8 @@ use common_catalog::consts::METRIC_ENGINE;
 use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
-    Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureState, Status,
 };
 use common_telemetry::{debug, error, warn};
 use futures::future;
@@ -260,7 +260,7 @@ impl Procedure for CreateLogicalTablesProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::CreateLogicalTables.as_str())

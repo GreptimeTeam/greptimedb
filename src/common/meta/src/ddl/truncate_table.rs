@@ -20,7 +20,7 @@ use api::v1::region::{
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::debug;
@@ -89,7 +89,10 @@ impl Procedure for TruncateTableProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::TruncateTable.as_str())

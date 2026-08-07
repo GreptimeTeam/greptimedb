@@ -49,7 +49,7 @@ use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventContext,
+    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext,
     EventTrigger, LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status,
     StringKey,
 };
@@ -797,7 +797,10 @@ impl Procedure for RepartitionProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(REPARTITION_EVENT_TYPE) {
             return None;
         }
@@ -1274,7 +1277,7 @@ mod tests {
         let all = Arc::new(EventTypeFilter::All);
 
         let submitted = procedure
-            .event(&EventContext {
+            .event(&EventRuntimeContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
@@ -1285,7 +1288,7 @@ mod tests {
         assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
 
         let allowed = procedure
-            .event(&EventContext {
+            .event(&EventRuntimeContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
@@ -1297,7 +1300,7 @@ mod tests {
         assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
 
         let succeeded = procedure
-            .event(&EventContext {
+            .event(&EventRuntimeContext {
                 procedure_id: ProcedureId::random(),
                 lifecycle_state: &state,
                 trigger: EventTrigger::Succeeded,
@@ -1306,7 +1309,7 @@ mod tests {
             .unwrap();
         assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
 
-        let filtered = procedure.event(&EventContext {
+        let filtered = procedure.event(&EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
@@ -1316,7 +1319,7 @@ mod tests {
         });
         assert!(filtered.is_none());
 
-        let empty = procedure.event(&EventContext {
+        let empty = procedure.event(&EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,

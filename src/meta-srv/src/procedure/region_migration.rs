@@ -50,7 +50,8 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, Status, StringKey,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure, Status,
+    StringKey,
 };
 use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
@@ -1000,7 +1001,7 @@ impl Procedure for RegionMigrationProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx.event_type_filter.allows(REGION_MIGRATION_EVENT_TYPE) {
             return None;
         }
@@ -1088,7 +1089,7 @@ mod tests {
 
         for trigger in triggers {
             let event = procedure
-                .event(&EventContext {
+                .event(&EventRuntimeContext {
                     procedure_id: common_procedure::ProcedureId::random(),
                     lifecycle_state: &state,
                     trigger,

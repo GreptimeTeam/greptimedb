@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
@@ -214,7 +214,7 @@ impl Procedure for DropViewProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx.event_type_filter.allows(DROP_VIEW_EVENT_TYPE) {
             return None;
         }

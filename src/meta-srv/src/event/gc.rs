@@ -243,7 +243,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use common_procedure::{
-        EventContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId, ProcedureState,
+        EventRuntimeContext, EventTrigger, Procedure, ProcedureEvent, ProcedureId, ProcedureState,
         RetryPhase,
     };
     use store_api::storage::FileId;
@@ -356,7 +356,7 @@ mod tests {
     fn test_batch_gc_event_filter() {
         let procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
-        let event_context = |trigger, lifecycle_state, event_type_filter| EventContext {
+        let event_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
@@ -468,7 +468,7 @@ mod tests {
     fn test_batch_gc_terminal_event_with_report() {
         let mut procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
-        let event_context = |trigger| EventContext {
+        let event_context = |trigger| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &running,
             trigger,

@@ -27,7 +27,7 @@ use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, ContextProvider, Error as ProcedureError, EventContext,
+    Context as ProcedureContext, ContextProvider, Error as ProcedureError, EventRuntimeContext,
     EventTrigger, LockKey, PoisonKey, PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
@@ -564,7 +564,10 @@ impl Procedure for AlterTableProcedure {
         PoisonKeys::new(vec![self.table_poison_key()])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::AlterTable.as_str())

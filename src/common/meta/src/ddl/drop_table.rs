@@ -22,8 +22,8 @@ use common_error::ext::BoxedError;
 use common_event_recorder::Event;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
-    Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
+    LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -414,7 +414,7 @@ impl Procedure for DropTableProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::DropTable.as_str())

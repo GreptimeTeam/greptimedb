@@ -23,7 +23,7 @@ use std::fmt::Debug;
 use common_error::ext::BoxedError;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
@@ -186,7 +186,10 @@ impl Procedure for DropDatabaseProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(DROP_DATABASE_EVENT_TYPE) {
             return None;
         }

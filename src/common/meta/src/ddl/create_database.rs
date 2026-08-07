@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
-    Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureId, Status,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
@@ -280,7 +280,10 @@ impl Procedure for CreateDatabaseProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(CREATE_DATABASE_EVENT_TYPE) {
             return None;
         }

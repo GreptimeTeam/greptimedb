@@ -23,8 +23,8 @@ use common_procedure::error::{
 };
 use common_procedure::local::DynamicKeyLockGuard;
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
-    ProcedureState, Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureId, ProcedureState, Status,
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -396,7 +396,10 @@ impl Procedure for CreateTableProcedure {
         ])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::CreateTable.as_str())
