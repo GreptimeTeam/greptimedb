@@ -1,0 +1,85 @@
+githubConfigUrl: "https://github.com/GreptimeTeam/greptimedb"
+githubConfigSecret: greptimedb-arc-github-app
+
+runnerScaleSetName: "perf-regression-ack"
+minRunners: 0
+maxRunners: 1
+
+template:
+  spec:
+    automountServiceAccountToken: false
+    activeDeadlineSeconds: 12600
+    # ACK nodepool bulk-ingestion-pool
+    # (id npb5ff93bea3a447a698fe31ebc997ea31) in the Hangzhou ACK cluster
+    # bulk-ingestion-test (c72c097b8b2bf4fd9946d31e9d41f632f). Node instances
+    # must be enterprise compute types (e.g. ecs.c7.2xlarge). The nodepool
+    # must be tainted with dedicated=perf-regression:NoSchedule before use.
+    nodeSelector:
+      alibabacloud.com/nodepool-id: npb5ff93bea3a447a698fe31ebc997ea31
+    # Match the dedicated=perf-regression:NoSchedule taint on the nodepool.
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: perf-regression
+        effect: NoSchedule
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1001
+      runAsGroup: 1001
+      fsGroup: 1001
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: runner
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        env:
+          # Cloud scale set has no persistent build cache and no build step
+          # (binaries come from GitHub artifacts), so no CARGO_*/RUSTUP_*/
+          # RUSTC_WRAPPER/SCCACHE_*/CARGO_TARGET_DIR/QUERY_REGRESSION_CACHE_META
+          # variables are needed.
+          # Proxy variables may be left empty or populated on demand via the
+          # ConfigMap if the cloud environment requires them.
+          - name: HTTP_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTP_PROXY
+                optional: true
+          - name: HTTPS_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTPS_PROXY
+                optional: true
+          - name: NO_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: NO_PROXY
+                optional: true
+          # Perf jobs drive the Python driver with uv; keep its cache dir.
+          - name: UV_CACHE_DIR
+            value: /home/runner/.cargo/uv-cache
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        # Perf runs both greptimedb base and candidate instances plus the
+        # load generator, so the request is below the 8C16G node capacity.
+        # Tune as needed; keep limits at the node capacity (8C16G).
+        resources:
+          requests:
+            cpu: "4"
+            memory: 12Gi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "8"
+            memory: 16Gi
+            ephemeral-storage: 40Gi

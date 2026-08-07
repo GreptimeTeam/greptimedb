@@ -319,3 +319,60 @@ cache service. Optional follow-ups are an image additionally seeded with the
 exact Rust toolchain and `cargo fetch --locked`; or an internal read/write
 sccache backend or Cargo/Git mirror. Evaluate them only if persistent PVC reuse
 is insufficient.
+
+## Cloud (ACK) scale set
+
+Perf runs execute on the Alibaba Cloud Hangzhou ACK cluster `bulk-ingestion-test`
+(`c72c097b8b2bf4fd9946d31e9d41f632f`), nodepool `bulk-ingestion-pool`
+(`npb5ff93bea3a447a698fe31ebc997ea31`). Builds still run on GitHub-hosted
+runners (see the workflow split); only the benchmark execution runs here. The
+scale set name is `perf-regression-ack`; its values are in
+`values-cloud.yaml`. The local `minipc-3` scale set remains available for the
+cold/warm canary flow described above.
+
+### Cloud prerequisites
+
+All of the following are Alibaba Cloud side configuration and must be completed
+**before** deploying the scale set:
+
+1. **Node instance specs**: use enterprise dedicated instance types (c7/g7
+   series, e.g. `ecs.c7.2xlarge`). Do **not** use economy (`e`), burstable
+   (`t`), or shared (`s`) types: their non-dedicated CPU scheduling contends
+   with other workloads and has no performance SLA, which pollutes perf data.
+2. **Elastic scaling and scheduling**: enable elastic scaling on the nodepool
+   (Cluster Autoscaler, min 0 / max as needed), taint it with
+   `dedicated=perf-regression:NoSchedule`, and apply the corresponding label.
+   The scale set values tolerate that taint and pin the runner to the nodepool
+   via `alibabacloud.com/nodepool-id`.
+3. **Egress**: the ACK cluster egress must reach GitHub (to pull jobs and
+   report results) and ACR (to pull the runner image).
+4. **ARC deployment**: install `gha-runner-scale-set-controller` and
+   `gha-runner-scale-set` in the ACK cluster with `values-cloud.yaml`. Deploy
+   commands mirror the local deployment section above; use namespace
+   `arc-runners` and the same GitHub App secret name
+   `greptimedb-arc-github-app` as locally. Follow the same paused-first
+   deployment and approval flow as the local scale set.
+
+### Differences from the local minipc version
+
+- **No persistent build cache**: there is no PVC and no
+  `initialize-build-cache` initContainer; binaries are passed via GitHub
+  artifacts, so no `CARGO_*`/`RUSTUP_*`/`SCCACHE_*` variables are set.
+- **Dynamic scaling**: the runner Pod is created only when a job arrives and
+  the nodepool scales on demand, then scales back to 0 after the run
+  (`minRunners=0`, `maxRunners=1`).
+- **Cost**: the nodepool is pay-as-you-go; scaling back to 0 after the run
+  keeps cost bounded.
+- **Pausing**: use the same `values-paused.yaml` overlay convention
+  (`minRunners=0`, `maxRunners=0`) to pause the cloud scale set.
+
+### Notes
+
+- Perf runs are serialized by the same concurrency group as the local scale
+  set.
+- Base and candidate must run on same-spec nodes. The `nodeSelector` pins
+  runners to the same nodepool; if stricter co-location is ever required, add a
+  `podAffinity` — this is currently only a note, not a configuration change.
+- All ACK nodepool/quota changes are write operations and require approval by
+  the responsible owner before execution. This document only records the
+  ready-state configuration.
