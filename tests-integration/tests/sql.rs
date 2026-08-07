@@ -83,6 +83,8 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_regclass_bind_parameter,
+                test_postgres_cached_plan_contract,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
@@ -1323,6 +1325,288 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_postgres_regclass_bind_parameter(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_regclass_bind_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .simple_query(
+            "CREATE TABLE test_adbc_app_logs (\"service\" STRING, \"message\" STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+
+    let pgadbc_query = "SELECT attr.attname FROM pg_catalog.pg_class AS cls \
+        INNER JOIN pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid \
+        INNER JOIN pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid \
+        WHERE attr.attnum >= 0 AND cls.oid = $1::regclass::oid ORDER BY attr.attnum";
+    let pgadbc_statement = client.prepare(pgadbc_query).await.unwrap();
+    let pgadbc_diagnostic_query = "SELECT attr.attnum, attr.attname FROM pg_catalog.pg_class AS cls \
+        INNER JOIN pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid \
+        INNER JOIN pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid \
+        WHERE attr.attnum >= 0 AND cls.oid = $1::regclass::oid ORDER BY attr.attnum";
+    let pgadbc_diagnostic_statement = client.prepare(pgadbc_diagnostic_query).await.unwrap();
+
+    for table_name in [
+        "test_adbc_app_logs",
+        "\"test_adbc_app_logs\"",
+        "public.test_adbc_app_logs",
+        "\"public\".\"test_adbc_app_logs\"",
+    ] {
+        let rows = client
+            .query(&pgadbc_statement, &[&table_name])
+            .await
+            .unwrap();
+        assert!(!rows.is_empty(), "{table_name} should resolve to a table");
+        let names = rows
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>();
+        let diagnostic_rows = client
+            .query(&pgadbc_diagnostic_statement, &[&table_name])
+            .await
+            .unwrap();
+        let diagnostic_pairs = diagnostic_rows
+            .iter()
+            .map(|row| (row.get::<_, i16>(0), row.get::<_, String>(1)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["service", "message", "ts"],
+            "primary query for {table_name} returned unexpected ordered names; diagnostic attnum/name pairs: {diagnostic_pairs:?}",
+        );
+        assert_eq!(
+            diagnostic_pairs,
+            [
+                (1, "service".to_string()),
+                (2, "message".to_string()),
+                (3, "ts".to_string()),
+            ],
+            "diagnostic query for {table_name} returned unexpected attnum/name pairs",
+        );
+    }
+
+    let relname_statement = client
+        .prepare("SELECT cls.oid FROM pg_catalog.pg_class AS cls WHERE cls.relname = $1")
+        .await
+        .unwrap();
+    let rows = client
+        .query(&relname_statement, &[&"\"test_adbc_app_logs\""])
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "quoted text is not a relation name");
+
+    client
+        .simple_query("CREATE DATABASE adbc_override")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE adbc_override.test_adbc_app_logs (override_column STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    client
+        .simple_query("SET search_path TO adbc_override, public")
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"test_adbc_app_logs"])
+        .await
+        .unwrap();
+    let names = rows
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    let diagnostic_rows = client
+        .query(&pgadbc_diagnostic_statement, &[&"test_adbc_app_logs"])
+        .await
+        .unwrap();
+    let diagnostic_pairs = diagnostic_rows
+        .iter()
+        .map(|row| (row.get::<_, i16>(0), row.get::<_, String>(1)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["override_column", "ts"],
+        "primary query after changing search_path returned unexpected ordered names; diagnostic attnum/name pairs: {diagnostic_pairs:?}",
+    );
+    assert_eq!(
+        diagnostic_pairs,
+        [(1, "override_column".to_string()), (2, "ts".to_string())],
+        "diagnostic query after changing search_path returned unexpected attnum/name pairs",
+    );
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"public.test_adbc_app_logs"])
+        .await
+        .unwrap();
+    let names = rows
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    let diagnostic_rows = client
+        .query(
+            &pgadbc_diagnostic_statement,
+            &[&"public.test_adbc_app_logs"],
+        )
+        .await
+        .unwrap();
+    let diagnostic_pairs = diagnostic_rows
+        .iter()
+        .map(|row| (row.get::<_, i16>(0), row.get::<_, String>(1)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["service", "message", "ts"],
+        "primary query with an explicit public schema returned unexpected ordered names; diagnostic attnum/name pairs: {diagnostic_pairs:?}",
+    );
+    assert_eq!(
+        diagnostic_pairs,
+        [
+            (1, "service".to_string()),
+            (2, "message".to_string()),
+            (3, "ts".to_string()),
+        ],
+        "diagnostic query with an explicit public schema returned unexpected attnum/name pairs",
+    );
+
+    client
+        .simple_query("SET search_path TO public")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE adbc_override.test_adbc_app_logs")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP DATABASE adbc_override")
+        .await
+        .unwrap();
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_cached_plan_contract(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_cached_plan_contract").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .simple_query("CREATE TABLE cached_plan_contract (v BIGINT, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+    client
+        .simple_query("CREATE DATABASE cached_plan_override")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE cached_plan_override.cached_plan_contract (v DOUBLE, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    client
+        .simple_query("CREATE TABLE cached_plan_arity_contract (v BIGINT, ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE cached_plan_override.cached_plan_arity_contract (v BIGINT, extra BIGINT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+
+    // The projection is stable; only the inferred bind type changes from INT8 to FLOAT8.
+    let parameter_statement = client
+        .prepare("SELECT 1 FROM cached_plan_contract WHERE v = $1")
+        .await
+        .unwrap();
+    let result_statement = client
+        .prepare("SELECT v FROM cached_plan_contract")
+        .await
+        .unwrap();
+    let arity_statement = client
+        .prepare("SELECT * FROM cached_plan_arity_contract")
+        .await
+        .unwrap();
+
+    client
+        .simple_query("SET search_path TO cached_plan_override, public")
+        .await
+        .unwrap();
+
+    assert_cached_plan_error(
+        client
+            .query(&parameter_statement, &[&42i64])
+            .await
+            .unwrap_err(),
+        "cached plan must not change parameter type",
+    );
+    assert_cached_plan_error(
+        client.query(&result_statement, &[]).await.unwrap_err(),
+        "cached plan must not change result type",
+    );
+    assert_cached_plan_error(
+        client.query(&arity_statement, &[]).await.unwrap_err(),
+        "cached plan must not change result type",
+    );
+    assert_eq!(
+        1,
+        client.query("SELECT 1", &[]).await.unwrap().len(),
+        "the connection must remain usable after a cached-plan error"
+    );
+
+    client
+        .simple_query("SET search_path TO public")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE cached_plan_override.cached_plan_contract")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE cached_plan_override.cached_plan_arity_contract")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP DATABASE cached_plan_override")
+        .await
+        .unwrap();
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
     let (mut guard, fe_pg_server) =
         setup_pg_server(store_type, "test_postgres_uint64_parameter").await;
@@ -1440,6 +1724,12 @@ fn assert_pg_numeric_range_error(error: tokio_postgres::Error) {
     let error = error.as_db_error().expect("expected PostgreSQL user error");
     assert_eq!("22023", error.code().code());
     assert_eq!("numeric_value_out_of_range", error.message());
+}
+
+fn assert_cached_plan_error(error: tokio_postgres::Error, message: &str) {
+    let error = error.as_db_error().expect("expected PostgreSQL user error");
+    assert_eq!("0A000", error.code().code());
+    assert_eq!(message, error.message());
 }
 
 pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {

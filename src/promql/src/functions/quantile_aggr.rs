@@ -82,7 +82,6 @@ impl QuantileAccumulator {
         }
 
         let q = match &args.exprs[0]
-            .as_any()
             .downcast_ref::<Literal>()
             .map(|lit| lit.value())
         {

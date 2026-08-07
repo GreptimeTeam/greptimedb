@@ -15,7 +15,7 @@ SELECT approx_median(i) FROM odd_test;
 +---------------------------+
 | approx_median(odd_test.i) |
 +---------------------------+
-| 3                         |
+| 3.0                       |
 +---------------------------+
 
 -- Test with even number of values
@@ -33,7 +33,7 @@ SELECT approx_median(i) FROM even_test;
 +----------------------------+
 | approx_median(even_test.i) |
 +----------------------------+
-| 3                          |
+| 3.25                       |
 +----------------------------+
 
 -- Test with larger dataset
@@ -50,7 +50,7 @@ SELECT approx_median(val) FROM large_test;
 +-------------------------------+
 | approx_median(large_test.val) |
 +-------------------------------+
-| 499                           |
+| 499.25                        |
 +-------------------------------+
 
 -- Test with groups
@@ -59,9 +59,9 @@ SELECT grp, approx_median(val) FROM large_test GROUP BY grp ORDER BY grp;
 +-----+-------------------------------+
 | grp | approx_median(large_test.val) |
 +-----+-------------------------------+
-| 0   | 498                           |
-| 1   | 499                           |
-| 2   | 500                           |
+| 0   | 498.75                        |
+| 1   | 499.32142857142856            |
+| 2   | 500.32142857142856            |
 +-----+-------------------------------+
 
 -- Test with doubles
@@ -111,7 +111,7 @@ SELECT approx_median(val) FROM dup_test;
 +-----------------------------+
 | approx_median(dup_test.val) |
 +-----------------------------+
-| 2                           |
+| 2.75                        |
 +-----------------------------+
 
 -- Compare with exact median
@@ -120,7 +120,7 @@ SELECT median(val), approx_median(val) FROM dup_test;
 +----------------------+-----------------------------+
 | median(dup_test.val) | approx_median(dup_test.val) |
 +----------------------+-----------------------------+
-| 2                    | 2                           |
+| 2.5                  | 2.75                        |
 +----------------------+-----------------------------+
 
 -- Test edge cases
@@ -139,7 +139,7 @@ SELECT approx_median(i) FROM odd_test WHERE i = 3;
 +---------------------------+
 | approx_median(odd_test.i) |
 +---------------------------+
-| 3                         |
+| 3.0                       |
 +---------------------------+
 
 -- Test with negative values
@@ -156,7 +156,7 @@ SELECT approx_median(val) FROM neg_test;
 +-----------------------------+
 | approx_median(neg_test.val) |
 +-----------------------------+
-| 0                           |
+| 0.0                         |
 +-----------------------------+
 
 -- cleanup

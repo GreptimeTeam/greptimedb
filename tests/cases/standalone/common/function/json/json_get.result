@@ -450,8 +450,10 @@ SELECT json_to_string(j) FROM jsons WHERE json_to_string(json_get_object(j, 'a.b
 
 SELECT json_to_string(j) FROM jsons WHERE json_get_string(json_get_object(j, 'a.x'), 'c') == 'foo';
 
-++
-++
++-------------------------+
+| json_to_string(jsons.j) |
++-------------------------+
++-------------------------+
 
 DROP TABLE jsons;
 

@@ -71,7 +71,7 @@ impl WindowedSortPhysicalRule {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let result = plan
             .transform_down(|plan| {
-                if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
+                if let Some(sort_exec) = plan.downcast_ref::<SortExec>() {
                     // TODO: support multiple expr in windowed sort
                     if sort_exec.expr().len() != 1 {
                         return Ok(Transformed::no(plan));
@@ -88,10 +88,7 @@ impl WindowedSortPhysicalRule {
                     let input_schema = sort_input.schema();
 
                     let first_sort_expr = sort_exec.expr().first();
-                    if let Some(column_expr) = first_sort_expr
-                        .expr
-                        .as_any()
-                        .downcast_ref::<PhysicalColumn>()
+                    if let Some(column_expr) = first_sort_expr.expr.downcast_ref::<PhysicalColumn>()
                         && matches!(
                             input_schema.field(column_expr.index()).data_type(),
                             DataType::Timestamp(_, _)
@@ -165,26 +162,26 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut tag_columns = None;
 
     input.transform_up(|plan| {
-        if plan.as_any().is::<CooperativeExec>() {
+        if plan.is::<CooperativeExec>() {
             return Ok(Transformed::no(plan));
         }
 
         // Unappliable case, reset the state.
-        if plan.as_any().is::<RepartitionExec>()
-            || plan.as_any().is::<CoalescePartitionsExec>()
-            || plan.as_any().is::<SortExec>()
-            || plan.as_any().is::<WindowedSortExec>()
+        if plan.is::<RepartitionExec>()
+            || plan.is::<CoalescePartitionsExec>()
+            || plan.is::<SortExec>()
+            || plan.is::<WindowedSortExec>()
         {
             partition_ranges = None;
         }
 
         // only a very limited set of plans can exist between region scan and sort exec
         // other plans might make this optimize wrong, so be safe here by limiting it
-        if !(plan.as_any().is::<ProjectionExec>() || plan.as_any().is::<FilterExec>()) {
+        if !(plan.is::<ProjectionExec>() || plan.is::<FilterExec>()) {
             partition_ranges = None;
         }
 
-        if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+        if let Some(region_scan_exec) = plan.downcast_ref::<RegionScanExec>() {
             // `PerSeries` distribution is not supported in windowed sort.
             if region_scan_exec.distribution()
                 == Some(store_api::storage::TimeSeriesDistribution::PerSeries)
@@ -216,11 +213,11 @@ fn is_time_index_expr(
     plan: &Arc<dyn ExecutionPlan>,
     expr: &Arc<dyn PhysicalExpr>,
 ) -> DataFusionResult<bool> {
-    if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
+    if let Some(column_expr) = expr.downcast_ref::<PhysicalColumn>() {
         return is_time_index_column(plan, column_expr);
     }
 
-    if let Some(cast_expr) = expr.as_any().downcast_ref::<CastExpr>() {
+    if let Some(cast_expr) = expr.downcast_ref::<CastExpr>() {
         return if matches!(cast_expr.cast_type(), DataType::Timestamp(_, _)) {
             is_time_index_expr(plan, cast_expr.expr())
         } else {
@@ -228,7 +225,7 @@ fn is_time_index_expr(
         };
     }
 
-    if let Some(scalar_function_expr) = expr.as_any().downcast_ref::<ScalarFunctionExpr>() {
+    if let Some(scalar_function_expr) = expr.downcast_ref::<ScalarFunctionExpr>() {
         return if is_supported_time_index_wrapper(scalar_function_expr)
             && scalar_function_expr.args().len() == 1
         {
@@ -245,14 +242,14 @@ fn is_time_index_column(
     plan: &Arc<dyn ExecutionPlan>,
     column_expr: &PhysicalColumn,
 ) -> DataFusionResult<bool> {
-    if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
         let Some(projection_expr) = projection.expr().get(column_expr.index()) else {
             return Ok(false);
         };
         return is_time_index_expr(projection.input(), &projection_expr.expr);
     }
 
-    if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
+    if let Some(filter) = plan.downcast_ref::<FilterExec>() {
         let child_column_expr = filter
             .projection()
             .as_ref()
@@ -268,7 +265,7 @@ fn is_time_index_column(
         return is_time_index_expr(filter.input(), &child_expr);
     }
 
-    if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+    if let Some(region_scan_exec) = plan.downcast_ref::<RegionScanExec>() {
         let schema = plan.schema();
         let column_field = schema.field(column_expr.index());
         return Ok(
@@ -285,9 +282,9 @@ fn is_time_index_column(
 }
 
 fn passthrough_child(plan: &dyn ExecutionPlan) -> Option<Arc<dyn ExecutionPlan>> {
-    if plan.as_any().is::<CoalescePartitionsExec>()
-        || plan.as_any().is::<RepartitionExec>()
-        || plan.as_any().is::<CooperativeExec>()
+    if plan.is::<CoalescePartitionsExec>()
+        || plan.is::<RepartitionExec>()
+        || plan.is::<CooperativeExec>()
     {
         return schema_preserving_child(plan);
     }
@@ -314,12 +311,12 @@ fn remove_repartition(
     plan: Arc<dyn ExecutionPlan>,
 ) -> DataFusionResult<Transformed<Arc<dyn ExecutionPlan>>> {
     plan.transform_down(|plan| {
-        if plan.as_any().is::<FilterExec>() {
+        if plan.is::<FilterExec>() {
             // Checks child.
             let maybe_repartition = plan.children()[0];
-            if maybe_repartition.as_any().is::<RepartitionExec>() {
+            if maybe_repartition.is::<RepartitionExec>() {
                 let maybe_scan = maybe_repartition.children()[0];
-                if maybe_scan.as_any().is::<RegionScanExec>() {
+                if maybe_scan.is::<RegionScanExec>() {
                     let new_filter = plan.clone().with_new_children(vec![maybe_scan.clone()])?;
                     return Ok(Transformed::yes(new_filter));
                 }

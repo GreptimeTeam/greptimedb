@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -325,10 +324,6 @@ pub struct AbsentExec {
 }
 
 impl ExecutionPlan for AbsentExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }

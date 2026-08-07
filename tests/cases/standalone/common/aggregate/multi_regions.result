@@ -59,9 +59,9 @@ select sum(val) from t;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[sum(t.val)] REDACTED
+| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
@@ -93,9 +93,9 @@ select sum(val) from t group by idc;
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[sum(t.val)@1 as sum(t.val)] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[idc@0 as idc], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED

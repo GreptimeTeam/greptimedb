@@ -68,7 +68,7 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SortPreservingMergeExec: [k@0 ASC NULLS LAST, j@1 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[k@0 ASC NULLS LAST, j@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[k@0 as k, j@1 as j], aggr=[avg(prom_irate(j_range,i))] REDACTED
+|_|_|_AggregateExec: mode=SinglePartitioned, gby=[k@0 as k, j@1 as j], aggr=[__avg_merge(__avg_state(prom_irate(j_range,i))) as avg(prom_irate(j_range,i))] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[k@0 as k, j@1 as j], aggr=[__avg_state(prom_irate(j_range,i))] REDACTED

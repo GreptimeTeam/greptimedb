@@ -120,7 +120,6 @@ impl UddSketchState {
 
 fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
     let bucket_size = match args.exprs[0]
-        .as_any()
         .downcast_ref::<Literal>()
         .map(|lit| lit.value())
     {
@@ -135,7 +134,6 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
     };
 
     let error_rate = match args.exprs[1]
-        .as_any()
         .downcast_ref::<Literal>()
         .map(|lit| lit.value())
     {

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use arrow_schema::SchemaRef;
+use arrow_schema::{Schema as ArrowSchema, SchemaRef};
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME, PG_CATALOG_TABLE_ID_START};
 use common_error::ext::BoxedError;
@@ -205,7 +205,9 @@ impl CatalogInfo for CatalogManagerWrapper {
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-        Ok(table.map(|t| t.schema().arrow_schema().clone()))
+        Ok(table.map(|t| {
+            schema_in_column_id_order(t.table_info().as_ref(), t.schema().arrow_schema().clone())
+        }))
     }
 
     async fn table_type(
@@ -222,6 +224,51 @@ impl CatalogInfo for CatalogManagerWrapper {
 
         Ok(table.map(|t| t.table_type().into()))
     }
+}
+
+/// Restores real PostgreSQL's `attnum` order from column IDs when table
+/// metadata provides a complete, unique set of IDs. IDs are monotonically
+/// allocated by `TableMeta::alloc_new_column`, so sorting them preserves
+/// declaration order across the physical key/value/time-index layout and
+/// tolerates dropped-column gaps. As in real PostgreSQL, which can only append
+/// columns, this matches `SELECT *` order for plain `ADD COLUMN` appends but
+/// diverges for positional adds (`ADD COLUMN ... FIRST/AFTER`): the new column
+/// has the highest ID and sorts last here while `SELECT *` shows it at the
+/// requested position. Older or incomplete metadata falls back to its physical
+/// schema order.
+fn schema_in_column_id_order(
+    table_info: &table::metadata::TableInfo,
+    schema: SchemaRef,
+) -> SchemaRef {
+    let column_ids = &table_info.meta.column_ids;
+    if column_ids.len() != schema.fields().len()
+        || column_ids
+            .iter()
+            .any(|id| *id >= table_info.meta.next_column_id)
+        || {
+            let mut unique_ids = column_ids.clone();
+            unique_ids.sort_unstable();
+            unique_ids.windows(2).any(|ids| ids[0] == ids[1])
+        }
+    {
+        return schema;
+    }
+
+    let mut fields = schema
+        .fields()
+        .iter()
+        .cloned()
+        .zip(column_ids.iter().copied())
+        .collect::<Vec<_>>();
+    fields.sort_unstable_by_key(|(_, id)| *id);
+
+    Arc::new(ArrowSchema::new_with_metadata(
+        fields
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect::<Vec<_>>(),
+        schema.metadata().clone(),
+    ))
 }
 
 struct DFTableProviderAsSystemTable {
@@ -310,5 +357,142 @@ impl SystemTable for DFTableProviderAsSystemTable {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use table::metadata::{TableIdent, TableInfo, TableMeta, TableType};
+
+    use super::*;
+
+    fn table_info(column_ids: Vec<u32>, next_column_id: u32) -> TableInfo {
+        let mut physical_tag =
+            ColumnSchema::new("physical_tag", ConcreteDataType::string_datatype(), true);
+        physical_tag
+            .mut_metadata()
+            .insert("test:metadata".to_string(), "preserved".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("value", ConcreteDataType::int64_datatype(), true),
+            physical_tag,
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+
+        TableInfo {
+            ident: TableIdent::new(1),
+            name: "demo".to_string(),
+            desc: None,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            meta: TableMeta {
+                schema,
+                primary_key_indices: vec![1],
+                value_indices: vec![0, 2],
+                engine: "mito".to_string(),
+                next_column_id,
+                options: Default::default(),
+                created_on: Default::default(),
+                updated_on: Default::default(),
+                partition_key_indices: vec![],
+                column_ids,
+            },
+            table_type: TableType::Base,
+        }
+    }
+
+    #[test]
+    fn test_schema_in_column_id_order_preserves_metadata_and_gaps() {
+        let table_info = table_info(vec![3, 1, 4], 5);
+        let ordered =
+            schema_in_column_id_order(&table_info, table_info.meta.schema.arrow_schema().clone());
+
+        assert_eq!(
+            ordered
+                .fields()
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>(),
+            ["physical_tag", "value", "ts"]
+        );
+        assert_eq!(
+            ordered.fields()[0].metadata().get("test:metadata"),
+            Some(&"preserved".to_string())
+        );
+    }
+
+    #[test]
+    fn test_schema_in_column_id_order_keeps_physical_order_for_incomplete_ids() {
+        let table_info = table_info(vec![3, 1], 5);
+        let ordered =
+            schema_in_column_id_order(&table_info, table_info.meta.schema.arrow_schema().clone());
+
+        assert_eq!(
+            ordered
+                .fields()
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>(),
+            ["value", "physical_tag", "ts"]
+        );
+    }
+
+    #[test]
+    fn test_schema_in_column_id_order_places_positional_add_last() {
+        // `ALTER TABLE ... ADD COLUMN ... FIRST` puts the new column at the head
+        // of the physical schema (`SELECT *` order) but gives it the highest
+        // column id, so column-id (`attnum`) order places it last, matching real
+        // PostgreSQL which can only append columns.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("new_col", ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let table_info = TableInfo {
+            ident: TableIdent::new(1),
+            name: "demo".to_string(),
+            desc: None,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            meta: TableMeta {
+                schema,
+                primary_key_indices: vec![1],
+                value_indices: vec![0, 2],
+                engine: "mito".to_string(),
+                next_column_id: 4,
+                options: Default::default(),
+                created_on: Default::default(),
+                updated_on: Default::default(),
+                partition_key_indices: vec![],
+                // new_col sits first in the physical schema but has the highest id.
+                column_ids: vec![3, 1, 2],
+            },
+            table_type: TableType::Base,
+        };
+
+        let ordered =
+            schema_in_column_id_order(&table_info, table_info.meta.schema.arrow_schema().clone());
+
+        assert_eq!(
+            ordered
+                .fields()
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>(),
+            ["value", "ts", "new_col"]
+        );
     }
 }

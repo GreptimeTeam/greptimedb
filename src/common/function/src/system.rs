@@ -48,6 +48,9 @@ impl SystemFunction {
 
 macro_rules! define_nullary_udf {
     ($(#[$attr:meta])* $name: ident) => {
+        define_nullary_udf!($(#[$attr])* $name, Volatility::Immutable);
+    };
+    ($(#[$attr:meta])* $name: ident, $volatility:expr) => {
         $(#[$attr])*
         #[derive(Clone, Debug, derive_more::Display)]
         #[display("{}", self.name())]
@@ -58,7 +61,7 @@ macro_rules! define_nullary_udf {
         impl Default for $name {
             fn default() -> Self {
                 Self {
-                    signature: datafusion_expr::Signature::nullary(Volatility::Immutable),
+                    signature: datafusion_expr::Signature::nullary($volatility),
                 }
             }
         }

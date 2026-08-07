@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_legacy_region_wal_options_from_encoded_map() {
-        let legacy_region_wal_options = HashMap::from([
+        let legacy_region_wal_options = std::collections::BTreeMap::from([
             (1, serde_json::to_string(&WalOptions::RaftEngine).unwrap()),
             (
                 2,

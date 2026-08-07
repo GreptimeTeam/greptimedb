@@ -32,6 +32,9 @@ ADMIN FLUSH_TABLE('lateral_dim');
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE partitioning=Hash\(\[k@(\d+)\],\s*\d+\) partitioning=Hash([k@$1], REDACTED)
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE (input_partitions=REDACTED)(\s+)\| $1|
 EXPLAIN SELECT f.k, d.threshold
 FROM lateral_fact f,
 LATERAL (

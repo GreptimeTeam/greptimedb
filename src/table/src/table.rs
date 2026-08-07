@@ -217,10 +217,10 @@ fn default_constraint_to_expr(
                 CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN
             ) =>
         {
-            Some(Expr::Cast(Cast {
-                expr: Box::new(NOW_EXPR.clone()),
-                data_type: target_type.as_arrow_type(),
-            }))
+            Some(Expr::Cast(Cast::new(
+                Box::new(NOW_EXPR.clone()),
+                target_type.as_arrow_type(),
+            )))
         }
 
         ColumnDefaultConstraint::Function(_) => None,
@@ -260,10 +260,12 @@ mod tests {
                          Expr::Literal(ScalarValue::Utf8(Some(s)), _) if s == "test"));
         assert!(matches!(
             column_defaults.get("ts").unwrap(),
-            Expr::Cast(Cast {
-                expr,
-                data_type
-            }) if **expr == *NOW_EXPR && *data_type == ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type()
+            Expr::Cast(Cast { expr, field })
+                if **expr == *NOW_EXPR
+                    && field.data_type() == &ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type()
+                    && field.is_nullable()
+                    && field.name().is_empty()
+                    && field.metadata().is_empty()
         ));
     }
 }

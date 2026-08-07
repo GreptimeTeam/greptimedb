@@ -176,7 +176,7 @@ fn remap_physical_expr_columns(
     expr: Arc<dyn PhysicalExpr>,
     input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> Result<Arc<dyn PhysicalExpr>> {
-    if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+    if let Some(column) = expr.downcast_ref::<Column>() {
         return Ok(Arc::new(Column::new_with_schema(
             column.name(),
             input_schema,
