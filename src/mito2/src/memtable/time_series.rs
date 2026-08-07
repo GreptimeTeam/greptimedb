@@ -32,8 +32,8 @@ use datatypes::prelude::{ScalarVector, Vector, VectorRef};
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
-    Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt8Vector, UInt64Vector,
+    Helper, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt8Vector, UInt64Vector,
 };
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
@@ -71,6 +71,12 @@ const INITIAL_BUILDER_CAPACITY: usize = 4;
 
 /// Vector builder capacity.
 const BUILDER_CAPACITY: usize = 512;
+
+fn checked_string_values_size(mut lengths: impl Iterator<Item = usize>) -> Option<i32> {
+    lengths.try_fold(0_i32, |size, len| {
+        size.checked_add(i32::try_from(len).ok()?)
+    })
+}
 
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
@@ -922,26 +928,40 @@ impl ValueBuilder {
     /// Checks if current value builder have sufficient space to accommodate `fields`.
     /// Returns false if there is no space to accommodate fields due to offset overflow.
     pub(crate) fn can_accommodate(&self, fields: &[VectorRef]) -> Result<bool> {
-        for (field_src, field_dest) in fields.iter().zip(self.fields.iter()) {
-            let Some(builder) = field_dest else {
+        for ((field_src, field_dest), field_type) in fields
+            .iter()
+            .zip(self.fields.iter())
+            .zip(self.field_types.iter())
+        {
+            if !matches!(field_type, ConcreteDataType::String(_)) {
                 continue;
-            };
-            let FieldBuilder::String(builder) = builder else {
-                continue;
+            }
+            let current_size = match field_dest {
+                Some(FieldBuilder::String(builder)) => builder.next_offset(),
+                None => 0,
+                Some(FieldBuilder::Other(_)) => unreachable!(),
             };
             let array = field_src.to_arrow_array();
-            let string_array = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .with_context(|| error::InvalidBatchSnafu {
-                    reason: format!(
-                        "Field type mismatch, expecting String, given: {}",
-                        field_src.data_type()
-                    ),
-                })?;
-            let space_needed = string_array.value_data().len() as i32;
+            let space_needed =
+                if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
+                    i32::try_from(string_array.value_data().len()).ok()
+                } else {
+                    let string_vector = field_src
+                        .as_any()
+                        .downcast_ref::<StringVector>()
+                        .with_context(|| error::InvalidBatchSnafu {
+                            reason: format!(
+                                "Field type mismatch, expecting String, given: {}",
+                                field_src.data_type()
+                            ),
+                        })?;
+                    checked_string_values_size(string_vector.iter_data().flatten().map(str::len))
+                };
+            let Some(space_needed) = space_needed else {
+                return Ok(false);
+            };
             // offset may overflow
-            if builder.next_offset().checked_add(space_needed).is_none() {
+            if current_size.checked_add(space_needed).is_none() {
                 return Ok(false);
             }
         }
@@ -1017,17 +1037,26 @@ impl ValueBuilder {
             match builder {
                 FieldBuilder::String(builder) => {
                     let array = field_src.to_arrow_array();
-                    let string_array =
-                        array
+                    if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
+                        builder.append_array(string_array);
+                    } else {
+                        let string_vector = field_src
                             .as_any()
-                            .downcast_ref::<StringArray>()
+                            .downcast_ref::<StringVector>()
                             .with_context(|| error::InvalidBatchSnafu {
                                 reason: format!(
                                     "Field type mismatch, expecting String, given: {}",
                                     field_src.data_type()
                                 ),
                             })?;
-                    builder.append_array(string_array);
+                        for value in string_vector.iter_data() {
+                            if let Some(value) = value {
+                                builder.append(value);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                    }
                 }
                 FieldBuilder::Other(builder) => {
                     let len = field_src.len();

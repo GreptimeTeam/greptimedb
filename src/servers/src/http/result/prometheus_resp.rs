@@ -439,6 +439,7 @@ impl PrometheusJsonResponse {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::StringViewArray;
     use common_query::native_histogram::{
         CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, Span, build_histogram_array,
         native_histogram_value_type,
@@ -585,6 +586,57 @@ mod tests {
         assert_eq!(*timestamp, 1.0);
         assert_eq!(histogram.count, "2");
         assert_eq!(histogram.sum, "3");
+    }
+
+    #[test]
+    fn label_replace_with_utf8view_labels_does_not_panic() {
+        // A PromQL `label_replace` query produces its new label through DataFusion's
+        // `regexp_replace`, whose output materializes as a `Utf8View` array even when
+        // the source label is a plain `Utf8`. Serializing such labels must not assume
+        // the column is a `StringArray`.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("host_copy", ConcreteDataType::utf8_view_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000])) as _,
+                Arc::new(StringVector::from(vec![Some("server-01")])) as _,
+                Arc::new(StringVector::from(StringViewArray::from(vec![Some(
+                    "server-01",
+                )]))) as _,
+                Arc::new(Float64Vector::from(vec![Some(1.0)])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            batches,
+            Some("label_replace_repro".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].metric["__name__"], "label_replace_repro");
+        assert_eq!(series[0].metric["host"], "server-01");
+        assert_eq!(series[0].metric["host_copy"], "server-01");
+        assert_eq!(series[0].value, Some((1.0, "1".to_string())));
     }
 
     #[test]
