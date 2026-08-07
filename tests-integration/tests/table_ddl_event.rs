@@ -212,7 +212,7 @@ async fn test_table_ddl_procedure_events() {
             "undrop_table",
             &undrop_table_procedure_id,
             "Succeeded",
-            None,
+            Some(TABLE),
             Some(table_id),
         )
         .await;

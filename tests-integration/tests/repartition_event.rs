@@ -129,7 +129,30 @@ WHERE type = 'repartition'
 +-------------+--------------+-------------+--------------------+----------+-----------------+----------------------+---------------+";
 
     assert_eventually_eq(instance, &query, expected).await;
+    assert_repartition_lifecycle_event(instance, &procedure_id).await;
     procedure_id
+}
+
+async fn assert_repartition_lifecycle_event(
+    instance: &Arc<frontend::instance::Instance>,
+    procedure_id: &str,
+) {
+    let query = format!(
+        r#"SELECT type, catalog_name, schema_name, table_name, table_id
+FROM greptime_private.events
+WHERE type = 'repartition'
+  AND procedure_id = '{procedure_id}'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
+  AND json_is_null(payload)"#
+    );
+    let expected = "\
++-------------+--------------+-------------+--------------------+----------+
+| type        | catalog_name | schema_name | table_name         | table_id |
++-------------+--------------+-------------+--------------------+----------+
+| repartition | greptime     | public      | repartition_events | 1024     |
++-------------+--------------+-------------+--------------------+----------+";
+
+    assert_eventually_eq(instance, &query, expected).await;
 }
 
 async fn assert_repartition_group_event(
@@ -169,6 +192,32 @@ ORDER BY target_region_id"#
 | repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511104    | 0                    | true           | 4398046511104    | 0                    | host < 10             |
 | repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         | 4398046511104    | 0                    | true           | 4398046511105    | 1                    | host >= 10            |
 +-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+------------------+----------------------+----------------+------------------+----------------------+-----------------------+";
+
+    assert_eventually_eq(instance, &query, expected).await;
+    assert_repartition_group_lifecycle_event(instance, &procedure_id, parent_procedure_id).await;
+}
+
+async fn assert_repartition_group_lifecycle_event(
+    instance: &Arc<frontend::instance::Instance>,
+    procedure_id: &str,
+    parent_procedure_id: &str,
+) {
+    let query = format!(
+        r#"SELECT type, catalog_name, schema_name, table_name, table_id,
+    parent_procedure_id = '{parent_procedure_id}' AS matches_parent_procedure_id,
+    repartition_group_id IS NOT NULL AS has_group_id
+FROM greptime_private.events
+WHERE type = 'repartition_group'
+  AND procedure_id = '{procedure_id}'
+  AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
+  AND json_is_null(payload)"#
+    );
+    let expected = "\
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+
+| type              | catalog_name | schema_name | table_name         | table_id | matches_parent_procedure_id | has_group_id |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+
+| repartition_group | greptime     | public      | repartition_events | 1024     | true                        | true         |
++-------------------+--------------+-------------+--------------------+----------+-----------------------------+--------------+";
 
     assert_eventually_eq(instance, &query, expected).await;
 }
