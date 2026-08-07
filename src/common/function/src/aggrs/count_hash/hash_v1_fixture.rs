@@ -921,13 +921,14 @@ fn build_nested_cases() -> Result<Vec<FlatCase>> {
         map.slice(1, 3)
     );
 
-    let union_fields = UnionFields::new(
+    let union_fields = UnionFields::try_new(
         vec![0, 1],
         vec![
             Arc::new(Field::new("i", DataType::Int32, true)),
             Arc::new(Field::new("s", DataType::Utf8, true)),
         ],
-    );
+    )
+    .unwrap();
     let dense = UnionArray::try_new(
         union_fields.clone(),
         ScalarBuffer::from(vec![0i8, 1, 0, 1, 0]),
