@@ -238,6 +238,8 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
+    /// Whether to enable the experimental two-phase metric series scan.
+    experimental_series_scan_v2: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -269,6 +271,7 @@ impl ScanRegion {
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            experimental_series_scan_v2: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -294,6 +297,13 @@ impl ScanRegion {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets whether eligible metric series scans use the two-phase implementation.
+    #[must_use]
+    pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
+        self.experimental_series_scan_v2 = enabled;
         self
     }
 
@@ -387,8 +397,9 @@ impl ScanRegion {
     /// Scans by series.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let experimental_series_scan_v2 = self.experimental_series_scan_v2;
         let input = self.scan_input().await?;
-        Ok(SeriesScan::new(input))
+        Ok(SeriesScan::new(input, experimental_series_scan_v2))
     }
 
     /// Returns true if the region can use unordered scan for current request.

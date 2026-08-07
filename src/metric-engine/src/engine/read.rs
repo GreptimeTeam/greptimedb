@@ -306,14 +306,71 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use std::fmt;
+
+    use api::v1::Rows;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
-    use store_api::region_request::RegionRequest;
+    use datafusion::physical_plan::DisplayFormatType;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use futures_util::TryStreamExt;
+    use futures_util::future::try_join_all;
+    use mito2::config::MitoConfig;
+    use store_api::region_engine::{PrepareRequest, QueryScanContext};
+    use store_api::region_request::{RegionFlushRequest, RegionPutRequest, RegionRequest};
+    use store_api::storage::TimeSeriesDistribution;
 
     use super::*;
+    use crate::config::EngineConfig;
     use crate::test_util::{
-        TestEnv, alter_logical_region_add_tag_columns, create_logical_region_request,
+        self, TestEnv, alter_logical_region_add_tag_columns, create_logical_region_request,
     };
+
+    struct ScannerDisplay<'a>(&'a dyn store_api::region_engine::RegionScanner);
+
+    impl fmt::Display for ScannerDisplay<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt_as(DisplayFormatType::Default, f)
+        }
+    }
+
+    async fn count_scanner_rows(scanner: &mut RegionScannerRef, partitions: usize) -> usize {
+        let ranges = scanner
+            .properties()
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut prepared = vec![Vec::new(); partitions];
+        prepared[0] = ranges;
+        scanner
+            .prepare(
+                PrepareRequest::default()
+                    .with_ranges(prepared)
+                    .with_target_partitions(partitions),
+            )
+            .unwrap();
+
+        let metrics = ExecutionPlanMetricsSet::default();
+        let context = QueryScanContext::default();
+        let streams = (0..partitions)
+            .map(|partition| {
+                scanner
+                    .scan_partition(&context, &metrics, partition)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        try_join_all(streams.into_iter().map(|stream| async move {
+            stream
+                .try_fold(0, |rows, batch| async move { Ok(rows + batch.num_rows()) })
+                .await
+        }))
+        .await
+        .unwrap()
+        .into_iter()
+        .sum()
+    }
 
     #[tokio::test]
     async fn test_invalid_logical_projection() {
@@ -405,5 +462,117 @@ mod test {
             scan_req.projection.as_deref().unwrap(),
             &[11, 10, 9, 8, 0, 1, 4]
         );
+    }
+
+    #[tokio::test]
+    async fn test_two_phase_series_scan_reads_metric_region() {
+        let env = TestEnv::with_mito_config(
+            "test_two_phase_series_scan",
+            MitoConfig {
+                experimental_series_scan_v2: true,
+                ..Default::default()
+            },
+            EngineConfig::default(),
+        )
+        .await;
+        env.init_metric_region().await;
+
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let logical_region_id_2 = RegionId::new(1024, logical_region_id.region_number());
+        env.metric()
+            .handle_request(
+                logical_region_id_2,
+                RegionRequest::Create(create_logical_region_request(
+                    &["job"],
+                    physical_region_id,
+                    "test_metric_region_2",
+                )),
+            )
+            .await
+            .unwrap();
+
+        let schema = test_util::row_schema_with_tags(&["job"]);
+        let put = |rows| {
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: schema.clone(),
+                    rows: test_util::build_rows(1, rows),
+                },
+                hint: None,
+                partition_expr_version: None,
+            })
+        };
+        env.metric()
+            .handle_request(logical_region_id, put(3))
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(logical_region_id, put(2))
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(logical_region_id_2, put(4))
+            .await
+            .unwrap();
+
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let request = ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            ..Default::default()
+        };
+        let mut scanner = env
+            .mito()
+            .handle_query(data_region_id, request)
+            .await
+            .unwrap();
+
+        let rows = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            count_scanner_rows(&mut scanner, 2),
+        )
+        .await
+        .expect("two-phase series scan should not deadlock");
+        assert_eq!(7, rows);
+
+        let explain = ScannerDisplay(scanner.as_ref()).to_string();
+        assert!(explain.contains("\"mode\":\"two_phase\""), "{explain}");
+    }
+
+    #[tokio::test]
+    async fn test_series_scan_v2_flag_disables_two_phase_mode() {
+        let env = TestEnv::with_mito_config(
+            "test_disable_two_phase_series_scan",
+            MitoConfig {
+                experimental_series_scan_v2: false,
+                ..Default::default()
+            },
+            EngineConfig::default(),
+        )
+        .await;
+        env.init_metric_region().await;
+
+        let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
+        let scanner = env
+            .mito()
+            .handle_query(
+                data_region_id,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let explain = ScannerDisplay(scanner.as_ref()).to_string();
+        assert!(explain.contains("\"mode\":\"legacy\""), "{explain}");
     }
 }

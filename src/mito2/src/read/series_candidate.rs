@@ -346,8 +346,7 @@ impl SeriesCandidateRangeBuilder {
     }
 }
 
-pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
-    let metadata = stream_ctx.input.region_metadata();
+pub(crate) fn is_sparse_metric_metadata(metadata: &store_api::metadata::RegionMetadataRef) -> bool {
     let valid_prefix = metadata
         .primary_key
         .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
@@ -358,8 +357,14 @@ pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()>
             table_id.column_schema.data_type == ConcreteDataType::uint32_datatype()
                 && tsid.column_schema.data_type == ConcreteDataType::uint64_datatype()
         });
+
+    metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types
+}
+
+pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
+    let metadata = stream_ctx.input.region_metadata();
     ensure!(
-        metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types,
+        is_sparse_metric_metadata(metadata),
         InvalidRequestSnafu {
             region_id: metadata.region_id,
             reason: "candidate-series scan requires sparse (__table_id, __tsid) primary keys",

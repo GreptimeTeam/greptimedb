@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use api::helper::encode_json_value;
-use api::v1::Rows;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
 use common_base::readable_size::ReadableSize;
 use common_error::ext::{ErrorExt, WhateverResult};
 use common_error::status_code::StatusCode;
@@ -26,14 +27,18 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
-use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
+use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt64Type};
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use futures::TryStreamExt;
+use futures::future::try_join_all;
 use serde_json::json;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionPutRequest, RegionRequest};
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
@@ -41,6 +46,7 @@ use crate::error::Error;
 use crate::read::read_columns::{ReadColumn, ReadColumns};
 use crate::read::scan_region::Scanner;
 use crate::test_util;
+use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -753,6 +759,7 @@ async fn test_series_scan_with_format(flat_format: bool) {
     let Scanner::Series(mut scanner) = scanner else {
         panic!("Scanner should be series scan");
     };
+    assert_eq!("legacy", scanner.mode());
     // 3 partition ranges for 3 time window.
     assert_eq!(
         3,
@@ -787,6 +794,189 @@ async fn test_series_scan_with_format(flat_format: bool) {
     expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
 
     assert_eq!(expected_rows, actual_rows);
+}
+
+#[tokio::test]
+async fn test_two_phase_series_scan() {
+    let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    let full_row_schema = test_util::rows_schema(&request);
+    let mut encoded_primary_key_schema = full_row_schema[0].clone();
+    encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    encoded_primary_key_schema.datatype = ColumnDataType::Binary.into();
+    encoded_primary_key_schema.semantic_type = SemanticType::Tag.into();
+    let row_schema = vec![
+        encoded_primary_key_schema,
+        full_row_schema[5].clone(),
+        full_row_schema[4].clone(),
+    ];
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = |values: &[(u32, u64, &str, &str, u64, i64)]| Rows {
+        schema: row_schema.clone(),
+        rows: values
+            .iter()
+            .map(|(table_id, tsid, tag_0, tag_1, field, ts)| {
+                row(vec![
+                    ValueData::BinaryValue(new_sparse_primary_key(
+                        &[*tag_0, *tag_1],
+                        &metadata,
+                        *table_id,
+                        *tsid,
+                    )),
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::U64Value(*field),
+                ])
+            })
+            .collect(),
+    };
+    let put = |rows| {
+        RegionRequest::Put(RegionPutRequest {
+            rows,
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+            partition_expr_version: None,
+        })
+    };
+
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 10, 1000),
+                (10, u64::MAX, "b", "y", 20, 1000),
+                (20, 0, "c", "z", 30, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                // Replaces the flushed row for this series and timestamp.
+                (10, 0, "a", "x", 11, 1000),
+                (10, 0, "a", "x", 12, 2000),
+                (10, u64::MAX, "b", "y", 21, 2000),
+                (20, u64::MAX, "d", "w", 40, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                // Internal metric identifiers must still be read for candidate discovery.
+                projection: Some(vec![2, 4, 5]),
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Scanner::Series(mut scanner) = scanner else {
+        panic!("Scanner should be series scan");
+    };
+    assert_eq!("two_phase", scanner.mode());
+
+    let ranges = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    scanner
+        .prepare(
+            PrepareRequest::default()
+                .with_ranges(vec![ranges, Vec::new(), Vec::new()])
+                .with_target_partitions(3),
+        )
+        .unwrap();
+
+    let metrics_set = ExecutionPlanMetricsSet::default();
+    let context = store_api::region_engine::QueryScanContext::default();
+    let partition_batches = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition(&context, &metrics_set, partition)
+            .unwrap();
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await
+    .unwrap();
+
+    let mut series_to_partition = BTreeMap::new();
+    let mut actual_rows = Vec::new();
+    for (partition, batches) in partition_batches.into_iter().enumerate() {
+        for batch in batches {
+            let tags = batch.column_by_name("tag_0").unwrap();
+            let fields = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_primitive::<UInt64Type>();
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_primitive::<TimestampMillisecondType>();
+            for row in 0..batch.num_rows() {
+                let tag = datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string();
+                let previous = series_to_partition.insert(tag.clone(), partition);
+                if let Some(previous) = previous {
+                    assert_eq!(previous, partition, "series {tag} moved partitions");
+                }
+                actual_rows.push((tag, fields.value(row), timestamps.value(row)));
+            }
+        }
+    }
+    actual_rows.sort();
+    assert_eq!(
+        vec![
+            ("a".to_string(), 11, 1000),
+            ("a".to_string(), 12, 2000),
+            ("b".to_string(), 20, 1000),
+            ("b".to_string(), 21, 2000),
+            ("c".to_string(), 30, 1000),
+            ("d".to_string(), 40, 1000),
+        ],
+        actual_rows
+    );
+    assert_eq!(4, series_to_partition.len());
+    assert_eq!(Some(&0), series_to_partition.get("a"));
+    assert_eq!(Some(&0), series_to_partition.get("c"));
+    assert_eq!(Some(&2), series_to_partition.get("b"));
+    assert_eq!(Some(&2), series_to_partition.get("d"));
 }
 
 /// Scans all partitions in round-robin fashion and returns rows sorted by (tag, ts).
