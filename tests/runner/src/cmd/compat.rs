@@ -29,6 +29,7 @@ use crate::util;
 const COMMENT_PREFIX: &str = "--";
 const INTERCEPTOR_PREFIX: &str = "-- SQLNESS";
 const QUERY_DELIMITER: char = ';';
+const SQLNESS_HOME_TEMPLATE: &str = "${SQLNESS_HOME}";
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum CompatTopology {
@@ -564,6 +565,13 @@ enum CompatPhase {
     Verify,
 }
 
+fn expand_sqlness_home(sql: &str, sqlness_home: Option<&str>) -> String {
+    match sqlness_home {
+        Some(sqlness_home) => sql.replace(SQLNESS_HOME_TEMPLATE, sqlness_home),
+        None => sql.to_string(),
+    }
+}
+
 /// Create an interceptor registry matching the ordinary sqlness runner.
 fn create_interceptor_registry() -> Registry {
     let mut interceptor_registry: Registry = Default::default();
@@ -851,6 +859,8 @@ impl ParsedStatement {
         db.compat_prepare_query_context(&context).await;
         run_namespace_prelude(db, namespace, &context).await?;
         let sql = self.concat_query_lines();
+        let sqlness_home = std::env::var("SQLNESS_HOME").ok();
+        let sql = expand_sqlness_home(&sql, sqlness_home.as_deref());
         let mut results = Vec::new();
 
         for sql in sql.split(TEMPLATE_DELIMITER) {
@@ -942,7 +952,37 @@ fn simple_diff(expected: &str, actual: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_trailing_blank_lines;
+    use super::{ParsedStatement, expand_sqlness_home, trim_trailing_blank_lines};
+
+    #[test]
+    fn test_expand_sqlness_home_for_execution_only() {
+        let mut statement = ParsedStatement::new();
+        statement.append_query_line(
+            "COPY source TO '${SQLNESS_HOME}/compat/source.parquet' WITH (format='parquet');",
+        );
+
+        let execution_sql = expand_sqlness_home(
+            &statement.concat_query_lines(),
+            Some("/tmp/sqlness-compat/copy"),
+        );
+
+        assert_eq!(
+            execution_sql,
+            "COPY source TO '/tmp/sqlness-compat/copy/compat/source.parquet' WITH (format='parquet');"
+        );
+        assert_eq!(
+            statement.display_text(),
+            "COPY source TO '${SQLNESS_HOME}/compat/source.parquet' WITH (format='parquet');\n\n"
+        );
+    }
+
+    #[test]
+    fn test_expand_sqlness_home_without_value_leaves_execution_sql_unchanged() {
+        let sql =
+            "COPY source FROM '${SQLNESS_HOME}/compat/source.parquet' WITH (format='parquet');";
+
+        assert_eq!(expand_sqlness_home(sql, None), sql);
+    }
 
     #[test]
     fn test_trim_trailing_blank_lines_preserves_single_final_newline() {
