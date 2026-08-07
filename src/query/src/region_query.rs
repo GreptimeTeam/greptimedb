@@ -68,6 +68,19 @@ pub trait RegionQueryHandler: Send + Sync {
         request: QueryRequest,
     ) -> Result<SendableRecordBatchStream>;
 
+    /// Fetches a record batch stream with a substrait plan that was encoded once
+    /// for the whole query instead of once per region. The encoded bytes are
+    /// region-invariant; the default implementation falls back to [`do_get`],
+    /// letting the datanode client encode the plan.
+    async fn do_get_encoded(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+        _encoded_plan: Vec<u8>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.do_get(target, request).await
+    }
+
     async fn handle_remote_dyn_filter_update(
         &self,
         target: &RegionQueryTarget,

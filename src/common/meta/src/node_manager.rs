@@ -32,6 +32,18 @@ pub trait Datanode: Send + Sync {
 
     /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
+
+    /// Handles query requests with a substrait plan that was encoded once for
+    /// the whole query instead of once per region. The encoded bytes are
+    /// region-invariant; the default implementation falls back to re-encoding
+    /// via [`Datanode::handle_query`].
+    async fn handle_query_encoded(
+        &self,
+        request: QueryRequest,
+        _encoded_plan: Vec<u8>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.handle_query(request).await
+    }
 }
 
 pub type DatanodeRef = Arc<dyn Datanode>;

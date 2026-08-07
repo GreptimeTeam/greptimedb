@@ -21,6 +21,7 @@ use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_meta::peer::Peer;
 use common_telemetry::debug;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
@@ -36,7 +37,7 @@ use partition::expr::PartitionExpr;
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableInfo;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -189,7 +190,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
+        let Ok((regions, region_leader_map)) = self.get_regions(&table_name, input_plan).await
+        else {
             // no peers found, going to execute them locally
             return fallback(optimized_plan).await;
         };
@@ -212,7 +214,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
-        )?;
+        )?
+        .with_region_leader_map(region_leader_map);
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
@@ -229,7 +232,7 @@ impl DistExtensionPlanner {
         &self,
         table_name: &TableName,
         logical_plan: &LogicalPlan,
-    ) -> Result<Vec<RegionId>> {
+    ) -> Result<(Vec<RegionId>, HashMap<RegionNumber, Peer>)> {
         let table = self
             .catalog_manager
             .table(
@@ -255,6 +258,19 @@ impl DistExtensionPlanner {
             .iter()
             .map(|r| RegionId::new(table_info.table_id(), r.region.id.region_number()))
             .collect::<Vec<_>>();
+        // Resolve the region → leader map once per query from the same route
+        // snapshot so `MergeScanExec::to_stream` does not re-resolve the leader
+        // per region. Leaders may be absent from the snapshot; `to_stream`
+        // falls back to `select_target` on such misses.
+        let region_leader_map = physical_table_route
+            .region_routes
+            .iter()
+            .filter_map(|r| {
+                r.leader_peer
+                    .as_ref()
+                    .map(|peer| (r.region.id.region_number(), peer.clone()))
+            })
+            .collect::<HashMap<_, _>>();
         let logical_partition_columns = partition_column_types(&table_info);
         let partition_columns = logical_partition_columns
             .iter()
@@ -269,7 +285,7 @@ impl DistExtensionPlanner {
             all_regions,
         );
         if partition_columns.is_empty() {
-            return Ok(all_regions);
+            return Ok((all_regions, region_leader_map));
         }
         // Extract predicates from logical plan
         let partition_expressions = match PredicateExtractor::extract_partition_expressions(
@@ -284,12 +300,12 @@ impl DistExtensionPlanner {
                     table.table_info().table_id(),
                     err
                 );
-                return Ok(all_regions);
+                return Ok((all_regions, region_leader_map));
             }
         };
 
         if partition_expressions.is_empty() {
-            return Ok(all_regions);
+            return Ok((all_regions, region_leader_map));
         }
 
         let Some(partition_column_types) = self
@@ -302,7 +318,7 @@ impl DistExtensionPlanner {
             )
             .await
         else {
-            return Ok(all_regions);
+            return Ok((all_regions, region_leader_map));
         };
 
         // Get partition information for the table if partition rule manager is available
@@ -317,11 +333,11 @@ impl DistExtensionPlanner {
                     table_name,
                     err
                 );
-                return Ok(all_regions);
+                return Ok((all_regions, region_leader_map));
             }
         };
         if partitions.is_empty() {
-            return Ok(all_regions);
+            return Ok((all_regions, region_leader_map));
         }
         // Apply region pruning based on partition rules
         let pruned_regions = match ConstraintPruner::prune_regions(
@@ -336,7 +352,7 @@ impl DistExtensionPlanner {
                     table_name,
                     err
                 );
-                return Ok(all_regions);
+                return Ok((all_regions, region_leader_map));
             }
         };
 
@@ -348,7 +364,7 @@ impl DistExtensionPlanner {
             pruned_regions.len()
         );
 
-        Ok(pruned_regions)
+        Ok((pruned_regions, region_leader_map))
     }
 
     /// Resolves the partition-column types that are safe to use for region pruning.
@@ -752,7 +768,7 @@ mod tests {
 
         assert_eq!(
             vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner.get_regions(&table_name, &plan).await.unwrap()
+            planner.get_regions(&table_name, &plan).await.unwrap().0
         );
     }
 
@@ -761,7 +777,7 @@ mod tests {
         let (planner, plan, table_name) =
             planner_and_plan(vec![0], physical_partition_expressions()).await;
 
-        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap());
+        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap().0);
     }
 
     #[tokio::test]
@@ -770,7 +786,7 @@ mod tests {
         expressions[1] = None;
         let (planner, plan, table_name) = planner_and_plan(vec![0, 1], expressions).await;
 
-        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap());
+        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap().0);
     }
 
     fn assert_all_logical_regions(mut regions: Vec<RegionId>) {
