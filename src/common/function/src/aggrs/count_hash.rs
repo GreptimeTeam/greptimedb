@@ -836,7 +836,7 @@ mod tests {
         // as additional distinct hashes on top of {hash(1), hash(2), hash(3)}.
         let mut acc = create_test_group_accumulator();
         let values = Arc::new(UInt64Array::from(vec![1u64, 2, 3])) as ArrayRef;
-        acc.update_batch(&[values.clone()], &[0, 0, 0], None, 1)?;
+        acc.update_batch(std::slice::from_ref(&values), &[0, 0, 0], None, 1)?;
         // Hashed state: distinct_sets[0] = {hash(1), hash(2), hash(3)}
         let hashed_state = acc.state(EmitTo::All)?;
 
