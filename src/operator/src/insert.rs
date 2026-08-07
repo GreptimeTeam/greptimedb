@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_accommodate_existing_schema_logic() {
+    async fn test_accommodate_existing_schema_and_reject_kind_changes() {
         let ts_name = "my_ts";
         let field_name = "my_field";
         let table =
@@ -1548,6 +1548,66 @@ mod tests {
         let req_schema = req.rows.as_ref().unwrap().schema.clone();
         assert_eq!(req_schema[0].column_name, ts_name);
         assert_eq!(req_schema[1].column_name, field_name);
+
+        let (datatype, datatype_extension) =
+            ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
+                .unwrap()
+                .into_parts();
+        let mut histogram_req = RowInsertRequest {
+            table_name: "test_table".to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    api::v1::ColumnSchema {
+                        column_name: greptime_native_histogram().to_string(),
+                        datatype: datatype as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension,
+                        options: None,
+                    },
+                ],
+                rows: vec![],
+            }),
+        };
+        let error = inserter
+            .get_alter_table_expr_on_demand(&mut histogram_req, &table, &ctx, true, true, true)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
+
+        let histogram_table = make_table_ref_with_schema(
+            "ts",
+            greptime_native_histogram(),
+            native_histogram_value_type().clone(),
+        );
+        let mut sample_req = RowInsertRequest {
+            table_name: "test_table".to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    field_column_schema(greptime_value(), ColumnDataType::Float64),
+                ],
+                rows: vec![],
+            }),
+        };
+        let error = inserter
+            .get_alter_table_expr_on_demand(
+                &mut sample_req,
+                &histogram_table,
+                &ctx,
+                true,
+                true,
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
     }
 
     #[test]

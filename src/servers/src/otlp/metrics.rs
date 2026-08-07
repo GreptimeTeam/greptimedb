@@ -374,7 +374,8 @@ fn encode_metrics(
                     metric_ctx,
                 )?;
             }
-            // TODO(sunng87) leave ExponentialHistogram for next release
+            // TODO: Convert OTLP exponential histograms into the canonical native-histogram
+            // Struct. See docs/rfcs/2026-08-04-native-histograms.md.
             metric::Data::ExponentialHistogram(_hist) => {}
         }
     }
@@ -711,12 +712,6 @@ fn encode_histogram(
     table_writer.add_table_data(sum_table_name, sum_table);
     table_writer.add_table_data(count_table_name, count_table);
 
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn encode_exponential_histogram(_name: &str, _hist: &ExponentialHistogram) -> Result<()> {
-    // TODO(sunng87): implement this using a prometheus compatible way
     Ok(())
 }
 
