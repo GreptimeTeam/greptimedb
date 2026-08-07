@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,8 @@ pub struct HeartbeatAccumulator {
     pub stat: Option<Stat>,
     pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
+    /// Generic heartbeat response extensions accumulated by handlers.
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl HeartbeatAccumulator {
@@ -405,6 +407,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             mailbox_message,
             heartbeat_config,
+            extensions: std::mem::take(&mut acc.extensions),
         };
         Ok(res)
     }
@@ -887,16 +890,21 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{MailboxMessage, Role};
+    use api::v1::meta::{HeartbeatRequest, MailboxMessage, RequestHeader, Role};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
-    use super::{HeartbeatHandlerGroupBuilder, PusherId, Pushers};
+    use super::{
+        HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroupBuilder,
+        PusherId, Pushers,
+    };
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
+    use crate::handler::test_utils::TestEnv;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
+    use crate::metasrv::Context;
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
     #[tokio::test]
@@ -1314,5 +1322,45 @@ mod tests {
 
         drop(pusher);
         deregister_signal_tx.changed().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_extension_reaches_response() {
+        struct CustomExtensionHandler;
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for CustomExtensionHandler {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Frontend
+            }
+
+            async fn handle(
+                &self,
+                _req: &HeartbeatRequest,
+                _ctx: &mut Context,
+                acc: &mut HeartbeatAccumulator,
+            ) -> crate::error::Result<HandleControl> {
+                acc.extensions
+                    .insert("custom.key".to_string(), b"custom-value".to_vec());
+                Ok(HandleControl::Continue)
+            }
+        }
+
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder.add_handler_last(CustomExtensionHandler);
+
+        let group = builder.build().unwrap();
+
+        let req = HeartbeatRequest {
+            header: Some(RequestHeader::new(1, Role::Frontend, Default::default())),
+            ..Default::default()
+        };
+        let ctx = TestEnv::new().ctx();
+
+        let res = group.handle(req, ctx).await.unwrap();
+
+        let extensions = res.extensions;
+        assert_eq!(extensions.get("custom.key").unwrap(), b"custom-value");
     }
 }

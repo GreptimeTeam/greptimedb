@@ -16,11 +16,18 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use servers::prom_remote_write::validation::PromValidationMode;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromStoreOptions {
     pub enable: bool,
     pub with_metric_engine: bool,
+    /// Validation mode while decoding Prometheus remote write requests.
+    #[serde(default)]
+    pub prom_validation_mode: PromValidationMode,
+    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
+    #[serde(default)]
+    pub experimental_enable_prometheus_native_histogram: bool,
     #[serde(default, with = "humantime_serde")]
     pub pending_rows_flush_interval: Duration,
     #[serde(default = "default_max_batch_rows")]
@@ -77,6 +84,8 @@ impl Default for PromStoreOptions {
         Self {
             enable: true,
             with_metric_engine: true,
+            prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_prometheus_native_histogram: false,
             pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
@@ -91,7 +100,7 @@ impl Default for PromStoreOptions {
 mod tests {
     use std::time::Duration;
 
-    use super::PromStoreOptions;
+    use super::{PromStoreOptions, PromValidationMode};
     use crate::service_config::prom_store::{
         default_flow_notification_queue_capacity, default_max_batch_rows,
         default_max_concurrent_flushes, default_max_inflight_requests,
@@ -103,6 +112,8 @@ mod tests {
         let default = PromStoreOptions::default();
         assert!(default.enable);
         assert!(default.with_metric_engine);
+        assert_eq!(default.prom_validation_mode, PromValidationMode::Strict);
+        assert!(!default.experimental_enable_prometheus_native_histogram);
         assert_eq!(default.pending_rows_flush_interval, Duration::ZERO);
         assert_eq!(default.max_batch_rows, default_max_batch_rows());
         assert_eq!(

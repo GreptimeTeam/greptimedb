@@ -25,7 +25,7 @@ use parquet::file::metadata::PageIndexPolicy;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -41,11 +41,13 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
-    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, DiscardUnflushedResult, OptionOutputTx,
+    RegionChangeResult, RegionEditRequest, RegionEditResult, RegionSyncRequest, TruncateResult,
+    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::location;
+use crate::wal::EntryId;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
@@ -503,6 +505,62 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }))
                 .await
                 .inspect_err(|_| warn!("failed to send truncate result"));
+        });
+    }
+
+    /// Advances the durable replay frontier before discarding a region's memtables.
+    pub(crate) fn handle_manifest_discard_unflushed_action(
+        &self,
+        region: MitoRegionRef,
+        discarded_entry_id: EntryId,
+        discarded_sequence: SequenceNumber,
+        discarded_rows: u64,
+        discarded_bytes: u64,
+        sender: OptionOutputTx,
+    ) {
+        if let Err(e) = region.set_truncating() {
+            sender.send(Err(e));
+            return;
+        }
+
+        let region_id = region.region_id;
+        let request_sender = self.sender.clone();
+        let manifest_ctx = region.manifest_ctx.clone();
+
+        common_runtime::spawn_global(async move {
+            // The frontier moves to the last written entry and sequence, so replaying the
+            // WAL after a restart skips everything the memtables held.
+            let edit = RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: Some(discarded_entry_id),
+                flushed_sequence: Some(discarded_sequence),
+                committed_sequence: None,
+            };
+            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+            let result = manifest_ctx
+                .update_manifest(RegionLeaderState::Truncating, action_list, false)
+                .await
+                .map(|_| ());
+
+            let result = DiscardUnflushedResult {
+                region_id,
+                sender,
+                result,
+                discarded_entry_id,
+                discarded_sequence,
+                discarded_rows,
+                discarded_bytes,
+            };
+            let _ = request_sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                    region_id,
+                    notify: BackgroundNotify::DiscardUnflushed(result),
+                }))
+                .await
+                .inspect_err(|_| warn!("failed to send discard unflushed result"));
         });
     }
 

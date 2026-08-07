@@ -397,6 +397,8 @@ fn recordbatch_to_timeseries(
             ),
         })?;
 
+    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
+    // The current path intentionally returns scalar samples only.
     let field_column = recordbatch
         .column_by_name(value_column_name)
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {

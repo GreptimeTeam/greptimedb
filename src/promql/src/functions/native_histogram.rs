@@ -1462,24 +1462,25 @@ fn histogram_delta(
             .map(NativeHistogram::into_gauge);
     }
 
-    let mut result = samples.first()?.zero_like();
-    let mut segment_start = samples.first()?;
-    for (sample_pair, ts_pair) in samples.windows(2).zip(timestamps.windows(2)) {
-        let previous_ts = ts_pair[0];
-        let current_ts = ts_pair[1];
-        let previous = &sample_pair[0];
-        let current = &sample_pair[1];
-        if current.detect_counter_reset(previous, previous_ts, current_ts) {
-            result = result.add(&previous.sub(segment_start)?)?;
-            result = result.add(current)?;
-            segment_start = current;
+    let first_reset = samples[1].detect_counter_reset(&samples[0], timestamps[0], timestamps[1]);
+    let (initial, reset_scan_start) = if first_reset {
+        // The first sample is irrelevant after an immediate reset. Adopt the
+        // second sample's layout so an incompatible pre-reset layout is ignored.
+        (samples[1].zero_like(), 2)
+    } else {
+        (samples[0].clone(), 1)
+    };
+    let mut result = samples.last()?.sub(&initial)?;
+    for index in reset_scan_start..samples.len() {
+        if samples[index].detect_counter_reset(
+            &samples[index - 1],
+            timestamps[index - 1],
+            timestamps[index],
+        ) {
+            result = result.add(&samples[index - 1])?;
         }
     }
-    Some(
-        result
-            .add(&samples.last()?.sub(segment_start)?)?
-            .into_gauge(),
-    )
+    Some(result.into_gauge())
 }
 
 fn idelta_value(
@@ -1569,7 +1570,7 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         let (raw_offset, raw_length) = unpack(keys[index]);
         let offset = raw_offset as usize;
         let length = raw_length as usize;
-        if length < 2 {
+        if length == 0 {
             result.push(None);
             continue;
         }
@@ -1584,6 +1585,20 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
             samples.push(histogram);
         }
         if has_null {
+            result.push(None);
+            continue;
+        }
+
+        let first_ts = all_timestamps[offset];
+        let last_ts = all_timestamps[offset + length - 1];
+        let range_end = eval_ts.value(index);
+        let range_start = range_end - range_length;
+        let synthetic_zero_timestamp = IS_COUNTER
+            .then_some(samples[0].start_timestamp)
+            .flatten()
+            .filter(|start| *start != 0 && range_start < *start && *start < first_ts);
+        let synthetic_zero_start = synthetic_zero_timestamp.is_some();
+        if length < 2 && !synthetic_zero_start {
             result.push(None);
             continue;
         }
@@ -1608,7 +1623,11 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         for pair in samples.windows(2) {
             record_custom_reconciliation(&collector, func_name, &pair[0], &pair[1]);
         }
-        let Some(mut histogram) = histogram_delta(&samples, timestamps, IS_COUNTER) else {
+        let mut histogram = if length == 1 {
+            samples[0].clone()
+        } else if let Some(histogram) = histogram_delta(&samples, timestamps, IS_COUNTER) {
+            histogram
+        } else {
             record_warning(
                 &collector,
                 format!("{func_name}: dropped native histogram range with incompatible schemas"),
@@ -1616,21 +1635,41 @@ fn native_extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
             result.push(None);
             continue;
         };
+        if synthetic_zero_start && length > 1 {
+            let Some(with_synthetic_zero) = histogram.add(&samples[0]) else {
+                record_warning(
+                    &collector,
+                    format!(
+                        "{func_name}: dropped native histogram range with incompatible schemas"
+                    ),
+                );
+                result.push(None);
+                continue;
+            };
+            histogram = with_synthetic_zero;
+        }
 
-        let first_ts = all_timestamps[offset];
-        let last_ts = all_timestamps[offset + length - 1];
-        let range_end = eval_ts.value(index);
-        let range_start = range_end - range_length;
-        let sampled_interval_ms = (last_ts - first_ts) as f64;
+        let real_sampled_interval_ms = (last_ts - first_ts) as f64;
+        let sampled_interval_ms = synthetic_zero_timestamp
+            .map(|start| (last_ts - start) as f64)
+            .unwrap_or(real_sampled_interval_ms);
         if sampled_interval_ms <= 0.0 {
             result.push(None);
             continue;
         }
-        let average_interval_ms = sampled_interval_ms / (length - 1) as f64;
-        let mut duration_to_start_ms = (first_ts - range_start) as f64;
+        let average_interval_ms = if length > 1 {
+            real_sampled_interval_ms / (length - 1) as f64
+        } else {
+            0.0
+        };
+        let mut duration_to_start_ms = if synthetic_zero_start {
+            0.0
+        } else {
+            (first_ts - range_start) as f64
+        };
         let duration_to_end_ms = (range_end - last_ts) as f64;
 
-        if IS_COUNTER && histogram.count > 0.0 && samples[0].count >= 0.0 {
+        if IS_COUNTER && !synthetic_zero_start && histogram.count > 0.0 && samples[0].count >= 0.0 {
             let duration_to_zero = sampled_interval_ms * (samples[0].count / histogram.count);
             if duration_to_zero < duration_to_start_ms {
                 duration_to_start_ms = duration_to_zero;
@@ -2010,14 +2049,47 @@ mod tests {
         histograms: Vec<NativeHistogram>,
     ) -> NativeHistogram {
         let range_length = histograms.len() as i64 * 1000;
-        let mut input = histogram_range_input(histograms.into_iter().map(Some).collect::<Vec<_>>());
+        let timestamps = (0..histograms.len())
+            .map(|idx| (idx as i64 + 1) * 1000)
+            .collect();
+        extrapolated_histogram_result(udf, timestamps, histograms, range_length, range_length)
+            .unwrap()
+    }
+
+    fn extrapolated_histogram_result(
+        udf: ScalarUDF,
+        timestamps: Vec<i64>,
+        histograms: Vec<NativeHistogram>,
+        range_end: i64,
+        range_length: i64,
+    ) -> Option<NativeHistogram> {
+        assert_eq!(timestamps.len(), histograms.len());
+        let range = [(0, u32::try_from(histograms.len()).unwrap())];
+        let timestamps = Arc::new(TimestampMillisecondArray::from(timestamps));
+        let histograms =
+            build_histogram_array(&histograms.into_iter().map(Some).collect::<Vec<_>>());
+        let mut input = vec![
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(timestamps, range)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(histograms, range)
+                    .unwrap()
+                    .into_dict(),
+            )),
+        ];
         input.push(ColumnarValue::Array(Arc::new(
-            TimestampMillisecondArray::from(vec![range_length]),
+            TimestampMillisecondArray::from(vec![range_end]),
         )));
         input.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
             range_length,
         ]))));
-        run_histogram_udf(udf, input)
+        let result = run_udf(udf, input, native_histogram_arrow_type());
+        let result = extract_array(&result).unwrap();
+        let result = result.as_any().downcast_ref::<StructArray>().unwrap();
+        read_histogram(result, 0).unwrap()
     }
 
     fn collected_warnings(collector: &PromqlAnnotationCollector) -> Vec<String> {
@@ -2051,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_uses_promql_histogram_equality() {
+    fn comparison_observes_explicit_sparse_zero_buckets() {
         let mut left = sample_histogram(1.0, 1.0, vec![1.0, 0.0]);
         left.reset_hint = COUNTER_RESET_HINT;
         left.start_timestamp = Some(1000);
@@ -2069,7 +2141,7 @@ mod tests {
         );
         let values = extract_array(&result).unwrap();
         let values = values.as_any().downcast_ref::<BooleanArray>().unwrap();
-        assert!(values.value(0));
+        assert!(!values.value(0));
     }
 
     #[test]
@@ -2396,5 +2468,133 @@ mod tests {
         let idelta = idelta_value(&[first, last], true, 1000, 2000, 1.0).unwrap();
         assert_eq!(idelta.count, 7.0);
         assert_eq!(idelta.sum, 12.0);
+    }
+
+    #[test]
+    fn extrapolated_rate_uses_start_timestamp_synthetic_zero() {
+        let mut single = sample_histogram(1.0, 1.0, vec![1.0]);
+        single.start_timestamp = Some(1_000);
+
+        let rate = extrapolated_histogram_result(
+            NativeHistogramRate::scalar_udf(),
+            vec![2_000],
+            vec![single.clone()],
+            3_000,
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(rate.count, 1.0 / 3.0);
+        assert_eq!(rate.sum, 1.0 / 3.0);
+
+        let increase = extrapolated_histogram_result(
+            NativeHistogramIncrease::scalar_udf(),
+            vec![2_000],
+            vec![single],
+            3_000,
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(increase.count, 1.0);
+        assert_eq!(increase.sum, 1.0);
+
+        let mut first = sample_histogram(2.0, 2.0, vec![2.0]);
+        first.start_timestamp = Some(1_000);
+        let last = sample_histogram(4.0, 4.0, vec![4.0]);
+        let increase = extrapolated_histogram_result(
+            NativeHistogramIncrease::scalar_udf(),
+            vec![2_000, 3_000],
+            vec![first, last],
+            3_000,
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(increase.count, 4.0);
+        assert_eq!(increase.sum, 4.0);
+    }
+
+    #[test]
+    fn extrapolated_rate_requires_strictly_in_range_start_timestamp() {
+        for (start_timestamp, range_end, range_length) in [
+            (0, 3_000, 3_000),
+            (500, 3_000, 2_000),
+            (1_000, 3_000, 2_000),
+            (2_000, 3_000, 3_000),
+            (2_500, 3_000, 3_000),
+        ] {
+            let mut sample = sample_histogram(1.0, 1.0, vec![1.0]);
+            sample.start_timestamp = Some(start_timestamp);
+            assert!(
+                extrapolated_histogram_result(
+                    NativeHistogramRate::scalar_udf(),
+                    vec![2_000],
+                    vec![sample],
+                    range_end,
+                    range_length,
+                )
+                .is_none(),
+                "start_timestamp={start_timestamp}"
+            );
+        }
+
+        let mut gauge = sample_histogram(1.0, 1.0, vec![1.0]);
+        gauge.start_timestamp = Some(1_000);
+        gauge.reset_hint = GAUGE_RESET_HINT;
+        assert!(
+            extrapolated_histogram_result(
+                NativeHistogramDelta::scalar_udf(),
+                vec![2_000],
+                vec![gauge],
+                3_000,
+                3_000,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn first_reset_ignores_incompatible_pre_reset_layout() {
+        let first = sample_histogram(10.0, 10.0, vec![10.0]);
+        let second = NativeHistogram {
+            schema: CUSTOM_BUCKETS_SCHEMA,
+            zero_threshold: 0.0,
+            sum: 2.0,
+            reset_hint: COUNTER_RESET_HINT,
+            start_timestamp: None,
+            custom_values: vec![1.0],
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            negative_spans: Vec::new(),
+            count: 2.0,
+            zero_count: 0.0,
+            positive_buckets: vec![2.0],
+            negative_buckets: Vec::new(),
+        };
+
+        let delta = histogram_delta(&[first, second], &[1_000, 2_000], true).unwrap();
+        assert_eq!(delta.schema, CUSTOM_BUCKETS_SCHEMA);
+        assert_eq!(delta.count, 2.0);
+        assert_eq!(delta.sum, 2.0);
+        assert_eq!(delta.positive_buckets, vec![2.0]);
+    }
+
+    #[test]
+    fn counter_delta_handles_reset_segment_boundaries() {
+        let first = sample_histogram(5.0, 5.0, vec![5.0]);
+        let second = sample_histogram(7.0, 7.0, vec![7.0]);
+        let mut reset = sample_histogram(2.0, 2.0, vec![2.0]);
+        reset.reset_hint = COUNTER_RESET_HINT;
+        let last = sample_histogram(4.0, 4.0, vec![4.0]);
+
+        let delta = histogram_delta(
+            &[first, second, reset, last],
+            &[1_000, 2_000, 3_000, 4_000],
+            true,
+        )
+        .unwrap();
+        assert_eq!(delta.count, 6.0);
+        assert_eq!(delta.sum, 6.0);
+        assert_eq!(delta.positive_buckets, vec![6.0]);
     }
 }

@@ -28,7 +28,9 @@ excludes = [
     "src/servers/src/http/test_helpers.rs",
     # enterprise: Apache-2.0 header is NOT applied to these. They are governed by
     # the GreptimeDB Enterprise License and checked via `licenserc-enterprise.toml`.
-    # Keep this list in sync with that file's `includes`.
+    # Keep this list in sync with that file's `includes`; enforced by
+    # `make check-enterprise-license`.
+    # enterprise:start
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/alter/trigger.rs",
@@ -39,6 +41,12 @@ excludes = [
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
+    "src/common/function/src/admin/purge_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin.rs",
+    "src/common/meta/src/ddl/purge_dropped_table.rs",
+    "src/common/meta/src/ddl/undrop_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin_test.rs",
+    # enterprise:end
 ]
 
 [properties]

@@ -14,6 +14,7 @@
 
 pub mod builder;
 mod dashboard;
+mod entity_graph;
 mod grpc;
 mod influxdb;
 mod jaeger;
@@ -1531,6 +1532,7 @@ pub fn check_permission(
                 validate_param(table_name, query_ctx)?;
             }
         }
+        #[cfg(feature = "enterprise")]
         Statement::UndropTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
@@ -1557,6 +1559,11 @@ pub fn check_permission(
         }
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowFlowStatus(_stmt) => {
+            // Flow statistics are organized based on the catalog dimension and
+            // filtered by the current catalog, so there is no need to check the
+            // permission of the database(schema).
         }
         #[cfg(feature = "enterprise")]
         Statement::ShowTriggers(_stmt) => {
@@ -1686,7 +1693,7 @@ mod tests {
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
-    use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
@@ -1722,7 +1729,9 @@ mod tests {
     };
     use store_api::storage::ScanRequest;
     use strfmt::Format;
-    use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{
+        FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType,
+    };
     use table::table_name::TableName;
     use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
@@ -2307,6 +2316,139 @@ mod tests {
         }
     }
 
+    /// A test [`ProcedureExecutor`] that completes create/drop DDL tasks against the
+    /// in-memory catalog, mimicking what the meta DDL procedures do in production.
+    /// This allows happy-path DDL requests (create/drop table/view) to be exercised
+    /// end to end through the gRPC ingress.
+    struct MockProcedureExecutor {
+        catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
+        next_table_id: std::sync::atomic::AtomicU32,
+        submitted: std::sync::Mutex<Vec<DdlTask>>,
+    }
+
+    impl MockProcedureExecutor {
+        fn new(catalog_manager: Arc<catalog::memory::MemoryCatalogManager>) -> Self {
+            Self {
+                catalog_manager,
+                next_table_id: std::sync::atomic::AtomicU32::new(1026),
+                submitted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcedureExecutor for MockProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            _ctx: &ExecutorContext,
+            request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.submitted.lock().unwrap().push(request.task.clone());
+            match request.task {
+                DdlTask::CreateTable(task) => {
+                    let table_id = self
+                        .next_table_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut table_info = task.table_info;
+                    table_info.ident.table_id = table_id;
+                    self.catalog_manager
+                        .register_table_sync(catalog::RegisterTableRequest {
+                            catalog: table_info.catalog_name.clone(),
+                            schema: table_info.schema_name.clone(),
+                            table_name: table_info.name.clone(),
+                            table_id,
+                            table: table::dist_table::DistTable::table(Arc::new(table_info)),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse {
+                        key: Vec::new(),
+                        table_ids: vec![table_id],
+                    })
+                }
+                DdlTask::CreateView(task) => {
+                    let view_id = self
+                        .next_table_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut view_info = task.view_info;
+                    view_info.ident.table_id = view_id;
+                    self.catalog_manager
+                        .register_table_sync(catalog::RegisterTableRequest {
+                            catalog: task.create_view.catalog_name.clone(),
+                            schema: task.create_view.schema_name.clone(),
+                            table_name: task.create_view.view_name.clone(),
+                            table_id: view_id,
+                            table: table::dist_table::DistTable::table(Arc::new(view_info)),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse {
+                        key: Vec::new(),
+                        table_ids: vec![view_id],
+                    })
+                }
+                DdlTask::DropView(task) => {
+                    self.catalog_manager
+                        .deregister_table_sync(catalog::DeregisterTableRequest {
+                            catalog: task.catalog.clone(),
+                            schema: task.schema.clone(),
+                            table_name: task.view.clone(),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse::default())
+                }
+                other => common_meta::error::UnsupportedSnafu {
+                    operation: format!("mock submit_ddl_task: {other:?}"),
+                }
+                .fail(),
+            }
+        }
+
+        async fn migrate_region(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "migrate_region",
+            }
+            .fail()
+        }
+
+        async fn reconcile(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "reconcile",
+            }
+            .fail()
+        }
+
+        async fn query_procedure_state(
+            &self,
+            _ctx: &ExecutorContext,
+            _pid: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "query_procedure_state",
+            }
+            .fail()
+        }
+
+        async fn list_procedures(
+            &self,
+            _ctx: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "list_procedures",
+            }
+            .fail()
+        }
+    }
+
     fn test_cache_registry(
         kv_backend: common_meta::kv_backend::KvBackendRef,
     ) -> TestResult<common_meta::cache::LayeredCacheRegistryRef> {
@@ -2486,9 +2628,28 @@ mod tests {
         plugins: Plugins,
         metric_names_table: Option<TableRef>,
     ) -> TestResult<Instance> {
+        let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
+        test_instance_with_catalog_manager(
+            catalog_manager,
+            target_table,
+            plugins,
+            metric_names_table,
+            Arc::new(NoopProcedureExecutor),
+        )
+        .await
+    }
+
+    /// Builds a test frontend `Instance` over the given (already source-registered)
+    /// catalog manager, completing DDL tasks through `procedure_executor`.
+    async fn test_instance_with_catalog_manager(
+        catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+        procedure_executor: ProcedureExecutorRef,
+    ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
-        let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
         let target_table_name = "target";
         catalog_manager
             .register_table_sync(catalog::RegisterTableRequest {
@@ -2529,7 +2690,7 @@ mod tests {
             cache_registry,
             catalog_manager,
             Arc::new(client::client_manager::NodeClients::default()),
-            Arc::new(NoopProcedureExecutor),
+            procedure_executor,
             process_manager,
         )
         .with_plugin(plugins)
@@ -3435,8 +3596,11 @@ mod tests {
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test undrop table
-        let sql = "UNDROP TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins.clone(), &query_ctx);
+        #[cfg(feature = "enterprise")]
+        {
+            let sql = "UNDROP TABLE {catalog}{schema}demo;";
+            replace_test(sql, plugins.clone(), &query_ctx);
+        }
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
@@ -3473,5 +3637,370 @@ mod tests {
             let result = check_permission(plugins.clone(), stmt, &query_ctx);
             assert_eq!(result.is_ok(), is_ok);
         }
+    }
+
+    /// A `DropView` DDL sent through the direct gRPC ingress must return an error
+    /// (e.g. table not found) instead of panicking on `todo!()`.
+    #[tokio::test]
+    async fn qx_152_drop_view_via_grpc_ddl_returns_error_not_panic() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "non_existent_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: false,
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("DropView DDL request must return an error instead of panicking"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.status_code(),
+            StatusCode::TableNotFound,
+            "dropping a non-existent view without IF EXISTS must report TableNotFound, got {err}"
+        );
+        Ok(())
+    }
+
+    /// `DROP VIEW IF EXISTS` on a missing view through the direct gRPC ingress must
+    /// succeed with 0 affected rows (no error, no DDL task submitted), instead of
+    /// returning `TableNotFound`.
+    #[tokio::test]
+    async fn qx_152_drop_view_if_exists_missing_view_via_grpc_ddl_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "non_existent_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: true,
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let output = match result {
+            Ok(output) => output,
+            Err(err) => {
+                panic!("DROP VIEW IF EXISTS on a missing view must succeed, got error: {err}")
+            }
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "DROP VIEW IF EXISTS on a missing view must report 0 affected rows"
+        );
+        assert!(
+            procedure_executor.submitted.lock().unwrap().is_empty(),
+            "DROP VIEW IF EXISTS on a missing view must not submit a DDL task"
+        );
+        Ok(())
+    }
+
+    /// A `CREATE VIEW` followed by `DROP VIEW` through the direct gRPC ingress must
+    /// succeed end to end: the view is registered in the catalog and then removed.
+    #[tokio::test]
+    async fn qx_152_drop_existing_view_via_grpc_ddl_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        // The default "greptime.public" schema must be visible to the kv-backed table
+        // metadata manager for `CREATE VIEW`/`CREATE TABLE` to pass validation.
+        instance
+            .table_metadata_manager()
+            .schema_manager()
+            .create(
+                common_meta::key::schema_name::SchemaNameKey::new("greptime", "public"),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let create_view_request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateView(
+                api::v1::CreateViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "my_view".to_string(),
+                    logical_plan: vec![1, 2, 3],
+                    create_if_not_exists: false,
+                    or_replace: false,
+                    table_names: vec![],
+                    columns: vec![],
+                    plan_columns: vec![],
+                    definition: "CREATE VIEW my_view AS SELECT * FROM source".to_string(),
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            create_view_request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("CREATE VIEW via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "CREATE VIEW via gRPC DDL must report 0 affected rows"
+        );
+
+        // The view is registered in the catalog as a view.
+        let view = instance
+            .catalog_manager()
+            .table("greptime", "public", "my_view", None)
+            .await
+            .unwrap()
+            .expect("view should exist after CREATE VIEW");
+        assert_eq!(view.table_info().table_type, TableType::View);
+
+        let drop_view_request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "my_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: false,
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            drop_view_request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("DROP VIEW via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "DROP VIEW via gRPC DDL must report 0 affected rows"
+        );
+
+        // The view is gone after the drop.
+        assert!(
+            instance
+                .catalog_manager()
+                .table("greptime", "public", "my_view", None)
+                .await
+                .unwrap()
+                .is_none(),
+            "view should be removed after DROP VIEW"
+        );
+
+        let submitted = procedure_executor.submitted.lock().unwrap();
+        assert_eq!(
+            submitted.len(),
+            2,
+            "expected create and drop view tasks, got {submitted:?}"
+        );
+        assert!(matches!(&submitted[0], DdlTask::CreateView(_)));
+        assert!(matches!(&submitted[1], DdlTask::DropView(_)));
+        Ok(())
+    }
+
+    /// A direct gRPC `CreateTable` whose time index column is not a timestamp must
+    /// be rejected with `InvalidArguments` instead of panicking while building the schema.
+    #[tokio::test]
+    async fn qx_153_create_table_with_non_timestamp_time_index_via_grpc_returns_error()
+    -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    table_name: "demo".to_string(),
+                    desc: String::new(),
+                    column_defs: vec![api::v1::ColumnDef {
+                        name: "host".to_string(),
+                        data_type: api::v1::ColumnDataType::String as i32,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                        semantic_type: 0,
+                        comment: String::new(),
+                        datatype_extension: None,
+                        options: None,
+                    }],
+                    time_index: "host".to_string(),
+                    primary_keys: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::new(),
+                    table_id: None,
+                    engine: "mito".to_string(),
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("CreateTable with a non-timestamp time index must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+        Ok(())
+    }
+
+    /// A valid `CREATE TABLE` (timestamp time index) through the direct gRPC ingress
+    /// must succeed, guarding that the `validate_create_expr` ingress check doesn't
+    /// accidentally reject good requests.
+    #[tokio::test]
+    async fn qx_153_create_table_with_timestamp_time_index_via_grpc_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        // The default "greptime.public" schema must be visible to the kv-backed table
+        // metadata manager for `CREATE TABLE` to pass validation.
+        instance
+            .table_metadata_manager()
+            .schema_manager()
+            .create(
+                common_meta::key::schema_name::SchemaNameKey::new("greptime", "public"),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    table_name: "demo".to_string(),
+                    desc: String::new(),
+                    column_defs: vec![
+                        api::v1::ColumnDef {
+                            name: "host".to_string(),
+                            data_type: api::v1::ColumnDataType::String as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                            semantic_type: 0,
+                            comment: String::new(),
+                            datatype_extension: None,
+                            options: None,
+                        },
+                        api::v1::ColumnDef {
+                            name: "ts".to_string(),
+                            data_type: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                            semantic_type: 0,
+                            comment: String::new(),
+                            datatype_extension: None,
+                            options: None,
+                        },
+                    ],
+                    time_index: "ts".to_string(),
+                    primary_keys: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::new(),
+                    table_id: None,
+                    engine: "mito".to_string(),
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("CREATE TABLE via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "CREATE TABLE via gRPC DDL must report 0 affected rows"
+        );
+
+        // The table is registered in the catalog.
+        let table = instance
+            .catalog_manager()
+            .table("greptime", "public", "demo", None)
+            .await
+            .unwrap()
+            .expect("table should exist after CREATE TABLE");
+        assert_eq!(table.table_info().table_type, TableType::Base);
+
+        let submitted = procedure_executor.submitted.lock().unwrap();
+        assert_eq!(
+            submitted.len(),
+            1,
+            "expected one create table task, got {submitted:?}"
+        );
+        assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
+        Ok(())
     }
 }

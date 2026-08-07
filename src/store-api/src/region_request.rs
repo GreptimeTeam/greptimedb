@@ -56,8 +56,8 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1436,6 +1436,10 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
     }
 }
 
+/// Region option changes used by ALTER requests.
+///
+/// This type currently derives serde for request persistence. Keep future changes
+/// backward compatible with previously serialized variants.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
     WriteBufferSize(Option<ReadableSize>),
@@ -1450,6 +1454,8 @@ pub enum SetRegionOption {
     AutoFlushInterval(Option<Duration>),
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
+    // Stops writing new WAL entries. This operation is irreversible.
+    SkipWal,
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1507,6 +1513,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::MaxRowGroupRowCount(Some(row_count)))
             }
+            SKIP_WAL_KEY if value == "true" => Ok(Self::SkipWal),
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1622,6 +1629,16 @@ pub struct RegionBuildIndexRequest {}
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
     All,
+    /// Discard all unflushed data while preserving persisted SST files.
+    ///
+    /// This destroys the region's in-memory data irreversibly. Persisted SST files and
+    /// the writable state are preserved, and the WAL is obsoleted up to the discard point
+    /// so a restart won't replay the discarded data.
+    ///
+    /// An error may be returned after the data has already been discarded, because the
+    /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
+    /// left to discard only re-attempts the WAL obsoletion.
+    Unflushed,
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.
@@ -1867,6 +1884,28 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_skip_wal_try_from() {
+        let pb = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "true".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::SkipWal,
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in ["false", "", "invalid"] {
+            let pb = PbOption {
+                key: SKIP_WAL_KEY.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert!(UnsetRegionOption::try_from(SKIP_WAL_KEY).is_err());
     }
 
     #[test]

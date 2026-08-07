@@ -214,6 +214,10 @@ fmt-check: ## Check code format.
 	python3 scripts/check-snafu.py
 	python3 scripts/check-super-imports.py
 
+.PHONY: check-enterprise-license
+check-enterprise-license: ## Check enterprise-gated files are listed in both license configs.
+	python3 scripts/check-enterprise-license.py
+
 .PHONY: start-etcd
 start-etcd: ## Start single node etcd for testing purpose.
 	docker run --rm -d --network=host -p 2379-2380:2379-2380 ${ETCD_IMAGE}

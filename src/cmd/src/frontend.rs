@@ -32,10 +32,6 @@ use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_error::ext::BoxedError;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
-use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::suspend::SuspendHandler;
 use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
 use common_telemetry::info;
@@ -43,7 +39,9 @@ use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use frontend::frontend::Frontend;
-use frontend::heartbeat::HeartbeatTask;
+use frontend::heartbeat::{
+    FrontendHeartbeatExtensions, HeartbeatTask, heartbeat_response_handler_executor,
+};
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
@@ -497,9 +495,20 @@ impl StartCommand {
             .await
             .context(error::StartFrontendSnafu)?;
 
-        let heartbeat_task = Some(create_heartbeat_task(&opts, meta_client, &instance));
-
         let instance = Arc::new(instance);
+
+        plugins::setup_frontend_heartbeat_extensions(&mut plugins, &plugin_opts, &instance)
+            .await
+            .context(error::StartFrontendSnafu)?;
+        let heartbeat_extensions = plugins
+            .get::<FrontendHeartbeatExtensions>()
+            .unwrap_or_default();
+        let heartbeat_task = Some(create_heartbeat_task_with_extensions(
+            &opts,
+            meta_client,
+            &instance,
+            heartbeat_extensions,
+        ));
 
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
@@ -520,13 +529,20 @@ pub fn create_heartbeat_task(
     meta_client: MetaClientRef,
     instance: &frontend::instance::Instance,
 ) -> HeartbeatTask {
-    let executor = Arc::new(HandlerGroupExecutor::new(vec![
-        Arc::new(ParseMailboxMessageHandler),
-        Arc::new(SuspendHandler::new(instance.suspend_state())),
-        Arc::new(InvalidateCacheHandler::new(
-            instance.cache_invalidator().clone(),
-        )),
-    ]));
+    create_heartbeat_task_with_extensions(options, meta_client, instance, Default::default())
+}
+
+fn create_heartbeat_task_with_extensions(
+    options: &frontend::frontend::FrontendOptions,
+    meta_client: MetaClientRef,
+    instance: &frontend::instance::Instance,
+    extensions: FrontendHeartbeatExtensions,
+) -> HeartbeatTask {
+    let executor = heartbeat_response_handler_executor(
+        &extensions,
+        instance.suspend_state(),
+        instance.cache_invalidator().clone(),
+    );
 
     let stat = {
         let mut stat = ResourceStatImpl::default();
@@ -541,6 +557,7 @@ pub fn create_heartbeat_task(
         executor,
         stat,
     )
+    .with_extensions(extensions)
 }
 
 #[cfg(test)]

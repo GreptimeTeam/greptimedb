@@ -38,7 +38,9 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
-use table::metadata::{TableId, TableInfo};
+use table::metadata::TableId;
+#[cfg(feature = "enterprise")]
+use table::metadata::TableInfo;
 use table::table_reference::TableReference;
 
 use crate::ddl::{DdlContext, DetectingRegion};
@@ -68,6 +70,7 @@ pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error
     }
 }
 
+#[cfg(feature = "enterprise")]
 pub(crate) fn is_metric_engine_logical_table(
     table_info: &TableInfo,
     table_route_value: &TableRouteValue,

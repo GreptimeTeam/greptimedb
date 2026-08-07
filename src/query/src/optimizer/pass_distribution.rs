@@ -153,7 +153,6 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
     use async_trait::async_trait;
     use common_query::request::QueryRequest;
-    use common_recordbatch::SendableRecordBatchStream;
     use datafusion::common::NullEquality;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -178,17 +177,25 @@ mod tests {
 
     #[async_trait]
     impl RegionQueryHandler for NoopRegionQueryHandler {
-        async fn do_get(
+        async fn select_target(
             &self,
             _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> QueryResult<crate::region_query::RegionQueryTarget> {
+            unreachable!("pass distribution tests should not execute remote queries")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
             _request: QueryRequest,
-        ) -> QueryResult<SendableRecordBatchStream> {
+        ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
             unreachable!("pass distribution tests should not execute remote queries")
         }
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _update: RemoteDynFilterUpdate,
         ) -> QueryResult<()> {
@@ -197,7 +204,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _unregister: RemoteDynFilterUnregister,
         ) -> QueryResult<()> {

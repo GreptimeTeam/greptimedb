@@ -92,7 +92,7 @@ function thresholdStatus(thresholds, query) {
   const hits = (Array.isArray(thresholds) ? thresholds : [])
     .filter(item => query === undefined || (hasScopedQuery(item) && String(item.query) === query))
     .map(formatThreshold);
-  return hits.length > 0 ? hits.join(', ') : 'N/A';
+  return hits.length > 0 ? hits.join('; ') : 'N/A';
 }
 
 function hasScopedQuery(threshold) {
@@ -115,7 +115,7 @@ function formatThreshold(threshold) {
   return `${name}${scope.length > 0 ? ` [${scope.join(', ')}]` : ''}: ${status}${reason}`;
 }
 
-function syntheticThresholdStatus(thresholds, measurementNames) {
+function classifyThresholds(thresholds, measurementNames) {
   const unscoped = [];
   const unmatched = new Map();
   for (const threshold of Array.isArray(thresholds) ? thresholds : []) {
@@ -130,7 +130,11 @@ function syntheticThresholdStatus(thresholds, measurementNames) {
       unmatched.set(query, entries);
     }
   }
+  return { unscoped, unmatched };
+}
 
+function syntheticThresholdStatus(thresholds, measurementNames) {
+  const { unscoped, unmatched } = classifyThresholds(thresholds, measurementNames);
   const parts = [];
   if (unscoped.length > 0) {
     parts.push(`case/storage threshold: ${thresholdStatus(unscoped)}`);
@@ -139,6 +143,21 @@ function syntheticThresholdStatus(thresholds, measurementNames) {
     parts.push(`unmatched query ${query}: ${thresholdStatus(unmatched.get(query))}`);
   }
   return parts.length > 0 ? parts.join('; ') : 'N/A';
+}
+
+// Case-level (query-unscoped) thresholds formatted for the collapsible details
+// block below the summary table: individual items, `; `-separated, without the
+// `case/storage threshold:` label (the section heading already says that).
+function syntheticThresholdDetail(thresholds, measurementNames) {
+  const { unscoped, unmatched } = classifyThresholds(thresholds, measurementNames);
+  const items = [];
+  if (unscoped.length > 0) {
+    items.push(thresholdStatus(unscoped));
+  }
+  for (const query of Array.from(unmatched.keys()).sort()) {
+    items.push(`unmatched query ${query}: ${thresholdStatus(unmatched.get(query))}`);
+  }
+  return items.length > 0 ? items.join('; ') : 'N/A';
 }
 
 function joinDetails(...details) {
@@ -229,7 +248,7 @@ function collectReportRows(report, reportPath) {
       ),
     };
   });
-  const syntheticThresholds = syntheticThresholdStatus(thresholds, measurementNames);
+  const syntheticThresholds = syntheticThresholdDetail(thresholds, measurementNames);
   if (syntheticThresholds !== 'N/A') {
     rows.push({
       caseName: name,
@@ -239,9 +258,28 @@ function collectReportRows(report, reportPath) {
       candidateMedian: 'N/A',
       regression: 'N/A',
       threshold: syntheticThresholds,
+      kind: 'case-thresholds',
     });
   }
   return rows;
+}
+
+function renderThresholdDetails(rows) {
+  const entries = rows.filter(row => row.kind === 'case-thresholds');
+  if (entries.length === 0) {
+    return '';
+  }
+  // The <details>/<summary> tags are emitted literally; only the entry content
+  // goes through text() (so `[ ] ( ) |` etc. stay escaped while the tags render).
+  const lines = [
+    '<details><summary>Case / storage thresholds</summary>',
+    '',
+  ];
+  for (const row of entries) {
+    lines.push(`- ${text(row.caseName)}: ${text(row.threshold)}`);
+  }
+  lines.push('</details>');
+  return lines.join('\n');
 }
 
 function renderSummaryTable(rows) {
@@ -250,11 +288,16 @@ function renderSummaryTable(rows) {
     '| --- | --- | --- | ---: | ---: | ---: | --- |',
   ];
   for (const row of rows) {
+    if (row.kind === 'case-thresholds') {
+      continue;
+    }
     lines.push(
-      `| ${text(row.caseName)} | ${text(row.query)} | ${statusEmoji(row.status)} \`${text(row.status)}\` | ${text(row.baseMedian)} | ${text(row.candidateMedian)} | ${text(row.regression)} | ${text(row.threshold)} |`
+      `| ${text(row.caseName)} | ${text(row.query)} | ${statusEmoji(row.status)} ${text(row.status)} | ${text(row.baseMedian)} | ${text(row.candidateMedian)} | ${text(row.regression)} | ${text(row.threshold)} |`
     );
   }
-  return lines.join('\n');
+  const details = renderThresholdDetails(rows);
+  const table = lines.join('\n');
+  return details === '' ? table : `${table}\n\n${details}`;
 }
 
 module.exports = async function validateQueryRegressionComment({ github, context, core }) {

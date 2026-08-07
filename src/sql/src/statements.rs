@@ -39,7 +39,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
-use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::json_type::JsonNativeType;
@@ -54,8 +54,8 @@ use crate::ast::{
 };
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonSettingsSnafu,
-    SetSkippingIndexOptionSnafu, SetVectorIndexOptionSnafu, SqlCommonSnafu,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+    SetVectorIndexOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -164,14 +164,8 @@ pub fn column_to_schema(
     };
     if is_json2_column {
         let settings = column.extensions.build_json_settings()?.unwrap_or_default();
-        let extension = JsonExtensionType::new(Arc::new(JsonMetadata {
-            json_settings: Some(settings.clone()),
-        }));
-        column_schema
-            .with_extension_type(&extension)
-            .with_context(|_| SetJsonSettingsSnafu {
-                value: format!("{settings:?}"),
-            })?;
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings)));
+        column_schema.with_extension_type(&extension);
     }
 
     Ok(column_schema)

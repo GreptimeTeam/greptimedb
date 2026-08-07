@@ -278,6 +278,11 @@ impl MitoRegion {
         version_data.version
     }
 
+    /// Returns whether writes to this region should skip WAL.
+    pub(crate) fn skip_wal(&self) -> bool {
+        self.provider == Provider::Noop || self.version().options.skip_wal
+    }
+
     /// Returns last flush timestamp in millis.
     pub(crate) fn last_flush_millis(&self) -> i64 {
         self.last_flush_millis.load(Ordering::Relaxed)

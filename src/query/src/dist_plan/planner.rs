@@ -535,7 +535,7 @@ mod tests {
     use table::test_util::EmptyTable;
 
     use super::DistExtensionPlanner;
-    use crate::region_query::RegionQueryHandler;
+    use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
     const PHYSICAL_TABLE_ID: u32 = 2048;
@@ -544,9 +544,17 @@ mod tests {
 
     #[async_trait]
     impl RegionQueryHandler for UnusedRegionQueryHandler {
-        async fn do_get(
+        async fn select_target(
             &self,
             _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<RegionQueryTarget> {
+            unreachable!("get_regions does not select region query targets")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &RegionQueryTarget,
             _request: QueryRequest,
         ) -> crate::error::Result<SendableRecordBatchStream> {
             unreachable!("get_regions does not query regions")
@@ -554,7 +562,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            _region_id: RegionId,
+            _target: &RegionQueryTarget,
             _query_id: String,
             _update: RemoteDynFilterUpdate,
         ) -> crate::error::Result<()> {
@@ -563,7 +571,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            _region_id: RegionId,
+            _target: &RegionQueryTarget,
             _query_id: String,
             _unregister: RemoteDynFilterUnregister,
         ) -> crate::error::Result<()> {

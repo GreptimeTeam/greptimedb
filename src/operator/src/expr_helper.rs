@@ -36,6 +36,7 @@ use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
@@ -215,12 +216,11 @@ pub fn create_to_expr(
             .context(ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(
+    let mut table_options = HashMap::from(
         &TableOptions::try_from_iter(create.options.to_str_map())
             .context(UnrecognizedTableOptionSnafu)?,
     );
 
-    let mut table_options = table_options;
     if table_options.contains_key(COMPACTION_TYPE) {
         table_options.insert(COMPACTION_OVERRIDE.to_string(), "true".to_string());
     }
@@ -443,14 +443,34 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     }
 
     // verify time_index exists
-    let _ = column_to_indices
-        .get(&create.time_index)
-        .with_context(|| InvalidSqlSnafu {
+    let time_index_idx =
+        column_to_indices
+            .get(&create.time_index)
+            .with_context(|| InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is not found in column list",
+                    create.time_index
+                ),
+            })?;
+
+    // verify time_index is a timestamp column
+    let time_index_column = &create.column_defs[*time_index_idx];
+    let data_type = ConcreteDataType::from(
+        ColumnDataTypeWrapper::try_new(
+            time_index_column.data_type,
+            time_index_column.datatype_extension.clone(),
+        )
+        .context(ColumnDataTypeSnafu)?,
+    );
+    ensure!(
+        data_type.is_timestamp(),
+        InvalidSqlSnafu {
             err_msg: format!(
-                "column name `{}` is not found in column list",
+                "column `{}` is not a timestamp type, it can't be used as time index",
                 create.time_index
             ),
-        })?;
+        }
+    );
 
     // verify primary_key exists
     for pk in &create.primary_keys {
@@ -1494,6 +1514,23 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!(
             "1.0MiB",
             expr.table_options.get("write_buffer_size").unwrap()
+        );
+
+        let sql = "CREATE TABLE monitor (ts TIMESTAMP TIME INDEX) WITH(skip_wal='false');";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            Some("false"),
+            expr.table_options
+                .get(store_api::mito_engine_options::SKIP_WAL_KEY)
+                .map(String::as_str)
         );
     }
 

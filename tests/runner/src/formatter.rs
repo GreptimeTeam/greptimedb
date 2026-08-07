@@ -203,7 +203,7 @@ pub fn build_recordbatches_from_mysql_rows(rows: &[MySqlRow]) -> RecordBatches {
         names
             .iter()
             .map(|name| {
-                ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), false)
+                ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), true)
             })
             .collect(),
     ));
@@ -214,7 +214,9 @@ pub fn build_recordbatches_from_mysql_rows(rows: &[MySqlRow]) -> RecordBatches {
         .collect();
     for row in rows.iter() {
         for (i, name) in names.iter().enumerate() {
-            columns[i].push(row.get::<String, &str>(name).as_deref());
+            // `get::<String, _>` panics on NULL values, so fetch as Option.
+            let value: Option<String> = row.get::<Option<String>, &str>(name).flatten();
+            columns[i].push(value.as_deref());
         }
     }
     let columns: Vec<VectorRef> = columns

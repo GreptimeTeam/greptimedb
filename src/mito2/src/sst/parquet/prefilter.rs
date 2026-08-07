@@ -268,13 +268,14 @@ pub(crate) struct BulkFilterPlan {
 /// omitted. Callers use this as a pruning filter and must preserve the full predicate for
 /// authoritative filtering later in the scan.
 pub(crate) fn build_primary_key_filter(
-    metadata: &RegionMetadataRef,
+    sst_metadata: &RegionMetadataRef,
+    expected_metadata: Option<&RegionMetadata>,
     predicate: Option<&Predicate>,
 ) -> Option<CachedPrimaryKeyFilter> {
     let filters = predicate
         .into_iter()
         .flat_map(|predicate| predicate.exprs())
-        .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
+        .filter_map(|expr| SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr))
         .filter_map(|filter_ctx| {
             (filter_ctx.semantic_type() == SemanticType::Tag)
                 .then(|| filter_ctx.filter().as_filter().cloned())
@@ -285,8 +286,8 @@ pub(crate) fn build_primary_key_filter(
         return None;
     }
 
-    let codec = build_primary_key_codec(metadata.as_ref());
-    let filter = codec.primary_key_filter(metadata, Arc::new(filters));
+    let codec = build_primary_key_codec(sst_metadata.as_ref());
+    let filter = codec.primary_key_filter(sst_metadata, Arc::new(filters));
     Some(CachedPrimaryKeyFilter::new(filter))
 }
 
@@ -370,13 +371,15 @@ pub(crate) fn build_bulk_filter_plan(
 /// reader always re-applies the original predicate, so the prefilter pass is purely a
 /// pruning hint.
 ///
-/// Tag and timestamp predicates that lower to [`SimpleFilterEvaluator`] are an
-/// exception — the engine enforces them precisely, so the prefilter pass is the only
-/// place they execute. They are never silently dropped.
+/// With predicate prefiltering enabled, tag and timestamp predicates that lower to
+/// [`SimpleFilterEvaluator`] are an exception — the engine enforces them precisely in
+/// the prefilter pass. When it is disabled, all simple filters remain on the normal
+/// precise-filter path instead.
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
     pre_filter_mode: PreFilterMode,
+    enable_predicate_prefilter: bool,
     read_format: &FlatReadFormat,
     codec: &Arc<dyn PrimaryKeyCodec>,
 ) -> ReaderFilterPlan {
@@ -417,6 +420,11 @@ pub(crate) fn build_reader_filter_plan(
         // Prefer cheap simple filters first. They also preserve `Matched` /
         // `Pruned` states for columns that only exist in expected metadata.
         if let Some(filter_ctx) = SimpleFilterContext::new_opt(metadata, expected_metadata, expr) {
+            if !enable_predicate_prefilter {
+                remaining_simple_filters.push(filter_ctx);
+                continue;
+            }
+
             // `Matched` and `Pruned` come from expected-metadata compatibility
             // and must stay in the main filter list so later phases keep that
             // outcome.
@@ -452,6 +460,10 @@ pub(crate) fn build_reader_filter_plan(
             continue;
         }
 
+        if !enable_predicate_prefilter {
+            continue;
+        }
+
         // Best-effort physical-filter prefilter (see fn-level doc): `new_opt`
         // returning `None` means the column is not in the projected arrow
         // schema, and dropping the predicate is safe because the upper
@@ -462,6 +474,13 @@ pub(crate) fn build_reader_filter_plan(
         {
             prefilter_physical_filters.push(filter);
         }
+    }
+
+    if !enable_predicate_prefilter {
+        return ReaderFilterPlan {
+            remaining_simple_filters,
+            prefilter_builder: None,
+        };
     }
 
     let pk_filter_expr_strs = (!pk_filter_contexts.is_empty()).then(|| {
@@ -1153,6 +1172,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use common_recordbatch::filter::SimpleFilterEvaluator;
+    use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
         ArrayRef, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
@@ -1557,6 +1577,7 @@ mod tests {
             ])),
             None,
             PreFilterMode::SkipFields,
+            true,
             &full_read_format,
             &codec,
         );
@@ -1584,6 +1605,7 @@ mod tests {
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
             None,
             PreFilterMode::All,
+            true,
             &projected_read_format,
             &metric_codec,
         );
@@ -1597,6 +1619,24 @@ mod tests {
                 .is_some()
         );
         assert!(pk_prefilter_plan.remaining_simple_filters.is_empty());
+
+        let disabled_plan = build_reader_filter_plan(
+            Some(&Predicate::new(vec![
+                col("tag_0").eq(lit("a")),
+                col("field_0").gt(lit(1_u64)),
+                col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
+            ])),
+            None,
+            PreFilterMode::All,
+            false,
+            &projected_read_format,
+            &metric_codec,
+        );
+        assert!(disabled_plan.prefilter_builder.is_none());
+        assert_eq!(
+            remaining_simple_filter_columns(&disabled_plan.remaining_simple_filters),
+            vec!["tag_0", "field_0", "ts"]
+        );
     }
 
     #[test]
@@ -1622,6 +1662,7 @@ mod tests {
             Some(&Predicate::new(vec![expr_a.clone(), expr_b.clone()])),
             None,
             PreFilterMode::All,
+            true,
             &read_format,
             &codec,
         );
@@ -1629,6 +1670,7 @@ mod tests {
             Some(&Predicate::new(vec![expr_b, expr_a])),
             None,
             PreFilterMode::All,
+            true,
             &read_format,
             &codec,
         );

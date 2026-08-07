@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SKIP_WAL_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -400,6 +400,14 @@ impl TableMeta {
                     } else {
                         new_options.extra_options.remove(MAX_ROW_GROUP_ROW_COUNT);
                     }
+                }
+                SetRegionOption::SkipWal => {
+                    new_options.skip_wal = true;
+                    // Keep the explicit table option so it remains distinguishable
+                    // from a value inherited from the schema.
+                    new_options
+                        .extra_options
+                        .insert(SKIP_WAL_KEY.to_string(), true.to_string());
                 }
             }
         }
@@ -1683,6 +1691,39 @@ mod tests {
                 .options
                 .extra_options
                 .get(MERGE_MODE_KEY)
+                .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_skip_wal_updates_typed_and_extra_options() {
+        let mut meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        meta.options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), false.to_string());
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(new_meta.options.skip_wal);
+        assert_eq!(
+            Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
                 .map(String::as_str)
         );
     }

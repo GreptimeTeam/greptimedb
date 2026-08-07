@@ -32,8 +32,6 @@
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
@@ -80,6 +78,8 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
@@ -96,7 +96,7 @@
 | `wal.sync_write` | Bool | `false` | Whether to use sync write.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.enable_log_recycle` | Bool | `true` | Whether to reuse logically truncated log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
-| `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
+| `wal.sync_period` | String | `5s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
@@ -217,6 +217,7 @@
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
@@ -260,8 +261,6 @@
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
-| `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `http.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `http.experimental_enable_explain_analyze_stream` | Bool | `true` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `http.enable_api_server` | Bool | `false` | Whether to start the dedicated public HTTP **API** server. This server serves<br/>only the `v1` interfaces plus the dashboard, and shares every other `[http]`<br/>option with the main server. It is disabled by default; set to `true` to enable. |
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
@@ -320,6 +319,8 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
 | `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
@@ -351,6 +352,7 @@
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.enable_per_region_metrics` | Bool | `false` | Whether to enable per-region metrics.<br/>Default to false. |
@@ -455,15 +457,13 @@
 | `gc` | -- | -- | -- |
 | `gc.enable` | Bool | `false` | Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`<br/>If set to false, no GC will be performed |
 | `gc.gc_cooldown_period` | String | `5m` | Cooldown period between GC operations on the same region. |
-| `gc.experimental_soft_drop` | -- | -- | -- |
-| `gc.experimental_soft_drop.enable` | Bool | `false` | Whether soft drop is enabled. Requires `gc.enable = true`. |
-| `gc.experimental_soft_drop.retention` | String | `7d` | How long soft-dropped tables are retained before automatic purge. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
@@ -529,7 +529,7 @@
 | `wal.sync_write` | Bool | `false` | Whether to use sync write.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.enable_log_recycle` | Bool | `true` | Whether to reuse logically truncated log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
-| `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
+| `wal.sync_period` | String | `5s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
@@ -641,6 +641,7 @@
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
@@ -701,6 +702,7 @@
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.enable_file_logging` | Bool | `true` | Whether to write logs to files in `dir`. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |

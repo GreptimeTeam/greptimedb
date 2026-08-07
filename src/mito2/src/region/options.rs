@@ -94,6 +94,8 @@ pub struct RegionOptions {
     pub storage: Option<String>,
     /// If append mode is enabled, the region keeps duplicate rows.
     pub append_mode: bool,
+    /// Whether to skip writing new WAL entries.
+    pub skip_wal: bool,
     /// Wal options.
     pub wal_options: WalOptions,
     /// Index options.
@@ -275,6 +277,7 @@ impl RegionOptions {
             compaction_override,
             storage: options.storage,
             append_mode: options.append_mode,
+            skip_wal: options.skip_wal,
             wal_options,
             index_options,
             memtable,
@@ -389,6 +392,8 @@ struct RegionOptionsWithoutEnum {
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
+    #[serde_as(as = "DisplayFromStr")]
+    skip_wal: bool,
     #[serde_as(as = "NoneAsEmptyString")]
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
@@ -406,6 +411,7 @@ impl Default for RegionOptionsWithoutEnum {
             auto_flush_interval: options.auto_flush_interval,
             storage: options.storage,
             append_mode: options.append_mode,
+            skip_wal: options.skip_wal,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
             max_row_group_row_count: options.max_row_group_row_count,
@@ -552,7 +558,7 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
-    use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
+    use store_api::mito_engine_options::{SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY};
 
     use super::*;
 
@@ -579,6 +585,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_skip_wal() {
+        let map = make_map(&[(SKIP_WAL_KEY, "true")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert!(options.skip_wal);
     }
 
     #[test]
@@ -937,6 +950,7 @@ mod tests {
             compaction_override: true,
             storage: Some("S3".to_string()),
             append_mode: false,
+            skip_wal: false,
             wal_options,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -974,6 +988,7 @@ mod tests {
             compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
+            skip_wal: false,
             wal_options: WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -1040,6 +1055,7 @@ mod tests {
             compaction_override: false,
             storage: Some("S3".to_string()),
             append_mode: false,
+            skip_wal: false,
             wal_options: WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {

@@ -103,7 +103,7 @@ fn test_load_datanode_example_config() {
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
@@ -210,11 +210,6 @@ fn test_load_metasrv_example_config() {
     let options =
         GreptimeOptions::<MetasrvOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    assert!(!options.component.gc.experimental_soft_drop.enable);
-    assert_eq!(
-        Duration::from_secs(7 * 24 * 60 * 60),
-        options.component.gc.experimental_soft_drop.retention
-    );
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
@@ -341,7 +336,7 @@ fn test_load_standalone_example_config() {
             auto_create_table: true,
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),

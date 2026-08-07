@@ -151,12 +151,6 @@ jobs:
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
-      - if: matrix.mode.name == 'Basic'
-        name: Run soft-drop lifecycle sqlness
-        env:
-          GREPTIMEDB_METASRV__GC__SOFT_DROP__ENABLE: "true"
-          GREPTIMEDB_METASRV__GC__SOFT_DROP__RETENTION: "7d"
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare --enable-gc -c ./tests/cases-soft-drop --bins-dir ./bins --preserve-state -t soft_drop_table
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -243,6 +237,23 @@ jobs:
     with:
       artifact-name: bins
 
+  compat-updater-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    name: Check compat version updater
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run compat updater unit tests
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
+      - name: Check compat version window and anchors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/update-compat-versions.py --check --published-only --check-anchors
+
   compat:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
     name: Compatibility Test (recent releases)
@@ -253,6 +264,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -260,8 +272,20 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
+      - name: Compute nightly compat window
+        id: nightly
+        if: ${{ github.event_name == 'schedule' }}
+        shell: bash
+        run: echo "extra=$(python3 .github/scripts/update-compat-versions.py --nightly-window)" >> "$GITHUB_OUTPUT"
       - name: Run compatibility test
-        run: python3 .github/scripts/run-compat.py --preserve-state
+        env:
+          NIGHTLY_EXTRA: ${{ steps.nightly.outputs.extra }}
+        run: |
+          EXTRA=""
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && -n "${NIGHTLY_EXTRA}" ]]; then
+            EXTRA="--from-versions-extra=${NIGHTLY_EXTRA}"
+          fi
+          python3 .github/scripts/run-compat.py --preserve-state ${EXTRA}
       - name: Upload compatibility logs
         if: failure()
         uses: actions/upload-artifact@v4

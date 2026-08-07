@@ -156,7 +156,7 @@ mod tests {
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ConcreteDataType, RegionId};
@@ -196,9 +196,7 @@ mod tests {
             ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
             true,
         );
-        json_column
-            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata::default())))
-            .unwrap();
+        json_column.with_extension_type(&Json2ExtensionType::default());
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: json_column,

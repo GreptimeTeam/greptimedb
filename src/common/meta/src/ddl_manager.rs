@@ -27,12 +27,12 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::TableId;
+use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_enables_skip_wal};
 use crate::ddl::comment_on::CommentOnProcedure;
 use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
@@ -43,8 +43,10 @@ use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
+#[cfg(feature = "enterprise")]
 use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
+#[cfg(feature = "enterprise")]
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
@@ -77,6 +79,8 @@ use crate::rpc::ddl::{
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask, UndropTableTask,
 };
+
+const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
 
 /// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
@@ -264,14 +268,21 @@ impl DdlManager {
             AlterLogicalTablesProcedure,
             AlterDatabaseProcedure,
             DropTableProcedure,
-            UndropTableProcedure,
-            PurgeDroppedTableProcedure,
             DropFlowProcedure,
             TruncateTableProcedure,
             DropDatabaseProcedure,
             DropViewProcedure,
             CommentOnProcedure
         );
+        #[cfg(feature = "enterprise")]
+        let loaders = {
+            let soft_drop_loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> =
+                procedure_loader!(UndropTableProcedure, PurgeDroppedTableProcedure);
+            loaders
+                .into_iter()
+                .chain(soft_drop_loaders)
+                .collect::<Vec<_>>()
+        };
 
         for (type_name, loader_factory) in loaders {
             let context = self.create_context();
@@ -280,17 +291,20 @@ impl DdlManager {
                 .context(RegisterProcedureLoaderSnafu { type_name })?;
         }
 
-        let type_name = PurgeDroppedTableProcedure::EXPIRED_TYPE_NAME;
-        let context = self.create_context();
-        self.procedure_manager
-            .register_loader(
-                type_name,
-                Box::new(move |json: &str| {
-                    PurgeDroppedTableProcedure::from_json(json, context.clone())
-                        .map(|procedure| Box::new(procedure) as _)
-                }),
-            )
-            .context(RegisterProcedureLoaderSnafu { type_name })?;
+        #[cfg(feature = "enterprise")]
+        {
+            let type_name = PurgeDroppedTableProcedure::EXPIRED_TYPE_NAME;
+            let context = self.create_context();
+            self.procedure_manager
+                .register_loader(
+                    type_name,
+                    Box::new(move |json: &str| {
+                        PurgeDroppedTableProcedure::from_json(json, context.clone())
+                            .map(|procedure| Box::new(procedure) as _)
+                    }),
+                )
+                .context(RegisterProcedureLoaderSnafu { type_name })?;
+        }
 
         self.repartition_procedure_factory
             .register_loaders(&self.ddl_context, &self.procedure_manager)
@@ -405,12 +419,60 @@ impl DdlManager {
                 .await;
         }
 
-        let context = self.create_context();
-        let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
+        let lock_regions = alter_table_task
+            .alter_table
+            .kind
+            .as_ref()
+            .is_some_and(only_enables_skip_wal);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let mut route_change_retries = 0;
+        loop {
+            // Hold the same physical region locks as migration while validating that
+            // this route snapshot is still the one the procedure will mutate.
+            let region_ids_to_lock = if lock_regions {
+                let (_, route) = self
+                    .table_metadata_manager()
+                    .table_route_manager()
+                    .get_physical_table_route(table_id)
+                    .await?;
+                route
+                    .region_routes
+                    .iter()
+                    .map(|route| route.region.id)
+                    .collect::<Vec<RegionId>>()
+            } else {
+                vec![]
+            };
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            let context = self.create_context();
+            let procedure = AlterTableProcedure::new_with_region_locks(
+                table_id,
+                alter_table_task.clone(),
+                region_ids_to_lock,
+                context,
+            )?;
+
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+            let result = self.execute_procedure_and_wait(procedure_with_id).await?;
+            if result
+                .1
+                .as_ref()
+                .is_some_and(|output| output.is::<RegionRouteChanged>())
+            {
+                if route_change_retries == MAX_REGION_ROUTE_CHANGE_RETRIES {
+                    let source = error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Region route kept changing while altering table {table_id}"
+                        ),
+                    }
+                    .build();
+                    return Err(error::Error::retry_later(source));
+                }
+                route_change_retries += 1;
+                continue;
+            }
+            return Ok(result);
+        }
     }
 
     /// Submits and executes a create table task.
@@ -498,55 +560,95 @@ impl DdlManager {
     }
 
     /// Submits and executes an undrop table task.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     #[tracing::instrument(skip_all)]
     pub async fn submit_undrop_table_task(
         &self,
         undrop_table_task: UndropTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
-        let original_table_name = context
-            .table_metadata_manager
-            .get_dropped_table_by_id(undrop_table_task.table_id)
-            .await?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: undrop_table_task.table_id.to_string(),
-            })?
-            .table_name;
-        let procedure = UndropTableProcedure::new_with_original_table_name(
-            undrop_table_task,
-            context,
-            Some(original_table_name),
-        );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use crate::error::UnsupportedSnafu;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            return UnsupportedSnafu {
+                operation: "undrop table is only available in GreptimeDB Enterprise Edition",
+            }
+            .fail();
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let context = self.create_context();
+            let original_table_name = context
+                .table_metadata_manager
+                .get_dropped_table_by_id(undrop_table_task.table_id)
+                .await?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: undrop_table_task.table_id.to_string(),
+                })?
+                .table_name;
+            let procedure = UndropTableProcedure::new_with_original_table_name(
+                undrop_table_task,
+                context,
+                Some(original_table_name),
+            );
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+            self.execute_procedure_and_wait(procedure_with_id).await
+        }
     }
 
     /// Submits and executes a purge dropped table task.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     #[tracing::instrument(skip_all)]
     pub async fn submit_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
-        let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use crate::error::UnsupportedSnafu;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            return UnsupportedSnafu {
+                operation: "purge dropped table is only available in GreptimeDB Enterprise Edition",
+            }
+            .fail();
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let context = self.create_context();
+            let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+            self.execute_procedure_and_wait(procedure_with_id).await
+        }
     }
 
     /// Submits and executes a purge task that first rechecks the tombstone deadline.
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     #[tracing::instrument(skip_all)]
     pub async fn submit_expired_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let context = self.create_context();
-        let procedure =
-            PurgeDroppedTableProcedure::new_if_expired(purge_dropped_table_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        #[cfg(not(feature = "enterprise"))]
+        {
+            use crate::error::UnsupportedSnafu;
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+            return UnsupportedSnafu {
+                operation:
+                    "purge expired dropped table is only available in GreptimeDB Enterprise Edition",
+            }
+            .fail();
+        }
+        #[cfg(feature = "enterprise")]
+        {
+            let context = self.create_context();
+            let procedure =
+                PurgeDroppedTableProcedure::new_if_expired(purge_dropped_table_task, context);
+            let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+            self.execute_procedure_and_wait(procedure_with_id).await
+        }
     }
 
     /// Submits and executes a create database task.
@@ -1263,7 +1365,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_error::ext::{BoxedError, ErrorExt};
+    use common_error::ext::BoxedError;
+    #[cfg(feature = "enterprise")]
+    use common_error::ext::ErrorExt;
+    #[cfg(feature = "enterprise")]
     use common_error::status_code::StatusCode;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
@@ -1289,9 +1394,13 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
+    #[cfg(not(feature = "enterprise"))]
+    use crate::procedure_executor::ExecutorContext;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
+    #[cfg(not(feature = "enterprise"))]
+    use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -1437,10 +1546,21 @@ mod tests {
         for loader in expected_loaders {
             assert!(procedure_manager.contains_loader(loader));
         }
+
+        let soft_drop_loaders = [
+            "metasrv-procedure::UndropTable",
+            "metasrv-procedure::PurgeDroppedTable",
+            "metasrv-procedure::PurgeExpiredDroppedTable",
+        ];
+        for loader in soft_drop_loaders {
+            assert_eq!(
+                cfg!(feature = "enterprise"),
+                procedure_manager.contains_loader(loader)
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+    fn build_soft_drop_test_ddl_manager() -> DdlManager {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
@@ -1462,7 +1582,7 @@ mod tests {
             None,
         ));
 
-        let ddl_manager = DdlManager::new(
+        DdlManager::new(
             DdlContext {
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
@@ -1479,7 +1599,13 @@ mod tests {
             },
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
-        );
+        )
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+        let ddl_manager = build_soft_drop_test_ddl_manager();
 
         let err = ddl_manager
             .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
@@ -1488,5 +1614,43 @@ mod tests {
 
         assert_eq!(err.status_code(), StatusCode::TableNotFound);
         assert!(matches!(err, crate::error::Error::TableNotFound { .. }));
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[tokio::test]
+    async fn test_submit_undrop_and_purge_rejected_in_non_enterprise_build() {
+        let ddl_manager = build_soft_drop_test_ddl_manager();
+
+        let err = ddl_manager
+            .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Unsupported { .. }));
+
+        let err = ddl_manager
+            .submit_purge_dropped_table_task(PurgeDroppedTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Unsupported { .. }));
+
+        let err = ddl_manager
+            .submit_expired_purge_dropped_table_task(PurgeDroppedTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Unsupported { .. }));
+
+        for task in [
+            DdlTask::UndropTable(UndropTableTask { table_id: 1024 }),
+            DdlTask::PurgeDroppedTable(PurgeDroppedTableTask { table_id: 1024 }),
+        ] {
+            let err = ddl_manager
+                .submit_ddl_task(
+                    &ExecutorContext::default(),
+                    SubmitDdlTaskRequest::new(QueryContext::default(), task),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, crate::error::Error::Unsupported { .. }));
+        }
     }
 }

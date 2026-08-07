@@ -65,14 +65,6 @@ enable_cors = true
 ## Customize allowed origins for HTTP CORS.
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
-## Whether to enable validation for Prometheus remote write requests.
-## Available options:
-## - strict: deny invalid UTF-8 strings (default).
-## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
-## - unchecked: do not valid strings.
-prom_validation_mode = "strict"
-## Experimental: enable Prometheus remote write v2 native histogram ingestion.
-experimental_enable_prometheus_native_histogram = false
 ## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
 experimental_enable_explain_analyze_stream = true
 
@@ -254,6 +246,14 @@ trace_ingest_chunk_size = 512
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
+## Whether to enable validation for Prometheus remote write requests.
+## Available options:
+## - strict: deny invalid UTF-8 strings (default).
+## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
+## - unchecked: do not valid strings.
+prom_validation_mode = "strict"
+## Experimental: enable Prometheus remote write v2 native histogram ingestion.
+experimental_enable_prometheus_native_histogram = false
 ## Interval to flush pending rows batcher.
 ## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
 #+pending_rows_flush_interval = "0s"
@@ -338,6 +338,9 @@ otlp_endpoint = "http://localhost:4318/v1/traces"
 
 ## Whether to append logs to stdout.
 append_stdout = true
+
+## Whether to write logs to files in `dir`.
+enable_file_logging = true
 
 ## The log format. Can be `text`/`json`.
 log_format = "text"

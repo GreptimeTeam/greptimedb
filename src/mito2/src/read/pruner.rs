@@ -178,6 +178,30 @@ impl PartitionPruner {
     }
 }
 
+/// Options to create a [`Pruner`].
+#[derive(Debug, Clone, Copy)]
+pub struct PrunerOptions {
+    /// Keeps file range builders until the query-scoped pruner is dropped.
+    pub retain_builders: bool,
+    /// Whether [`FileRange`]s execute the reduced-column predicate prefilter.
+    ///
+    /// The flag is baked into the cached [`FileRangeBuilder`], so it belongs to
+    /// the whole scan. All partitions sharing this pruner must agree on it.
+    /// Two-stage series scans disable this prefilter: candidate discovery applies
+    /// tag predicates, then the data phase calls [`FileRange::precise_filter_flat`]
+    /// with tag filtering skipped so the predicates are applied exactly once.
+    pub enable_predicate_prefilter: bool,
+}
+
+impl Default for PrunerOptions {
+    fn default() -> Self {
+        Self {
+            retain_builders: false,
+            enable_predicate_prefilter: true,
+        }
+    }
+}
+
 /// A pruner that prunes files for all partitions of a scanner.
 pub struct Pruner {
     /// Channels to send requests to workers.
@@ -200,6 +224,8 @@ struct PrunerInner {
     manifest_pruned_files: Vec<AtomicBool>,
     /// Keeps file range builders until the query-scoped pruner is dropped.
     retain_builders: bool,
+    /// Whether FileRanges should execute the reduced-column predicate prefilter.
+    enable_predicate_prefilter: bool,
 }
 
 impl Drop for PrunerInner {
@@ -275,15 +301,19 @@ impl Pruner {
     /// Initially all file_entries have `remaining_ranges = 0`.
     /// Call `add_partition_ranges()` to initialize ref counts.
     pub fn new(stream_ctx: Arc<StreamContext>, num_workers: usize) -> Self {
-        Self::new_with_retained_builders(stream_ctx, num_workers, false)
+        Self::new_with_options(stream_ctx, num_workers, PrunerOptions::default())
     }
 
-    /// Creates a new pruner and optionally retains file range builders until drop.
-    pub fn new_with_retained_builders(
+    /// Creates a new pruner with the given options.
+    pub fn new_with_options(
         stream_ctx: Arc<StreamContext>,
         num_workers: usize,
-        retain_builders: bool,
+        options: PrunerOptions,
     ) -> Self {
+        let PrunerOptions {
+            retain_builders,
+            enable_predicate_prefilter,
+        } = options;
         let num_files = stream_ctx.input.num_files();
         let file_entries: Vec<_> = (0..num_files)
             .map(|_| {
@@ -311,6 +341,7 @@ impl Pruner {
             stream_ctx,
             manifest_pruned_files,
             retain_builders,
+            enable_predicate_prefilter,
         });
 
         // Spawn worker tasks with their receivers
@@ -486,6 +517,12 @@ impl Pruner {
         let _ = self.worker_senders[worker_idx].try_send(request);
     }
 
+    /// Returns whether this pruner builds file ranges with the reduced-column
+    /// predicate prefilter enabled.
+    pub fn predicate_prefilter_enabled(&self) -> bool {
+        self.inner.enable_predicate_prefilter
+    }
+
     fn get_worker_idx(&self, file_id: FileId) -> usize {
         let file_id_hash = Uuid::from(file_id).as_u128() as usize;
         file_id_hash % self.inner.num_workers
@@ -516,7 +553,13 @@ impl Pruner {
             .inner
             .stream_ctx
             .input
-            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .prune_file_after_manifest_check(
+                file,
+                pre_filter_mode,
+                self.inner.enable_predicate_prefilter,
+                predicate,
+                reader_metrics,
+            )
             .await?;
 
         let arc_builder = Arc::new(builder);
@@ -599,7 +642,13 @@ impl Pruner {
                 inner
                     .stream_ctx
                     .input
-                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
+                    .prune_file_after_manifest_check(
+                        file,
+                        pre_filter_mode,
+                        inner.enable_predicate_prefilter,
+                        predicate,
+                        &mut metrics,
+                    )
                     .await
             };
 
@@ -796,10 +845,13 @@ mod tests {
             .with_files(files)
             .with_append_mode(true);
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
-        let pruner = Arc::new(Pruner::new_with_retained_builders(
+        let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
             1,
-            retain_builders,
+            PrunerOptions {
+                retain_builders,
+                ..Default::default()
+            },
         ));
         (env, pruner)
     }

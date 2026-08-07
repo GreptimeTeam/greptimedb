@@ -1533,7 +1533,7 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Mutation, Row, Rows, SemanticType};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::json::value::JsonValue;
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
@@ -1730,8 +1730,7 @@ mod tests {
 
         let data_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
         let mut col_schema = ColumnSchema::new("data", data_type, true);
-        let extension = JsonExtensionType::new(Arc::new(JsonMetadata::default()));
-        col_schema.with_extension_type(&extension).unwrap();
+        col_schema.with_extension_type(&Json2ExtensionType::default());
 
         let col_meta_2 = ColumnMetadata {
             column_schema: col_schema,

@@ -643,7 +643,6 @@ async fn setup_test_prom_app_with_frontend_inner(
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
-        experimental_enable_prometheus_native_histogram,
         ..Default::default()
     };
     let frontend_ref = instance.fe_instance().clone();
@@ -675,6 +674,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             Some(frontend_ref.clone()),
             true,
             PromValidationMode::Strict,
+            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
