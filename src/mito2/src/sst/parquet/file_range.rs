@@ -53,7 +53,7 @@ use crate::sst::parquet::flat_format::{
     time_index_column_index,
 };
 use crate::sst::parquet::json_align::ProjectedRecordBatchStream;
-use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, primary_key_filter_mask};
+use crate::sst::parquet::prefilter::primary_key_filter_mask;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
@@ -100,13 +100,12 @@ pub struct FileRange {
 }
 
 impl FileRange {
-    /// Builds the encoded-primary-key filter selected for this file.
-    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
-        self.context.reader_builder.primary_key_filter()
+    /// Returns the region metadata stored in this SST.
+    pub(crate) fn region_metadata(&self) -> &RegionMetadataRef {
+        self.context.read_format().metadata()
     }
 
     /// Returns encoded primary-key min/max statistics for this row group.
-    #[allow(dead_code)]
     pub(crate) fn primary_key_range(&self) -> Option<(&[u8], &[u8])> {
         let metadata = self.context.reader_builder.parquet_metadata();
         let num_columns = metadata.file_metadata().schema_descr().num_columns();
@@ -301,9 +300,8 @@ impl FileRange {
     /// filter and this range's existing row selection.
     ///
     /// This deliberately bypasses generic predicate prefiltering. The series
-    /// pruner selected the row group independently, and non-tag simple predicates
-    /// are applied after merge and dedup by the series reader.
-    #[allow(dead_code)]
+    /// pruner selected the row group independently, and simple predicates retained
+    /// by the disabled prefilter plan are applied precisely before merge.
     pub(crate) async fn reader_by_primary_key(
         &self,
         primary_key_filter: &mut dyn mito_codec::row_converter::PrimaryKeyFilter,
@@ -348,13 +346,28 @@ impl FileRange {
         self.context.compaction_projection_mapper()
     }
 
+    /// Filters a full-projection batch using this range's precise filters.
+    pub(crate) fn precise_filter_flat(
+        &self,
+        input: RecordBatch,
+        skip_fields: bool,
+        skip_tags: bool,
+    ) -> Result<Option<RecordBatch>> {
+        self.context
+            .precise_filter_flat(input, skip_fields, skip_tags)
+    }
+
+    /// Returns the precise-filter mode configured for this range.
+    pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
+        self.context.pre_filter_mode()
+    }
+
     /// Returns the file handle of the file range.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()
     }
 }
 
-#[allow(dead_code)]
 fn refine_primary_key_selection(
     masks: &[BooleanArray],
     original: &Option<RowSelection>,
@@ -431,8 +444,9 @@ impl FileRangeContext {
         &self,
         input: RecordBatch,
         skip_fields: bool,
+        skip_tags: bool,
     ) -> Result<Option<RecordBatch>> {
-        self.base.precise_filter_flat(input, skip_fields)
+        self.base.precise_filter_flat(input, skip_fields, skip_tags)
     }
 
     pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
@@ -534,13 +548,16 @@ impl RangeBase {
     /// # Arguments
     /// * `input` - The RecordBatch to filter
     /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
+    /// * `skip_tags` - Whether to skip tag filters that were applied in an earlier phase
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
         skip_fields: bool,
+        skip_tags: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
-        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
+        let mask =
+            self.compute_filter_mask_flat(&input, skip_fields, skip_tags, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -558,8 +575,14 @@ impl RangeBase {
             mask = mask.bitand(&partition_mask);
         }
 
-        if mask.count_set_bits() == 0 {
+        let num_selected = mask.count_set_bits();
+        if num_selected == 0 {
             return Ok(None);
+        }
+        if num_selected == input.num_rows() {
+            // Nothing was filtered out, e.g. all filters were skipped by
+            // `skip_fields`/`skip_tags`. Avoid copying the whole batch.
+            return Ok(Some(input));
         }
 
         let filtered_batch =
@@ -582,10 +605,12 @@ impl RangeBase {
     /// # Arguments
     /// * `input` - The RecordBatch to compute mask for
     /// * `skip_fields` - Whether to skip field filters based on PreFilterMode
+    /// * `skip_tags` - Whether to skip tag filters that were applied in an earlier phase
     pub(crate) fn compute_filter_mask_flat(
         &self,
         input: &RecordBatch,
         skip_fields: bool,
+        skip_tags: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -604,6 +629,9 @@ impl RangeBase {
 
             // Skip field filters if skip_fields is true
             if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
+                continue;
+            }
+            if skip_tags && filter_ctx.semantic_type() == SemanticType::Tag {
                 continue;
             }
 
@@ -783,7 +811,11 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion_expr::{col, lit};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::Value;
     use parquet::arrow::arrow_reader::RowSelector;
+    use partition::expr::col as partition_col;
 
     use super::*;
     use crate::read::read_columns::ReadColumns;
@@ -829,10 +861,33 @@ mod tests {
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
         let mask = base
-            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
+            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
         assert_eq!(mask.count_set_bits(), 0);
+
+        let mask = base
+            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    #[test]
+    fn test_precise_filter_flat_returns_input_when_nothing_is_filtered() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let tag_filter =
+            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("z"))).unwrap();
+        let base = new_test_range_base(vec![tag_filter]);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        // The only filter is a tag filter, and it is skipped, so the batch must
+        // come back untouched rather than being copied through `filter_record_batch`.
+        let filtered = base
+            .precise_filter_flat(batch.clone(), false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch, filtered);
     }
 
     #[test]
@@ -859,10 +914,49 @@ mod tests {
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
         let mask = base
-            .compute_filter_mask_flat(&batch, false, &mut TagDecodeState::new())
+            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
         assert_eq!(mask.count_set_bits(), 4);
+    }
+
+    #[test]
+    fn test_precise_filter_flat_applies_partition_filter_when_skipping_tags() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let tag_filter =
+            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("z"))).unwrap();
+        let mut base = new_test_range_base(vec![tag_filter]);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let batch_schema = batch.schema();
+        let tag_field = batch_schema.field(0);
+        let partition_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::from_arrow_type(tag_field.data_type()),
+            tag_field.is_nullable(),
+        )]));
+        let partition_expr = partition_col("tag_0")
+            .gt_eq(Value::String("a".into()))
+            .and(partition_col("tag_0").lt(Value::String("c".into())));
+        base.partition_filter = Some(PartitionFilterContext {
+            region_partition_physical_expr: partition_expr
+                .try_as_physical_expr(partition_schema.arrow_schema())
+                .unwrap(),
+            partition_schema,
+        });
+
+        let filtered = base
+            .precise_filter_flat(batch, false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(filtered.num_rows(), 4);
+
+        let out_of_partition = new_record_batch_with_custom_sequence(&["z", "x"], 0, 4, 1);
+        assert!(
+            base.precise_filter_flat(out_of_partition, false, true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

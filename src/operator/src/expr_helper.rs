@@ -36,6 +36,7 @@ use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
@@ -442,14 +443,34 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     }
 
     // verify time_index exists
-    let _ = column_to_indices
-        .get(&create.time_index)
-        .with_context(|| InvalidSqlSnafu {
+    let time_index_idx =
+        column_to_indices
+            .get(&create.time_index)
+            .with_context(|| InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is not found in column list",
+                    create.time_index
+                ),
+            })?;
+
+    // verify time_index is a timestamp column
+    let time_index_column = &create.column_defs[*time_index_idx];
+    let data_type = ConcreteDataType::from(
+        ColumnDataTypeWrapper::try_new(
+            time_index_column.data_type,
+            time_index_column.datatype_extension.clone(),
+        )
+        .context(ColumnDataTypeSnafu)?,
+    );
+    ensure!(
+        data_type.is_timestamp(),
+        InvalidSqlSnafu {
             err_msg: format!(
-                "column name `{}` is not found in column list",
+                "column `{}` is not a timestamp type, it can't be used as time index",
                 create.time_index
             ),
-        })?;
+        }
+    );
 
     // verify primary_key exists
     for pk in &create.primary_keys {

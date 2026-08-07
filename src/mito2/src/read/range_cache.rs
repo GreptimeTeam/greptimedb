@@ -501,7 +501,6 @@ pub(crate) fn build_candidate_range_cache_key(
 }
 
 /// Builds a cache key for a two-phase series-data partition-range result.
-#[allow(dead_code)]
 pub(crate) fn build_series_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,

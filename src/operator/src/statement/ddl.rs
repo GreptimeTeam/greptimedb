@@ -31,7 +31,9 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_base::regex_pattern::NAME_PATTERN_REG;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema, is_readonly_table,
+};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
@@ -96,8 +98,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
+    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -106,12 +108,12 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidEntitySemanticOptionSnafu, InvalidPartitionRuleSnafu,
+    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
+    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -385,12 +387,7 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
-        ensure!(
-            !is_readonly_schema(&create_table.schema_name),
-            SchemaReadOnlySnafu {
-                name: create_table.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
 
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -1229,7 +1226,7 @@ impl StatementExecutor {
 
     /// Drop a view
     #[tracing::instrument(skip_all)]
-    pub(crate) async fn drop_view(
+    pub async fn drop_view(
         &self,
         catalog: String,
         schema: String,
@@ -1389,12 +1386,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
-            ensure!(
-                !is_readonly_schema(&table_name.schema_name),
-                SchemaReadOnlySnafu {
-                    name: table_name.schema_name.clone()
-                }
-            );
+            ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
             if let Some(table) = self
                 .catalog_manager
@@ -1500,12 +1492,7 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_schema(&table_name.schema_name),
-            SchemaReadOnlySnafu {
-                name: table_name.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
         let table = self
             .catalog_manager
@@ -1553,12 +1540,7 @@ impl StatementExecutor {
         query_context: &QueryContextRef,
     ) -> Result<Output> {
         // Check if the schema is read-only.
-        ensure!(
-            !is_readonly_schema(&request.schema_name),
-            SchemaReadOnlySnafu {
-                name: request.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&request.schema_name, &request.table_name)?;
 
         let table_ref = TableReference::full(
             &request.catalog_name,
@@ -1841,12 +1823,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_schema(&expr.schema_name),
-            SchemaReadOnlySnafu {
-                name: expr.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&expr.schema_name, &expr.table_name)?;
 
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
@@ -2349,6 +2326,9 @@ pub fn verify_alter(
                 violated: format!("Invalid table name: {}", new_table_name)
             }
         );
+        // Renaming INTO a computed graph table's name would let the overlay
+        // shadow the renamed physical table, orphaning its data.
+        ensure_table_writable(&table_info.schema_name, new_table_name)?;
     } else if let AlterKind::AddColumns { columns } = alter_kind {
         // If all the columns are marked as add_if_not_exists and they already exist in the table,
         // there is no need to perform the alter.
@@ -2397,7 +2377,7 @@ pub fn create_table_info(
     }
 
     let next_column_id = column_schemas.len() as u32;
-    let schema = Arc::new(Schema::new(column_schemas));
+    let schema = Arc::new(Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?);
 
     let primary_key_indices = create_table
         .primary_keys
@@ -2430,6 +2410,12 @@ pub fn create_table_info(
         &column_name_to_index_map,
         &partition_key_indices,
         &create_table.time_index,
+    )?;
+
+    validate_entity_semantic_options(
+        &table_options,
+        &column_name_to_index_map,
+        &primary_key_indices,
     )?;
 
     let meta = TableMeta {
@@ -2542,6 +2528,54 @@ fn validate_repartition_column_hint(
         .extra_options
         .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
 
+    Ok(())
+}
+
+/// Rejects DDL against read-only schemas and computed entity-graph tables.
+fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
+    ensure!(
+        !is_readonly_schema(schema),
+        SchemaReadOnlySnafu {
+            name: schema.to_string()
+        }
+    );
+    ensure!(
+        !is_readonly_table(schema, table),
+        TableReadOnlySnafu {
+            name: table.to_string()
+        }
+    );
+    Ok(())
+}
+
+/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
+/// against the table schema: every named column must exist, and `id` columns must
+/// additionally be tag (primary-key) columns so entity identity stays indexable
+/// and joinable. See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+fn validate_entity_semantic_options(
+    table_options: &TableOptions,
+    column_name_to_index_map: &HashMap<String, usize>,
+    primary_key_indices: &[usize],
+) -> Result<()> {
+    for (key, value) in &table_options.extra_options {
+        let Some((_, role)) = parse_entity_option_key(key) else {
+            continue;
+        };
+        let is_id_role = role == EntityRole::Id;
+        for col in &parse_entity_columns(value) {
+            let idx = column_name_to_index_map
+                .get(col)
+                .context(ColumnNotFoundSnafu { msg: col })?;
+            ensure!(
+                !is_id_role || primary_key_indices.contains(idx),
+                InvalidEntitySemanticOptionSnafu {
+                    reason: format!(
+                        "entity id column `{col}` (option `{key}`) must be a tag/primary-key column"
+                    ),
+                }
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2766,12 +2800,7 @@ async fn execute_undrop_table(
     table_name: TableName,
     query_context: QueryContextRef,
 ) -> Result<Output> {
-    ensure!(
-        !is_readonly_schema(&table_name.schema_name),
-        SchemaReadOnlySnafu {
-            name: table_name.schema_name.clone()
-        }
-    );
+    ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
     let dropped = table_metadata_manager
         .get_dropped_table(&table_name)
@@ -3074,6 +3103,58 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
+
+    #[test]
+    fn test_validate_entity_semantic_options() {
+        let col_map = HashMap::from([
+            ("service_name".to_string(), 0usize),
+            ("host_id".to_string(), 1usize),
+            ("value".to_string(), 2usize),
+        ]);
+        // service_name (0) and host_id (1) are tags; value (2) is a field.
+        let pk = vec![0usize, 1usize];
+        let opts = |pairs: &[(&str, &str)]| TableOptions {
+            extra_options: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+
+        // id on a tag column, composite id on tags, and descriptive on a field
+        // column are all accepted.
+        for pairs in [
+            &[("greptime.semantic.entity.service.id", "service_name")][..],
+            &[(
+                "greptime.semantic.entity.process.id",
+                "service_name,host_id",
+            )][..],
+            &[("greptime.semantic.entity.service.descriptive", "value")][..],
+        ] {
+            assert!(validate_entity_semantic_options(&opts(pairs), &col_map, &pk).is_ok());
+        }
+
+        // id pointing at a field column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "value")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            error::Error::InvalidEntitySemanticOption { .. }
+        ));
+
+        // id pointing at a missing column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "nope")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
     }
 
     #[test]
@@ -3404,6 +3485,38 @@ WITH ('repartition.column.hint' = ' host ')",
                 .extra_options
                 .get(REPARTITION_COLUMN_HINT_KEY),
             Some(&"host".to_string())
+        );
+    }
+
+    #[test]
+    fn test_create_table_info_rejects_non_timestamp_time_index() {
+        let expr = CreateTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "demo".to_string(),
+            desc: String::new(),
+            column_defs: vec![api::v1::ColumnDef {
+                name: "host".to_string(),
+                data_type: api::v1::ColumnDataType::String as i32,
+                is_nullable: true,
+                default_constraint: vec![],
+                semantic_type: 0,
+                comment: String::new(),
+                datatype_extension: None,
+                options: None,
+            }],
+            time_index: "host".to_string(),
+            primary_keys: vec![],
+            create_if_not_exists: false,
+            table_options: HashMap::new(),
+            table_id: None,
+            engine: "mito".to_string(),
+        };
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert_eq!(
+            common_error::ext::ErrorExt::status_code(&err),
+            common_error::status_code::StatusCode::InvalidArguments
         );
     }
 

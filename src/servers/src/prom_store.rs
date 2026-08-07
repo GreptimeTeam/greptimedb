@@ -381,6 +381,8 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
             ),
         })?;
 
+    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
+    // The current path intentionally returns scalar samples only.
     let field_column = recordbatch.column_by_name(greptime_value()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",

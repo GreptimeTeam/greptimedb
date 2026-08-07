@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::Plugins;
-use common_catalog::consts::is_readonly_schema;
+use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
@@ -259,7 +259,7 @@ impl DatafusionQueryEngine {
         let table_schema = table.schema();
 
         ensure!(
-            !is_readonly_schema(&schema_name),
+            !is_readonly_table(&schema_name, &table_name),
             TableReadOnlySnafu { table: table_name }
         );
 
@@ -307,7 +307,7 @@ impl DatafusionQueryEngine {
         let table_name = table_name.table.to_string();
 
         ensure!(
-            !is_readonly_schema(&schema_name),
+            !is_readonly_table(&schema_name, &table_name),
             TableReadOnlySnafu { table: table_name }
         );
 

@@ -177,6 +177,9 @@ impl GrpcQueryHandler for Instance {
 
                     match expr {
                         DdlExpr::CreateTable(mut expr) => {
+                            // Direct gRPC DDL bypasses the SQL parser, so validate the
+                            // request here (e.g. the time index must be a timestamp).
+                            operator::expr_helper::validate_create_expr(&expr)?;
                             let _ = self
                                 .statement_executor
                                 .create_table_inner(
@@ -250,8 +253,16 @@ impl GrpcQueryHandler for Instance {
 
                             Output::new_with_affected_rows(0)
                         }
-                        DdlExpr::DropView(_) => {
-                            todo!("implemented in the following PR")
+                        DdlExpr::DropView(expr) => {
+                            self.statement_executor
+                                .drop_view(
+                                    expr.catalog_name,
+                                    expr.schema_name,
+                                    expr.view_name,
+                                    expr.drop_if_exists,
+                                    ctx.clone(),
+                                )
+                                .await?
                         }
                         DdlExpr::CommentOn(expr) => {
                             self.statement_executor
