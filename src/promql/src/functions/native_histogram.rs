@@ -1793,7 +1793,7 @@ fn select_mixed_range_lanes(
                     (false, false) => None,
                 },
                 MixedRangePolicy::FloatOnly => {
-                    if histogram_count > 0 {
+                    if float_count > 0 && histogram_count > 0 {
                         record_info(
                             collector,
                             format!(
@@ -3059,6 +3059,17 @@ mod tests {
         );
 
         let collector = PromqlAnnotationCollector::default();
+        let histogram_only_min =
+            mixed_range_input("min_over_time", vec![None], vec![Some(first.clone())]);
+        assert_eq!(
+            mixed_float_result(
+                MixedRange::float_udf(Some(collector.clone())),
+                histogram_only_min,
+            ),
+            None
+        );
+        assert!(collected_infos(&collector).is_empty());
+
         let min = mixed_range_input(
             "min_over_time",
             vec![Some(3.0), None, Some(1.0)],
