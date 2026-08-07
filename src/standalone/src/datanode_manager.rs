@@ -54,12 +54,12 @@ impl FlownodeManager for StandaloneDatanodeManager {
 }
 
 /// Relative to [client::region::RegionRequester]
-pub struct RegionInvoker {
+struct RegionInvoker {
     region_server: RegionServer,
 }
 
 impl RegionInvoker {
-    pub fn arc(region_server: RegionServer) -> Arc<Self> {
+    fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
 

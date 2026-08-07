@@ -193,13 +193,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Operation to region server failed"))]
-    InvokeRegionServer {
-        #[snafu(implicit)]
-        location: Location,
-        source: servers::error::Error,
-    },
-
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
 
@@ -285,9 +278,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Invalid region request, reason: {}", reason))]
-    InvalidRegionRequest { reason: String },
 
     #[snafu(display("Table operation error"))]
     TableOperation {
@@ -415,8 +405,6 @@ impl ErrorExt for Error {
 
             Error::CacheRequired { .. } => StatusCode::Internal,
 
-            Error::InvalidRegionRequest { .. } => StatusCode::IllegalState,
-
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 
             Error::Catalog { source, .. } => source.status_code(),
@@ -427,7 +415,6 @@ impl ErrorExt for Error {
             | Error::ReadTable { source, .. }
             | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
-            Error::InvokeRegionServer { source, .. } => source.status_code(),
             Error::External { source, .. } | Error::InitPlugin { source, .. } => {
                 source.status_code()
             }
@@ -461,7 +448,6 @@ impl ErrorExt for Error {
 
             Error::StartServer { source, .. }
             | Error::ShutdownServer { source, .. }
-            | Error::InvokeRegionServer { source, .. }
             | Error::ExecutePromql { source, .. }
             | Error::PromStoreRemoteQueryPlan { source, .. }
             | Error::PrometheusMetricNamesQueryPlan { source, .. } => source.retry_hint(),

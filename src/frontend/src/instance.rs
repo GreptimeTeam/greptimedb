@@ -25,7 +25,6 @@ mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
-pub mod standalone;
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -100,7 +99,6 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
-pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 

@@ -165,6 +165,7 @@ impl Frontend {
 mod tests {
     use std::any::Any;
     use std::net::SocketAddr;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -186,9 +187,9 @@ mod tests {
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
     use common_meta::instruction::Instruction;
     use common_stat::ResourceStatImpl;
+    use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
-    use meta_srv::service::GrpcStream;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -205,6 +206,9 @@ mod tests {
     };
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
+
+    type GrpcStream<T> =
+        Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
     fn test_toml() {
