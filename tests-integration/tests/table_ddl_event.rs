@@ -93,23 +93,17 @@ async fn test_table_ddl_procedure_events() {
 +--------------+------------------+",
     )
     .await;
-    assert_id_terminal_event(
+    assert_terminal_event(
         &frontend,
         "create_table",
         &create_table_procedure_id,
-        table_id,
         "Succeeded",
-        "\
-+--------------+
-| type         |
-+--------------+
-| create_table |
-+--------------+",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
 
-    // Act / Assert: Alter and Truncate have a rich submitted row and lightweight
-    // terminal lifecycle row.
+    // Act / Assert: Alter and Truncate retain their submitted locators on terminal rows.
     run_sql(
         &frontend,
         &format!("ALTER TABLE {TABLE} ADD COLUMN extra STRING"),
@@ -128,11 +122,13 @@ async fn test_table_ddl_procedure_events() {
 +-------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "alter_table",
         &alter_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
     run_sql(
@@ -155,11 +151,13 @@ async fn test_table_ddl_procedure_events() {
 +----------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "truncate_table",
         &truncate_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
 
@@ -179,11 +177,13 @@ async fn test_table_ddl_procedure_events() {
 +------------+------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "drop_table",
         &drop_table_procedure_id,
         "Succeeded",
+        Some(TABLE),
+        Some(table_id),
     )
     .await;
     #[cfg(feature = "enterprise")]
@@ -207,11 +207,13 @@ async fn test_table_ddl_procedure_events() {
 +--------------+",
         )
         .await;
-        assert_lightweight_terminal_event(
+        assert_terminal_event(
             &frontend,
             "undrop_table",
             &undrop_table_procedure_id,
             "Succeeded",
+            None,
+            Some(table_id),
         )
         .await;
         run_sql(&frontend, &format!("DROP TABLE {TABLE}")).await;
@@ -236,11 +238,13 @@ async fn test_table_ddl_procedure_events() {
 +---------------------+",
         )
         .await;
-        assert_lightweight_terminal_event(
+        assert_terminal_event(
             &frontend,
             "purge_dropped_table",
             &purge_table_procedure_id,
             "Succeeded",
+            None,
+            Some(table_id),
         )
         .await;
     }
@@ -297,7 +301,7 @@ async fn test_table_ddl_procedure_events() {
     .await;
 
     // Act / Assert: logical Alter preserves the one-row-per-logical-table submitted
-    // contract and emits a lightweight terminal row.
+    // contract and retains the logical-table locator on its terminal row.
     run_sql(
         &frontend,
         &format!("ALTER TABLE {LOGICAL_TABLE} ADD COLUMN rack STRING PRIMARY KEY"),
@@ -317,11 +321,13 @@ async fn test_table_ddl_procedure_events() {
 +----------------------+--------------------------+",
     )
     .await;
-    assert_lightweight_terminal_event(
+    assert_terminal_event(
         &frontend,
         "alter_logical_tables",
         &alter_logical_tables_procedure_id,
         "Succeeded",
+        Some(LOGICAL_TABLE),
+        None,
     )
     .await;
 }
@@ -398,27 +404,46 @@ async fn assert_id_submitted_event(
     assert_eventually_eq(instance, &query, expected).await;
 }
 
-async fn assert_id_terminal_event(
+async fn assert_terminal_event(
     instance: &Arc<Instance>,
     event_type: &str,
     procedure_id: &str,
-    table_id: u32,
     terminal_trigger: &str,
-    expected: &str,
+    table_name: Option<&str>,
+    table_id: Option<u32>,
 ) {
+    let table_name_predicate = table_name.map_or_else(
+        || format!("{} IS NULL", TABLE_NAME_COLUMN.name()),
+        |table_name| format!("{} = '{table_name}'", TABLE_NAME_COLUMN.name()),
+    );
+    let catalog_and_schema_predicate = table_name.map_or_else(
+        || {
+            format!(
+                "{} IS NULL AND {} IS NULL",
+                CATALOG_NAME_COLUMN.name(),
+                SCHEMA_NAME_COLUMN.name(),
+            )
+        },
+        |_| {
+            format!(
+                "{} = 'greptime' AND {} = 'public'",
+                CATALOG_NAME_COLUMN.name(),
+                SCHEMA_NAME_COLUMN.name(),
+            )
+        },
+    );
+    let table_id_predicate = table_id.map_or_else(
+        || format!("{} IS NULL", TABLE_ID_COLUMN.name()),
+        |table_id| format!("{} = {table_id}", TABLE_ID_COLUMN.name()),
+    );
     let query = format!(
-        "SELECT {} FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND {} = {table_id} AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL",
-        TYPE_COLUMN.name(),
+        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {catalog_and_schema_predicate} AND {table_name_predicate} AND {table_id_predicate}",
         TYPE_COLUMN.name(),
         PROCEDURE_ID_COLUMN.name(),
         PROCEDURE_TRIGGER_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
         PAYLOAD_COLUMN.name(),
-        CATALOG_NAME_COLUMN.name(),
-        SCHEMA_NAME_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
     );
-    assert_eventually_eq(instance, &query, expected).await;
+    assert_single_event(instance, &query).await;
 }
 
 async fn assert_logical_terminal_event(
@@ -442,24 +467,4 @@ async fn assert_logical_terminal_event(
         PAYLOAD_COLUMN.name(),
     );
     assert_eventually_eq(instance, &query, expected).await;
-}
-
-async fn assert_lightweight_terminal_event(
-    instance: &Arc<Instance>,
-    event_type: &str,
-    procedure_id: &str,
-    terminal_trigger: &str,
-) {
-    let query = format!(
-        "SELECT count(*) AS event_count FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_path_match({}, '$.type == \"{terminal_trigger}\"') AND json_is_null({}) AND {} IS NULL AND {} IS NULL AND {} IS NULL AND {} IS NULL",
-        TYPE_COLUMN.name(),
-        PROCEDURE_ID_COLUMN.name(),
-        PROCEDURE_TRIGGER_COLUMN.name(),
-        PAYLOAD_COLUMN.name(),
-        CATALOG_NAME_COLUMN.name(),
-        SCHEMA_NAME_COLUMN.name(),
-        TABLE_NAME_COLUMN.name(),
-        TABLE_ID_COLUMN.name(),
-    );
-    assert_single_event(instance, &query).await;
 }

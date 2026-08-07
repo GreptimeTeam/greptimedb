@@ -270,7 +270,7 @@ impl Procedure for RepartitionGroupProcedure {
         let event = if matches!(ctx.trigger, EventTrigger::Submitted) {
             RepartitionGroupEvent::submitted(&self.context.persistent_ctx)
         } else {
-            RepartitionGroupEvent::lifecycle()
+            RepartitionGroupEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }

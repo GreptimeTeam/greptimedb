@@ -147,24 +147,27 @@ fn test_drop_database_submitted_event_contract() {
 }
 
 #[test]
-fn test_database_lifecycle_events_have_fixed_schema_and_null_intent() {
+fn test_database_lifecycle_events_preserve_locator_and_null_intent() {
     for (event, event_type) in [
         (
-            DatabaseDdlEvent::create_lifecycle(),
+            DatabaseDdlEvent::create_lifecycle("greptime", "metrics"),
             CREATE_DATABASE_EVENT_TYPE,
         ),
         (
-            DatabaseDdlEvent::alter_lifecycle(),
+            DatabaseDdlEvent::alter_lifecycle("greptime", "metrics"),
             ALTER_DATABASE_EVENT_TYPE,
         ),
-        (DatabaseDdlEvent::drop_lifecycle(), DROP_DATABASE_EVENT_TYPE),
+        (
+            DatabaseDdlEvent::drop_lifecycle("greptime", "metrics"),
+            DROP_DATABASE_EVENT_TYPE,
+        ),
     ] {
-        assert_event_locator(&event, event_type, None, None);
+        assert_event_locator(&event, event_type, Some("greptime"), Some("metrics"));
         assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
     }
 
     assert_eq!(
-        DatabaseDdlEvent::create_lifecycle().extra_schema(),
+        DatabaseDdlEvent::create_lifecycle("greptime", "metrics").extra_schema(),
         DatabaseDdlEvent::create_submitted("c", "s", false, &HashMap::new()).extra_schema()
     );
 }
@@ -185,7 +188,7 @@ fn test_database_events_preserve_procedure_envelope_contract() {
     );
     let lifecycle = ProcedureEvent::new(
         procedure_id,
-        Box::new(DatabaseDdlEvent::create_lifecycle()),
+        Box::new(DatabaseDdlEvent::create_lifecycle("greptime", "metrics")),
         ProcedureState::Done { output: None },
         EventTrigger::Succeeded,
     );
@@ -203,8 +206,8 @@ fn test_database_events_preserve_procedure_envelope_contract() {
         CREATE_DATABASE_EVENT_TYPE,
         "Done",
         "Succeeded",
-        None,
-        None,
+        Some("greptime"),
+        Some("metrics"),
     );
     assert_eq!(lifecycle.json_payload().unwrap(), serde_json::Value::Null);
 }

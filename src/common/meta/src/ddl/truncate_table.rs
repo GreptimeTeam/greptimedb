@@ -103,7 +103,12 @@ impl Procedure for TruncateTableProcedure {
                     .with_table_id(task.table_id);
                 TableDdlEvent::truncate_table_submitted(locator, task.time_ranges.len())
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable),
+            _ => {
+                let task = &self.data.task;
+                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+                    .with_table_id(task.table_id);
+                TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable, [locator])
+            }
         };
 
         Some(Box::new(event))

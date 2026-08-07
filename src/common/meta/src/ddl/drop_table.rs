@@ -427,7 +427,12 @@ impl Procedure for DropTableProcedure {
                     .with_table_id(task.table_id);
                 TableDdlEvent::drop_table_submitted(locator, task.drop_if_exists)
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
+            _ => {
+                let task = &self.data.task;
+                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+                    .with_table_id(task.table_id);
+                TableDdlEvent::lifecycle(TableDdlEventType::DropTable, [locator])
+            }
         };
 
         Some(Box::new(event))

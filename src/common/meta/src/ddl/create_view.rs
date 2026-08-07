@@ -295,12 +295,33 @@ impl Procedure for CreateViewProcedure {
                 ProcedureState::Done {
                     output: Some(output),
                 } => output.downcast_ref::<TableId>().copied().map_or_else(
-                    ViewDdlEvent::create_lifecycle,
-                    ViewDdlEvent::create_succeeded,
+                    || {
+                        ViewDdlEvent::create_lifecycle(
+                            &self.data.task.create_view.catalog_name,
+                            &self.data.task.create_view.schema_name,
+                            &self.data.task.create_view.view_name,
+                        )
+                    },
+                    |view_id| {
+                        ViewDdlEvent::create_succeeded(
+                            &self.data.task.create_view.catalog_name,
+                            &self.data.task.create_view.schema_name,
+                            &self.data.task.create_view.view_name,
+                            view_id,
+                        )
+                    },
                 ),
-                _ => ViewDdlEvent::create_lifecycle(),
+                _ => ViewDdlEvent::create_lifecycle(
+                    &self.data.task.create_view.catalog_name,
+                    &self.data.task.create_view.schema_name,
+                    &self.data.task.create_view.view_name,
+                ),
             },
-            _ => ViewDdlEvent::create_lifecycle(),
+            _ => ViewDdlEvent::create_lifecycle(
+                &self.data.task.create_view.catalog_name,
+                &self.data.task.create_view.schema_name,
+                &self.data.task.create_view.view_name,
+            ),
         };
 
         Some(Box::new(event))

@@ -301,11 +301,41 @@ impl Procedure for CreateLogicalTablesProcedure {
                         TableDdlEvent::create_logical_tables_succeeded(locators)
                     })
                     .unwrap_or_else(|| {
-                        TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables)
+                        TableDdlEvent::lifecycle(
+                            TableDdlEventType::CreateLogicalTables,
+                            self.data.tasks.iter().map(|task| {
+                                TableDdlLocator::new(
+                                    &task.create_table.catalog_name,
+                                    &task.create_table.schema_name,
+                                    &task.create_table.table_name,
+                                )
+                                .with_physical_table_id(self.data.physical_table_id)
+                            }),
+                        )
                     }),
-                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+                _ => TableDdlEvent::lifecycle(
+                    TableDdlEventType::CreateLogicalTables,
+                    self.data.tasks.iter().map(|task| {
+                        TableDdlLocator::new(
+                            &task.create_table.catalog_name,
+                            &task.create_table.schema_name,
+                            &task.create_table.table_name,
+                        )
+                        .with_physical_table_id(self.data.physical_table_id)
+                    }),
+                ),
             },
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+            _ => TableDdlEvent::lifecycle(
+                TableDdlEventType::CreateLogicalTables,
+                self.data.tasks.iter().map(|task| {
+                    TableDdlLocator::new(
+                        &task.create_table.catalog_name,
+                        &task.create_table.schema_name,
+                        &task.create_table.table_name,
+                    )
+                    .with_physical_table_id(self.data.physical_table_id)
+                }),
+            ),
         };
 
         Some(Box::new(event))

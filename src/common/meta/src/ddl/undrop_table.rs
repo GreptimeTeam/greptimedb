@@ -450,7 +450,22 @@ impl Procedure for UndropTableProcedure {
                     .with_table_id(self.data.task.table_id);
                 TableDdlEvent::undrop_table_submitted(locator)
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
+            _ => {
+                let locator = self
+                    .data
+                    .table_name
+                    .as_ref()
+                    .map(|table_name| {
+                        TableDdlLocator::new(
+                            &table_name.catalog_name,
+                            &table_name.schema_name,
+                            &table_name.table_name,
+                        )
+                    })
+                    .unwrap_or_default()
+                    .with_table_id(self.data.task.table_id);
+                TableDdlEvent::lifecycle(TableDdlEventType::UndropTable, [locator])
+            }
         };
 
         Some(Box::new(event))

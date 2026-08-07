@@ -188,7 +188,7 @@ impl Procedure for AlterDatabaseProcedure {
                 &self.data.kind,
             )
         } else {
-            DatabaseDdlEvent::alter_lifecycle()
+            DatabaseDdlEvent::alter_lifecycle(self.data.catalog(), self.data.schema())
         };
         Some(Box::new(event))
     }
