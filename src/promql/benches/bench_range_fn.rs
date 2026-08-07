@@ -37,7 +37,7 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets,
+    Changes, CountOverTime, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets,
 };
 use promql::range_array::RangeArray;
 
@@ -280,6 +280,34 @@ fn assert_edge_count_output(
     let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
     let actual = output.iter().collect::<Vec<_>>();
     assert_eq!(actual, expected);
+}
+
+fn count_over_time_oracle(ranges: &[(u32, u32)]) -> Vec<Option<f64>> {
+    ranges
+        .iter()
+        .map(|(_, length)| (*length != 0).then_some(*length as f64))
+        .collect()
+}
+
+fn assert_count_over_time_output(
+    udf: &datafusion::logical_expr::ScalarUDF,
+    prepared: &PreparedUdfCall,
+    ranges: &[(u32, u32)],
+) {
+    let expected = count_over_time_oracle(ranges);
+    let output = invoke_prepared_output(udf, prepared);
+    let ColumnarValue::Array(output) = output else {
+        panic!("count-over-time range UDF must return an array");
+    };
+    let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+
+    assert_eq!(output.len(), expected.len());
+    for (index, expected) in expected.iter().enumerate() {
+        assert_eq!(output.is_valid(index), expected.is_some());
+        if let Some(expected) = expected {
+            assert_eq!(output.value(index).to_bits(), expected.to_bits());
+        }
+    }
 }
 
 fn bench_range_functions(c: &mut Criterion) {
@@ -555,6 +583,74 @@ fn bench_edge_count_functions(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_count_over_time_current_baseline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("count_over_time_current_baseline");
+    let num_points = 4_096;
+    let values = build_default_values(num_points);
+    let udf = CountOverTime::scalar_udf();
+
+    for window_size in [4u32, 20, 240] {
+        let ranges = (0..=num_points - window_size as usize)
+            .map(|offset| (offset as u32, window_size))
+            .collect::<Vec<_>>();
+        let prepared = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+            values.clone(),
+            ranges.clone(),
+        ));
+
+        // Validate the current macro-generated UDF before Criterion starts timing it.
+        assert_count_over_time_output(&udf, &prepared, &ranges);
+        group.bench_with_input(
+            BenchmarkId::new(
+                "count_over_time_prebuilt_range_array",
+                format!("N{num_points}_k{window_size}"),
+            ),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&udf, &prepared)),
+        );
+    }
+
+    // Keep N=4096 but cover only eight four-slot windows to expose global-backing scans.
+    let low_coverage_ranges = vec![
+        (0, 4),
+        (512, 4),
+        (1_024, 4),
+        (1_536, 4),
+        (2_048, 4),
+        (2_560, 4),
+        (3_584, 4),
+        (4_092, 4),
+    ];
+    let low_coverage_prepared = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        values.clone(),
+        low_coverage_ranges.clone(),
+    ));
+    assert_count_over_time_output(&udf, &low_coverage_prepared, &low_coverage_ranges);
+    group.bench_with_input(
+        BenchmarkId::new(
+            "count_over_time_low_coverage_full_backing",
+            "N4096_windows8_k4",
+        ),
+        &(),
+        |b, _| b.iter(|| invoke_prepared(&udf, &low_coverage_prepared)),
+    );
+
+    // This control includes gapped, repeated, reordered, and empty windows.
+    let arbitrary_ranges = vec![(0, 4), (512, 4), (512, 4), (1_024, 0), (3_584, 4), (20, 20)];
+    let arbitrary_prepared = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        values,
+        arbitrary_ranges.clone(),
+    ));
+    assert_count_over_time_output(&udf, &arbitrary_prepared, &arbitrary_ranges);
+    group.bench_with_input(
+        BenchmarkId::new("count_over_time_arbitrary_layout", "N4096_windows6"),
+        &(),
+        |b, _| b.iter(|| invoke_prepared(&udf, &arbitrary_prepared)),
+    );
+
+    group.finish();
+}
+
 const RANGE_MANIPULATE_CADENCE_MS: i64 = 15_000;
 
 fn make_range_manipulate_batch(timestamps: Vec<i64>, field_count: usize) -> RecordBatch {
@@ -782,5 +878,6 @@ criterion_group!(
     benches,
     bench_range_functions,
     bench_edge_count_functions,
+    bench_count_over_time_current_baseline,
     bench_range_manipulate_wall_time
 );

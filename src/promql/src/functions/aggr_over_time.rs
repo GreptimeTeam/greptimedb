@@ -19,6 +19,7 @@ use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
@@ -81,16 +82,49 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 }
 
 /// The count of all values in the specified interval.
-#[range_fn(
-    name = CountOverTime,
-    ret = Float64Array,
-    display_name = prom_count_over_time
-)]
+#[allow(dead_code)]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
         None
     } else {
         Some(values.len() as f64)
+    }
+}
+
+#[derive(Debug)]
+pub struct CountOverTime {}
+
+impl CountOverTime {
+    pub const fn name() -> &'static str {
+        "prom_count_over_time"
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        create_udf(
+            Self::name(),
+            Self::input_type(),
+            Self::return_type(),
+            Volatility::Volatile,
+            Arc::new(Self::calc) as _,
+        )
+    }
+
+    fn input_type() -> Vec<DataType> {
+        vec![
+            RangeArray::convert_data_type(
+                TimestampMillisecondArray::new_null(0).data_type().clone(),
+            ),
+            RangeArray::convert_data_type(Float64Array::new_null(0).data_type().clone()),
+        ]
+    }
+
+    fn return_type() -> DataType {
+        Float64Array::new_null(0).data_type().clone()
+    }
+
+    fn calc(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        assert_eq!(input.len(), 2);
+        crate::functions::rolling::count::calc(input, Self::name())
     }
 }
 
@@ -194,6 +228,11 @@ pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
 
 #[cfg(test)]
 mod test {
+    use datafusion::arrow::buffer::NullBuffer;
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::ScalarFunctionArgs;
+    use datatypes::arrow::datatypes::Field;
+
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
 
@@ -216,6 +255,254 @@ mod test {
 
         assert_over_time_value(min_over_time(&timestamps, &values), expected_min);
         assert_over_time_value(max_over_time(&timestamps, &values), expected_max);
+    }
+
+    fn count_over_time_oracle(ranges: &[(u32, u32)]) -> Vec<Option<f64>> {
+        ranges
+            .iter()
+            .map(|&(_, length)| (length != 0).then_some(f64::from(length)))
+            .collect()
+    }
+
+    fn invoke_count_over_time(
+        udf: &ScalarUDF,
+        timestamps: RangeArray,
+        values: RangeArray,
+    ) -> Result<Float64Array, DataFusionError> {
+        let number_rows = timestamps.len();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(timestamps.into_dict())),
+            ColumnarValue::Array(Arc::new(values.into_dict())),
+        ];
+        let arg_fields = vec![
+            Arc::new(Field::new("timestamps", args[0].data_type(), false)),
+            Arc::new(Field::new("values", args[1].data_type(), false)),
+        ];
+        let result = udf.invoke_with_args(ScalarFunctionArgs {
+            args,
+            arg_fields,
+            number_rows,
+            return_field: Arc::new(Field::new("result", DataType::Float64, false)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })?;
+        let result = extract_array(&result)?;
+
+        Ok(result
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("count_over_time must return a Float64Array")
+            .clone())
+    }
+
+    fn assert_count_over_time_result(actual: &Float64Array, expected: &[Option<f64>]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, expected) in expected.iter().enumerate() {
+            match expected {
+                Some(expected) => {
+                    assert!(actual.is_valid(index), "row {index} should be valid");
+                    assert_eq!(
+                        actual.value(index).to_bits(),
+                        expected.to_bits(),
+                        "row {index}"
+                    );
+                }
+                None => assert!(!actual.is_valid(index), "row {index} should be null"),
+            }
+        }
+    }
+
+    fn timestamp_backing(len: usize) -> Arc<TimestampMillisecondArray> {
+        Arc::new(TimestampMillisecondArray::from_iter(
+            (0..len).map(|index| Some(index as i64)),
+        ))
+    }
+
+    fn run_count_over_time_case(
+        udf: &ScalarUDF,
+        timestamps: Arc<TimestampMillisecondArray>,
+        values: Arc<Float64Array>,
+        timestamp_ranges: &[(u32, u32)],
+        value_ranges: &[(u32, u32)],
+    ) {
+        let expected = count_over_time_oracle(value_ranges);
+        let timestamps =
+            RangeArray::from_ranges(timestamps, timestamp_ranges.iter().copied()).unwrap();
+        let values = RangeArray::from_ranges(values, value_ranges.iter().copied()).unwrap();
+        let actual = invoke_count_over_time(udf, timestamps, values).unwrap();
+
+        assert_count_over_time_result(&actual, &expected);
+    }
+
+    fn assert_execution_error(error: DataFusionError, expected: &str) {
+        match error {
+            DataFusionError::Execution(message) => assert_eq!(message, expected),
+            other => panic!("expected execution error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn count_over_time_freezes_physical_slot_semantics() {
+        const RANGES: &[(u32, u32)] = &[
+            (0, 0), // empty
+            (0, 1), // finite
+            (1, 1), // NaN
+            (2, 1), // positive infinity
+            (3, 1), // negative infinity
+            (3, 3), // mixed valid and null slots
+            (4, 2), // all null slots
+            (4, 1), // raw nonzero value under a null slot
+        ];
+
+        let values = Arc::new(Float64Array::new(
+            vec![
+                1.25,
+                f64::from_bits(0x7ff8_0000_0000_0000),
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                42.0,
+                -7.0,
+            ]
+            .into(),
+            Some(NullBuffer::from(vec![true, true, true, true, false, false])),
+        ));
+        assert!(!values.is_valid(4));
+        assert_eq!(values.value(4).to_bits(), 42.0f64.to_bits());
+
+        let udf = CountOverTime::scalar_udf();
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(values.len()),
+            values,
+            RANGES,
+            RANGES,
+        );
+    }
+
+    #[test]
+    fn count_over_time_freezes_dense_and_arbitrary_layouts() {
+        const DENSE_SLIDING_RANGES: &[(u32, u32)] =
+            &[(1, 2), (2, 2), (3, 2), (4, 2), (5, 2), (6, 2), (8, 0)];
+        const ARBITRARY_RANGES: &[(u32, u32)] = &[
+            (5, 2),
+            (0, 3),
+            (3, 0),
+            (1, 4),
+            (1, 4),
+            (7, 1),
+            (3, 2),
+            (8, 0),
+        ];
+
+        let values = Arc::new(Float64Array::from_iter((0..8).map(|value| value as f64)));
+        let udf = CountOverTime::scalar_udf();
+
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(values.len()),
+            values.clone(),
+            DENSE_SLIDING_RANGES,
+            DENSE_SLIDING_RANGES,
+        );
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(values.len()),
+            values,
+            ARBITRARY_RANGES,
+            ARBITRARY_RANGES,
+        );
+    }
+
+    #[test]
+    fn count_over_time_ignores_timestamp_offsets_and_validity_after_shape_validation() {
+        const TIMESTAMP_RANGES: &[(u32, u32)] = &[(2, 2), (4, 1), (7, 0), (5, 3)];
+        const VALUE_RANGES: &[(u32, u32)] = &[(1, 2), (5, 1), (4, 0), (2, 3)];
+
+        let timestamps = Arc::new(TimestampMillisecondArray::new(
+            vec![100, 200, 300, 400, 500, 600, 700, 800].into(),
+            Some(NullBuffer::from(vec![
+                true, true, false, true, true, true, true, true,
+            ])),
+        ));
+        assert!(!timestamps.is_valid(2));
+        assert_eq!(timestamps.value(2), 300);
+
+        let values = Arc::new(Float64Array::from_iter((0..8).map(|value| value as f64)));
+        let udf = CountOverTime::scalar_udf();
+        run_count_over_time_case(&udf, timestamps, values, TIMESTAMP_RANGES, VALUE_RANGES);
+    }
+
+    #[test]
+    fn count_over_time_freezes_zero_window_outer_invocation() {
+        const NO_RANGES: &[(u32, u32)] = &[];
+
+        let values = Arc::new(Float64Array::from_iter([1.0, 2.0, 3.0]));
+        let udf = CountOverTime::scalar_udf();
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(values.len()),
+            values,
+            NO_RANGES,
+            NO_RANGES,
+        );
+    }
+
+    #[test]
+    fn count_over_time_same_udf_resets_between_invocations() {
+        const FIRST_RANGES: &[(u32, u32)] = &[(0, 3), (3, 0), (4, 2)];
+        const SECOND_RANGES: &[(u32, u32)] = &[(1, 1), (4, 3), (0, 0), (2, 2)];
+
+        let udf = CountOverTime::scalar_udf();
+        let first_values = Arc::new(Float64Array::from_iter([
+            10.0, 20.0, 30.0, 40.0, 50.0, 60.0,
+        ]));
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(first_values.len()),
+            first_values,
+            FIRST_RANGES,
+            FIRST_RANGES,
+        );
+
+        let second_values = Arc::new(Float64Array::from_iter([
+            f64::NAN,
+            f64::NEG_INFINITY,
+            3.0,
+            4.0,
+            f64::INFINITY,
+            6.0,
+            7.0,
+        ]));
+        run_count_over_time_case(
+            &udf,
+            timestamp_backing(second_values.len()),
+            second_values,
+            SECOND_RANGES,
+            SECOND_RANGES,
+        );
+    }
+
+    #[test]
+    fn count_over_time_preserves_range_shape_errors() {
+        let udf = CountOverTime::scalar_udf();
+        let timestamps = RangeArray::from_ranges(timestamp_backing(2), [(0, 1), (1, 1)]).unwrap();
+        let values =
+            RangeArray::from_ranges(Arc::new(Float64Array::from_iter([1.0, 2.0])), [(0, 1)])
+                .unwrap();
+        let error = invoke_count_over_time(&udf, timestamps, values).unwrap_err();
+        assert_execution_error(
+            error,
+            "RangeArray have different lengths in PromQL function prom_count_over_time: array1=2, array2=1",
+        );
+
+        let timestamps = RangeArray::from_ranges(timestamp_backing(2), [(0, 2)]).unwrap();
+        let values =
+            RangeArray::from_ranges(Arc::new(Float64Array::from_iter([1.0, 2.0])), [(0, 1)])
+                .unwrap();
+        let error = invoke_count_over_time(&udf, timestamps, values).unwrap_err();
+        assert_execution_error(
+            error,
+            "RangeArray's element 0 have different lengths in PromQL function prom_count_over_time: array1=2, array2=1",
+        );
     }
 
     #[test]
