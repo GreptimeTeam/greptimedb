@@ -1707,6 +1707,7 @@ fn mixed_range(
     invoke_range_udf(udf, input, args, bounds.len())
 }
 
+/// Decodes packed range keys into validated half-open `(offset, end)` bounds.
 fn checked_window_bounds(
     keys: &[i64],
     value_len: usize,
@@ -1729,6 +1730,7 @@ fn checked_window_bounds(
         .collect()
 }
 
+/// Builds prefix counts where `prefix[i]` is the number of valid samples in `valid[..i]`.
 fn validity_prefix(valid: &[bool], name: &str) -> DfResult<Vec<usize>> {
     let capacity = valid.len().checked_add(1).ok_or_else(|| {
         DataFusionError::Execution(format!("{name}: sample validity length overflow"))
@@ -1750,12 +1752,14 @@ fn validity_prefix(valid: &[bool], name: &str) -> DfResult<Vec<usize>> {
     Ok(prefix)
 }
 
+/// Returns the number of valid samples in the half-open window `[offset, end)`.
 fn valid_count(prefix: &[usize], offset: usize, end: usize) -> usize {
     prefix[end]
         .checked_sub(prefix[offset])
         .expect("validity prefix is monotonic")
 }
 
+/// Selects the sample lane for each window and records policy-required annotations.
 #[allow(clippy::too_many_arguments)]
 fn select_mixed_range_lanes(
     function: MixedRangeFunction,
@@ -1845,6 +1849,8 @@ fn select_mixed_range_lanes(
         .collect()
 }
 
+/// Filters null placeholders from one sample lane and remaps its selected windows.
+/// Windows assigned to the other lane become empty.
 #[allow(clippy::too_many_arguments)]
 fn compact_lane_input(
     timestamps: &TimestampMillisecondArray,
