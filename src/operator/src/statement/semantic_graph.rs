@@ -45,9 +45,36 @@ use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
 use datafusion::functions_aggregate::expr_fn::{count, sum};
 use datafusion::functions_nested::expr_fn::make_array;
+use datafusion::functions_window::expr_fn::row_number;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, ScalarUDF, cast, ident, lit};
 use store_api::mito_engine_options::TTL_KEY;
+
+/// Whether an existing declared-edge table still matches the canonical
+/// definition ([`build_declared_relationships_expr`]): same columns, in order,
+/// with the same types. The union branch projects the table by name and type,
+/// so a mismatched table (only possible through upgrade skew — user DDL against
+/// it is rejected) must be surfaced, not silently mis-derived.
+pub fn declared_relationships_schema_matches(schema: &datatypes::schema::Schema) -> bool {
+    let canonical = build_declared_relationships_expr("greptime");
+    if schema.column_schemas().len() != canonical.column_defs.len() {
+        return false;
+    }
+    canonical
+        .column_defs
+        .iter()
+        .zip(schema.column_schemas())
+        .all(|(def, column)| {
+            let Ok(wrapper) = api::helper::ColumnDataTypeWrapper::try_new(
+                def.data_type,
+                def.datatype_extension.clone(),
+            ) else {
+                return false;
+            };
+            def.name == column.name
+                && datatypes::prelude::ConcreteDataType::from(wrapper) == column.data_type
+        })
+}
 
 /// Bin width for the temporal window of derived rows: 60s buckets, matching the
 /// service-graph convention.
@@ -541,9 +568,15 @@ pub struct RegistrySource {
 }
 
 /// A trace table's scan paired with the `service` declaration it derives
-/// `calls` edges for — the unit `build_calls_plan` consumes.
+/// `calls` edges for — a unit of `build_relationships_plan`.
 pub struct CallsSource {
     pub service: EntityDeclaration,
+    pub scan: DataFrame,
+}
+
+/// The declared-edge table's scan (`semantic_relationships_declared`), whose
+/// rows `build_relationships_plan` unions into the edge set.
+pub struct DeclaredSource {
     pub scan: DataFrame,
 }
 
@@ -566,11 +599,11 @@ pub fn build_registry_plan(
 }
 
 /// The projected columns of `semantic_relationships`, in order. Every derived
-/// branch and the declared-edge scan must project exactly these so the top-level
-/// `UNION ALL` type-aligns. (The physical declared table additionally stores
-/// `valid_from`/`valid_until`, which are applied as a filter, not projected.)
-/// Test-only until the declared-edge union branch lands and enforces it in code.
-#[cfg(test)]
+/// branch and the declared-edge branch must project exactly these so the
+/// top-level `UNION ALL` type-aligns; `build_relationships_plan` re-selects
+/// them over the union to enforce the contract. (The physical declared table
+/// additionally stores `valid_from`/`valid_until`, which feed the validity
+/// filter and the projected window columns.)
 const RELATIONSHIP_COLUMNS: [&str; 16] = [
     "observed_at",
     "window_start",
@@ -597,7 +630,94 @@ const RELATIONSHIP_COLUMNS: [&str; 16] = [
 const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
 const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
-/// Builds the `calls` derivation (RFC §3a) over `traces`: pair each client span
+/// Builds the `semantic_relationships` plan: the trace-derived `calls` branch
+/// unioned with the declared-edge branch, re-projected to the 16-column
+/// contract. Returns `None` when there is neither a trace table nor a
+/// declared-edge table, so the computed table streams empty.
+pub fn build_relationships_plan(
+    traces: Vec<CallsSource>,
+    declared: Option<DeclaredSource>,
+    window: &GraphQueryWindow,
+) -> DfResult<Option<LogicalPlan>> {
+    let mut union_df = calls_branch(traces, window)?;
+    if let Some(declared) = declared {
+        union_df = union_all(union_df, declared_edges(declared.scan, window)?)?;
+    }
+    union_df
+        .map(|df| {
+            Ok(df
+                .select_columns(&RELATIONSHIP_COLUMNS)?
+                .into_unoptimized_plan())
+        })
+        .transpose()
+}
+
+/// Ranking column used to pick the latest declared-edge revision per edge key.
+const DECLARED_REVISION_COLUMN: &str = "__declared_revision";
+
+/// The declared-edge branch: the latest revision per edge key (mito dedups on
+/// primary key + `observed_at`, so re-asserting an edge stores a new revision),
+/// filtered to declarations whose business validity overlaps the queried
+/// window, projected to the relationship contract.
+///
+/// Validity semantics: `valid_from` defaults to the declaration time
+/// (`observed_at`); a NULL `valid_until` means the edge holds for as long as
+/// its row exists — TTL expiry retires it — so the projected `window_end` /
+/// `fresh_until` take the queried window's upper bound. The output
+/// `observed_at` is synthesized inside the queried range (its intersection
+/// with the validity window): the scan's filters are re-applied above the
+/// computed table, and the physical revision timestamp would fail them.
+fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFrame> {
+    let revision = row_number()
+        .partition_by(
+            DECLARED_PRIMARY_KEY_COLUMNS
+                .iter()
+                .map(|c| ident(*c))
+                .collect(),
+        )
+        .order_by(vec![ident(OBSERVED_AT_COLUMN).sort(false, false)])
+        .build()?
+        .alias(DECLARED_REVISION_COLUMN);
+
+    let eff_valid_from =
+        core_fns::coalesce().call(vec![ident("valid_from"), ident(OBSERVED_AT_COLUMN)]);
+    let eff_valid_until =
+        core_fns::coalesce().call(vec![ident("valid_until"), window.observed_end()]);
+    let overlap = eff_valid_from.clone().lt(window.observed_end()).and(
+        ident("valid_until")
+            .is_null()
+            .or(ident("valid_until").gt(window.observed_start())),
+    );
+    // Tags come out of the storage engine dictionary-encoded; cast to plain
+    // strings so the union with the derived branches type-aligns.
+    let tag_utf8 = |name: &str| cast(ident(name), DataType::Utf8).alias(name);
+
+    scan.window(vec![revision])?
+        .filter(ident(DECLARED_REVISION_COLUMN).eq(lit(1_u64)))?
+        .filter(overlap)?
+        .select(vec![
+            core_fns::greatest()
+                .call(vec![eff_valid_from.clone(), window.observed_start()])
+                .alias(OBSERVED_AT_COLUMN),
+            eff_valid_from.alias("window_start"),
+            eff_valid_until.clone().alias("window_end"),
+            eff_valid_until.alias("fresh_until"),
+            tag_utf8("src_type"),
+            tag_utf8("src_id"),
+            tag_utf8("dst_type"),
+            tag_utf8("dst_id"),
+            tag_utf8("rel_type"),
+            tag_utf8("provenance"),
+            ident("confidence"),
+            ident("request_count"),
+            ident("error_count"),
+            ident("duration_sum"),
+            ident("duration_count"),
+            ident("attributes"),
+        ])
+}
+
+/// The `calls` derivation (RFC §3a) over `traces`: pair each client span
 /// with its child server span on `trace_id` + `parent_span_id`, project to
 /// `service`, union the pairs of all trace tables, and aggregate to RED metrics
 /// per 60s window in one pass — so an edge observed across several trace tables
@@ -608,10 +728,10 @@ const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 /// is required); `span_status_code` is a string column (`STATUS_CODE_ERROR`),
 /// verified against the trace ingest path. Returns `None` when there is no
 /// trace table.
-pub fn build_calls_plan(
+fn calls_branch(
     traces: Vec<CallsSource>,
     window: &GraphQueryWindow,
-) -> DfResult<Option<LogicalPlan>> {
+) -> DfResult<Option<DataFrame>> {
     let mut union_df: Option<DataFrame> = None;
     for trace in traces {
         union_df = union_all(union_df, calls_pairs(&trace.service, trace.scan, window)?)?;
@@ -620,7 +740,7 @@ pub fn build_calls_plan(
         return Ok(None);
     };
 
-    let plan = pairs
+    let df = pairs
         .aggregate(
             vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
             vec![
@@ -651,9 +771,8 @@ pub fn build_calls_plan(
                 .alias("duration_sum"),
             ident("request_count").alias("duration_count"),
             null_json().alias("attributes"),
-        ])?
-        .into_unoptimized_plan();
-    Ok(Some(plan))
+        ])?;
+    Ok(Some(df))
 }
 
 /// One trace table's client/server span pairs, projected to the aggregation
@@ -1165,7 +1284,7 @@ mod tests {
     async fn calls_plan_aggregates_red_metrics() {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(
+        let plan = build_relationships_plan_for_test(
             vec![CallsSource {
                 service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
                 scan: trace,
@@ -1227,7 +1346,7 @@ mod tests {
         let ctx = trace_table_ctx();
         let t1 = ctx.table("opentelemetry_traces").await.unwrap();
         let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
-        let plan = build_calls_plan(
+        let plan = build_relationships_plan_for_test(
             vec![
                 CallsSource {
                     service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
@@ -1273,7 +1392,7 @@ mod tests {
     async fn calls_endpoints_follow_service_declaration() {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(
+        let plan = build_relationships_plan_for_test(
             vec![CallsSource {
                 service: trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
                 scan: trace,
@@ -1354,5 +1473,233 @@ mod tests {
                 type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
             })
         );
+    }
+
+    fn build_relationships_plan_for_test(
+        traces: Vec<CallsSource>,
+        window: &GraphQueryWindow,
+    ) -> DfResult<Option<LogicalPlan>> {
+        build_relationships_plan(traces, None, window)
+    }
+
+    fn ts_values(batch: &RecordBatch, column: usize) -> Vec<i64> {
+        let array = batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        (0..array.len()).map(|i| array.value(i)).collect()
+    }
+
+    /// Registers a declared-edge table holding:
+    /// - frontend->db: two revisions, the newer retiring the edge at 300s;
+    /// - api->cache: expired at 100s;
+    /// - agent-1->search: open-ended `provenance = 'agent'` with JSON attributes.
+    fn declared_table(ctx: &SessionContext) {
+        let ts_field = |name: &str| {
+            Field::new(
+                name,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                name != OBSERVED_AT_COLUMN,
+            )
+        };
+        let schema = Arc::new(Schema::new(vec![
+            ts_field(OBSERVED_AT_COLUMN),
+            ts_field("window_start"),
+            ts_field("window_end"),
+            ts_field("fresh_until"),
+            ts_field("valid_from"),
+            ts_field("valid_until"),
+            Field::new("src_type", DataType::Utf8, false),
+            Field::new("src_id", DataType::Utf8, false),
+            Field::new("rel_type", DataType::Utf8, false),
+            Field::new("dst_type", DataType::Utf8, false),
+            Field::new("dst_id", DataType::Utf8, false),
+            Field::new("provenance", DataType::Utf8, false),
+            Field::new("scope", DataType::Utf8, false),
+            Field::new("generation_id", DataType::Utf8, false),
+            Field::new("confidence", DataType::Float64, true),
+            Field::new("request_count", DataType::Int64, true),
+            Field::new("error_count", DataType::Int64, true),
+            Field::new("duration_sum", DataType::Float64, true),
+            Field::new("duration_count", DataType::Int64, true),
+            Field::new("attributes", DataType::Binary, true),
+        ]));
+        let attrs = jsonb::parse_value(br#"{"connection_type":"virtual_node"}"#)
+            .unwrap()
+            .to_vec();
+        let no_ts = || Arc::new(TimestampMillisecondArray::from(vec![None::<i64>; 4])) as ArrayRef;
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    100_000, 200_000, 50_000, 90_000,
+                ])) as ArrayRef,
+                no_ts(), // window_start
+                no_ts(), // window_end
+                no_ts(), // fresh_until
+                no_ts(), // valid_from
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    None,
+                    Some(300_000),
+                    Some(100_000),
+                    None,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "service", "service", "service", "agent",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "frontend", "frontend", "api", "agent-1",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "depends_on",
+                    "depends_on",
+                    "depends_on",
+                    "uses",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "service", "service", "service", "tool",
+                ])),
+                Arc::new(StringArray::from(vec!["db", "db", "cache", "search"])),
+                Arc::new(StringArray::from(vec![
+                    "declared", "declared", "declared", "agent",
+                ])),
+                Arc::new(StringArray::from(vec![""; 4])),
+                Arc::new(StringArray::from(vec![""; 4])),
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    Some(1.0),
+                    Some(1.0),
+                    Some(0.8),
+                ])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 4])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 4])),
+                Arc::new(Float64Array::from(vec![None::<f64>; 4])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 4])),
+                Arc::new(BinaryArray::from(vec![
+                    None,
+                    None,
+                    None,
+                    Some(attrs.as_slice()),
+                ])),
+            ],
+        )
+        .unwrap();
+        ctx.register_table(
+            SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn declared_edges_latest_revision_validity_and_synthetic_time() {
+        let ctx = SessionContext::new();
+        declared_table(&ctx);
+        let scan = ctx
+            .table(SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME)
+            .await
+            .unwrap();
+
+        // Queried window [120s, 600s).
+        let window = GraphQueryWindow::from_observed(120_000, 600_000);
+        let plan = build_relationships_plan(vec![], Some(DeclaredSource { scan }), &window)
+            .unwrap()
+            .unwrap();
+        let names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, RELATIONSHIP_COLUMNS);
+
+        let batches = collect(&ctx, plan).await;
+        let mut rows: Vec<(String, i64, i64, i64, i64, String, Option<String>)> = vec![];
+        for batch in &batches {
+            let observed = ts_values(batch, 0);
+            let window_start = ts_values(batch, 1);
+            let window_end = ts_values(batch, 2);
+            let fresh_until = ts_values(batch, 3);
+            let src = strings(batch, 5);
+            let provenance = strings(batch, 9);
+            let attributes = json_texts(batch, 15);
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    src[i].clone(),
+                    observed[i],
+                    window_start[i],
+                    window_end[i],
+                    fresh_until[i],
+                    provenance[i].clone(),
+                    attributes[i].clone(),
+                ));
+            }
+        }
+        rows.sort();
+
+        // api->cache expired before the window; frontend->db keeps only the
+        // latest revision.
+        assert_eq!(rows.len(), 2);
+
+        // agent->tool: open-ended validity declared at 90s. The synthesized
+        // observed_at is clamped into the queried window; window_end and
+        // fresh_until take the window's upper bound.
+        assert_eq!(
+            rows[0],
+            (
+                "agent-1".to_string(),
+                120_000,
+                90_000,
+                600_000,
+                600_000,
+                "agent".to_string(),
+                Some(r#"{"connection_type":"virtual_node"}"#.to_string()),
+            )
+        );
+
+        // frontend->db: the latest revision (declared at 200s, retired at 300s)
+        // supersedes the open-ended first revision.
+        assert_eq!(
+            rows[1],
+            (
+                "frontend".to_string(),
+                200_000,
+                200_000,
+                300_000,
+                300_000,
+                "declared".to_string(),
+                None,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_edges_union_calls_branch() {
+        let ctx = trace_table_ctx();
+        declared_table(&ctx);
+        let trace = ctx.table("opentelemetry_traces").await.unwrap();
+        let declared = ctx
+            .table(SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME)
+            .await
+            .unwrap();
+
+        let plan = build_relationships_plan(
+            vec![CallsSource {
+                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                scan: trace,
+            }],
+            Some(DeclaredSource { scan: declared }),
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let mut provenance: Vec<String> = batches.iter().flat_map(|b| strings(b, 9)).collect();
+        provenance.sort();
+        // One trace-derived calls edge plus all three declared edges (the
+        // [0s, 600s) window overlaps every declared validity).
+        assert_eq!(provenance, vec!["agent", "declared", "declared", "trace"]);
     }
 }

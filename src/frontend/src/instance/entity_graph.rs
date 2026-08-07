@@ -35,7 +35,7 @@ use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
-    SERVICE_NAME_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -47,8 +47,9 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource,
-    build_calls_plan, build_registry_plan,
+    CallsSource, DeclaredSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
+    RegistrySource, build_registry_plan, build_relationships_plan,
+    declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -346,6 +347,58 @@ impl EntityGraphProviderImpl {
         self.query_engine.read_table(table).map_err(BoxedError::new)
     }
 
+    /// The declared-edge branch source, when the physical table exists, the
+    /// caller may read it, and its schema still matches the canonical
+    /// definition. A mismatched schema (upgrade skew — user DDL against it is
+    /// rejected) is an explicit error: silently dropping declared edges would
+    /// misrepresent the graph.
+    async fn declared_source(
+        &self,
+        catalog: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<DeclaredSource>, BoxedError> {
+        let Some(catalog_manager) = self.catalog_manager.upgrade() else {
+            return Ok(None);
+        };
+        let Some(table) = catalog_manager
+            .table(
+                catalog,
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+                query_ctx,
+            )
+            .await
+            .map_err(BoxedError::new)?
+        else {
+            return Ok(None);
+        };
+        if !self.authorize_sources(
+            query_ctx,
+            PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                catalog,
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+            )]),
+        )? {
+            return Ok(None);
+        }
+        let table_info = table.table_info();
+        if !declared_relationships_schema_matches(&table_info.meta.schema) {
+            return Err(BoxedError::new(
+                error::InvalidSqlSnafu {
+                    err_msg: format!(
+                        "{DEFAULT_PRIVATE_SCHEMA_NAME}.{SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME} \
+                         does not match its canonical schema; declared edges cannot be derived"
+                    ),
+                }
+                .build(),
+            ));
+        }
+        Ok(Some(DeclaredSource {
+            scan: self.read_table(table)?,
+        }))
+    }
+
     /// Executes a derivation plan and returns its live result stream. The plan
     /// runs under the caller's context so the derivation inherits the caller's
     /// permissions, cancellation and deadline; context-less internal scans get
@@ -417,8 +470,9 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(trace)?,
             });
         }
+        let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;
         let window = Self::query_window(&request)?;
-        let Some(plan) = build_calls_plan(scans, &window)
+        let Some(plan) = build_relationships_plan(scans, declared, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
         else {
