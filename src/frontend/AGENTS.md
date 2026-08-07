@@ -36,12 +36,9 @@ distributed mode it talks to remote datanodes via `operator`/`client`.
 
 ## Request lifecycles
 
-- **SQL query** (`instance.rs`): `do_query` → `pre_parsing` interceptor → parse →
-  `post_parsing` interceptor → then per statement: `check_permission` →
-  `statement_executor.plan` (logical plan) → `query_engine.execute` → for
-  distributed reads, `region_query.rs` fetches from datanodes → cancellable
-  `RecordBatch` stream. Interceptors run around parsing, before the per-statement
-  permission check — preserve that ordering.
+- **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
+  permission checks, timeout/cancellation, and delegates planning/execution to
+  `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
