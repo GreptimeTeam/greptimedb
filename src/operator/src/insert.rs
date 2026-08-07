@@ -1244,32 +1244,41 @@ pub fn fill_table_options_for_create(
     }
 }
 
-/// Folds the semantic keys for `table_name` carried on the internal per-table
-/// index extension into `table_options`.
+/// Folds the semantic keys for the table being created (looked up by the
+/// context's current schema and `table_name`) carried on the internal
+/// per-table index extension into `table_options`.
 ///
-/// The index is a `{table_name -> {semantic_key: value}}` JSON blob produced by
-/// the OTLP metrics encode path (where one metric can fan out into several
-/// tables with distinct keys). Common keys shared by every table in a request
-/// travel as plain semantic extensions and are handled by
-/// [`fill_table_options_for_create`]; this carries only the per-table tail.
+/// The index is a `{schema -> {table_name -> {semantic_key: value}}}` JSON blob
+/// produced by the OTLP metrics encode path (where one metric can fan out into
+/// several tables with distinct keys) and the Prometheus remote write v2 path
+/// (where per-series metadata declares type/unit, and a series may override its
+/// target schema). Common keys shared by every table in a request travel as
+/// plain semantic extensions and are handled by
+/// [`fill_table_options_for_create`]; this carries only the per-table tail and
+/// is applied after it, so a per-table value (e.g. `declared` quality) wins.
 /// Keys are re-checked against the vocabulary defensively. Ingestion paths
-/// without a per-table index (logs, traces, Prom RW) carry no extension, so this
-/// is a no-op for them.
-fn apply_per_table_semantic_options(
+/// without a per-table index (logs, traces, Prom RW v1) carry no extension, so
+/// this is a no-op for them.
+pub fn apply_per_table_semantic_options(
     table_options: &mut std::collections::HashMap<String, String>,
     ctx: &QueryContextRef,
     table_name: &str,
 ) {
+    type PerTableIndex = std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    >;
     let Some(raw) = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY) else {
         return;
     };
-    let Ok(index) = serde_json::from_str::<
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    >(raw) else {
+    let Ok(index) = serde_json::from_str::<PerTableIndex>(raw) else {
         warn!("failed to parse semantic per-table index, skipping per-table options");
         return;
     };
-    let Some(entry) = index.get(table_name) else {
+    let Some(entry) = index
+        .get(ctx.current_schema().as_str())
+        .and_then(|tables| tables.get(table_name))
+    else {
         return;
     };
     for (key, value) in entry {
@@ -1634,22 +1643,32 @@ mod tests {
             SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_PER_TABLE_INDEX_KEY,
         };
 
-        let index = r#"{
-            "http_requests_total": {
-                "greptime.semantic.metric.type": "counter",
-                "greptime.semantic.metric.unit": "By",
-                "greptime.semantic.metric.type_BOGUS": "x"
-            },
-            "other_table": {
-                "greptime.semantic.metric.type": "gauge"
-            }
-        }"#;
+        let index = format!(
+            r#"{{
+            "{DEFAULT_SCHEMA_NAME}": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "counter",
+                    "greptime.semantic.metric.unit": "By",
+                    "greptime.semantic.metric.type_BOGUS": "x"
+                }},
+                "other_table": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }},
+            "other_schema": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }}
+        }}"#
+        );
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
         let ctx = Arc::new(ctx);
 
         let mut table_options = std::collections::HashMap::new();
         apply_per_table_semantic_options(&mut table_options, &ctx, "http_requests_total");
+        // The current schema's entry applies — not other_schema's `gauge`.
         assert_eq!(
             table_options.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
             Some("counter")
@@ -1666,6 +1685,17 @@ mod tests {
         let mut empty = std::collections::HashMap::new();
         apply_per_table_semantic_options(&mut empty, &ctx, "not_in_index");
         assert!(empty.is_empty());
+
+        // A schema with no entry is a no-op even when the table name matches
+        // elsewhere.
+        let mut foreign = QueryContext::with(DEFAULT_CATALOG_NAME, "schema_without_entry");
+        foreign.set_extension(
+            SEMANTIC_PER_TABLE_INDEX_KEY,
+            ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY).unwrap(),
+        );
+        let mut opts = std::collections::HashMap::new();
+        apply_per_table_semantic_options(&mut opts, &Arc::new(foreign), "http_requests_total");
+        assert!(opts.is_empty());
 
         // No extension at all is a no-op (e.g. logs / Prom RW).
         let bare = Arc::new(QueryContext::with(

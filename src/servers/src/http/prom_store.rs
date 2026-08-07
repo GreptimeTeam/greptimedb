@@ -35,8 +35,9 @@ use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use table::requests::{
-    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_PER_TABLE_INDEX_KEY,
+    SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC,
+    SOURCE_PROMETHEUS,
 };
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
@@ -155,6 +156,7 @@ async fn remote_write_v1(
 
     let (db, query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
+    let query_ctx = Arc::new(query_ctx);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -230,7 +232,7 @@ async fn remote_write_v2(
     // optional pipeline parameter and ingest samples directly.
     let _ = pipeline_info;
 
-    let (db, query_ctx, _timer) =
+    let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
     let request = match decode_remote_write_v2_request(is_zstd, body) {
@@ -253,6 +255,12 @@ async fn remote_write_v2(
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
+    // The v2 per-series metadata upgrades the written tables' semantic options
+    // (metric type/unit, declared quality) at auto-create time.
+    if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
+        query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+    }
+    let query_ctx = Arc::new(query_ctx);
     let sample_count = req.sample_count;
     let histogram_count = req.histogram_count;
     let sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
@@ -310,11 +318,14 @@ fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response
         .map(|_| VM_PROTO_VERSION.into_response())
 }
 
+/// Returns the context still un-shared so the caller can attach
+/// request-derived extensions (the v2 per-table metadata index) before
+/// wrapping it in an `Arc`.
 fn prepare_remote_write_context(
     params: &RemoteWriteQuery,
     mut query_ctx: QueryContext,
     remote_write_version: &str,
-) -> (String, Arc<QueryContext>, HistogramTimer) {
+) -> (String, QueryContext, HistogramTimer) {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
     let physical_table = params
@@ -325,12 +336,12 @@ fn prepare_remote_write_context(
     // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
     // batched and direct write paths, so both inherit it (the batched path bypasses
     // `PromStoreProtocolHandler::write`). Prometheus remote-write metadata is weak
-    // here, so the type is inferred from naming.
+    // here, so the type is inferred from naming; v2 upgrades tables whose series
+    // carry inline metadata via the per-table index.
     query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
     query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
     query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
-    let query_ctx = Arc::new(query_ctx);
     let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();

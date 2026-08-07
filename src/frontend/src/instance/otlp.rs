@@ -132,8 +132,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
             // Per-table metric specifics + resource/scope lineage ride this
-            // internal channel; the auto-create path folds them per table name.
-            if let Some(index) = semantic_index.encode() {
+            // internal channel; the auto-create path folds them per schema and
+            // table name.
+            if let Some(index) = semantic_index.encode(&c.current_schema()) {
                 c.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
             }
             if !is_legacy {

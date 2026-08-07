@@ -29,11 +29,14 @@ use table::requests::{
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
 use crate::row_writer::{self, MultiTableData, TableData};
+pub use crate::semantic::SemanticIndex;
+use crate::semantic::{
+    METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, METRIC_TYPE_HISTOGRAM, METRIC_TYPE_SUMMARY,
+    METRIC_TYPE_UPDOWN_COUNTER,
+};
 
-mod semantic;
 mod translator;
 
-pub use semantic::SemanticIndex;
 pub use translator::legacy_normalize_otlp_name;
 use translator::{translate_label_name, translate_metric_name};
 
@@ -43,15 +46,6 @@ const APPROXIMATE_COLUMN_COUNT: usize = 8;
 const COUNT_TABLE_SUFFIX: &str = "_count";
 const SUM_TABLE_SUFFIX: &str = "_sum";
 const BUCKET_TABLE_SUFFIX: &str = "_bucket";
-
-// `greptime.semantic.metric.type` values stamped per emitted table. Must stay
-// within the domain accepted by `validate_semantic_option`; the drift-guard test
-// asserts this.
-const METRIC_TYPE_COUNTER: &str = "counter";
-const METRIC_TYPE_UPDOWN_COUNTER: &str = "updown_counter";
-const METRIC_TYPE_GAUGE: &str = "gauge";
-const METRIC_TYPE_HISTOGRAM: &str = "histogram";
-const METRIC_TYPE_SUMMARY: &str = "summary";
 
 const JOB_KEY: &str = "job";
 const INSTANCE_KEY: &str = "instance";
@@ -1188,7 +1182,9 @@ mod tests {
     use table::requests::validate_semantic_option;
 
     fn decode(index: &SemanticIndex) -> BTreeMap<String, BTreeMap<String, String>> {
-        serde_json::from_str(&index.encode().expect("non-empty index")).unwrap()
+        let nested: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>> =
+            serde_json::from_str(&index.encode("public").expect("non-empty index")).unwrap();
+        nested.into_values().next().unwrap()
     }
 
     fn record(metric: &Metric, metric_type: MetricType, name: &str) -> SemanticIndex {
