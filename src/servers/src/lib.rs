@@ -15,6 +15,9 @@
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
 
+use std::collections::HashMap;
+
+use arrow_schema::DataType;
 use datafusion_expr::LogicalPlan;
 use sql::statements::statement::Statement;
 // Re-export for use in add_service! macro
@@ -60,8 +63,10 @@ pub enum SqlPlan {
     Empty,
     /// Hardcoded SQL shortcuts
     Shortcut(String),
-    /// Datafusion parsed execution plan with the original statement
-    Plan(LogicalPlan, Statement),
+    /// Datafusion parsed execution plan with the original statement and the
+    /// inferred placeholder parameter types (a pure function of the plan,
+    /// computed once at prepare time).
+    Plan(LogicalPlan, Statement, HashMap<String, Option<DataType>>),
     /// Parsed statement when execution is not managed by datafusion
     /// eg. CREATE TABLE
     /// The String is the original query string to avoid AST round-trip issues

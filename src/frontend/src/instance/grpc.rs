@@ -49,9 +49,9 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu,
-    NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
-    SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
+    CatalogSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SubstraitDecodeLogicalPlanSnafu,
+    TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{Instance, attach_timer};
 use crate::metrics::{
@@ -497,19 +497,11 @@ impl Instance {
         let insert_into = add_insert_to_logical_plan(table_name, table_source, logical_plan)
             .context(SubstraitDecodeLogicalPlanSnafu)?;
 
-        let engine_ctx = self.query_engine().engine_context(ctx.clone());
-        let state = engine_ctx.state();
-        // Analyze the plan
-        let analyzed_plan = state
-            .analyzer()
-            .execute_and_check(insert_into, state.config_options(), |_, _| {})
-            .context(DataFusionSnafu)?;
-
-        // Optimize the plan
-        let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
-
+        // `do_exec_plan_inner` → `create_physical_plan` already runs the analyzer and
+        // optimizer internally (with MergeScan/Explain guards), so pass the decoded,
+        // unoptimized plan directly.
         let output = self
-            .do_exec_plan_inner(optimized_plan, None, ctx.clone())
+            .do_exec_plan_inner(insert_into, None, ctx.clone())
             .await?;
 
         Ok(attach_timer(output, timer))

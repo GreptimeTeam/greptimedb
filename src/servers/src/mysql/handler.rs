@@ -203,19 +203,21 @@ impl MysqlInstanceShim {
             .await?;
         let plan = describe_result.map(|DescribeResult { logical_plan }| logical_plan);
 
-        let (params, can_cache_as_plan) = if let Some(plan) = &plan {
-            let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
-                .context(InferParameterTypesSnafu)?
-                .into_iter()
-                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
-                .collect();
+        let (params, can_cache_as_plan, inferred_param_types) = if let Some(plan) = &plan {
+            let inferred_param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
+                .context(InferParameterTypesSnafu)?;
+            let param_types = inferred_param_types
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_ref().map(ConcreteDataType::from_arrow_type)))
+                .collect::<HashMap<_, _>>();
 
             (
                 prepared_params(&param_types, param_num)?,
                 all_params_have_types(&param_types, param_num),
+                Some(inferred_param_types),
             )
         } else {
-            (dummy_params(param_num)?, false)
+            (dummy_params(param_num)?, false, None)
         };
 
         let columns =
@@ -242,10 +244,15 @@ impl MysqlInstanceShim {
 
         match plan {
             Some(plan) if can_cache_as_plan => {
-                self.save_plan(SqlPlan::Plan(plan, statement), stmt_key)
-                    .inspect_err(|e| {
-                        error!(e; "Failed to save prepared statement");
-                    })?;
+                // `inferred_param_types` is always `Some` here because
+                // `can_cache_as_plan` implies a logical plan was produced.
+                self.save_plan(
+                    SqlPlan::Plan(plan, statement, inferred_param_types.unwrap_or_default()),
+                    stmt_key,
+                )
+                .inspect_err(|e| {
+                    error!(e; "Failed to save prepared statement");
+                })?;
             }
             _ => {
                 self.save_plan(
@@ -275,9 +282,8 @@ impl MysqlInstanceShim {
         };
 
         let outputs = match sql_plan {
-            SqlPlan::Plan(plan, stmt) => {
-                let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
-                    .context(InferParameterTypesSnafu)?
+            SqlPlan::Plan(plan, stmt, inferred_param_types) => {
+                let param_types = inferred_param_types
                     .into_iter()
                     .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
                     .collect::<HashMap<_, _>>();
@@ -527,12 +533,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .start_timer();
 
         // Clear warnings for non SHOW WARNINGS queries
-        let query_upcase = query.to_uppercase();
-        if !query_upcase.starts_with("SHOW WARNINGS") {
+        if !query
+            .get(..13)
+            .is_some_and(|s| s.eq_ignore_ascii_case("SHOW WARNINGS"))
+        {
             self.session.clear_warnings();
         }
 
-        if query_upcase.starts_with("PREPARE ") {
+        if query
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("PREPARE "))
+        {
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, stmt)) => {
                     let prepare_results =
@@ -559,7 +570,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return Ok(());
                 }
             }
-        } else if query_upcase.starts_with("EXECUTE ") {
+        } else if query
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("EXECUTE "))
+        {
             match ParserContext::parse_mysql_execute_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, params)) => {
                     let outputs = match self
@@ -588,7 +602,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return Ok(());
                 }
             }
-        } else if query_upcase.starts_with("DEALLOCATE ") {
+        } else if query
+            .get(..11)
+            .is_some_and(|s| s.eq_ignore_ascii_case("DEALLOCATE "))
+        {
             match ParserContext::parse_mysql_deallocate_stmt(query, query_ctx.sql_dialect()) {
                 Ok(stmt_name) => {
                     self.do_close(stmt_name);

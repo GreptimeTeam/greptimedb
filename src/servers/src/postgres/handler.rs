@@ -364,8 +364,12 @@ impl QueryParser for DefaultQueryParser {
                 .map_err(convert_err)?
                 .map(|DescribeResult { logical_plan }| logical_plan)
             {
+                let inferred_param_types =
+                    DfLogicalPlanner::get_inferred_parameter_types(&logical_plan)
+                        .context(InferParameterTypesSnafu)
+                        .map_err(convert_err)?;
                 Ok(PgSqlPlan {
-                    plan: SqlPlan::Plan(logical_plan, stmt),
+                    plan: SqlPlan::Plan(logical_plan, stmt, inferred_param_types),
                     copy_to_stdout_format,
                 })
             } else {
@@ -442,7 +446,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                     return Ok(Response::EmptyQuery);
                 }
             }
-            SqlPlan::Plan(plan, stmt) => {
+            SqlPlan::Plan(plan, stmt, _) => {
                 let values = parameters_to_scalar_values(plan, portal)?;
                 let plan = plan
                     .clone()
@@ -488,7 +492,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let sql_plan = &stmt.statement.plan;
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
-        let server_inferenced_types = if let SqlPlan::Plan(plan, _) = &sql_plan {
+        let server_inferenced_types = if let SqlPlan::Plan(plan, _, _) = &sql_plan {
             let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)
                 .map_err(convert_err)?
@@ -555,7 +559,7 @@ fn describe_fields(
 ) -> PgWireResult<Vec<FieldInfo>> {
     match sql_plan {
         // query
-        SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
+        SqlPlan::Plan(plan, _, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
             let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
             schema_to_pg(&schema, format, None).map_err(convert_err)
         }

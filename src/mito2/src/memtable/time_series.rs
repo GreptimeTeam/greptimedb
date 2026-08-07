@@ -1056,7 +1056,9 @@ impl ValueBuilder {
             .enumerate()
             .map(|(i, v)| {
                 if let Some(v) = v {
-                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
+                    // `finish_cloned` only clones the builder, which stays alive and remains
+                    // counted in `MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT`. The count is released
+                    // by `Values::from(ValueBuilder)` (write/flush path) and `SeriesMap::drop`.
                     v.finish_cloned()
                 } else {
                     let mut single_null = self.field_types[i].create_mutable_vector(num_rows);
@@ -1388,6 +1390,26 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(expect, &read);
+    }
+
+    #[test]
+    fn test_field_builder_gauge_balance_after_read_and_flush() {
+        let region_metadata = schema_for_test();
+        let mut series = Series::new(&region_metadata);
+        let gauge_before = MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.get();
+
+        series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1));
+        // Pushing the two field values creates one field builder per column.
+        assert_eq!(MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.get(), gauge_before + 2);
+
+        // `read_to_values` clones the active builders without consuming them, so the
+        // active field builder count must stay unchanged.
+        let _values = series.read_to_values();
+        assert_eq!(MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.get(), gauge_before + 2);
+
+        // Freezing consumes the builders via `Values::from`, releasing the gauge.
+        series.freeze(&region_metadata);
+        assert_eq!(MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.get(), gauge_before);
     }
 
     #[test]
