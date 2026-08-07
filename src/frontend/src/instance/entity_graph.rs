@@ -27,13 +27,18 @@ use std::collections::HashMap;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
+};
 use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
     SERVICE_NAME_COLUMN,
 };
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::warn;
@@ -45,7 +50,7 @@ use operator::statement::semantic_graph::{
     build_registry_plan,
 };
 use query::QueryEngineRef;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::TableRef;
@@ -60,6 +65,7 @@ use crate::error;
 pub struct EntityGraphProviderImpl {
     query_engine: QueryEngineRef,
     catalog_manager: Weak<dyn CatalogManager>,
+    permission_checker: Option<PermissionCheckerRef>,
 }
 
 struct EntitySource {
@@ -68,10 +74,38 @@ struct EntitySource {
 }
 
 impl EntityGraphProviderImpl {
-    pub fn new(query_engine: QueryEngineRef, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        catalog_manager: Weak<dyn CatalogManager>,
+        permission_checker: Option<PermissionCheckerRef>,
+    ) -> Self {
         Self {
             query_engine,
             catalog_manager,
+            permission_checker,
+        }
+    }
+
+    /// Checks whether the caller may read derivation sources named by `targets`.
+    /// `Ok(false)` = denied — the source is silently excluded, per the derivation
+    /// contract ("a source the caller cannot read never appears"). Errors other
+    /// than a permission denial abort the scan.
+    fn authorize_sources(
+        &self,
+        query_ctx: Option<&QueryContext>,
+        targets: PermissionTableTargets,
+    ) -> Result<bool, BoxedError> {
+        let Some(ctx) = query_ctx else {
+            return Ok(true);
+        };
+        match self.permission_checker.as_ref().check_permission_with_table_targets(
+            ctx.current_user(),
+            PermissionReq::Action(SEMANTIC_GRAPH_QUERY),
+            targets,
+        ) {
+            Ok(_) => Ok(true),
+            Err(err) if err.status_code() == StatusCode::PermissionDenied => Ok(false),
+            Err(err) => Err(BoxedError::new(err)),
         }
     }
 
@@ -182,15 +216,33 @@ impl EntityGraphProviderImpl {
     async fn enumerate(
         &self,
         catalog: &str,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<(Vec<EntitySource>, Vec<(EntityDeclaration, TableRef)>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
 
+        // A target-blind checker (e.g. the default mode-based one) answers the
+        // same for every table: ask once up front instead of per table.
+        let per_table_auth = match self.permission_checker.as_ref() {
+            Some(checker) if query_ctx.is_some() => {
+                if checker.uses_table_targets() {
+                    true
+                } else if self
+                    .authorize_sources(query_ctx, PermissionTableTargets::resolved(vec![]))?
+                {
+                    false
+                } else {
+                    return Ok((vec![], vec![]));
+                }
+            }
+            _ => false,
+        };
+
         let mut declarations = vec![];
         let mut traces = vec![];
         let schemas = catalog_manager
-            .schema_names(catalog, None)
+            .schema_names(catalog, query_ctx)
             .await
             .map_err(BoxedError::new)?;
         for schema in schemas {
@@ -202,11 +254,26 @@ impl EntityGraphProviderImpl {
             {
                 continue;
             }
-            let mut tables = catalog_manager.tables(catalog, &schema, None);
+            let mut tables = catalog_manager.tables(catalog, &schema, query_ctx);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info);
-                if is_trace_v1_table(&table_info) {
+                let is_trace = is_trace_v1_table(&table_info);
+                // Authorize only tables that would contribute rows.
+                if per_table_auth
+                    && (is_trace || !table_declarations.is_empty())
+                    && !self.authorize_sources(
+                        query_ctx,
+                        PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                            catalog,
+                            &schema,
+                            &table_info.name,
+                        )]),
+                    )?
+                {
+                    continue;
+                }
+                if is_trace {
                     // TODO(entity-graph): validate the complete fixed trace-v1
                     // schema before adding the table to calls derivation, and
                     // skip malformed/stale tables instead of letting one poison
@@ -250,22 +317,23 @@ impl EntityGraphProviderImpl {
         self.query_engine.read_table(table).map_err(BoxedError::new)
     }
 
-    /// Executes a derivation plan and returns its live result stream.
-    ///
-    /// TODO(entity-graph): the QueryContext must come from the outer query
-    /// instead of being built here, so the derivation inherits the caller's
-    /// permissions, cancellation and deadline. Requires threading the context
-    /// through the computed-table scan path (planned next PR).
+    /// Executes a derivation plan and returns its live result stream. The plan
+    /// runs under the caller's context so the derivation inherits the caller's
+    /// permissions, cancellation and deadline; context-less internal scans get
+    /// a minimal default.
     async fn execute_plan(
         &self,
         catalog: &str,
         plan: LogicalPlan,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let query_ctx: QueryContextRef = QueryContextBuilder::default()
-            .current_catalog(catalog.to_string())
-            .current_schema(DEFAULT_SCHEMA_NAME.to_string())
-            .build()
-            .into();
+        let query_ctx = query_ctx.unwrap_or_else(|| {
+            QueryContextBuilder::default()
+                .current_catalog(catalog.to_string())
+                .current_schema(DEFAULT_SCHEMA_NAME.to_string())
+                .build()
+                .into()
+        });
         let output = self
             .query_engine
             .execute(plan, query_ctx)
@@ -286,8 +354,9 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (sources, _) = self.enumerate(catalog).await?;
+        let (sources, _) = self.enumerate(catalog, query_ctx.as_deref()).await?;
         let mut plans = Vec::with_capacity(sources.len());
         for source in sources {
             plans.push(RegistrySource {
@@ -302,15 +371,16 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         else {
             return Ok(None);
         };
-        self.execute_plan(catalog, plan).await
+        self.execute_plan(catalog, plan, query_ctx).await
     }
 
     async fn scan_relationships(
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (_, traces) = self.enumerate(catalog).await?;
+        let (_, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
         let mut scans = Vec::with_capacity(traces.len());
         for (service, trace) in traces {
             scans.push(CallsSource {
@@ -325,7 +395,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         else {
             return Ok(None);
         };
-        self.execute_plan(catalog, plan).await
+        self.execute_plan(catalog, plan, query_ctx).await
     }
 }
 

@@ -49,6 +49,7 @@ use common_recordbatch::{
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::StreamExt;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
@@ -70,6 +71,12 @@ pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 /// binding breaks the `catalog -> query` dependency cycle. Keeping derivation out
 /// of `catalog` also respects the crate layering (the plan builders live in
 /// `operator`). See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+/// The derivation contract requires running as the caller (RFC "The contract"):
+/// `query_ctx` is the outer query's context, captured when the computed table is
+/// resolved. The provider must derive only from source tables that context may
+/// read, and execute under it so the derivation inherits the caller's
+/// permissions, cancellation and deadline. `None` (context-less internal
+/// resolution) keeps the provider's default behaviour.
 #[async_trait::async_trait]
 pub trait EntityGraphProvider: Send + Sync {
     /// Produces the entity registry (`semantic_entities`) rows for `catalog`.
@@ -78,6 +85,7 @@ pub trait EntityGraphProvider: Send + Sync {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 
     /// Produces the relationship set (`semantic_relationships`) rows for `catalog`.
@@ -85,6 +93,7 @@ pub trait EntityGraphProvider: Send + Sync {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 }
 
@@ -94,13 +103,21 @@ pub trait EntityGraphProvider: Send + Sync {
 pub(crate) struct SemanticGraphTableProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    /// The resolving query's context; captured per resolution (the provider is
+    /// built on demand, never cached), so it cannot leak across sessions.
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl SemanticGraphTableProvider {
-    pub(crate) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub(crate) fn new(
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+        query_ctx: Option<QueryContextRef>,
+    ) -> Self {
         Self {
             catalog_name,
             catalog_manager,
+            query_ctx,
         }
     }
 
@@ -139,6 +156,7 @@ impl SystemSchemaProviderInner for SemanticGraphTableProvider {
             kind,
             self.catalog_name.clone(),
             self.catalog_manager.clone(),
+            self.query_ctx.clone(),
         )) as _)
     }
 }
@@ -252,6 +270,7 @@ struct SemanticGraphTable {
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl SemanticGraphTable {
@@ -259,6 +278,7 @@ impl SemanticGraphTable {
         kind: GraphTableKind,
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
+        query_ctx: Option<QueryContextRef>,
     ) -> Self {
         let schema = match kind {
             GraphTableKind::Entities => ENTITIES_SCHEMA.clone(),
@@ -269,6 +289,7 @@ impl SemanticGraphTable {
             schema,
             catalog_name,
             catalog_manager,
+            query_ctx,
         }
     }
 
@@ -277,6 +298,7 @@ impl SemanticGraphTable {
         catalog: String,
         catalog_manager: Weak<dyn CatalogManager>,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>> {
         let provider = utils::entity_graph_provider(&catalog_manager)?;
         // No provider (engine not up / non-frontend node): stream empty.
@@ -284,8 +306,10 @@ impl SemanticGraphTable {
             return Ok(None);
         };
         match kind {
-            GraphTableKind::Entities => provider.scan_entities(&catalog, request).await,
-            GraphTableKind::Relationships => provider.scan_relationships(&catalog, request).await,
+            GraphTableKind::Entities => provider.scan_entities(&catalog, request, query_ctx).await,
+            GraphTableKind::Relationships => {
+                provider.scan_relationships(&catalog, request, query_ctx).await
+            }
         }
         .context(InternalSnafu)
     }
@@ -338,10 +362,11 @@ impl SystemTable for SemanticGraphTable {
         let kind = self.kind;
         let catalog = self.catalog_name.clone();
         let catalog_manager = self.catalog_manager.clone();
+        let query_ctx = self.query_ctx.clone();
 
         let stream_schema = schema.clone();
         let stream = async move {
-            let stream = Self::derive(kind, catalog, catalog_manager, request)
+            let stream = Self::derive(kind, catalog, catalog_manager, request, query_ctx)
                 .await
                 .map_err(BoxedError::new)
                 .context(common_recordbatch::error::ExternalSnafu)?;
