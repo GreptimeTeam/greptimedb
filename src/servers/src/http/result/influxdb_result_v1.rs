@@ -16,7 +16,7 @@ use axum::Json;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, util};
+use common_recordbatch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -136,6 +136,7 @@ impl InfluxdbV1Response {
     pub async fn from_output(
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
+        max_result_rows: usize,
     ) -> HttpResponse {
         // TODO(sunng87): this api response structure cannot represent error well.
         //  It hides successful execution results from error response
@@ -153,7 +154,12 @@ impl InfluxdbV1Response {
                         }
                         OutputData::Stream(stream) => {
                             // TODO(sunng87): streaming response
-                            match util::collect(stream).await {
+                            match crate::http::handler::collect_with_max_rows(
+                                stream,
+                                max_result_rows,
+                            )
+                            .await
+                            {
                                 Ok(rows) => match InfluxdbRecordsOutput::try_from((epoch, rows)) {
                                     Ok(rows) => {
                                         results.push(InfluxdbOutput {
@@ -166,12 +172,19 @@ impl InfluxdbV1Response {
                                     }
                                 },
                                 Err(err) => {
-                                    return HttpResponse::Error(ErrorResponse::from_error(err));
+                                    return HttpResponse::Error(err);
                                 }
                             }
                         }
                         OutputData::RecordBatches(rbs) => {
-                            match InfluxdbRecordsOutput::try_from((epoch, rbs.take())) {
+                            let batches = rbs.take();
+                            if let Err(err) = crate::http::handler::check_max_result_rows(
+                                &batches,
+                                max_result_rows,
+                            ) {
+                                return HttpResponse::Error(err);
+                            }
+                            match InfluxdbRecordsOutput::try_from((epoch, batches)) {
                                 Ok(rows) => {
                                     results.push(InfluxdbOutput {
                                         statement_id,

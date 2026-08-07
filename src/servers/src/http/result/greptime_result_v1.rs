@@ -39,8 +39,11 @@ pub struct GreptimedbV1Response {
 }
 
 impl GreptimedbV1Response {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
-        match handler::from_output(outputs).await {
+    pub async fn from_output(
+        outputs: Vec<crate::error::Result<Output>>,
+        max_result_rows: usize,
+    ) -> HttpResponse {
+        match handler::from_output(outputs, max_result_rows).await {
             Ok((output, resp_metrics)) => HttpResponse::GreptimedbV1(Self {
                 output,
                 execution_time_ms: 0,

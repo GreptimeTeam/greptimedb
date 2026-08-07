@@ -27,10 +27,10 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{self, Error};
+use crate::error::{self, Error, ResultTooLargeSnafu};
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::{HttpResponse, ResponseFormat};
+use crate::http::{HttpResponse, ResponseFormat, handler};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ArrowResponse {
@@ -42,8 +42,10 @@ async fn write_arrow_bytes(
     mut recordbatches: Pin<Box<dyn RecordBatchStream + Send>>,
     schema: &Arc<Schema>,
     compression: Option<CompressionType>,
+    max_result_rows: usize,
 ) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
+    let mut total_rows = 0usize;
     {
         let options = IpcWriteOptions::default()
             .try_with_compression(compression)
@@ -53,6 +55,14 @@ async fn write_arrow_bytes(
 
         while let Some(rb) = recordbatches.next().await {
             let rb = rb.context(error::CollectRecordbatchSnafu)?;
+            total_rows += rb.num_rows();
+            if max_result_rows > 0 && total_rows > max_result_rows {
+                return ResultTooLargeSnafu {
+                    limit: max_result_rows,
+                    rows: total_rows,
+                }
+                .fail();
+            }
             writer
                 .write(&rb.into_df_record_batch())
                 .context(error::ArrowSnafu)?;
@@ -79,6 +89,7 @@ impl ArrowResponse {
     pub async fn from_output(
         mut outputs: Vec<error::Result<Output>>,
         compression: Option<String>,
+        max_result_rows: usize,
     ) -> HttpResponse {
         if outputs.len() > 1 {
             return HttpResponse::Error(ErrorResponse::from_error_message(
@@ -101,8 +112,18 @@ impl ArrowResponse {
                 }),
                 OutputData::RecordBatches(batches) => {
                     let schema = batches.schema();
-                    match write_arrow_bytes(batches.as_stream(), schema.arrow_schema(), compression)
-                        .await
+                    if let Err(err) =
+                        handler::check_max_result_rows(batches.iter(), max_result_rows)
+                    {
+                        return HttpResponse::Error(err);
+                    }
+                    match write_arrow_bytes(
+                        batches.as_stream(),
+                        schema.arrow_schema(),
+                        compression,
+                        max_result_rows,
+                    )
+                    .await
                     {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {
                             data: payload,
@@ -113,7 +134,14 @@ impl ArrowResponse {
                 }
                 OutputData::Stream(batches) => {
                     let schema = batches.schema();
-                    match write_arrow_bytes(batches, schema.arrow_schema(), compression).await {
+                    match write_arrow_bytes(
+                        batches,
+                        schema.arrow_schema(),
+                        compression,
+                        max_result_rows,
+                    )
+                    .await
+                    {
                         Ok(payload) => HttpResponse::Arrow(ArrowResponse {
                             data: payload,
                             execution_time_ms: 0,
@@ -196,7 +224,7 @@ mod test {
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
 
-            let http_resp = ArrowResponse::from_output(outputs, compression).await;
+            let http_resp = ArrowResponse::from_output(outputs, compression, usize::MAX).await;
             match http_resp {
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
@@ -217,6 +245,62 @@ mod test {
                 }
                 _ => unreachable!(),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_arrow_response_bounded() {
+        use common_error::status_code::StatusCode;
+
+        let column_schemas = vec![ColumnSchema::new(
+            "numbers",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        // A result larger than the limit errors cleanly instead of being buffered whole.
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4]))];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
+        let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
+        match ArrowResponse::from_output(outputs, None, 2).await {
+            HttpResponse::Error(err) => {
+                assert_eq!(err.code(), StatusCode::RuntimeResourcesExhausted as u32);
+                assert!(err.error().contains("maximum of 2"));
+            }
+            _ => panic!("expected error response"),
+        }
+
+        // A result within the limit still works.
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4]))];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
+        let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
+        match ArrowResponse::from_output(outputs, None, 4).await {
+            HttpResponse::Arrow(resp) => {
+                let mut reader = StreamReader::try_new(Cursor::new(resp.data), None)
+                    .expect("Arrow reader error");
+                let rb = reader.next().unwrap().expect("read record batch failed");
+                assert_eq!(rb.num_rows(), 4);
+            }
+            _ => panic!("expected arrow response"),
+        }
+
+        // A stream that overflows the limit is also rejected.
+        let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(vec![5, 6, 7, 8]))];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let outputs = vec![Ok(Output::new(
+            OutputData::Stream(recordbatches.as_stream()),
+            Default::default(),
+        ))];
+        match ArrowResponse::from_output(outputs, None, 3).await {
+            HttpResponse::Error(err) => {
+                assert_eq!(err.code(), StatusCode::RuntimeResourcesExhausted as u32);
+                assert!(err.error().contains("maximum of 3"));
+            }
+            _ => panic!("expected error response"),
         }
     }
 }

@@ -1017,7 +1017,10 @@ pub(crate) async fn execute_log_context_req(
             .observe(exec_timer.elapsed().as_secs_f64());
     }
 
-    let response = GreptimedbV1Response::from_output(outputs)
+    // The outputs of a log ingestion request are `AffectedRows` results; the
+    // `max_result_rows` guard only applies to query record streams, so the
+    // default limit is used here.
+    let response = GreptimedbV1Response::from_output(outputs, crate::http::DEFAULT_MAX_RESULT_ROWS)
         .await
         .with_execution_time(exec_timer.elapsed().as_millis() as u64);
     Ok(response)
