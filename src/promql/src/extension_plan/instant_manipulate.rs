@@ -383,8 +383,13 @@ impl ExecutionPlan for InstantManipulateExec {
         let schema = input.schema();
         let time_index = schema
             .column_with_name(&self.time_index_column)
-            .expect("time index column not found")
-            .0;
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "time index column {} not found in input schema {schema:?}",
+                    self.time_index_column
+                ))
+            })?;
         let field_index = self
             .field_column
             .as_ref()
@@ -872,6 +877,39 @@ mod test {
         .to_execution_plan(exec_input);
 
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_time_index() {
+        // Feed a malformed physical child (no time index column) directly to
+        // `execute`: it must return an error instead of panicking.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let value_column =
+            Arc::new(datafusion::arrow::array::Float64Array::from(vec![1.0, 2.0])) as _;
+        let host_column = Arc::new(datafusion::arrow::array::StringArray::from(vec![
+            "foo", "foo",
+        ])) as _;
+        let batch = RecordBatch::try_new(schema.clone(), vec![value_column, host_column]).unwrap();
+        let exec_input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(InstantManipulateExec {
+            start: 0,
+            end: 5_000,
+            lookback_delta: 1_000,
+            interval: 1_000,
+            time_index_column: TIME_INDEX_COLUMN.to_string(),
+            field_column: Some("value".to_string()),
+            reuse_tsid_column: false,
+            input: exec_input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(exec, session_context.task_ctx()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

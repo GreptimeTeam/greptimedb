@@ -21,7 +21,7 @@ use datafusion::arrow::array::{Array, ArrayRef, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::error::Result as DataFusionResult;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{LexRequirement, OrderingRequirements, PhysicalSortRequirement};
@@ -273,13 +273,37 @@ impl SeriesDivide {
         "SeriesDivide"
     }
 
-    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        Arc::new(SeriesDivideExec {
+    pub fn to_execution_plan(
+        &self,
+        exec_input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        // Validate the required columns against the *physical* input schema so a
+        // missing tag/time index column fails with an error instead of panicking
+        // later in `execute`, `required_input_distribution` or
+        // `required_input_ordering`.
+        let input_schema = exec_input.schema();
+        for tag in &self.tag_columns {
+            input_schema.index_of(tag).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "SeriesDivide: tag column {tag} not found in input schema: {e}"
+                ))
+            })?;
+        }
+        input_schema
+            .index_of(&self.time_index_column)
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "SeriesDivide: time index column {} not found in input schema: {e}",
+                    self.time_index_column
+                ))
+            })?;
+
+        Ok(Arc::new(SeriesDivideExec {
             tag_columns: self.tag_columns.clone(),
             time_index_column: self.time_index_column.clone(),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
-        })
+        }))
     }
 
     pub fn tags(&self) -> &[String] {
@@ -435,10 +459,14 @@ impl ExecutionPlan for SeriesDivideExec {
             .map(|tag| {
                 schema
                     .column_with_name(tag)
-                    .unwrap_or_else(|| panic!("tag column not found {tag}"))
-                    .0
+                    .map(|(idx, _)| idx)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "tag column {tag} not found in input schema {schema:?}"
+                        ))
+                    })
             })
-            .collect();
+            .collect::<DataFusionResult<Vec<usize>>>()?;
         Ok(Box::pin(SeriesDivideStream {
             tag_indices,
             buffer: vec![],
@@ -740,6 +768,77 @@ mod test {
         let required = plan.necessary_children_exprs(&output_columns).unwrap();
         let required = &required[0];
         assert_eq!(required.as_slice(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn to_execution_plan_errors_on_missing_required_columns() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = SeriesDivide::new(
+            vec!["host".to_string(), "path".to_string()],
+            "time_index".to_string(),
+            input,
+        );
+
+        // Malformed physical child: missing the tag columns.
+        let broken_schema = Arc::new(Schema::new(vec![Field::new(
+            "time_index",
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], broken_schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+
+        // Malformed physical child: missing the time index column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let broken_exec: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], broken_schema, None).unwrap(),
+        )));
+        let result = plan.to_execution_plan(broken_exec);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_error_when_input_missing_tag_columns() {
+        // Bypass `to_execution_plan` validation and feed a malformed child directly
+        // to `execute`: it must return an error instead of panicking.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("path", DataType::Utf8, true),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let path_column = Arc::new(StringArray::from(vec!["foo"; 2])) as _;
+        let time_index_column = Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+            vec![1000, 2000],
+        )) as _;
+        let batch =
+            RecordBatch::try_new(broken_schema.clone(), vec![path_column, time_index_column])
+                .unwrap();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], broken_schema, None).unwrap(),
+        )));
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["host".to_string(), "path".to_string()],
+            time_index_column: "time_index".to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let session_context = SessionContext::default();
+        let result =
+            datafusion::physical_plan::collect(divide_exec, session_context.task_ctx()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

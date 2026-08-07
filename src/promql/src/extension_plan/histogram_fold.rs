@@ -263,21 +263,27 @@ impl HistogramFold {
         check_column(field_column)
     }
 
-    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let input_schema = self.input.schema();
-        // safety: those fields are checked in `check_schema()`
-        let le_column_index = input_schema
-            .index_of_column_by_name(None, &self.le_column)
-            .unwrap();
-        let field_column_index = input_schema
-            .index_of_column_by_name(None, &self.field_column)
-            .unwrap();
-        let ts_column_index = input_schema
-            .index_of_column_by_name(None, &self.ts_column)
-            .unwrap();
+    pub fn to_execution_plan(
+        &self,
+        exec_input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        // Resolve column indices against the *physical* input schema. The logical
+        // schema can be out of sync with the physical one (e.g. after column
+        // pruning); using logical-schema indices on the physical input would panic
+        // or silently read the wrong column.
+        let input_schema = exec_input.schema();
+        let lookup_index = |name: &str| {
+            input_schema.index_of(name).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "HistogramFold: column {name} not found in input schema: {e}"
+                ))
+            })
+        };
+        let le_column_index = lookup_index(&self.le_column)?;
+        let field_column_index = lookup_index(&self.field_column)?;
+        let ts_column_index = lookup_index(&self.ts_column)?;
 
-        let tag_columns = exec_input
-            .schema()
+        let tag_columns = input_schema
             .fields()
             .iter()
             .enumerate()
@@ -292,7 +298,7 @@ impl HistogramFold {
 
         let mut partition_exprs = tag_columns.clone();
         partition_exprs.push(Arc::new(PhyColumn::new(
-            self.input.schema().field(ts_column_index).name(),
+            input_schema.field(ts_column_index).name(),
             ts_column_index,
         )) as _);
 
@@ -306,7 +312,7 @@ impl HistogramFold {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
-        Arc::new(HistogramFoldExec {
+        Ok(Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
             ts_column_index,
@@ -317,7 +323,7 @@ impl HistogramFold {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-        })
+        }))
     }
 
     /// Transform the schema
@@ -1129,7 +1135,6 @@ mod test {
     use datafusion::logical_expr::EmptyRelation;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
-    use futures::FutureExt;
 
     use super::*;
 
@@ -1424,7 +1429,7 @@ mod test {
             MemorySourceConfig::try_new(&[vec![projected]], projected_schema, None).unwrap(),
         )));
 
-        let fold_exec = plan.to_execution_plan(memory_exec);
+        let fold_exec = plan.to_execution_plan(memory_exec).unwrap();
         let session_context = SessionContext::default();
         let output_batches =
             datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
@@ -1467,14 +1472,67 @@ mod test {
         let broken_exec = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![broken]], broken_schema, None).unwrap(),
         )));
-        let broken_fold_exec = plan.to_execution_plan(broken_exec);
-        let session_context = SessionContext::default();
-        let broken_result = std::panic::AssertUnwindSafe(async {
-            datafusion::physical_plan::collect(broken_fold_exec, session_context.task_ctx()).await
-        })
-        .catch_unwind()
-        .await;
+        // A missing `le` column must fail with an error instead of panicking.
+        let broken_result = plan.to_execution_plan(broken_exec);
         assert!(broken_result.is_err());
+    }
+
+    #[test]
+    fn to_execution_plan_errors_on_missing_required_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let df_schema = schema.clone().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            0.5,
+            input,
+        )
+        .unwrap();
+
+        let build_broken_exec = |schema: SchemaRef| -> Arc<dyn ExecutionPlan> {
+            Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[], schema, None).unwrap(),
+            )))
+        };
+
+        // Missing the `le` column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        assert!(
+            plan.to_execution_plan(build_broken_exec(broken_schema))
+                .is_err()
+        );
+
+        // Missing the `ts` column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        assert!(
+            plan.to_execution_plan(build_broken_exec(broken_schema))
+                .is_err()
+        );
+
+        // Missing the field column.
+        let broken_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("le", DataType::Utf8, true),
+        ]));
+        assert!(
+            plan.to_execution_plan(build_broken_exec(broken_schema))
+                .is_err()
+        );
     }
 
     #[test]

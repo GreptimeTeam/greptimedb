@@ -750,7 +750,9 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
         let physical_input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![input_batch]], input_schema, None).unwrap(),
         )));
-        let execution_plan = logical_plan.to_execution_plan(physical_input);
+        let execution_plan = logical_plan
+            .to_execution_plan(physical_input)
+            .expect("failed to build RangeManipulate execution plan");
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let task_ctx = datafusion::prelude::SessionContext::new().task_ctx();
 
