@@ -21,10 +21,10 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    GC_REPORT_COLUMN, REGION_ID_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN,
-    TRIGGER_CONTEXT_COLUMN, column_schemas, nullable_json,
+    EVENT_CONTEXT_COLUMN, GC_REPORT_COLUMN, REGION_ID_COLUMN, REGION_NUMBER_COLUMN,
+    TABLE_ID_COLUMN, column_schemas, nullable_json,
 };
-use common_meta::rpc::ddl::TriggerContext;
+use common_meta::rpc::ddl::EventContext;
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::{GcReport, IndexVersion, RegionId};
@@ -67,7 +67,7 @@ struct BatchGcRegionRow {
 #[derive(Debug)]
 pub(crate) struct BatchGcEvent {
     payload: Option<BatchGcPayload>,
-    trigger_context: Option<TriggerContext>,
+    event_context: Option<EventContext>,
     // None emits a procedure-level lifecycle row with null Region dimensions.
     regions: Option<Vec<BatchGcRegionRow>>,
 }
@@ -77,7 +77,7 @@ impl BatchGcEvent {
         regions: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
-        trigger_context: Option<TriggerContext>,
+        event_context: Option<EventContext>,
     ) -> Self {
         Self {
             payload: Some(BatchGcPayload {
@@ -86,7 +86,7 @@ impl BatchGcEvent {
                 full_file_listing,
                 timeout,
             }),
-            trigger_context,
+            event_context,
             regions: None,
         }
     }
@@ -111,7 +111,7 @@ impl BatchGcEvent {
 
         (!regions.is_empty()).then_some(Self {
             payload: None,
-            trigger_context: None,
+            event_context: None,
             regions: Some(regions),
         })
     }
@@ -136,8 +136,8 @@ impl Event for BatchGcEvent {
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
-        let trigger_context = self
-            .trigger_context
+        let event_context = self
+            .event_context
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
@@ -149,7 +149,7 @@ impl Event for BatchGcEvent {
                     Value { value_data: None },
                     Value { value_data: None },
                     Value { value_data: None },
-                    nullable_json(trigger_context.as_ref()),
+                    nullable_json(event_context.as_ref()),
                 ],
             }]);
         };
@@ -182,7 +182,7 @@ fn schema() -> Vec<ColumnSchema> {
         &TABLE_ID_COLUMN,
         &REGION_NUMBER_COLUMN,
         &GC_REPORT_COLUMN,
-        &TRIGGER_CONTEXT_COLUMN,
+        &EVENT_CONTEXT_COLUMN,
     ])
 }
 
@@ -356,7 +356,7 @@ mod tests {
     fn test_batch_gc_event_filter() {
         let procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
-        let event_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
+        let runtime_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
@@ -365,7 +365,7 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Submitted,
                     &running,
                     EventTypeFilter::All,
@@ -382,7 +382,7 @@ mod tests {
         };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done,
                     EventTypeFilter::All,
@@ -392,7 +392,7 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Recovered,
                     &running,
                     EventTypeFilter::All,
@@ -401,7 +401,7 @@ mod tests {
         );
 
         let retrying = procedure
-            .event(&event_context(
+            .event(&runtime_context(
                 EventTrigger::Retrying {
                     phase: RetryPhase::Execute,
                     attempt: 1,
@@ -423,7 +423,7 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Recovered,
                     &running,
                     EventTypeFilter::Only(HashSet::from(["another_event".to_string()])),
@@ -432,7 +432,7 @@ mod tests {
         );
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Recovered,
                     &running,
                     EventTypeFilter::Only(HashSet::new()),
@@ -443,7 +443,7 @@ mod tests {
         let missing = ProcedureState::Done { output: None };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &missing,
                     EventTypeFilter::All,
@@ -455,7 +455,7 @@ mod tests {
         };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &wrong,
                     EventTypeFilter::All,
@@ -468,7 +468,7 @@ mod tests {
     fn test_batch_gc_terminal_event_with_report() {
         let mut procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
-        let event_context = |trigger| EventRuntimeContext {
+        let runtime_context = |trigger| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &running,
             trigger,
@@ -481,7 +481,7 @@ mod tests {
         procedure.set_gc_report_for_test(report);
 
         let retrying = procedure
-            .event(&event_context(EventTrigger::Retrying {
+            .event(&runtime_context(EventTrigger::Retrying {
                 phase: RetryPhase::Execute,
                 attempt: 2,
             }))
@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(retrying.extra_rows().unwrap(), vec![null_row()]);
 
         for trigger in [EventTrigger::Failed, EventTrigger::Poisoned] {
-            let event = procedure.event(&event_context(trigger)).unwrap();
+            let event = procedure.event(&runtime_context(trigger)).unwrap();
             assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
             assert_eq!(
                 event.extra_rows().unwrap(),
@@ -513,7 +513,7 @@ mod tests {
 
         let procedure = batch_gc_procedure();
         let failed_without_report = procedure
-            .event(&event_context(EventTrigger::Failed))
+            .event(&runtime_context(EventTrigger::Failed))
             .unwrap();
         assert_eq!(
             failed_without_report.json_payload().unwrap(),
@@ -607,7 +607,7 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
-            TriggerContext::default(),
+            EventContext::default(),
         )
     }
 }

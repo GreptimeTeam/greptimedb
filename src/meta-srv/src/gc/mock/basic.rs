@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
+use common_meta::rpc::ddl::{EventContext, TriggerReason};
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -36,7 +36,7 @@ async fn test_parallel_process_datanodes_empty() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            TriggerContext::default(),
+            EventContext::default(),
         )
         .await;
 
@@ -105,7 +105,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            TriggerContext::default(),
+            EventContext::default(),
         )
         .await;
 
@@ -188,8 +188,8 @@ async fn test_handle_tick() {
     assert_eq!(*ctx.get_table_to_region_stats_calls.lock().unwrap(), 1);
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
     assert_eq!(
-        ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
-        &[TriggerContext::new(TriggerReason::ScheduledGc)]
+        ctx.gc_event_contexts.lock().unwrap().as_slice(),
+        &[EventContext::new(TriggerReason::ScheduledGc)]
     );
 
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -201,7 +201,7 @@ async fn test_handle_tick() {
 }
 
 #[tokio::test]
-async fn test_handle_manual_gc_without_regions_records_manual_trigger_context() {
+async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
     init_default_ut_logging();
 
     let table_id = 1;
@@ -248,7 +248,7 @@ async fn test_handle_manual_gc_without_regions_records_manual_trigger_context() 
     scheduler.handle_manual_gc(None, None, None).await.unwrap();
 
     assert_eq!(
-        ctx.gc_trigger_contexts.lock().unwrap().as_slice(),
-        &[TriggerContext::new(TriggerReason::Manual)]
+        ctx.gc_event_contexts.lock().unwrap().as_slice(),
+        &[EventContext::new(TriggerReason::Manual)]
     );
 }

@@ -19,16 +19,14 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, PROCEDURE_ERROR_COLUMN,
-    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, TRIGGER_CONTEXT_COLUMN,
+    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN,
+    PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 use table::table_name::TableName;
 
-use super::test_util::{
-    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
-};
+use super::test_util::{assert_event_filter, default_event_context_value, procedure_trigger_value};
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::event::flow::{
@@ -37,7 +35,7 @@ use crate::ddl::event::flow::{
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::ddl::tests::create_flow::{test_create_flow_task, test_query_context};
 use crate::ddl::tests::drop_flow::test_drop_flow_task;
-use crate::rpc::ddl::TriggerContext;
+use crate::rpc::ddl::EventContext;
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 #[test]
@@ -51,7 +49,7 @@ fn test_flow_submitted_event_contracts() {
             expire_after: Some(300),
             eval_interval_secs: Some(60),
         },
-        TriggerContext::default(),
+        EventContext::default(),
     );
     assert_event_contract(
         &create,
@@ -62,7 +60,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
-                default_trigger_context_value(),
+                default_event_context_value(),
             ],
         }],
     );
@@ -78,7 +76,7 @@ fn test_flow_submitted_event_contracts() {
     );
 
     let drop =
-        FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true, TriggerContext::default());
+        FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true, EventContext::default());
     assert_event_contract(
         &drop,
         DROP_FLOW_EVENT_TYPE,
@@ -88,7 +86,7 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
-                default_trigger_context_value(),
+                default_event_context_value(),
             ],
         }],
     );
@@ -151,7 +149,7 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
                 expire_after: None,
                 eval_interval_secs: None,
             },
-            TriggerContext::default(),
+            EventContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -197,7 +195,7 @@ fn test_create_flow_event_filter() {
             false,
         ),
         test_query_context(),
-        TriggerContext::default(),
+        EventContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, CREATE_FLOW_EVENT_TYPE);
@@ -207,7 +205,7 @@ fn test_create_flow_event_filter() {
 fn test_drop_flow_event_filter() {
     let procedure = DropFlowProcedure::new(
         test_drop_flow_task("flow", 42, false),
-        TriggerContext::default(),
+        EventContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, DROP_FLOW_EVENT_TYPE);
@@ -218,7 +216,7 @@ fn flow_schema() -> Vec<ColumnSchema> {
         CATALOG_NAME_COLUMN.column_schema(),
         FLOW_NAME_COLUMN.column_schema(),
         FLOW_ID_COLUMN.column_schema(),
-        TRIGGER_CONTEXT_COLUMN.column_schema(),
+        EVENT_CONTEXT_COLUMN.column_schema(),
     ]
 }
 
@@ -260,7 +258,7 @@ fn assert_procedure_event_contract(
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
                 if locator.catalog_name.is_some() {
-                    default_trigger_context_value()
+                    default_event_context_value()
                 } else {
                     Value { value_data: None }
                 },

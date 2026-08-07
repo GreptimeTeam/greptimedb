@@ -20,19 +20,17 @@ use api::v1::value::ValueData;
 use api::v1::{AlterDatabaseExpr, Row, SetDatabaseOptions as PbSetDatabaseOptions, Value};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN,
+    CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN,
     PROCEDURE_ERROR_COLUMN as EVENT_TABLE_PROCEDURE_ERROR_COLUMN,
     PROCEDURE_ID_COLUMN as EVENT_TABLE_PROCEDURE_ID_COLUMN,
     PROCEDURE_STATE_COLUMN as EVENT_TABLE_PROCEDURE_STATE_COLUMN,
     PROCEDURE_TRIGGER_COLUMN as EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN,
-    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN,
+    SCHEMA_NAME_COLUMN as EVENT_TABLE_SCHEMA_NAME_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 
-use super::test_util::{
-    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
-};
+use super::test_util::{assert_event_filter, default_event_context_value, procedure_trigger_value};
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
@@ -41,7 +39,7 @@ use crate::ddl::event::database::{
     DatabaseDdlEvent,
 };
 use crate::rpc::ddl::{
-    AlterDatabaseKind, SetDatabaseOption, SetDatabaseOptions, TriggerContext, UnsetDatabaseOption,
+    AlterDatabaseKind, EventContext, SetDatabaseOption, SetDatabaseOptions, UnsetDatabaseOption,
     UnsetDatabaseOptions,
 };
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -57,7 +55,7 @@ fn test_create_database_submitted_event_contract() {
         "metrics",
         true,
         &options,
-        TriggerContext::default(),
+        EventContext::default(),
     );
 
     assert_event_locator(
@@ -95,7 +93,7 @@ fn test_alter_database_set_and_unset_event_contracts() {
             SetDatabaseOption::Other("secret_token".to_string(), "hidden".to_string()),
             SetDatabaseOption::Ttl(std::time::Duration::from_secs(3600).into()),
         ])),
-        TriggerContext::default(),
+        EventContext::default(),
     );
     assert_event_locator(
         &set,
@@ -122,7 +120,7 @@ fn test_alter_database_set_and_unset_event_contracts() {
             UnsetDatabaseOption::Ttl,
             UnsetDatabaseOption::Other("compaction.type".to_string()),
         ])),
-        TriggerContext::default(),
+        EventContext::default(),
     );
     assert_event_locator(
         &unset,
@@ -143,7 +141,7 @@ fn test_alter_database_set_and_unset_event_contracts() {
 #[test]
 fn test_drop_database_submitted_event_contract() {
     let event =
-        DatabaseDdlEvent::drop_submitted("greptime", "metrics", true, TriggerContext::default());
+        DatabaseDdlEvent::drop_submitted("greptime", "metrics", true, EventContext::default());
 
     assert_event_locator(
         &event,
@@ -181,7 +179,7 @@ fn test_database_lifecycle_events_have_fixed_schema_and_null_intent() {
             "s",
             false,
             &HashMap::new(),
-            TriggerContext::default()
+            EventContext::default()
         )
         .extra_schema()
     );
@@ -197,7 +195,7 @@ fn test_database_events_preserve_procedure_envelope_contract() {
             "metrics",
             false,
             &HashMap::new(),
-            TriggerContext::default(),
+            EventContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -236,7 +234,7 @@ fn test_create_database_event_filter() {
         false,
         HashMap::new(),
         None,
-        TriggerContext::default(),
+        EventContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
@@ -257,7 +255,7 @@ fn test_alter_database_event_filter() {
                 )),
             },
         },
-        TriggerContext::default(),
+        EventContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     )
     .unwrap();
@@ -271,7 +269,7 @@ fn test_drop_database_event_filter() {
         "greptime".to_string(),
         "metrics".to_string(),
         false,
-        TriggerContext::default(),
+        EventContext::default(),
         new_ddl_context(Arc::new(MockDatanodeManager::new(()))),
     );
 
@@ -290,7 +288,7 @@ fn assert_event_locator(
         &[
             EVENT_TABLE_CATALOG_NAME_COLUMN.column_schema(),
             EVENT_TABLE_SCHEMA_NAME_COLUMN.column_schema(),
-            TRIGGER_CONTEXT_COLUMN.column_schema(),
+            EVENT_CONTEXT_COLUMN.column_schema(),
         ],
         &[Row {
             values: vec![
@@ -301,7 +299,7 @@ fn assert_event_locator(
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
                 if catalog_name.is_some() {
-                    default_trigger_context_value()
+                    default_event_context_value()
                 } else {
                     Value { value_data: None }
                 },
@@ -328,7 +326,7 @@ fn assert_procedure_event_contract(
             EVENT_TABLE_PROCEDURE_TRIGGER_COLUMN.column_schema(),
             EVENT_TABLE_CATALOG_NAME_COLUMN.column_schema(),
             EVENT_TABLE_SCHEMA_NAME_COLUMN.column_schema(),
-            TRIGGER_CONTEXT_COLUMN.column_schema(),
+            EVENT_CONTEXT_COLUMN.column_schema(),
         ],
         &[Row {
             values: vec![
@@ -351,7 +349,7 @@ fn assert_procedure_event_contract(
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
                 if catalog_name.is_some() {
-                    default_trigger_context_value()
+                    default_event_context_value()
                 } else {
                     Value { value_data: None }
                 },

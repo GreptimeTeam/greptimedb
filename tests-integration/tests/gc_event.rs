@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
+use common_meta::rpc::ddl::{EventContext, TriggerReason};
 use common_procedure::{ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
@@ -129,7 +129,7 @@ async fn test_batch_gc_event() {
         false,
         Duration::from_secs(10),
         Default::default(),
-        TriggerContext::new(TriggerReason::Manual),
+        EventContext::new(TriggerReason::Manual),
     );
     let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-00000000bac0").unwrap();
     let mut watcher = cluster
@@ -145,7 +145,7 @@ async fn test_batch_gc_event() {
     assert_sst_count(&cluster, 1).await;
 
     let submitted = format!(
-        r#"SELECT json_to_string(trigger_context) AS trigger_context
+        r#"SELECT json_to_string(event_context) AS event_context
 FROM greptime_private.events
 WHERE type = 'batch_gc'
   AND procedure_id = '{procedure_id}'
@@ -154,7 +154,7 @@ WHERE type = 'batch_gc'
     );
     assert_eq!(
         r#"{"reason":"manual"}"#,
-        find_eventually_string(instance, &submitted, "trigger_context").await
+        find_eventually_string(instance, &submitted, "event_context").await
     );
 
     let succeeded = format!(
@@ -165,7 +165,7 @@ WHERE type = 'batch_gc'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
   AND json_is_null(payload)
-  AND trigger_context IS NULL"#,
+  AND event_context IS NULL"#,
     );
     let actual_report: serde_json::Value =
         serde_json::from_str(&find_eventually_string(instance, &succeeded, "gc_report").await)

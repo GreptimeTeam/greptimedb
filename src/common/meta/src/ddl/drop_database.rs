@@ -38,13 +38,13 @@ use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::rpc::ddl::TriggerContext;
+use crate::rpc::ddl::EventContext;
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
     runtime_context: DdlContext,
     context: DropDatabaseContext,
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 
     state: Box<dyn State>,
 }
@@ -91,12 +91,12 @@ impl DropDatabaseProcedure {
         catalog: String,
         schema: String,
         drop_if_exists: bool,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
             runtime_context: context,
-            trigger_context,
+            event_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -113,13 +113,13 @@ impl DropDatabaseProcedure {
             catalog,
             schema,
             drop_if_exists,
-            trigger_context,
+            event_context,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
         Ok(Self {
             runtime_context,
-            trigger_context,
+            event_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -170,7 +170,7 @@ impl Procedure for DropDatabaseProcedure {
             catalog: &self.context.catalog,
             schema: &self.context.schema,
             drop_if_exists: self.context.drop_if_exists,
-            trigger_context: &self.trigger_context,
+            event_context: &self.event_context,
             state: self.state.as_ref(),
         };
 
@@ -199,7 +199,7 @@ impl Procedure for DropDatabaseProcedure {
                 &self.context.catalog,
                 &self.context.schema,
                 self.context.drop_if_exists,
-                self.trigger_context.clone(),
+                self.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::drop_lifecycle()
@@ -215,7 +215,7 @@ struct DropDatabaseData<'a> {
     // The schema name
     schema: &'a str,
     drop_if_exists: bool,
-    trigger_context: &'a TriggerContext,
+    event_context: &'a EventContext,
     state: &'a dyn State,
 }
 
@@ -227,6 +227,6 @@ struct DropDatabaseOwnedData {
     schema: String,
     drop_if_exists: bool,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
     state: Box<dyn State>,
 }

@@ -43,7 +43,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::{TriggerContext, TruncateTableTask};
+use crate::rpc::ddl::{EventContext, TruncateTableTask};
 use crate::rpc::router::{find_leader_regions, find_leaders};
 
 pub struct TruncateTableProcedure {
@@ -107,7 +107,7 @@ impl Procedure for TruncateTableProcedure {
                 TableDdlEvent::truncate_table_submitted(
                     locator,
                     task.time_ranges.len(),
-                    self.data.trigger_context.clone(),
+                    self.data.event_context.clone(),
                 )
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable),
@@ -124,11 +124,11 @@ impl TruncateTableProcedure {
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         context: DdlContext,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             context,
-            data: TruncateTableData::new(task, table_info_value, trigger_context),
+            data: TruncateTableData::new(task, table_info_value, event_context),
         }
     }
 
@@ -236,20 +236,20 @@ pub struct TruncateTableData {
     task: TruncateTableTask,
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl TruncateTableData {
     pub fn new(
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             state: TruncateTableState::Prepare,
             task,
             table_info_value,
-            trigger_context,
+            event_context,
         }
     }
 

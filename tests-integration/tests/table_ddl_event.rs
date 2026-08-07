@@ -85,7 +85,7 @@ async fn test_table_ddl_procedure_events() {
     auto_create_table(&frontend, AUTO_TABLE, Channel::Prometheus).await;
     let auto_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", AUTO_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "create_table",
         &auto_create_procedure_id,
@@ -97,7 +97,7 @@ async fn test_table_ddl_procedure_events() {
     auto_create_table(&frontend, AUTO_INFLUX_TABLE, Channel::Influx).await;
     let auto_influx_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", AUTO_INFLUX_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "create_table",
         &auto_influx_create_procedure_id,
@@ -146,7 +146,7 @@ async fn test_table_ddl_procedure_events() {
     .unwrap();
     let grpc_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", GRPC_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "create_table",
         &grpc_create_procedure_id,
@@ -185,7 +185,7 @@ async fn test_table_ddl_procedure_events() {
     .unwrap();
     let grpc_alter_procedure_id =
         submitted_procedure_id(&frontend, "alter_table", GRPC_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "alter_table",
         &grpc_alter_procedure_id,
@@ -210,7 +210,7 @@ async fn test_table_ddl_procedure_events() {
     .await;
     let table_id = find_table_id(&frontend, TABLE).await;
     let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "create_table",
         &create_table_procedure_id,
@@ -258,7 +258,7 @@ async fn test_table_ddl_procedure_events() {
     )
     .await;
     let alter_table_procedure_id = submitted_procedure_id(&frontend, "alter_table", TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "alter_table",
         &alter_table_procedure_id,
@@ -302,7 +302,7 @@ async fn test_table_ddl_procedure_events() {
     .await;
     let truncate_table_procedure_id =
         submitted_procedure_id(&frontend, "truncate_table", TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "truncate_table",
         &truncate_table_procedure_id,
@@ -343,7 +343,7 @@ async fn test_table_ddl_procedure_events() {
     )
     .await;
     let drop_table_procedure_id = submitted_procedure_id(&frontend, "drop_table", TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "drop_table",
         &drop_table_procedure_id,
@@ -377,14 +377,14 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_undrop_table_task(
                 common_meta::rpc::ddl::UndropTableTask { table_id },
-                common_meta::rpc::ddl::TriggerContext::new(
+                common_meta::rpc::ddl::EventContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
                 ),
             )
             .await
             .unwrap();
         let undrop_table_procedure_id = undrop_table_procedure_id.to_string();
-        assert_trigger_context(
+        assert_event_context(
             &frontend,
             "undrop_table",
             &undrop_table_procedure_id,
@@ -417,14 +417,14 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_purge_dropped_table_task(
                 common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
-                common_meta::rpc::ddl::TriggerContext::new(
+                common_meta::rpc::ddl::EventContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
                 ),
             )
             .await
             .unwrap();
         let purge_table_procedure_id = purge_table_procedure_id.to_string();
-        assert_trigger_context(
+        assert_event_context(
             &frontend,
             "purge_dropped_table",
             &purge_table_procedure_id,
@@ -478,7 +478,7 @@ async fn test_table_ddl_procedure_events() {
     let logical_table_id = find_table_id(&frontend, LOGICAL_TABLE).await;
     let create_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "create_logical_tables", LOGICAL_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "create_logical_tables",
         &create_logical_tables_procedure_id,
@@ -531,7 +531,7 @@ async fn test_table_ddl_procedure_events() {
     .await;
     let alter_logical_tables_procedure_id =
         submitted_procedure_id(&frontend, "alter_logical_tables", LOGICAL_TABLE).await;
-    assert_trigger_context(
+    assert_event_context(
         &frontend,
         "alter_logical_tables",
         &alter_logical_tables_procedure_id,
@@ -624,7 +624,7 @@ async fn run_sql_with_context(
     assert!(matches!(output.data, OutputData::AffectedRows(_)), "{sql}");
 }
 
-async fn assert_trigger_context(
+async fn assert_event_context(
     instance: &Arc<Instance>,
     event_type: &str,
     procedure_id: &str,
@@ -645,8 +645,8 @@ async fn assert_trigger_context(
 
     let actual = find_eventually_string(
         instance,
-        &format!("SELECT json_to_string(trigger_context) AS trigger_context {event_filter}"),
-        "trigger_context",
+        &format!("SELECT json_to_string(event_context) AS event_context {event_filter}"),
+        "event_context",
     )
     .await;
     let expected = format!(r#"{{"protocol":"{protocol}","reason":"{reason}"}}"#);

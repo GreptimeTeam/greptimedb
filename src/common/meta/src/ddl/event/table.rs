@@ -21,8 +21,8 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
-    TABLE_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, column_schemas, nullable_json, nullable_string,
+    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN,
+    TABLE_ID_COLUMN, TABLE_NAME_COLUMN, column_schemas, nullable_json, nullable_string,
     nullable_value,
 };
 use serde::Serialize;
@@ -30,7 +30,7 @@ use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 use store_api::storage::TableId;
 
-use crate::rpc::ddl::TriggerContext;
+use crate::rpc::ddl::EventContext;
 
 /// Current version of table DDL event payloads.
 pub(crate) const TABLE_DDL_PAYLOAD_VERSION: u8 = 1;
@@ -214,7 +214,7 @@ pub(crate) struct TableDdlEvent {
     event_type: TableDdlEventType,
     locators: Vec<TableDdlLocator>,
     payload: Option<TableDdlPayload>,
-    trigger_context: Option<TriggerContext>,
+    event_context: Option<EventContext>,
 }
 
 impl TableDdlEvent {
@@ -223,7 +223,7 @@ impl TableDdlEvent {
         locator: TableDdlLocator,
         create_if_not_exists: bool,
         engine: &str,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::CreateTable,
@@ -233,7 +233,7 @@ impl TableDdlEvent {
                 create_if_not_exists,
                 engine: engine.to_string(),
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -241,7 +241,7 @@ impl TableDdlEvent {
     pub(crate) fn create_logical_tables_submitted(
         locators: impl IntoIterator<Item = TableDdlLocator>,
         table_count: usize,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::CreateLogicalTables,
@@ -250,7 +250,7 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 table_count,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -258,7 +258,7 @@ impl TableDdlEvent {
     pub(crate) fn alter_table_submitted(
         locator: TableDdlLocator,
         kind: Option<&'static str>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::AlterTable,
@@ -267,7 +267,7 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 kind,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -276,7 +276,7 @@ impl TableDdlEvent {
         locators: impl IntoIterator<Item = TableDdlLocator>,
         table_count: usize,
         kinds: impl IntoIterator<Item = &'static str>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         let kinds = kinds
             .into_iter()
@@ -291,7 +291,7 @@ impl TableDdlEvent {
                 table_count,
                 kinds,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -299,7 +299,7 @@ impl TableDdlEvent {
     pub(crate) fn drop_table_submitted(
         locator: TableDdlLocator,
         drop_if_exists: bool,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::DropTable,
@@ -308,7 +308,7 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 drop_if_exists,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -316,7 +316,7 @@ impl TableDdlEvent {
     #[cfg(feature = "enterprise")]
     pub(crate) fn undrop_table_submitted(
         locator: TableDdlLocator,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::UndropTable,
@@ -324,7 +324,7 @@ impl TableDdlEvent {
             TableDdlPayload::UndropTable(UndropTablePayload {
                 version: TABLE_DDL_PAYLOAD_VERSION,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -332,7 +332,7 @@ impl TableDdlEvent {
     #[cfg(feature = "enterprise")]
     pub(crate) fn purge_dropped_table_submitted(
         locator: TableDdlLocator,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::PurgeDroppedTable,
@@ -340,7 +340,7 @@ impl TableDdlEvent {
             TableDdlPayload::PurgeDroppedTable(PurgeDroppedTablePayload {
                 version: TABLE_DDL_PAYLOAD_VERSION,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -348,7 +348,7 @@ impl TableDdlEvent {
     pub(crate) fn truncate_table_submitted(
         locator: TableDdlLocator,
         time_range_count: usize,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             TableDdlEventType::TruncateTable,
@@ -357,7 +357,7 @@ impl TableDdlEvent {
                 version: TABLE_DDL_PAYLOAD_VERSION,
                 time_range_count,
             }),
-            Some(trigger_context),
+            Some(event_context),
         )
     }
 
@@ -367,7 +367,7 @@ impl TableDdlEvent {
             event_type,
             locators: vec![TableDdlLocator::default()],
             payload: None,
-            trigger_context: None,
+            event_context: None,
         }
     }
 
@@ -377,7 +377,7 @@ impl TableDdlEvent {
             event_type: TableDdlEventType::CreateTable,
             locators: vec![TableDdlLocator::from_table_id(table_id)],
             payload: None,
-            trigger_context: None,
+            event_context: None,
         }
     }
 
@@ -389,7 +389,7 @@ impl TableDdlEvent {
             event_type: TableDdlEventType::CreateLogicalTables,
             locators: locators.into_iter().collect(),
             payload: None,
-            trigger_context: None,
+            event_context: None,
         }
     }
 
@@ -397,13 +397,13 @@ impl TableDdlEvent {
         event_type: TableDdlEventType,
         locators: impl IntoIterator<Item = TableDdlLocator>,
         payload: TableDdlPayload,
-        trigger_context: Option<TriggerContext>,
+        event_context: Option<EventContext>,
     ) -> Self {
         Self {
             event_type,
             locators: locators.into_iter().collect(),
             payload: Some(payload),
-            trigger_context,
+            event_context,
         }
     }
 
@@ -426,13 +426,13 @@ impl TableDdlEvent {
         if self.event_type.has_physical_table_id() {
             values.push(nullable_table_id(locator.physical_table_id));
         }
-        let trigger_context = self
-            .trigger_context
+        let event_context = self
+            .event_context
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
             .context(SerializeEventSnafu)?;
-        values.push(nullable_json(trigger_context.as_ref()));
+        values.push(nullable_json(event_context.as_ref()));
         Ok(Row { values })
     }
 }
@@ -454,7 +454,7 @@ impl Event for TableDdlEvent {
         if self.event_type.has_physical_table_id() {
             schema.push(PHYSICAL_TABLE_ID_COLUMN.column_schema());
         }
-        schema.push(TRIGGER_CONTEXT_COLUMN.column_schema());
+        schema.push(EVENT_CONTEXT_COLUMN.column_schema());
         schema
     }
 

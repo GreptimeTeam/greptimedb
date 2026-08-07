@@ -41,7 +41,7 @@ use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::lock_key::{CatalogLock, FlowLock};
 use crate::metrics;
-use crate::rpc::ddl::{DropFlowTask, TriggerContext};
+use crate::rpc::ddl::{DropFlowTask, EventContext};
 
 /// The procedure for dropping a flow.
 pub struct DropFlowProcedure {
@@ -54,7 +54,7 @@ pub struct DropFlowProcedure {
 impl DropFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropFlow";
 
-    pub fn new(task: DropFlowTask, trigger_context: TriggerContext, context: DdlContext) -> Self {
+    pub fn new(task: DropFlowTask, event_context: EventContext, context: DdlContext) -> Self {
         Self {
             context,
             data: DropFlowData {
@@ -62,7 +62,7 @@ impl DropFlowProcedure {
                 task,
                 flow_info_value: None,
                 flow_route_values: vec![],
-                trigger_context,
+                event_context,
             },
         }
     }
@@ -237,7 +237,7 @@ impl Procedure for DropFlowProcedure {
                 &self.data.task.flow_name,
                 self.data.task.flow_id,
                 self.data.task.drop_if_exists,
-                self.data.trigger_context.clone(),
+                self.data.event_context.clone(),
             ),
             _ => FlowDdlEvent::drop_lifecycle(),
         };
@@ -254,7 +254,7 @@ pub(crate) struct DropFlowData {
     pub(crate) flow_info_value: Option<FlowInfoValue>,
     pub(crate) flow_route_values: Vec<FlowRouteValue>,
     #[serde(default)]
-    pub(crate) trigger_context: TriggerContext,
+    pub(crate) event_context: EventContext,
 }
 
 /// The state of drop flow

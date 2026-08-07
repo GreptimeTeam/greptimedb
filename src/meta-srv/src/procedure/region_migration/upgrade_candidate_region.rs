@@ -356,7 +356,7 @@ mod tests {
     use common_meta::key::topic_name::TopicNameKey;
     use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
     use common_meta::peer::Peer;
-    use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
+    use common_meta::rpc::ddl::{EventContext, TriggerReason};
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::wal_provider::RegionWalOptions;
     use common_wal::options::KafkaWalOptions;
@@ -377,7 +377,7 @@ mod tests {
             Peer::empty(2),
             vec![RegionId::new(1024, 1)],
             Duration::from_millis(1000),
-            TriggerContext::new(TriggerReason::Manual),
+            EventContext::new(TriggerReason::Manual),
         )
     }
 

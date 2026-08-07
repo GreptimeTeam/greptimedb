@@ -32,7 +32,7 @@ use crate::key::DeserializedValueWithBytes;
 use crate::key::schema_name::{SchemaName, SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::rpc::ddl::UnsetDatabaseOption::{self};
-use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, SetDatabaseOption, TriggerContext};
+use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, EventContext, SetDatabaseOption};
 
 pub struct AlterDatabaseProcedure {
     pub context: DdlContext,
@@ -75,12 +75,12 @@ impl AlterDatabaseProcedure {
 
     pub fn new(
         task: AlterDatabaseTask,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Result<Self> {
         Ok(Self {
             context,
-            data: AlterDatabaseData::new(task, trigger_context)?,
+            data: AlterDatabaseData::new(task, event_context)?,
         })
     }
 
@@ -193,7 +193,7 @@ impl Procedure for AlterDatabaseProcedure {
                 self.data.catalog(),
                 self.data.schema(),
                 &self.data.kind,
-                self.data.trigger_context.clone(),
+                self.data.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::alter_lifecycle()
@@ -218,18 +218,18 @@ pub struct AlterDatabaseData {
     schema_name: String,
     schema_value: Option<DeserializedValueWithBytes<SchemaNameValue>>,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl AlterDatabaseData {
-    pub fn new(task: AlterDatabaseTask, trigger_context: TriggerContext) -> Result<Self> {
+    pub fn new(task: AlterDatabaseTask, event_context: EventContext) -> Result<Self> {
         Ok(Self {
             state: AlterDatabaseState::Prepare,
             kind: AlterDatabaseKind::try_from(task.alter_expr.kind.unwrap())?,
             catalog_name: task.alter_expr.catalog_name,
             schema_name: task.alter_expr.schema_name,
             schema_value: None,
-            trigger_context,
+            event_context,
         })
     }
 

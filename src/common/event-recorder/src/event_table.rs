@@ -80,11 +80,8 @@ pub const TYPE_COLUMN: EventTableColumn =
 pub const PAYLOAD_COLUMN: EventTableColumn =
     EventTableColumn::json_binary("payload", ColumnDataType::Binary, SemanticType::Field);
 /// The optional context describing why an event was triggered.
-pub const TRIGGER_CONTEXT_COLUMN: EventTableColumn = EventTableColumn::json_binary(
-    "trigger_context",
-    ColumnDataType::Binary,
-    SemanticType::Field,
-);
+pub const EVENT_CONTEXT_COLUMN: EventTableColumn =
+    EventTableColumn::json_binary("event_context", ColumnDataType::Binary, SemanticType::Field);
 /// The canonical event timestamp column.
 pub const TIMESTAMP_COLUMN: EventTableColumn = EventTableColumn::new(
     "timestamp",

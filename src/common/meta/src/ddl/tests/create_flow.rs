@@ -37,7 +37,7 @@ use crate::key::flow::flow_info::{
     FlowInfoValue, FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus,
 };
 use crate::key::table_route::TableRouteValue;
-use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext, TriggerContext};
+use crate::rpc::ddl::{CreateFlowTask, EventContext, FlowQueryContext, QueryContext};
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 pub(crate) fn test_query_context() -> QueryContext {
@@ -121,7 +121,7 @@ async fn test_create_flow_source_table_not_found() {
     let ddl_context = new_ddl_context(node_manager);
     let query_ctx = test_query_context();
     let mut procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+        CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::Unsupported { .. });
     assert!(
@@ -147,7 +147,7 @@ async fn test_create_pending_flow_source_table_not_found_with_defer() {
     let mut procedure = CreateFlowProcedure::new(
         task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -190,7 +190,7 @@ async fn test_create_pending_flow_source_table_not_found_with_defer_false() {
     let ddl_context = new_ddl_context(node_manager);
     let query_ctx = test_query_context();
     let mut procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+        CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::Unsupported { .. });
     assert!(
@@ -243,7 +243,7 @@ async fn test_create_pending_flow_records_partial_source_resolution() {
     let mut procedure = CreateFlowProcedure::new(
         task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -440,7 +440,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
 
     // Construct CreateFlowData and verify CreateRequest carries internal key.
     let data = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::CreateFlows,
         task,
         flow_id: Some(1024),
@@ -454,7 +454,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
     };
 
     let data2 = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: data.task.clone(),
         flow_id: Some(1024),
@@ -595,7 +595,7 @@ async fn test_create_flow_rejects_unknown_option_in_meta_task() {
     let ddl_context = new_ddl_context(node_manager);
     let query_ctx = test_query_context();
     let mut procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+        CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
 
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::Unexpected { .. });
@@ -616,7 +616,7 @@ fn test_create_request_strips_defer_on_missing_source_runtime_option() {
     enable_defer_on_missing_source(&mut task);
 
     let data = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::CreateFlows,
         task,
         flow_id: Some(1024),
@@ -669,7 +669,7 @@ pub(crate) async fn create_test_flow(
     let mut procedure = CreateFlowProcedure::new(
         task.clone(),
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
@@ -695,7 +695,7 @@ pub(crate) async fn create_test_pending_flow(
     let mut procedure = CreateFlowProcedure::new(
         task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
@@ -747,7 +747,7 @@ async fn test_create_flow() {
     let mut procedure = CreateFlowProcedure::new(
         task.clone(),
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
@@ -760,7 +760,7 @@ async fn test_create_flow() {
     let mut procedure = CreateFlowProcedure::new(
         task.clone(),
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     );
     let err = procedure.on_prepare().await.unwrap_err();
@@ -822,7 +822,7 @@ async fn test_replace_pending_flow_with_active_flow_is_unsupported() {
     let mut procedure = CreateFlowProcedure::new(
         replace_task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let err = procedure.on_prepare().await.unwrap_err();
@@ -885,7 +885,7 @@ async fn test_replace_active_flow_with_pending_flow_is_unsupported() {
     let mut procedure = CreateFlowProcedure::new(
         replace_task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let err = procedure.on_prepare().await.unwrap_err();
@@ -950,7 +950,7 @@ async fn test_replace_pending_flow_with_pending_flow_updates_metadata() {
     let mut procedure = CreateFlowProcedure::new(
         replace_task,
         query_ctx,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
@@ -1005,7 +1005,7 @@ async fn test_create_flow_same_source_and_sink_table() {
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
     let query_ctx = test_query_context();
     let mut procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+        CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::Unsupported { .. });
 
@@ -1038,8 +1038,7 @@ fn test_create_flow_lock_key_does_not_lock_sink_table_name() {
     let task = create_test_flow_task_for_serialization();
     let query_ctx = test_query_context();
     let ddl_context = new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler)));
-    let procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+    let procedure = CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
 
     let lock_keys = procedure.lock_key().get_keys();
 
@@ -1114,7 +1113,7 @@ fn test_create_flow_data_new_format_serialization() {
     };
 
     let data = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::Prepare,
         task: create_test_flow_task_for_serialization(),
         flow_id: None,
@@ -1183,8 +1182,7 @@ fn test_create_flow_procedure_strips_scheduled_time_extension() {
         .extensions
         .insert("flow.other".to_string(), "kept".to_string());
 
-    let procedure =
-        CreateFlowProcedure::new(task, query_ctx, TriggerContext::default(), ddl_context);
+    let procedure = CreateFlowProcedure::new(task, query_ctx, EventContext::default(), ddl_context);
 
     assert!(
         !procedure
@@ -1217,7 +1215,7 @@ fn test_flow_info_conversion_with_flow_context() {
     };
 
     let data = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: create_test_flow_task_for_serialization(),
         flow_id: Some(123),
@@ -1260,7 +1258,7 @@ fn test_flow_info_conversion_strips_scheduled_time_extension() {
     };
 
     let data = CreateFlowData {
-        trigger_context: TriggerContext::default(),
+        event_context: EventContext::default(),
         state: CreateFlowState::CreateMetadata,
         task: create_test_flow_task_for_serialization(),
         flow_id: Some(123),

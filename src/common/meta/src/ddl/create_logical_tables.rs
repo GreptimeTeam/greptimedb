@@ -48,7 +48,7 @@ use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::{CreateTableTask, TriggerContext};
+use crate::rpc::ddl::{CreateTableTask, EventContext};
 use crate::rpc::router::{RegionRoute, find_leaders};
 
 pub struct CreateLogicalTablesProcedure {
@@ -62,7 +62,7 @@ impl CreateLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -75,7 +75,7 @@ impl CreateLogicalTablesProcedure {
                 physical_region_numbers: vec![],
                 physical_columns: vec![],
                 physical_partition_columns: vec![],
-                trigger_context,
+                event_context,
             },
         }
     }
@@ -280,7 +280,7 @@ impl Procedure for CreateLogicalTablesProcedure {
                 TableDdlEvent::create_logical_tables_submitted(
                     locators,
                     self.data.tasks.len(),
-                    self.data.trigger_context.clone(),
+                    self.data.event_context.clone(),
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
@@ -328,7 +328,7 @@ pub struct CreateTablesData {
     physical_columns: Vec<ColumnMetadata>,
     physical_partition_columns: Vec<String>,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl CreateTablesData {

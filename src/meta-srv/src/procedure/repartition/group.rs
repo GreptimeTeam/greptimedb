@@ -713,7 +713,7 @@ mod tests {
             context: env.create_context(new_persistent_context(1024, vec![], vec![])),
         };
         let state = ProcedureState::Running;
-        let event_context = |event_type_filter| EventRuntimeContext {
+        let runtime_context = |event_type_filter| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
@@ -721,7 +721,7 @@ mod tests {
         };
 
         let allowed = procedure
-            .event(&event_context(EventTypeFilter::Only(HashSet::from([
+            .event(&runtime_context(EventTypeFilter::Only(HashSet::from([
                 REPARTITION_GROUP_EVENT_TYPE.to_string(),
             ]))))
             .unwrap();
@@ -729,14 +729,14 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(EventTypeFilter::Only(HashSet::from([
+                .event(&runtime_context(EventTypeFilter::Only(HashSet::from([
                     "another_event".to_string(),
                 ]))))
                 .is_none()
         );
         assert!(
             procedure
-                .event(&event_context(EventTypeFilter::Only(HashSet::new())))
+                .event(&runtime_context(EventTypeFilter::Only(HashSet::new())))
                 .is_none()
         );
     }

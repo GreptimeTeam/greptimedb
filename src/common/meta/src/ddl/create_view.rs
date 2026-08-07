@@ -35,7 +35,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::{CreateViewTask, TriggerContext};
+use crate::rpc::ddl::{CreateViewTask, EventContext};
 
 // The procedure to execute `[CreateViewTask]`.
 pub struct CreateViewProcedure {
@@ -46,14 +46,14 @@ pub struct CreateViewProcedure {
 impl CreateViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateView";
 
-    pub fn new(task: CreateViewTask, trigger_context: TriggerContext, context: DdlContext) -> Self {
+    pub fn new(task: CreateViewTask, event_context: EventContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateViewData {
                 state: CreateViewState::Prepare,
                 task,
                 need_update: false,
-                trigger_context,
+                event_context,
             },
         }
     }
@@ -290,7 +290,7 @@ impl Procedure for CreateViewProcedure {
                         referenced_table_count: self.data.task.table_names().len(),
                         column_count: self.data.task.columns().len(),
                     },
-                    self.data.trigger_context.clone(),
+                    self.data.event_context.clone(),
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
@@ -324,7 +324,7 @@ pub struct CreateViewData {
     /// Whether to update the view info.
     pub need_update: bool,
     #[serde(default)]
-    pub trigger_context: TriggerContext,
+    pub event_context: EventContext,
 }
 
 impl CreateViewData {

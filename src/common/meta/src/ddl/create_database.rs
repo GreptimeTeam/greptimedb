@@ -34,7 +34,7 @@ use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, UserCacheIdent};
 use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::rpc::ddl::{CreatorGrantIntent, TriggerContext};
+use crate::rpc::ddl::{CreatorGrantIntent, EventContext};
 
 /// Describes the creator-access result of an atomic create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ impl CreateDatabaseProcedure {
         create_if_not_exists: bool,
         options: HashMap<String, String>,
         creator: Option<CreatorGrantIntent>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -105,7 +105,7 @@ impl CreateDatabaseProcedure {
                 create_if_not_exists,
                 options,
                 creator,
-                trigger_context,
+                event_context,
             },
         }
     }
@@ -294,7 +294,7 @@ impl Procedure for CreateDatabaseProcedure {
                 &self.data.schema,
                 self.data.create_if_not_exists,
                 &self.data.options,
-                self.data.trigger_context.clone(),
+                self.data.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::create_lifecycle()
@@ -328,7 +328,7 @@ pub struct CreateDatabaseData {
     #[serde(default)]
     pub creator: Option<CreatorGrantIntent>,
     #[serde(default)]
-    pub trigger_context: TriggerContext,
+    pub event_context: EventContext,
 }
 
 #[cfg(test)]
@@ -423,7 +423,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
-            TriggerContext::default(),
+            EventContext::default(),
             context,
         );
         (procedure, committer)
@@ -583,7 +583,7 @@ mod tests {
             false,
             HashMap::new(),
             None,
-            TriggerContext::default(),
+            EventContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;
@@ -619,7 +619,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
-            TriggerContext::default(),
+            EventContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;

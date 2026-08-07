@@ -21,7 +21,7 @@ use std::time::Duration;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::TriggerContext;
+use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::{error, info, warn};
@@ -486,7 +486,7 @@ impl RegionMigrationManager {
                 task.to_peer.clone(),
                 task.region_ids.clone(),
                 task.timeout,
-                TriggerContext::new(task.trigger_reason.to_trigger_reason()),
+                EventContext::new(task.trigger_reason.to_trigger_reason()),
             ),
             self.context_factory.clone(),
             procedure_guards,
@@ -582,7 +582,7 @@ impl RegionMigrationManager {
                 to_peer,
                 vec![region_id],
                 timeout,
-                TriggerContext::new(trigger_reason.to_trigger_reason()),
+                EventContext::new(trigger_reason.to_trigger_reason()),
             ),
             self.context_factory.clone(),
             vec![guard],

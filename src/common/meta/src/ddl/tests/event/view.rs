@@ -17,8 +17,8 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-    PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TRIGGER_CONTEXT_COLUMN, VIEW_ID_COLUMN,
+    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+    PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
     VIEW_NAME_COLUMN,
 };
 use common_event_recorder::testing::assert_event_contract;
@@ -28,9 +28,7 @@ use common_procedure::{
     ProcedureId, ProcedureState, RetryPhase,
 };
 
-use super::test_util::{
-    assert_event_filter, default_trigger_context_value, procedure_trigger_value,
-};
+use super::test_util::{assert_event_filter, default_event_context_value, procedure_trigger_value};
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::event::view::{
@@ -38,7 +36,7 @@ use crate::ddl::event::view::{
 };
 use crate::ddl::tests::create_view::test_create_view_task;
 use crate::ddl::tests::drop_view::new_drop_view_task;
-use crate::rpc::ddl::TriggerContext;
+use crate::rpc::ddl::EventContext;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 #[test]
@@ -46,7 +44,7 @@ fn test_view_submitted_event_contracts() {
     let mut task = test_create_view_task("v_metrics");
     task.create_view.or_replace = true;
     task.create_view.create_if_not_exists = true;
-    let create = CreateViewProcedure::new(task, TriggerContext::default(), test_context());
+    let create = CreateViewProcedure::new(task, EventContext::default(), test_context());
     let event = event_for(&create, EventTrigger::Submitted);
 
     assert_view_event_contract(
@@ -76,7 +74,7 @@ fn test_view_submitted_event_contracts() {
 
     let drop = DropViewProcedure::new(
         new_drop_view_task("view_name", 42, true),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     let event = event_for(&drop, EventTrigger::Submitted);
@@ -126,12 +124,12 @@ fn test_view_lifecycle_event_contracts() {
 fn test_view_procedures_emit_lightweight_lifecycle_events() {
     let create = CreateViewProcedure::new(
         test_create_view_task("view_name"),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     let drop = DropViewProcedure::new(
         new_drop_view_task("view_name", 42, false),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     let triggers = [
@@ -167,7 +165,7 @@ fn test_view_procedures_emit_lightweight_lifecycle_events() {
 fn test_create_view_succeeded_output_mapping() {
     let procedure = CreateViewProcedure::new(
         test_create_view_task("view_name"),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     let state = ProcedureState::Done {
@@ -197,7 +195,7 @@ fn test_create_view_succeeded_output_mapping() {
 fn test_create_view_event_filter() {
     let procedure = CreateViewProcedure::new(
         test_create_view_task("view_name"),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     assert_event_filter(&procedure, CREATE_VIEW_EVENT_TYPE);
@@ -207,7 +205,7 @@ fn test_create_view_event_filter() {
 fn test_drop_view_event_filter() {
     let procedure = DropViewProcedure::new(
         new_drop_view_task("view_name", 42, false),
-        TriggerContext::default(),
+        EventContext::default(),
         test_context(),
     );
     assert_event_filter(&procedure, DROP_VIEW_EVENT_TYPE);
@@ -228,7 +226,7 @@ fn test_view_event_procedure_envelope_contract() {
                 referenced_table_count: 1,
                 column_count: 1,
             },
-            TriggerContext::default(),
+            EventContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -283,7 +281,7 @@ impl ViewEventLocator<'_> {
                 .map(Into::into)
                 .unwrap_or_default(),
             if self.catalog_name.is_some() {
-                default_trigger_context_value()
+                default_event_context_value()
             } else {
                 Value { value_data: None }
             },
@@ -297,7 +295,7 @@ fn view_schema() -> Vec<ColumnSchema> {
         SCHEMA_NAME_COLUMN.column_schema(),
         VIEW_NAME_COLUMN.column_schema(),
         VIEW_ID_COLUMN.column_schema(),
-        TRIGGER_CONTEXT_COLUMN.column_schema(),
+        EVENT_CONTEXT_COLUMN.column_schema(),
     ]
 }
 

@@ -43,7 +43,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
-use crate::rpc::ddl::{TriggerContext, UndropTableTask};
+use crate::rpc::ddl::{EventContext, UndropTableTask};
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
 };
@@ -56,21 +56,17 @@ pub struct UndropTableProcedure {
 impl UndropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::UndropTable";
 
-    pub fn new(
-        task: UndropTableTask,
-        context: DdlContext,
-        trigger_context: TriggerContext,
-    ) -> Self {
-        Self::new_with_original_table_name(task, context, None, trigger_context)
+    pub fn new(task: UndropTableTask, context: DdlContext, event_context: EventContext) -> Self {
+        Self::new_with_original_table_name(task, context, None, event_context)
     }
 
     pub(crate) fn new_with_original_table_name(
         task: UndropTableTask,
         context: DdlContext,
         table_name: Option<TableName>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
-        let mut data = UndropTableData::new(task, trigger_context);
+        let mut data = UndropTableData::new(task, event_context);
         data.table_name = table_name;
         Self { context, data }
     }
@@ -456,7 +452,7 @@ impl Procedure for UndropTableProcedure {
                     })
                     .unwrap_or_default()
                     .with_table_id(self.data.task.table_id);
-                TableDdlEvent::undrop_table_submitted(locator, self.data.trigger_context.clone())
+                TableDdlEvent::undrop_table_submitted(locator, self.data.event_context.clone())
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
         };
@@ -565,11 +561,11 @@ pub struct UndropTableData {
     #[serde(default)]
     tombstone_identity_loaded: bool,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl UndropTableData {
-    fn new(task: UndropTableTask, trigger_context: TriggerContext) -> Self {
+    fn new(task: UndropTableTask, event_context: EventContext) -> Self {
         Self {
             state: UndropTableState::Prepare,
             task,
@@ -581,7 +577,7 @@ impl UndropTableData {
             retention_expires_at: None,
             drop_generation: None,
             tombstone_identity_loaded: false,
-            trigger_context,
+            event_context,
         }
     }
 
@@ -649,7 +645,7 @@ mod tests {
         let procedure = UndropTableProcedure::new(
             UndropTableTask { table_id: 42 },
             context,
-            TriggerContext::default(),
+            EventContext::default(),
         );
 
         let err = procedure.map_restore_metadata_error(
@@ -668,7 +664,7 @@ mod tests {
         let mut procedure = UndropTableProcedure::new(
             UndropTableTask { table_id: 42 },
             context.clone(),
-            TriggerContext::default(),
+            EventContext::default(),
         );
         procedure.data.state = UndropTableState::OpenRegions;
         let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
@@ -697,7 +693,7 @@ mod tests {
         let mut procedure = UndropTableProcedure::new(
             UndropTableTask { table_id },
             context,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         procedure.data.table_route_value = Some(TableRouteValue::physical(vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -740,7 +736,7 @@ mod tests {
         let mut procedure = UndropTableProcedure::new(
             UndropTableTask { table_id },
             context,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         procedure.data.table_name = Some(TableName::new(
             DEFAULT_CATALOG_NAME,

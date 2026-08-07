@@ -47,7 +47,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::{AlterTableTask, TriggerContext};
+use crate::rpc::ddl::{AlterTableTask, EventContext};
 use crate::rpc::router::RegionRoute;
 
 pub struct AlterLogicalTablesProcedure {
@@ -88,7 +88,7 @@ impl AlterLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -101,7 +101,7 @@ impl AlterLogicalTablesProcedure {
                 physical_table_info: None,
                 physical_columns: vec![],
                 table_cache_keys_to_invalidate: vec![],
-                trigger_context,
+                event_context,
             },
             physical_table_route: None,
         }
@@ -353,7 +353,7 @@ impl Procedure for AlterLogicalTablesProcedure {
             locators,
             self.data.tasks.len(),
             kinds,
-            self.data.trigger_context.clone(),
+            self.data.event_context.clone(),
         )))
     }
 }
@@ -371,7 +371,7 @@ pub struct AlterTablesData {
     physical_columns: Vec<ColumnMetadata>,
     table_cache_keys_to_invalidate: Vec<CacheIdent>,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl AlterTablesData {

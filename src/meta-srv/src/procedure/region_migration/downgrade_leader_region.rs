@@ -382,7 +382,7 @@ mod tests {
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::ddl::{TriggerContext, TriggerReason};
+    use common_meta::rpc::ddl::{EventContext, TriggerReason};
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::wal_provider::RegionWalOptions;
     use store_api::storage::RegionId;
@@ -403,7 +403,7 @@ mod tests {
             Peer::empty(2),
             vec![RegionId::new(1024, 1)],
             Duration::from_millis(1000),
-            TriggerContext::new(TriggerReason::Manual),
+            EventContext::new(TriggerReason::Manual),
         )
     }
 

@@ -26,7 +26,7 @@ use crate::ddl::drop_database::executor::DropDatabaseExecutor;
 use crate::ddl::test_util::datanode_handler::{NaiveDatanodeHandler, RetryErrorDatanodeHandler};
 use crate::ddl::test_util::{create_logical_table, create_physical_table};
 use crate::key::schema_name::SchemaNameKey;
-use crate::rpc::ddl::TriggerContext;
+use crate::rpc::ddl::EventContext;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 #[tokio::test]
@@ -55,7 +55,7 @@ async fn test_drop_database_with_logical_tables() {
         DEFAULT_CATALOG_NAME.to_string(),
         DEFAULT_SCHEMA_NAME.to_string(),
         false,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
 
@@ -104,7 +104,7 @@ async fn test_drop_database_retryable_error() {
         DEFAULT_CATALOG_NAME.to_string(),
         DEFAULT_SCHEMA_NAME.to_string(),
         false,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
 
@@ -149,7 +149,7 @@ async fn test_drop_database_recover() {
         DEFAULT_CATALOG_NAME.to_string(),
         DEFAULT_SCHEMA_NAME.to_string(),
         false,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let num_operating_regions = 1;

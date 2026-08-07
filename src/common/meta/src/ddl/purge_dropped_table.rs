@@ -38,7 +38,7 @@ use crate::error::{self, Result};
 use crate::key::DroppedTableMetadata;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::TableLock;
-use crate::rpc::ddl::{PurgeDroppedTableTask, TriggerContext};
+use crate::rpc::ddl::{EventContext, PurgeDroppedTableTask};
 use crate::rpc::router::RegionRoute;
 
 pub struct PurgeDroppedTableProcedure {
@@ -53,22 +53,22 @@ impl PurgeDroppedTableProcedure {
     pub fn new(
         task: PurgeDroppedTableTask,
         context: DdlContext,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             context,
-            data: PurgeDroppedTableData::new(task, trigger_context),
+            data: PurgeDroppedTableData::new(task, event_context),
         }
     }
 
     pub fn new_if_expired(
         task: PurgeDroppedTableTask,
         context: DdlContext,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             context,
-            data: PurgeDroppedTableData::new_if_expired(task, trigger_context),
+            data: PurgeDroppedTableData::new_if_expired(task, event_context),
         }
     }
 
@@ -279,7 +279,7 @@ impl Procedure for PurgeDroppedTableProcedure {
                 let locator = TableDdlLocator::from_table_id(self.data.task.table_id);
                 TableDdlEvent::purge_dropped_table_submitted(
                     locator,
-                    self.data.trigger_context.clone(),
+                    self.data.event_context.clone(),
                 )
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable),
@@ -308,11 +308,11 @@ pub struct PurgeDroppedTableData {
     #[serde(default)]
     purging_claimed: bool,
     #[serde(default)]
-    trigger_context: TriggerContext,
+    event_context: EventContext,
 }
 
 impl PurgeDroppedTableData {
-    fn new(task: PurgeDroppedTableTask, trigger_context: TriggerContext) -> Self {
+    fn new(task: PurgeDroppedTableTask, event_context: EventContext) -> Self {
         Self {
             state: PurgeDroppedTableState::Prepare,
             task,
@@ -325,14 +325,14 @@ impl PurgeDroppedTableData {
             drop_generation: None,
             drop_generation_loaded: false,
             purging_claimed: false,
-            trigger_context,
+            event_context,
         }
     }
 
-    fn new_if_expired(task: PurgeDroppedTableTask, trigger_context: TriggerContext) -> Self {
+    fn new_if_expired(task: PurgeDroppedTableTask, event_context: EventContext) -> Self {
         Self {
             check_expired: true,
-            ..Self::new(task, trigger_context)
+            ..Self::new(task, event_context)
         }
     }
 

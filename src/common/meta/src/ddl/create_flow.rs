@@ -50,7 +50,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext, TriggerContext};
+use crate::rpc::ddl::{CreateFlowTask, EventContext, FlowQueryContext, QueryContext};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -65,7 +65,7 @@ impl CreateFlowProcedure {
     pub fn new(
         task: CreateFlowTask,
         query_context: QueryContext,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -81,7 +81,7 @@ impl CreateFlowProcedure {
                 prev_flow_info_value: None,
                 did_replace: false,
                 flow_type: None,
-                trigger_context,
+                event_context,
             },
         }
     }
@@ -428,7 +428,7 @@ impl Procedure for CreateFlowProcedure {
                     expire_after: self.data.task.expire_after,
                     eval_interval_secs: self.data.task.eval_interval_secs,
                 },
-                self.data.trigger_context.clone(),
+                self.data.event_context.clone(),
             ),
             EventTrigger::Succeeded => {
                 let flow_id = match ctx.lifecycle_state {
@@ -712,7 +712,7 @@ pub struct CreateFlowData {
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
     #[serde(default)]
-    pub(crate) trigger_context: TriggerContext,
+    pub(crate) event_context: EventContext,
 }
 
 impl CreateFlowData {

@@ -48,7 +48,7 @@ use crate::ddl::test_util::{assert_column_name, get_raw_table_info, put_datanode
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::rpc::ddl::{CreateTableTask, QueryContext, TriggerContext};
+use crate::rpc::ddl::{CreateTableTask, EventContext, QueryContext};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
 fn create_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
@@ -192,7 +192,7 @@ async fn test_on_prepare_table_exists_err() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -221,7 +221,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -240,7 +240,7 @@ async fn test_on_prepare_without_create_if_table_exists() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -265,7 +265,7 @@ async fn test_on_datanode_create_regions_should_retry() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -288,7 +288,7 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     )
     .unwrap();
@@ -311,7 +311,7 @@ async fn test_on_datanode_create_regions_remaps_addresses_when_retrying() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     )
     .unwrap();
@@ -338,7 +338,7 @@ async fn test_on_create_metadata_error() {
     let mut procedure = CreateTableProcedure::new(
         task.clone(),
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     )
     .unwrap();
@@ -377,7 +377,7 @@ async fn test_on_create_metadata() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     )
     .unwrap();
@@ -411,7 +411,7 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let mut procedure = CreateTableProcedure::new(
         task,
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     )
     .unwrap();

@@ -29,7 +29,7 @@ use common_meta::ddl::test_util::create_table::{
 };
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::rpc::ddl::{CreateTableTask, QueryContext, TriggerContext};
+use common_meta::rpc::ddl::{CreateTableTask, EventContext, QueryContext};
 use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_procedure::Status;
 use store_api::storage::RegionId;
@@ -92,7 +92,7 @@ fn test_region_request_builder() {
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         test_data::new_ddl_context(Arc::new(NodeClients::default())),
     )
     .unwrap();
@@ -191,7 +191,7 @@ async fn test_on_datanode_create_regions() {
     let mut procedure = CreateTableProcedure::new(
         create_table_task(None),
         QueryContext::default(),
-        TriggerContext::default(),
+        EventContext::default(),
         test_data::new_ddl_context(node_manager),
     )
     .unwrap();
@@ -267,7 +267,7 @@ async fn test_on_datanode_create_logical_regions() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task1, task2, task3],
         physical_table_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ctx,
     );
 

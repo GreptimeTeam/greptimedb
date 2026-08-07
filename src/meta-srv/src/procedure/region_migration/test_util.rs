@@ -27,7 +27,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
-use common_meta::rpc::ddl::TriggerContext;
+use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
@@ -190,7 +190,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         Peer::empty(to),
         vec![region_id],
         Duration::from_secs(10),
-        TriggerContext::default(),
+        EventContext::default(),
     )
 }
 

@@ -30,7 +30,7 @@ use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::TriggerContext;
+use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::debug;
 use ordered_float::OrderedFloat;
@@ -75,7 +75,7 @@ pub struct MockSchedulerCtx {
     pub candidates: Arc<Mutex<Option<HashMap<TableId, Vec<GcCandidate>>>>>,
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
-    pub gc_trigger_contexts: Arc<Mutex<Vec<TriggerContext>>>,
+    pub gc_event_contexts: Arc<Mutex<Vec<EventContext>>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
@@ -214,13 +214,10 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
-        self.gc_trigger_contexts
-            .lock()
-            .unwrap()
-            .push(trigger_context);
+        self.gc_event_contexts.lock().unwrap().push(event_context);
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {

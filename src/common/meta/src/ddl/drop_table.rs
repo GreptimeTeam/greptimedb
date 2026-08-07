@@ -48,7 +48,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::ddl::{DropTableTask, TriggerContext};
+use crate::rpc::ddl::{DropTableTask, EventContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 #[cfg(feature = "enterprise")]
@@ -74,12 +74,12 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(task: DropTableTask, context: DdlContext, trigger_context: TriggerContext) -> Self {
+    pub fn new(task: DropTableTask, context: DdlContext, event_context: EventContext) -> Self {
         let data = DropTableData::new(
             task,
             cfg!(feature = "enterprise") && context.soft_drop_enabled,
             context.soft_drop_retention,
-            trigger_context,
+            event_context,
         );
         let executor = data.build_executor();
         Self {
@@ -429,7 +429,7 @@ impl Procedure for DropTableProcedure {
                 TableDdlEvent::drop_table_submitted(
                     locator,
                     task.drop_if_exists,
-                    self.data.trigger_context.clone(),
+                    self.data.event_context.clone(),
                 )
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
@@ -489,7 +489,7 @@ pub struct DropTableData {
     #[serde(default)]
     pub drop_generation: Option<String>,
     #[serde(default)]
-    pub trigger_context: TriggerContext,
+    pub event_context: EventContext,
 }
 
 impl DropTableData {
@@ -497,7 +497,7 @@ impl DropTableData {
         task: DropTableTask,
         soft_drop_enabled: bool,
         soft_drop_retention: Option<std::time::Duration>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             state: DropTableState::Prepare,
@@ -511,7 +511,7 @@ impl DropTableData {
             retention_expires_at: None,
             soft_drop_retention_millis: soft_drop_retention_millis(soft_drop_retention),
             drop_generation: None,
-            trigger_context,
+            event_context,
         }
     }
 

@@ -43,7 +43,7 @@ use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
 use crate::error::Result;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
-use crate::rpc::ddl::{AlterTableTask, TriggerContext};
+use crate::rpc::ddl::{AlterTableTask, EventContext};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -165,7 +165,7 @@ async fn test_on_prepare_check_schema() {
     let mut procedure = AlterLogicalTablesProcedure::new(
         tasks,
         physical_table_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     );
     let err = procedure.on_prepare().await.unwrap_err();
@@ -185,7 +185,7 @@ async fn test_on_prepare_check_alter_kind() {
     let mut procedure = AlterLogicalTablesProcedure::new(
         tasks,
         physical_table_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context,
     );
     let err = procedure.on_prepare().await.unwrap_err();
@@ -208,7 +208,7 @@ async fn test_on_prepare_different_physical_table() {
     ];
 
     let mut procedure =
-        AlterLogicalTablesProcedure::new(tasks, phy1_id, TriggerContext::default(), ddl_context);
+        AlterLogicalTablesProcedure::new(tasks, phy1_id, EventContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
@@ -230,7 +230,7 @@ async fn test_on_prepare_logical_table_not_exists() {
     ];
 
     let mut procedure =
-        AlterLogicalTablesProcedure::new(tasks, phy_id, TriggerContext::default(), ddl_context);
+        AlterLogicalTablesProcedure::new(tasks, phy_id, EventContext::default(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, TableNotFound { .. });
 }
@@ -254,7 +254,7 @@ async fn test_on_prepare() {
     ];
 
     let mut procedure =
-        AlterLogicalTablesProcedure::new(tasks, phy_id, TriggerContext::default(), ddl_context);
+        AlterLogicalTablesProcedure::new(tasks, phy_id, EventContext::default(), ddl_context);
     let result = procedure.on_prepare().await;
     assert_matches!(
         result,
@@ -293,7 +293,7 @@ async fn test_on_update_metadata() {
     let mut procedure = AlterLogicalTablesProcedure::new(
         tasks,
         phy_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let mut status = procedure.on_prepare().await.unwrap();
@@ -382,7 +382,7 @@ async fn test_on_part_duplicate_alter_request() {
     let mut procedure = AlterLogicalTablesProcedure::new(
         tasks,
         phy_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let mut status = procedure.on_prepare().await.unwrap();
@@ -472,7 +472,7 @@ async fn test_on_part_duplicate_alter_request() {
     let mut procedure = AlterLogicalTablesProcedure::new(
         tasks,
         phy_id,
-        TriggerContext::default(),
+        EventContext::default(),
         ddl_context.clone(),
     );
     let mut status = procedure.on_prepare().await.unwrap();
@@ -646,7 +646,7 @@ async fn test_on_submit_alter_region_request() {
     ];
 
     let mut procedure =
-        AlterLogicalTablesProcedure::new(tasks, phy_id, TriggerContext::default(), ddl_context);
+        AlterLogicalTablesProcedure::new(tasks, phy_id, EventContext::default(), ddl_context);
     procedure.on_prepare().await.unwrap();
     procedure.on_submit_alter_region_requests().await.unwrap();
     let mut results = Vec::new();

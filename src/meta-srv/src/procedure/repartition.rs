@@ -44,7 +44,7 @@ use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::rpc::ddl::TriggerContext;
+use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -105,7 +105,7 @@ pub struct PersistentContext {
     /// Records table-level partition metadata updated by this repartition.
     pub partition_metadata_update: Option<PartitionMetadataUpdate>,
     #[serde(default)]
-    pub trigger_context: TriggerContext,
+    pub event_context: EventContext,
 }
 
 fn default_timeout() -> Duration {
@@ -113,7 +113,7 @@ fn default_timeout() -> Duration {
 }
 
 impl PersistentContext {
-    /// Creates a new [PersistentContext] with the table, timeout and trigger context.
+    /// Creates a new [PersistentContext] with the table, timeout and event context.
     ///
     /// If the timeout is not provided, the default timeout will be used.
     pub fn new(
@@ -124,7 +124,7 @@ impl PersistentContext {
         }: TableName,
         table_id: TableId,
         timeout: Option<Duration>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> Self {
         Self {
             catalog_name,
@@ -136,7 +136,7 @@ impl PersistentContext {
             unknown_procedures: vec![],
             timeout: timeout.unwrap_or_else(default_timeout),
             partition_metadata_update: None,
-            trigger_context,
+            event_context,
         }
     }
 
@@ -869,7 +869,7 @@ impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
         _source: RepartitionSource,
         _to_exprs: Vec<String>,
         _timeout: Option<Duration>,
-        _trigger_context: TriggerContext,
+        _event_context: EventContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         Err(BoxedError::new(
             error::InvalidArgumentsSnafu {
@@ -908,9 +908,9 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         source: RepartitionSource,
         to_exprs: Vec<String>,
         timeout: Option<Duration>,
-        trigger_context: TriggerContext,
+        event_context: EventContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout, trigger_context);
+        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout, event_context);
         let from = match source {
             RepartitionSource::Partitioned {
                 exprs,
@@ -1143,7 +1143,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
 
         Context::new(
@@ -1175,7 +1175,7 @@ mod tests {
                 },
                 vec![],
                 None,
-                TriggerContext::default(),
+                EventContext::default(),
             )
             .err()
             .expect("GC-disabled factory must reject repartition");
@@ -1397,7 +1397,7 @@ mod tests {
         assert!(persistent_ctx.failed_procedures.is_empty());
         assert!(persistent_ctx.unknown_procedures.is_empty());
         assert!(persistent_ctx.partition_metadata_update.is_none());
-        assert_eq!(persistent_ctx.trigger_context, TriggerContext::default());
+        assert_eq!(persistent_ctx.event_context, EventContext::default());
     }
 
     #[tokio::test]
@@ -1474,7 +1474,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -1541,7 +1541,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![test_plan(table_id)];
         let context = Context::new(
@@ -1595,7 +1595,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         let failed_plan = test_plan(table_id);
         let failed_plan = with_rollback_metadata(
@@ -1729,7 +1729,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![failed_plan, succeeded_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {
@@ -1839,7 +1839,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![plan.clone()];
         persistent_ctx.unknown_procedures = vec![ProcedureMeta {
@@ -1901,7 +1901,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![with_rollback_metadata(
             test_plan(table_id),
@@ -2030,7 +2030,7 @@ mod tests {
             TableName::new("test_catalog", "test_schema", "test_table"),
             table_id,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         persistent_ctx.plans = vec![failed_merge_plan, succeeded_split_plan.clone()];
         persistent_ctx.failed_procedures = vec![ProcedureMeta {

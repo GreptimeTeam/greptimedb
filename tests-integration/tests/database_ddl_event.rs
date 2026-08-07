@@ -125,9 +125,9 @@ WHERE type = '{event_type}'
     let actual = find_eventually_string(
         instance,
         &format!(
-            "SELECT json_to_string(trigger_context) AS trigger_context FROM greptime_private.events WHERE type = '{event_type}' AND procedure_state = 'Running' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') ORDER BY timestamp DESC LIMIT 1"
+            "SELECT json_to_string(event_context) AS event_context FROM greptime_private.events WHERE type = '{event_type}' AND procedure_state = 'Running' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') ORDER BY timestamp DESC LIMIT 1"
         ),
-        "trigger_context",
+        "event_context",
     )
     .await;
     assert_eq!(r#"{"reason":"manual"}"#, actual);

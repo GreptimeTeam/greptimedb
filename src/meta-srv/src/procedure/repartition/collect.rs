@@ -136,7 +136,7 @@ mod tests {
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-    use common_meta::rpc::ddl::TriggerContext;
+    use common_meta::rpc::ddl::EventContext;
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{
         Context as ProcedureContext, ContextProvider, Error as ProcedureError, ProcedureId,
@@ -194,7 +194,7 @@ mod tests {
             table::table_name::TableName::new("test_catalog", "test_schema", "test_table"),
             1024,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         let mut ctx = crate::procedure::repartition::Context::new(
             &ddl_ctx,
@@ -229,7 +229,7 @@ mod tests {
             table::table_name::TableName::new("test_catalog", "test_schema", "test_table"),
             1024,
             None,
-            TriggerContext::default(),
+            EventContext::default(),
         );
         let mut ctx = crate::procedure::repartition::Context::new(
             &ddl_ctx,

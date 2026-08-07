@@ -506,7 +506,7 @@ mod tests {
         let mut procedure =
             WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
         let running = ProcedureState::Running;
-        let event_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
+        let runtime_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
@@ -516,13 +516,13 @@ mod tests {
         for trigger in [EventTrigger::Submitted, EventTrigger::Recovered] {
             assert!(
                 procedure
-                    .event(&event_context(trigger, &running, EventTypeFilter::All))
+                    .event(&runtime_context(trigger, &running, EventTypeFilter::All))
                     .is_none()
             );
         }
 
         let retrying_event = procedure
-            .event(&event_context(
+            .event(&runtime_context(
                 EventTrigger::Retrying {
                     phase: common_procedure::RetryPhase::Execute,
                     attempt: 1,
@@ -540,7 +540,7 @@ mod tests {
         procedure.observed_latest_offset = Some(100);
         for trigger in [EventTrigger::Failed, EventTrigger::Poisoned] {
             let event = procedure
-                .event(&event_context(trigger, &running, EventTypeFilter::All))
+                .event(&runtime_context(trigger, &running, EventTypeFilter::All))
                 .unwrap();
             assert_eq!(
                 event.extra_rows().unwrap()[0].values[2].value_data,
@@ -551,7 +551,7 @@ mod tests {
         let done_without_output = ProcedureState::Done { output: None };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done_without_output,
                     EventTypeFilter::All,
@@ -563,7 +563,7 @@ mod tests {
         };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done_with_wrong_output,
                     EventTypeFilter::All,
@@ -575,7 +575,7 @@ mod tests {
             output: Some(Arc::new(WalPruneOutcome) as Output),
         };
         let event = procedure
-            .event(&event_context(
+            .event(&runtime_context(
                 EventTrigger::Succeeded,
                 &done,
                 EventTypeFilter::All,
@@ -592,7 +592,7 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done,
                     EventTypeFilter::Only(HashSet::new()),

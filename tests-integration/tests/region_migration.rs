@@ -1348,8 +1348,8 @@ async fn check_region_migration_events_system_table(
             Alias::new("procedure_trigger"),
         )
         .expr_as(
-            Expr::cust("json_to_string(trigger_context)"),
-            Alias::new("trigger_context"),
+            Expr::cust("json_to_string(event_context)"),
+            Alias::new("event_context"),
         )
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
@@ -1367,7 +1367,7 @@ async fn check_region_migration_events_system_table(
 
     let expected = "\
 +---------------------------------+-----------------+-------------------+---------------------+
-| region_migration_trigger_reason | procedure_state | procedure_trigger | trigger_context     |
+| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context     |
 +---------------------------------+-----------------+-------------------+---------------------+
 | Manual                          | Running         | Submitted         | {\"reason\":\"manual\"} |
 | Manual                          | Done            | Succeeded         |                     |
