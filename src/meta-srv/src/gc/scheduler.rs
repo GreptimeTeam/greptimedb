@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
+use common_meta::rpc::ddl::{EventContext, TriggerReason};
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
@@ -216,7 +217,10 @@ impl GcScheduler {
                 .await;
         }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
-        let report = self.trigger_gc().instrument(span).await?;
+        let report = self
+            .trigger_gc(EventContext::new(TriggerReason::ScheduledGc))
+            .instrument(span)
+            .await?;
 
         // Periodically clean up stale tracker entries
         self.cleanup_tracker_if_needed().await?;
@@ -300,7 +304,9 @@ impl GcScheduler {
 
         // No specific regions, use default tick behavior
         let Some(regions) = region_ids else {
-            let report = self.trigger_gc().await?;
+            let report = self
+                .trigger_gc(EventContext::new(TriggerReason::Manual))
+                .await?;
             info!("Finished manual gc request");
             return Ok(report);
         };
@@ -347,6 +353,7 @@ impl GcScheduler {
                     full_listing,
                     gc_timeout,
                     Region2Peers::new(),
+                    EventContext::new(TriggerReason::Manual),
                 )
                 .await?;
             combined_report.merge(report);
@@ -355,7 +362,13 @@ impl GcScheduler {
         if !dropped_regions.is_empty() {
             let report = self
                 .ctx
-                .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
+                .gc_regions(
+                    &dropped_regions,
+                    true,
+                    gc_timeout,
+                    dropped_routes_override,
+                    EventContext::new(TriggerReason::Manual),
+                )
                 .await?;
             combined_report.merge(report);
         }
@@ -477,6 +490,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _event_context: EventContext,
         ) -> Result<GcReport> {
             self.gc_regions_calls.fetch_add(1, Ordering::Relaxed);
             panic!("gc_regions should not be called in maintenance mode")
@@ -550,6 +564,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _event_context: EventContext,
         ) -> Result<GcReport> {
             Ok(GcReport::default())
         }
@@ -883,6 +898,7 @@ mod tests {
             _full_file_listing: bool,
             _timeout: Duration,
             _region_routes_override: Region2Peers,
+            _event_context: EventContext,
         ) -> Result<GcReport> {
             crate::error::UnexpectedSnafu {
                 violated: "mock gc failure".to_string(),

@@ -34,8 +34,8 @@ use crate::procedure::{Output, StringKey};
 use crate::rwlock::OwnedKeyRwLockGuard;
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{
-    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventContext, EventTrigger, Procedure,
-    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
+    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventRuntimeContext, EventTrigger,
+    Procedure, ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
 };
 
 /// A guard to cleanup procedure state.
@@ -776,7 +776,7 @@ impl Runner {
     pub(crate) fn build_event(&self, trigger: EventTrigger) -> Option<ProcedureEvent> {
         let recorder = self.event_recorder.as_ref()?;
         let state = self.meta.state();
-        let context = EventContext {
+        let context = EventRuntimeContext {
             procedure_id: self.meta.id,
             lifecycle_state: &state,
             trigger: trigger.clone(),

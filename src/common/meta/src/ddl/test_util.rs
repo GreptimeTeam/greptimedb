@@ -45,7 +45,7 @@ use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::table_route::TableRouteValue;
 use crate::key::{MetadataKey, MetadataValue};
 use crate::peer::Peer;
-use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::ddl::{CreateTableTask, EventContext};
 use crate::rpc::store::PutRequest;
 
 pub async fn create_physical_table_metadata(
@@ -104,7 +104,12 @@ pub async fn create_logical_table(
     table_name: &str,
 ) -> TableId {
     let tasks = vec![test_create_logical_table_task(table_name)];
-    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        tasks,
+        physical_table_id,
+        EventContext::default(),
+        ddl_context,
+    );
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,

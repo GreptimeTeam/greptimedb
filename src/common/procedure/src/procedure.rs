@@ -237,13 +237,13 @@ pub trait Procedure: Send {
     /// [`Event::extra_schema`] values. The event recorder batches events by type
     /// and rejects incompatible schemas; use a distinct event type for a
     /// different schema.
-    fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         None
     }
 }
 
 /// Framework-owned context supplied when a procedure builds a lifecycle event.
-pub struct EventContext<'a> {
+pub struct EventRuntimeContext<'a> {
     /// Id of the procedure associated with the event.
     pub procedure_id: ProcedureId,
     /// Current framework state of the procedure.
@@ -336,7 +336,7 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
         (**self).poison_keys()
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         (**self).event(ctx)
     }
 }
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn test_default_procedure_event_hook() {
         let state = ProcedureState::Running;
-        let context = EventContext {
+        let context = EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Succeeded,

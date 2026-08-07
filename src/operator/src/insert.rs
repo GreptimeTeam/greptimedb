@@ -36,6 +36,7 @@ use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -656,7 +657,7 @@ impl Inserter {
                 if !alter_tables.is_empty() {
                     // Alter logical tables in batch.
                     statement_executor
-                        .alter_logical_tables(alter_tables, ctx.clone())
+                        .alter_logical_tables(alter_tables, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -677,7 +678,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -786,7 +787,7 @@ impl Inserter {
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
                 }
             }
@@ -872,7 +873,12 @@ impl Inserter {
 
         // create physical table
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx.clone())
+            .create_table_inner(
+                create_table_expr,
+                None,
+                ctx.clone(),
+                TriggerReason::AutoCreate,
+            )
             .await;
 
         match res {
@@ -1060,7 +1066,12 @@ impl Inserter {
             info!("Table `{table_ref}` does not exist, try creating table");
         }
         let res = statement_executor
-            .create_table_inner(&mut create_table_expr, partitions, ctx.clone())
+            .create_table_inner(
+                &mut create_table_expr,
+                partitions,
+                ctx.clone(),
+                TriggerReason::AutoCreate,
+            )
             .await;
 
         let table_ref = TableReference::full(
@@ -1091,7 +1102,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
         let res = statement_executor
-            .create_logical_tables(&create_table_exprs, ctx.clone())
+            .create_logical_tables(&create_table_exprs, ctx.clone(), TriggerReason::AutoCreate)
             .await;
 
         match res {

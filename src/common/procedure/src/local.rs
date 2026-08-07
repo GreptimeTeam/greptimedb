@@ -1053,8 +1053,8 @@ mod tests {
     use crate::store::state_store::ObjectStateStore;
     use crate::test_util::InMemoryPoisonStore;
     use crate::{
-        ChildSubmissionOutcome, Context, EventContext, EventTrigger, Procedure, ProcedureEvent,
-        Status,
+        ChildSubmissionOutcome, Context, EventRuntimeContext, EventTrigger, Procedure,
+        ProcedureEvent, Status,
     };
 
     fn new_test_manager_context() -> ManagerContext {
@@ -1296,7 +1296,7 @@ mod tests {
             self.poison_keys.clone()
         }
 
-        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1354,7 +1354,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1397,7 +1397,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, _ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
             Some(Box::new(TestProcedureEvent))
         }
     }
@@ -1424,7 +1424,7 @@ mod tests {
             LockKey::default()
         }
 
-        fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
             *self.captured_filter.lock().unwrap() = Some(ctx.event_type_filter.clone());
             Some(Box::new(TestProcedureEvent))
         }

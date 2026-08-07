@@ -19,6 +19,7 @@ use std::time::Instant;
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
+use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::info;
 use common_time::FOREVER;
 use datatypes::timestamp::TimestampNanosecond;
@@ -131,7 +132,7 @@ impl PipelineOperator {
 
         // create table
         self.statement_executor
-            .create_table_inner(&mut expr, None, ctx.clone())
+            .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
             .await
             .context(CreateTableSnafu)?;
 

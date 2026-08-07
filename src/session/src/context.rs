@@ -618,6 +618,7 @@ impl ConnInfo {
     }
 }
 
+/// The protocol mapping for these wire values lives in [`common_session::channel_protocol`].
 #[derive(Debug, PartialEq, Default, Clone, Copy)]
 #[repr(u8)]
 pub enum Channel {
@@ -680,23 +681,7 @@ impl Display for Channel {
 
 impl AsRef<str> for Channel {
     fn as_ref(&self) -> &str {
-        match self {
-            Channel::Mysql => "mysql",
-            Channel::Postgres => "postgres",
-            Channel::HttpSql => "httpsql",
-            Channel::Prometheus => "prometheus",
-            Channel::Otlp => "otlp",
-            Channel::Grpc => "grpc",
-            Channel::Influx => "influx",
-            Channel::Opentsdb => "opentsdb",
-            Channel::Loki => "loki",
-            Channel::Elasticsearch => "elasticsearch",
-            Channel::Jaeger => "jaeger",
-            Channel::Log => "log",
-            Channel::Promql => "promql",
-            Channel::Splunk => "splunk",
-            Channel::Unknown => "unknown",
-        }
+        common_session::channel_protocol(*self as u8).unwrap_or("unknown")
     }
 }
 

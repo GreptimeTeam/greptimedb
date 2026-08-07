@@ -30,6 +30,7 @@ use auth::{
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_recordbatch::RecordBatches;
@@ -279,7 +280,7 @@ impl PendingRowsSchemaAlterer for Instance {
             AutoCreateTableType::Logical(_) => {
                 // Use the batch API for logical tables.
                 self.statement_executor
-                    .create_logical_tables(&create_exprs, ctx)
+                    .create_logical_tables(&create_exprs, ctx, TriggerReason::AutoCreate)
                     .await
                     .map_err(BoxedError::new)
                     .context(error::ExecuteGrpcQuerySnafu)?;
@@ -290,7 +291,7 @@ impl PendingRowsSchemaAlterer for Instance {
                     expr.table_options
                         .insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
                     self.statement_executor
-                        .create_table_inner(&mut expr, None, ctx.clone())
+                        .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::ExecuteGrpcQuerySnafu)?;
@@ -357,7 +358,7 @@ impl PendingRowsSchemaAlterer for Instance {
         }
 
         self.statement_executor
-            .alter_logical_tables(alter_exprs, ctx)
+            .alter_logical_tables(alter_exprs, ctx, TriggerReason::AutoAlter)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -609,7 +610,7 @@ impl Instance {
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx)
+            .create_table_inner(&mut create_table_expr, None, ctx, TriggerReason::AutoCreate)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
