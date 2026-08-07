@@ -37,3 +37,7 @@ tokio.workspace = true
 [[bench]]
 name = "bench_main"
 harness = false
+
+[[bench]]
+name = "union_distinct_on"
+harness = false
