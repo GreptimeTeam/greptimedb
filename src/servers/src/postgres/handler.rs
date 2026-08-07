@@ -443,9 +443,13 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 }
             }
             SqlPlan::Plan(plan, stmt) => {
-                let values = parameters_to_scalar_values(plan, portal)?;
+                // Re-validate the cached plan against the current catalog: a
+                // schema change (e.g. ALTER TABLE) may have made the cached
+                // table providers stale. When that happens, execute a freshly
+                // re-planned plan instead (parameters are bound afterwards).
+                let plan = self.revalidated_plan(plan, stmt, query_ctx.clone()).await?;
+                let values = parameters_to_scalar_values(&plan, portal)?;
                 let plan = plan
-                    .clone()
                     .replace_params_with_values(&ParamValues::List(
                         values.into_iter().map(Into::into).collect(),
                     ))
@@ -545,6 +549,29 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let fields = describe_fields(sql_plan, format, &self.session)?;
 
         Ok(DescribePortalResponse::new(fields))
+    }
+}
+
+impl PostgresServerHandlerInner {
+    /// Re-validates a cached prepared plan against the current catalog before
+    /// it is executed. Returns the plan to execute: a freshly re-planned plan
+    /// when the cached plan is stale (e.g. an underlying table was altered),
+    /// otherwise the cached plan itself.
+    async fn revalidated_plan(
+        &self,
+        plan: &LogicalPlan,
+        stmt: &Statement,
+        query_ctx: QueryContextRef,
+    ) -> PgWireResult<LogicalPlan> {
+        match self
+            .query_handler
+            .validate_prepared_plan(plan, stmt.clone(), query_ctx)
+            .await
+            .map_err(convert_err)?
+        {
+            Some(fresh_plan) => Ok(fresh_plan),
+            None => Ok(plan.clone()),
+        }
     }
 }
 
@@ -717,14 +744,153 @@ fn check_copy_to_stdout(statement: &SqlParserStatement) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use common_query::Output;
+    use datafusion::datasource::DefaultTableSource;
+    use datafusion_expr::LogicalPlan;
+    use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
     use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
+    use query::parser::PromQuery;
+    use query::query_engine::DescribeResult;
+    use session::context::{Channel, QueryContext};
+    use sql::statements::statement::Statement;
+    use table::TableRef;
+    use table::table::adapter::DfTableProviderAdapter;
+    use table::test_util::MemTable;
 
     use super::*;
+    use crate::error::Result;
+    use crate::postgres::GreptimeDBStartupParameters;
+    use crate::postgres::auth_handler::PgLoginVerifier;
+    use crate::query_handler::sql::SqlQueryHandler;
 
     fn parse_copy_statement(sql: &str) -> SqlParserStatement {
         let parser = PostgresCompatibilityParser::new();
         let statements = parser.parse(sql).unwrap();
         statements.into_iter().next().unwrap()
+    }
+
+    fn pg_plan_for(table: &TableRef) -> LogicalPlan {
+        let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
+        LogicalPlanBuilder::scan(
+            "numbers",
+            Arc::new(DefaultTableSource { table_provider }),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    /// A fake [`SqlQueryHandler`] that counts `validate_prepared_plan` calls
+    /// and always reports the cached plan as stale, returning a fresh plan.
+    struct StalePlanHandler {
+        validate_calls: Arc<AtomicUsize>,
+        fresh_plan: LogicalPlan,
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for StalePlanHandler {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_exec_plan(
+            &self,
+            _: LogicalPlan,
+            _: Option<Statement>,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_describe(
+            &self,
+            _: Statement,
+            _: QueryContextRef,
+        ) -> Result<Option<DescribeResult>> {
+            unimplemented!()
+        }
+
+        async fn is_valid_schema(&self, _: &str, _: &str) -> Result<bool> {
+            unimplemented!()
+        }
+
+        async fn validate_prepared_plan(
+            &self,
+            _plan: &LogicalPlan,
+            _stmt: Statement,
+            _query_ctx: QueryContextRef,
+        ) -> Result<Option<LogicalPlan>> {
+            self.validate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.fresh_plan.clone()))
+        }
+    }
+
+    fn postgres_handler(query_handler: ServerSqlQueryHandlerRef) -> PostgresServerHandlerInner {
+        let session = Arc::new(Session::new(None, Channel::Postgres, Default::default(), 1));
+        PostgresServerHandlerInner {
+            query_handler: query_handler.clone(),
+            login_verifier: PgLoginVerifier::new(None),
+            force_tls: false,
+            param_provider: Arc::new(GreptimeDBStartupParameters::new()),
+            session: session.clone(),
+            query_parser: Arc::new(DefaultQueryParser::new(
+                query_handler.clone(),
+                session.clone(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_prepared_plan_revalidated_after_schema_change() {
+        let cached_plan = pg_plan_for(&MemTable::default_numbers_table());
+        // The "fresh" plan differs from the cached plan so we can tell them
+        // apart below.
+        let fresh_plan = LogicalPlanBuilder::from(cached_plan.clone())
+            .filter(datafusion_expr::col("uint32s").gt(datafusion_expr::lit(5)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let validate_calls = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(StalePlanHandler {
+            validate_calls: validate_calls.clone(),
+            fresh_plan: fresh_plan.clone(),
+        });
+        let inner = postgres_handler(handler);
+
+        let query_ctx = QueryContext::arc();
+        let stmt = ParserContext::create_with_dialect(
+            "SELECT 1",
+            &PostgreSqlDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        // The cached plan is stale: the Postgres extended-query path must
+        // invoke `validate_prepared_plan` and execute the fresh plan.
+        let plan = inner
+            .revalidated_plan(&cached_plan, &stmt, query_ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh_plan, plan,
+            "stale cached plan must be replaced by the re-planned one"
+        );
+        assert_eq!(1, validate_calls.load(Ordering::SeqCst));
     }
 
     #[test]

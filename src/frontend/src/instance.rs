@@ -73,6 +73,7 @@ use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
+use query::plan::extract_prepared_plan_tables;
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{
@@ -972,6 +973,51 @@ impl Instance {
             .await
             .context(error::CatalogSnafu)
     }
+
+    /// Re-validates a cached prepared plan against the current catalog. Returns
+    /// `Some(plan)` with a freshly planned plan when any base table referenced
+    /// by the cached plan changed (e.g. `ALTER TABLE` bumped its version or the
+    /// table was dropped/recreated), and `None` when the cached plan is still
+    /// valid.
+    async fn validate_prepared_plan_inner(
+        &self,
+        plan: &LogicalPlan,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<LogicalPlan>> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
+        for table in extract_prepared_plan_tables(plan) {
+            let current = self
+                .catalog_manager
+                .table(
+                    &table.table_name.catalog_name,
+                    &table.table_name.schema_name,
+                    &table.table_name.table_name,
+                    Some(&query_ctx),
+                )
+                .await
+                .context(error::CatalogSnafu)?;
+            let stale = match current {
+                None => true,
+                Some(current) => {
+                    let ident = current.table_info().ident.clone();
+                    ident.table_id != table.table_id || ident.version != table.version
+                }
+            };
+            if stale {
+                // The cached plan is stale: re-plan against the current catalog.
+                let plan = self
+                    .query_engine
+                    .planner()
+                    .plan(&QueryStatement::Sql(stmt), query_ctx)
+                    .await
+                    .context(PlanStatementSnafu)?;
+                return Ok(Some(plan));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -1032,6 +1078,18 @@ impl SqlQueryHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(server_error::DescribeStatementSnafu)
+    }
+
+    async fn validate_prepared_plan(
+        &self,
+        plan: &LogicalPlan,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<LogicalPlan>> {
+        self.validate_prepared_plan_inner(plan, stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecutePlanSnafu)
     }
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
@@ -2578,6 +2636,131 @@ mod tests {
                 .await?;
 
         let _event_recorder = instance.event_recorder();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_plan_revalidated_after_schema_change() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let query_ctx = QueryContext::arc();
+        let stmt = parse_test_sql("SELECT * FROM source").remove(0);
+
+        // Plan against the v1 table (version 0, columns [id, ts]).
+        let cached_plan = instance
+            .query_engine()
+            .planner()
+            .plan(
+                &query::parser::QueryStatement::Sql(stmt.clone()),
+                query_ctx.clone(),
+            )
+            .await
+            .expect("plan SELECT * FROM source");
+
+        // Simulate `ALTER TABLE source ADD COLUMN extra` by swapping the catalog
+        // table for a version-bumped table with an extra column.
+        let mut info = test_table_info(1024, "source")?.clone();
+        info.ident.version = 1;
+        info.meta.schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("id", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("extra", ConcreteDataType::int32_datatype(), true),
+        ]));
+        let table_v2 = EmptyTable::from_table_info(&info);
+        let catalog = instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .expect("memory catalog manager");
+        catalog
+            .deregister_table_sync(catalog::DeregisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "source".to_string(),
+            })
+            .expect("deregister source");
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "source".to_string(),
+                table_id: 1024,
+                table: table_v2,
+            })
+            .expect("register source");
+
+        // The cached plan must be re-planned against the new schema.
+        let revalidated = instance
+            .validate_prepared_plan(&cached_plan, stmt, query_ctx)
+            .await
+            .expect("validate prepared plan");
+        let fresh_plan = revalidated.expect("plan must be re-planned after schema change");
+        let names: Vec<String> = fresh_plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "extra"),
+            "re-planned plan must include the newly added column, got columns: {names:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_plan_errors_after_table_dropped() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let query_ctx = QueryContext::arc();
+        let stmt = parse_test_sql("SELECT * FROM source").remove(0);
+
+        // Plan against the (about to be dropped) table.
+        let cached_plan = instance
+            .query_engine()
+            .planner()
+            .plan(
+                &query::parser::QueryStatement::Sql(stmt.clone()),
+                query_ctx.clone(),
+            )
+            .await
+            .expect("plan SELECT * FROM source");
+
+        // Drop the table: the cached plan is now stale (`current == None`).
+        // Pinned drop behavior: re-validation must fail with the re-planning
+        // error (table not found) instead of silently executing the stale plan.
+        let catalog = instance
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+            .expect("memory catalog manager");
+        catalog
+            .deregister_table_sync(catalog::DeregisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "source".to_string(),
+            })
+            .expect("deregister source");
+
+        let result = instance
+            .validate_prepared_plan(&cached_plan, stmt, query_ctx)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a dropped table must make the cached prepared plan fail to re-plan"
+        );
 
         Ok(())
     }

@@ -16,10 +16,11 @@ use std::collections::HashSet;
 
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference;
-use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
+use datafusion_common::tree_node::{Transformed, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_expr::{Expr, LogicalPlan};
 use session::context::QueryContextRef;
 pub use table::metadata::TableType;
+use table::metadata::{TableId, TableVersion};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
@@ -120,6 +121,58 @@ pub fn extract_and_rewrite_full_table_names(
     Ok((extractor.table_names, plan.data))
 }
 
+/// A base table referenced by a logical plan, together with the table id and
+/// version the plan was created against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlanTable {
+    /// The fully qualified table name.
+    pub table_name: TableName,
+    /// The table id captured when the plan was created.
+    pub table_id: TableId,
+    /// The table version captured when the plan was created. It is bumped when
+    /// the table metadata (e.g. schema) changes.
+    pub version: TableVersion,
+}
+
+/// Collects the base tables referenced by a logical plan (including subqueries)
+/// together with the (table id, version) captured when the plan was created.
+///
+/// Used to detect whether a cached prepared plan became stale after the
+/// underlying table metadata (e.g. schema) changed.
+pub fn extract_prepared_plan_tables(plan: &LogicalPlan) -> Vec<PreparedPlanTable> {
+    let mut tables = Vec::new();
+    // `apply_with_subqueries` descends into expression-embedded subqueries
+    // (Expr::ScalarSubquery / Exists / InSubquery inside Projection/Filter/
+    // Aggregate) in addition to child plans, unlike `plan.inputs()` which only
+    // visits inputs. Without it, e.g. `WHERE x IN (SELECT ... FROM lookup)`
+    // would miss `lookup` and a cached prepared plan could go stale unnoticed
+    // after `lookup` is altered.
+    plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node
+            && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+            && let Some(provider) = source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+            && provider.table().table_type() == TableType::Base
+        {
+            let info = provider.table().table_info();
+            tables.push(PreparedPlanTable {
+                table_name: TableName::new(
+                    info.catalog_name.clone(),
+                    info.schema_name.clone(),
+                    info.name.clone(),
+                ),
+                table_id: info.ident.table_id,
+                version: info.ident.version,
+            });
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .expect("plan tree traversal cannot fail");
+    tables
+}
+
 /// A trait to extract expressions from a logical plan.
 pub trait ExtractExpr {
     /// Gets expressions from a logical plan.
@@ -140,10 +193,12 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-    use common_catalog::consts::DEFAULT_CATALOG_NAME;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datafusion::datasource::DefaultTableSource;
     use datafusion::logical_expr::builder::LogicalTableSource;
     use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit, scalar_subquery};
     use session::context::QueryContextBuilder;
+    use table::test_util::MemTable;
 
     use super::*;
 
@@ -306,6 +361,42 @@ pub(crate) mod tests {
         assert_nested_scalar_subquery_table_name(
             &plan,
             TableReference::full("qp031_external_catalog", "qp031_external_schema", "lookup"),
+        );
+    }
+
+    #[test]
+    fn test_extract_prepared_plan_tables_from_scalar_subquery() {
+        // Build `SELECT scalar_subquery FROM ...` where the subquery scans a
+        // Greptime table (`DefaultTableSource` + `DfTableProviderAdapter`). The
+        // subquery's table only lives inside the Projection expression, so a
+        // traversal over `plan.inputs()` alone would miss it.
+        let table = MemTable::default_numbers_table();
+        let subquery = LogicalPlanBuilder::scan(
+            TableReference::bare("numbers"),
+            Arc::new(DefaultTableSource {
+                table_provider: Arc::new(DfTableProviderAdapter::new(table)),
+            }),
+            None,
+        )
+        .unwrap()
+        .project(vec![col("uint32s")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let plan = LogicalPlanBuilder::empty(false)
+            .project(vec![scalar_subquery(Arc::new(subquery))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            vec![PreparedPlanTable {
+                table_name: TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "numbers"),
+                table_id: 1,
+                version: 0,
+            }],
+            extract_prepared_plan_tables(&plan)
         );
     }
 }

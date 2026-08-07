@@ -65,4 +65,20 @@ pub trait SqlQueryHandler {
     ) -> Result<Option<DescribeResult>>;
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
+
+    /// Re-validates a cached prepared plan against the current catalog before it
+    /// is executed.
+    ///
+    /// Returns `Some(plan)` when the cached plan must be replaced (e.g. because
+    /// an underlying table's schema changed since the statement was prepared)
+    /// and `None` when the cached plan is still valid. The default
+    /// implementation performs no validation.
+    async fn validate_prepared_plan(
+        &self,
+        _plan: &LogicalPlan,
+        _stmt: Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<LogicalPlan>> {
+        Ok(None)
+    }
 }
