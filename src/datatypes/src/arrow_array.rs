@@ -197,7 +197,7 @@ pub fn is_string_null_at(array: &ArrayRef, i: usize) -> bool {
             downcast_dictionary_array! {
                 array => array
                     .key(i)
-                    .map_or(true, |key| is_string_null_at(array.values(), key)),
+                    .is_none_or(|key| is_string_null_at(array.values(), key)),
                 _ => true,
             }
         }
