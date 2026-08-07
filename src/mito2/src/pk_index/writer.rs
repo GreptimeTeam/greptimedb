@@ -618,6 +618,7 @@ fn timestamp_values(array: &ArrayRef) -> Result<&[i64]> {
     .fail()
 }
 
+// TODO(yingwen): Bench and optimize the performance if this is costly.
 fn decode_primary_key(
     codec: &dyn PrimaryKeyCodec,
     primary_key: &[u8],
