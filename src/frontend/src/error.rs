@@ -164,6 +164,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Ambiguous value column in table '{table_name}', candidates: {field_columns:?}"
+    ))]
+    AmbiguousValueColumn {
+        table_name: String,
+        field_columns: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect recordbatch"))]
     CollectRecordbatch {
         #[snafu(implicit)]
@@ -377,6 +387,7 @@ impl ErrorExt for Error {
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaExists { .. }
             | Error::ColumnNotFound { .. }
+            | Error::AmbiguousValueColumn { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
             | Error::ColumnNoneDefaultValue { .. }
