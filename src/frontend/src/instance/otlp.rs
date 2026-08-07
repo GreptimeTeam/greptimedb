@@ -291,6 +291,7 @@ mod tests {
                         value: Some(AnyValue {
                             value: Some(any_value::Value::StringValue("frontend".to_string())),
                         }),
+                        ..Default::default()
                     }],
                     ..Default::default()
                 }),

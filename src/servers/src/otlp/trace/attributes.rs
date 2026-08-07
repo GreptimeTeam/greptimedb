@@ -16,6 +16,7 @@ use std::fmt::Display;
 
 use opentelemetry_proto::tonic::common::v1::any_value::Value::{
     ArrayValue, BoolValue, BytesValue, DoubleValue, IntValue, KvlistValue, StringValue,
+    StringValueStrindex,
 };
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 use serde::Serialize;
@@ -78,6 +79,11 @@ impl Serialize for OtlpAnyValue<'_> {
                     map.end()
                 }
                 BytesValue(v) => zer.serialize_bytes(v),
+                // `StringValueStrindex` is profiling-signal-only and references the
+                // Profiling `ProfilesDictionary.string_table`, which is unavailable
+                // here. Per the OTLP spec, non-Profiling receivers must treat it as
+                // a non-fatal issue and process the value as if it were absent.
+                StringValueStrindex(_) => zer.serialize_none(),
             },
             None => zer.serialize_none(),
         }
@@ -293,6 +299,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: None,
+                    ..Default::default()
                 }],
             ),
             (
@@ -300,6 +307,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: Some(AnyValue { value: None }),
+                    ..Default::default()
                 }],
             ),
             (
@@ -309,6 +317,7 @@ mod tests {
                     value: Some(AnyValue {
                         value: Some(Value::StringValue(String::from("val1"))),
                     }),
+                    ..Default::default()
                 }],
             ),
         ];
@@ -331,6 +340,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: None,
+                    ..Default::default()
                 }],
             ),
             (
@@ -338,6 +348,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: Some(AnyValue { value: None }),
+                    ..Default::default()
                 }],
             ),
             (
@@ -347,6 +358,7 @@ mod tests {
                     value: Some(AnyValue {
                         value: Some(Value::StringValue(String::from("val1"))),
                     }),
+                    ..Default::default()
                 }],
             ),
         ];
