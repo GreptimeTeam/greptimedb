@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GraphTableKind"],"fn":["json","string","ts"],"static":["ENTITIES_SCHEMA","RELATIONSHIPS_SCHEMA"],"struct":["SemanticGraphTable","SemanticGraphTableProvider"],"trait":["EntityGraphProvider"],"type":["EntityGraphProviderRef"]};

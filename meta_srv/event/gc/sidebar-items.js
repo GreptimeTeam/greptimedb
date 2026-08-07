@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BATCH_GC_EVENT_TYPE","PAYLOAD_VERSION"],"fn":["region_report","schema"],"struct":["BatchGcEvent","BatchGcPayload","BatchGcRegionReport","BatchGcRegionRow","DeletedIndexPayload"]};

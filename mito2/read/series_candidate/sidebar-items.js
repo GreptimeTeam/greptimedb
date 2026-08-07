@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CANDIDATE_SERIES_BATCH_SIZE"],"fn":["append_unique_primary_key","candidate_primary_key_stream","decode_metric_series","merge_primary_key_streams","normalize_candidate_batch","primary_key_schema","validate_metric_metadata"],"struct":["MetricSeriesId","SeriesCandidateRangeBuilder","SeriesCandidateScanner"],"type":["MetricSeriesIdStream"]};

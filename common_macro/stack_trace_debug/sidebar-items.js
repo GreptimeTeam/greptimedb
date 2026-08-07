@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_debug_fmt_impl","build_debug_impl","build_next_impl","build_transparent_fn","stack_trace_style_impl"],"struct":["ErrorVariant"]};

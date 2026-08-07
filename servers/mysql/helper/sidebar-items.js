@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_placeholder_spans","convert_bytes_to_date","convert_bytes_to_timestamp","convert_expr_to_scalar_value","convert_value","format_placeholder","placeholder_index","placeholder_spans","transform_placeholders_with_count","visit_placeholders"],"struct":["PlaceholderSpan"]};

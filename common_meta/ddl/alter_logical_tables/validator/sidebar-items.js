@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["retain_unskipped","skip_alter_logical_region"],"struct":["AlterLogicalTableValidator","ValidatorResult"]};

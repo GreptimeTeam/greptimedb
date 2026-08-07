@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_INSTANT_MANIPULATE_OUTPUT_POINTS"],"fn":["reuse_constant_column"],"struct":["InstantManipulate","InstantManipulateExec","InstantManipulateStream","UnfixIndices"]};

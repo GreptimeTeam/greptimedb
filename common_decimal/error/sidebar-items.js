@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["BigDecimalOutOfRangeSnafu","InvalidPrecisionOrScaleSnafu","ParseBigDecimalStrSnafu","ParseRustDecimalStrSnafu"],"type":["Result"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bench_self_recorded","create_region_routes","create_region_wal_options","create_table_info"],"mod":["metadata"],"struct":["BenchTableMetadata","BenchTableMetadataCommand"]};

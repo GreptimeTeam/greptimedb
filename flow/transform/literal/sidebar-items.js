@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TimestampPrecision"],"fn":["from_bytes","from_interval_day_sec","from_interval_year_month","from_substrait_literal","from_substrait_type","to_substrait_literal"]};

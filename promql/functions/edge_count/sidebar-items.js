@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EdgeKind"],"fn":["build_prefix","calc","checked_end","count_edges","input_type","is_edge","range_at","scalar_udf","should_scan_direct","validate_windows"]};

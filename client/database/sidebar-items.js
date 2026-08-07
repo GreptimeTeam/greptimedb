@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["attach_terminal_metrics","is_grpc_retryable","make_database_client","output_from_flight_message_stream","parse_terminal_metrics"],"struct":["Database","DatabaseClient","FlightContext","OutputMetrics","OutputMetricsInner","OutputWithMetrics","StreamWithMetrics"],"type":["DoPutResponseStream","FlightDataStream"]};

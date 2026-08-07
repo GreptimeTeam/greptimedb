@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ManagedTableSource","TableDesc"],"trait":["FlowTableSource"]};

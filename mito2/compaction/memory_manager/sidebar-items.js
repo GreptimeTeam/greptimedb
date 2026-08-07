@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_compaction_memory_manager"],"struct":["CompactionMemoryMetrics"],"type":["CompactionMemoryGuard","CompactionMemoryManager"]};

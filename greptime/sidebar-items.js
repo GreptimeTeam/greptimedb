@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SubCommand"],"fn":["main","main_body","setup_human_panic","start"],"static":["ALLOC"],"struct":["Command"]};

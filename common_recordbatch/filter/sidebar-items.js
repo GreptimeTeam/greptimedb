@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["batch_filter","boolean_array_to_scan_mask","regexp_is_match_dictionary","regexp_is_match_scalar"],"struct":["SimpleFilterEvaluator"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["deduce_json_type","deduce_json_types"],"struct":["JsonTypeConcretizeRule"]};

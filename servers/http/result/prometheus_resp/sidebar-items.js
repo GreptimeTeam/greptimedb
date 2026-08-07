@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["prometheus_native_histogram"],"struct":["PromSeriesSamples","PrometheusJsonResponse"]};

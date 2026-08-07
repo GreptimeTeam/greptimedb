@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Plan"],"mod":["join","reduce"],"struct":["TypedPlan"]};

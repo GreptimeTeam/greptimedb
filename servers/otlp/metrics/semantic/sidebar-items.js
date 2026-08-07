@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collapse_value"],"struct":["SemanticIndex"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_proto_lit","from_scalar_fn_to_df_fn_impl","is_proto_literal","proto_col","rewrite_scalar_function","typename_to_cdt"]};
