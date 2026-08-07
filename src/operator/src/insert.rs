@@ -29,8 +29,8 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
-    trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
+    trace_operations_table_name, trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -905,6 +905,18 @@ impl Inserter {
         create_type: &AutoCreateTableType,
         ctx: &QueryContextRef,
     ) -> Result<CreateTableExpr> {
+        // A DDL-reserved table is defined by the system: never derive its
+        // schema from the write request (a first gRPC write could otherwise
+        // squat the reserved name with an arbitrary shape).
+        let schema = ctx.current_schema();
+        if is_ddl_reserved_table(&schema, &req.table_name) {
+            return Ok(
+                crate::statement::semantic_graph::build_declared_relationships_expr(
+                    ctx.current_catalog(),
+                ),
+            );
+        }
+
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
         apply_per_table_semantic_options(&mut table_options, ctx, &req.table_name);
@@ -916,7 +928,6 @@ impl Inserter {
             default_engine()
         };
 
-        let schema = ctx.current_schema();
         let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
         // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_row_inserts_with_create_type()`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
@@ -956,6 +967,12 @@ impl Inserter {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
+
+        // A DDL-reserved table's schema is system-owned: never auto-alter it to
+        // fit a write. A request with unknown columns fails instead.
+        if is_ddl_reserved_table(&schema_name, &table_name) {
+            return Ok(None);
+        }
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let request_field_count = request_schema

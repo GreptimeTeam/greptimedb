@@ -32,7 +32,8 @@ use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema, is_readonly_table,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_ddl_reserved_table, is_readonly_schema,
+    is_readonly_table,
 };
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
@@ -112,8 +113,8 @@ use crate::error::{
     InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
     InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
     SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -372,6 +373,21 @@ impl StatementExecutor {
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;
         self.create_table_inner(create_expr, None, ctx).await
+    }
+
+    /// Creates the declared-edge table of the entity graph with its canonical
+    /// schema. Deliberately enters below the user-DDL guard
+    /// ([`ensure_table_writable`]): the table's definition is system-owned,
+    /// users only write rows to it. `create_if_not_exists` makes concurrent
+    /// first inserts race safely.
+    pub async fn create_declared_relationships_table(
+        &self,
+        catalog: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        let mut expr = super::semantic_graph::build_declared_relationships_expr(catalog);
+        self.create_non_logic_table(&mut expr, None, query_ctx)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -2497,7 +2513,11 @@ fn validate_repartition_column_hint(
     Ok(())
 }
 
-/// Rejects DDL against read-only schemas and computed entity-graph tables.
+/// Rejects DDL against read-only schemas, computed entity-graph tables, and
+/// system-defined tables whose rows are user-written but whose definition is
+/// not (the declared-edge table; the system creates it on first INSERT via
+/// [`StatementExecutor::create_declared_relationships_table`], which enters
+/// below this guard).
 fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
         !is_readonly_schema(schema),
@@ -2508,6 +2528,12 @@ fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
         !is_readonly_table(schema, table),
         TableReadOnlySnafu {
+            name: table.to_string()
+        }
+    );
+    ensure!(
+        !is_ddl_reserved_table(schema, table),
+        TableDdlReservedSnafu {
             name: table.to_string()
         }
     );

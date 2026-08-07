@@ -356,6 +356,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "The definition of table `{name}` is managed by GreptimeDB; its rows are writable but user DDL is not allowed"
+    ))]
+    TableDdlReserved {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table occurs error"))]
     Table {
         #[snafu(implicit)]
@@ -986,7 +995,8 @@ impl ErrorExt for Error {
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
             | Error::SchemaReadOnly { .. }
-            | Error::TableReadOnly { .. } => StatusCode::Unsupported,
+            | Error::TableReadOnly { .. }
+            | Error::TableDdlReserved { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),

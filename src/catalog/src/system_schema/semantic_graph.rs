@@ -18,10 +18,9 @@
 //! They live in `greptime_private`, not `information_schema`: scanning them
 //! triggers read-time derivation over telemetry tables (trace self-joins, ...),
 //! which breaks the "cheap, metadata-only" expectation users have of
-//! `information_schema`. `greptime_private` already signals "system-managed,
-//! computed data objects", and it is also where the physical declared-edge
-//! table will live (a follow-up), so derived and declared edges will share one
-//! schema.
+//! `information_schema`. `greptime_private` also hosts the physical
+//! declared-edge table (`semantic_relationships_declared`), whose rows are
+//! unioned into the computed `semantic_relationships`.
 //!
 //! These are thin forwarders: their rows are derived at read time by the injected
 //! [`EntityGraphProvider`], which enumerates the `table_semantics` declarations,

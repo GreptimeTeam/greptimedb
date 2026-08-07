@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Typed DataFusion plan builders for the read-time derivation behind the
+//! The entity-relationship graph: the physical declared-edge table DDL and the
+//! typed DataFusion plan builders for the read-time derivation behind the
 //! computed `semantic_entities` / `semantic_relationships` tables.
+//!
+//! In OSS the graph is derived at read time, so the *only* stored part is the
+//! declared-edge table: edges a user asserts by hand (`provenance = 'declared'`).
 //!
 //! The derivation is built as typed [`Expr`]s over [`DataFrame`]s (never as SQL
 //! text), so user-controlled identifiers are plain values — no quoting or SQL
@@ -23,10 +27,16 @@
 
 use std::sync::{Arc, LazyLock};
 
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnDef, CreateTableExpr, JsonTypeExtension,
+    SemanticType,
+};
 use common_catalog::consts::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
-    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR,
-    TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    DEFAULT_PRIVATE_SCHEMA_NAME, DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SPAN_ID_COLUMN, SPAN_KIND_CLIENT, SPAN_KIND_COLUMN,
+    SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR, TRACE_ID_COLUMN,
+    TRACE_TIMESTAMP_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
@@ -37,6 +47,7 @@ use datafusion::functions_aggregate::expr_fn::{count, sum};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, ScalarUDF, cast, ident, lit};
+use store_api::mito_engine_options::TTL_KEY;
 
 /// Bin width for the temporal window of derived rows: 60s buckets, matching the
 /// service-graph convention.
@@ -45,6 +56,130 @@ const BIN_NANOS: i64 = 60 * 1_000_000_000;
 /// Time index column of the graph tables: when an edge/entity observation was
 /// recorded. The provider extracts the query window from predicates on it.
 pub const OBSERVED_AT_COLUMN: &str = "observed_at";
+
+/// Default retention for the declared-edge table; expiry slides the topology
+/// window (New Relic / Datadog treat derived topology as a sliding window).
+const DECLARED_RELATIONSHIPS_TTL: &str = "30d";
+
+/// The primary-key (tag) columns, in key order. Starting with the source endpoint
+/// makes out-edge lookup (`WHERE src_type=? AND src_id=?`) a key-prefix scan;
+/// `provenance` and `generation_id` are in the key so a declared edge and a
+/// (future) derived edge for the same pair coexist without clobbering.
+pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
+    "src_type",
+    "src_id",
+    "rel_type",
+    "dst_type",
+    "dst_id",
+    "provenance",
+    "scope",
+    "generation_id",
+];
+
+fn column(
+    name: &str,
+    data_type: ColumnDataType,
+    semantic_type: SemanticType,
+    nullable: bool,
+) -> ColumnDef {
+    ColumnDef {
+        name: name.to_string(),
+        data_type: data_type as i32,
+        is_nullable: nullable,
+        default_constraint: vec![],
+        semantic_type: semantic_type as i32,
+        comment: String::new(),
+        datatype_extension: None,
+        options: None,
+    }
+}
+
+fn tag(name: &str) -> ColumnDef {
+    column(name, ColumnDataType::String, SemanticType::Tag, false)
+}
+
+fn field(name: &str, data_type: ColumnDataType) -> ColumnDef {
+    column(name, data_type, SemanticType::Field, true)
+}
+
+fn json_field(name: &str) -> ColumnDef {
+    let mut def = field(name, ColumnDataType::Binary);
+    def.datatype_extension = Some(ColumnDataTypeExtension {
+        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+    });
+    def
+}
+
+/// Builds the `CREATE TABLE` request for the declared-edge table. Columns mirror
+/// the computed `semantic_relationships` shape (temporal window + endpoints +
+/// provenance/confidence + RED metrics) plus the declared-only business validity
+/// window (`valid_from` / `valid_until`), which — unlike TTL (physical retention)
+/// — expresses whether a hand-declared edge is still in effect.
+///
+/// The default `LastRow` merge dedups on primary key **plus** `observed_at`
+/// (the time index is part of mito's dedup key): re-asserting an edge at a new
+/// `observed_at` stores a new revision, and the read-side union keeps only the
+/// latest revision per edge key.
+pub fn build_declared_relationships_expr(catalog: &str) -> CreateTableExpr {
+    let column_defs = vec![
+        // Temporal: when this revision of the edge was declared (time index,
+        // also the TTL clock).
+        column(
+            OBSERVED_AT_COLUMN,
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+            false,
+        ),
+        field("window_start", ColumnDataType::TimestampMillisecond),
+        field("window_end", ColumnDataType::TimestampMillisecond),
+        field("fresh_until", ColumnDataType::TimestampMillisecond),
+        // Declared-only business validity. NULL valid_from = valid since the
+        // declaration; NULL valid_until = valid for as long as the row exists
+        // (TTL expiry retires the edge with the row).
+        field("valid_from", ColumnDataType::TimestampMillisecond),
+        field("valid_until", ColumnDataType::TimestampMillisecond),
+        // Endpoints + edge identity (all tags, in primary-key order).
+        tag("src_type"),
+        tag("src_id"),
+        tag("rel_type"),
+        tag("dst_type"),
+        tag("dst_id"),
+        tag("provenance"),
+        tag("scope"),
+        tag("generation_id"),
+        // Confidence + RED metrics (populated for derived edges; usually NULL here).
+        field("confidence", ColumnDataType::Float64),
+        field("request_count", ColumnDataType::Int64),
+        field("error_count", ColumnDataType::Int64),
+        field("duration_sum", ColumnDataType::Float64),
+        field("duration_count", ColumnDataType::Int64),
+        // JSON edge attributes: connection_type, db.system, peer.service, ...
+        // Stored as JSONB so the union branch matches the computed table's
+        // json column without a per-scan parse.
+        json_field("attributes"),
+    ];
+
+    let table_options = [(TTL_KEY.to_string(), DECLARED_RELATIONSHIPS_TTL.to_string())]
+        .into_iter()
+        .collect();
+
+    CreateTableExpr {
+        catalog_name: catalog.to_string(),
+        schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+        table_name: SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME.to_string(),
+        desc: "Hand-declared edges of the entity-relationship graph".to_string(),
+        column_defs,
+        time_index: OBSERVED_AT_COLUMN.to_string(),
+        primary_keys: DECLARED_PRIMARY_KEY_COLUMNS
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+        create_if_not_exists: true,
+        table_options,
+        table_id: None,
+        engine: common_catalog::consts::MITO_ENGINE.to_string(),
+    }
+}
 
 /// A single table's entity-identity declaration, projected from
 /// `information_schema.table_semantics` (`greptime.semantic.entity.<type>.*`).
@@ -1161,6 +1296,63 @@ mod tests {
         assert_eq!(
             strings(batch, 7),
             vec!["service_name=cart,service_namespace=ns1"]
+        );
+    }
+
+    #[test]
+    fn declared_relationships_expr_shape() {
+        let expr = build_declared_relationships_expr(common_catalog::consts::DEFAULT_CATALOG_NAME);
+
+        assert_eq!(expr.schema_name, DEFAULT_PRIVATE_SCHEMA_NAME);
+        assert_eq!(expr.table_name, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME);
+        assert!(expr.create_if_not_exists);
+        assert_eq!(expr.time_index, OBSERVED_AT_COLUMN);
+        assert_eq!(expr.primary_keys, DECLARED_PRIMARY_KEY_COLUMNS);
+        // append_mode is unset so the table gets the default LastRow merge
+        // (last-write-wins per primary key + observed_at).
+        assert!(!expr.table_options.contains_key("append_mode"));
+        assert_eq!(
+            expr.table_options.get(TTL_KEY).map(String::as_str),
+            Some("30d")
+        );
+
+        // Every primary-key column exists and is a tag.
+        for pk in DECLARED_PRIMARY_KEY_COLUMNS {
+            let def = expr
+                .column_defs
+                .iter()
+                .find(|c| c.name == pk)
+                .unwrap_or_else(|| panic!("missing pk column {pk}"));
+            assert_eq!(
+                def.semantic_type,
+                SemanticType::Tag as i32,
+                "{pk} must be a tag"
+            );
+            assert!(!def.is_nullable, "{pk} must be non-null");
+        }
+
+        // The time index is a non-null timestamp.
+        let ts = expr
+            .column_defs
+            .iter()
+            .find(|c| c.name == OBSERVED_AT_COLUMN)
+            .unwrap();
+        assert_eq!(ts.semantic_type, SemanticType::Timestamp as i32);
+        assert!(!ts.is_nullable);
+
+        // `attributes` is a JSON (JSONB-encoded Binary) field, matching the
+        // computed table's json column so the union needs no per-scan parse.
+        let attributes = expr
+            .column_defs
+            .iter()
+            .find(|c| c.name == "attributes")
+            .unwrap();
+        assert_eq!(attributes.data_type, ColumnDataType::Binary as i32);
+        assert_eq!(
+            attributes.datatype_extension,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            })
         );
     }
 }
