@@ -282,7 +282,10 @@ impl Procedure for PurgeDroppedTableProcedure {
                     self.data.event_context.clone(),
                 )
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable),
+            _ => TableDdlEvent::lifecycle(
+                TableDdlEventType::PurgeDroppedTable,
+                [TableDdlLocator::from_table_id(self.data.task.table_id)],
+            ),
         };
 
         Some(Box::new(event))

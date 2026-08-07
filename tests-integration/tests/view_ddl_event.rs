@@ -134,9 +134,9 @@ WHERE type = '{CREATE_VIEW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
-  AND view_name IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = 'public'
+  AND view_name = '{view}'
   AND view_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
@@ -190,10 +190,10 @@ WHERE type = '{DROP_VIEW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
-  AND view_name IS NULL
-  AND view_id IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = 'public'
+  AND view_name = '{view}'
+  AND view_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
     )

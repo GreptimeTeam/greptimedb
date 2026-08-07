@@ -196,7 +196,7 @@ impl Procedure for AlterDatabaseProcedure {
                 self.data.event_context.clone(),
             )
         } else {
-            DatabaseDdlEvent::alter_lifecycle()
+            DatabaseDdlEvent::alter_lifecycle(self.data.catalog(), self.data.schema())
         };
         Some(Box::new(event))
     }

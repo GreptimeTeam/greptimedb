@@ -574,12 +574,11 @@ impl Procedure for AlterTableProcedure {
         {
             return None;
         }
+        let table_ref = self.data.table_ref();
+        let locator = TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+            .with_table_id(self.data.table_id());
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                let table_ref = self.data.table_ref();
-                let locator =
-                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
-                        .with_table_id(self.data.table_id());
                 let kind = self
                     .data
                     .task
@@ -589,7 +588,7 @@ impl Procedure for AlterTableProcedure {
                     .and_then(alter_table_kind_name);
                 TableDdlEvent::alter_table_submitted(locator, kind, self.data.event_context.clone())
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable),
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable, [locator]),
         };
 
         Some(Box::new(event))

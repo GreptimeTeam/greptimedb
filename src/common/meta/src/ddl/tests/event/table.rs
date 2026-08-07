@@ -108,13 +108,26 @@ fn submitted_event_contracts_are_bounded_and_fixed() {
                 .all(|column| column.semantic_type == SemanticType::Field as i32)
         );
 
-        let lifecycle = TableDdlEvent::lifecycle(case.event_type);
+        let lifecycle = TableDdlEvent::lifecycle(
+            case.event_type,
+            [TableDdlLocator::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "lifecycle",
+            )],
+        );
         assert_eq!(lifecycle.extra_schema(), schema);
         assert_eq!(lifecycle.json_payload().unwrap(), JsonValue::Null);
-        assert_eq!(
-            lifecycle.extra_rows().unwrap()[0].values,
-            vec![Value::default(); schema.len()]
-        );
+        assert_eq!(lifecycle.extra_rows().unwrap()[0].values, {
+            let mut values = table_locator_values(Some("lifecycle"), None);
+            if matches!(
+                case.event_type,
+                TableDdlEventType::CreateLogicalTables | TableDdlEventType::AlterLogicalTables
+            ) {
+                values.push(Value::default());
+            }
+            values
+        });
     }
 }
 
@@ -166,8 +179,18 @@ fn later_lifecycle_events_are_uniform() {
             assert_eq!(event.extra_schema(), schema);
             assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
             assert_eq!(
-                event.extra_rows().unwrap()[0].values,
-                vec![Value::default(); schema.len()]
+                event
+                    .extra_rows()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect::<Vec<_>>(),
+                submitted
+                    .extra_rows()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -193,7 +216,7 @@ fn create_success_events_keep_allocated_ids() {
     assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
     assert_eq!(
         event.extra_rows().unwrap()[0].values,
-        table_locator_values(None, Some(42))
+        table_locator_values(Some("create_success"), Some(42))
     );
 
     let logical_tables = CreateLogicalTablesProcedure::new(
