@@ -14,7 +14,7 @@
 
 use api::v1::meta::{FlowStat, HeartbeatRequest, Role};
 use common_meta::key::flow::flow_state::{FlowStateManager, FlowStateValue};
-use common_telemetry::warn;
+use common_telemetry::debug;
 use snafu::ResultExt;
 
 use crate::error::{FlowStateHandlerSnafu, Result};
@@ -87,8 +87,11 @@ impl HeartbeatHandler for FlowStateHandler {
                 // No usable identity in the request: ignore the report instead
                 // of falling back to a whole-map replace, which would clobber
                 // other nodes' reports.
+                // Normal flownodes always carry header.member_id/peer.id; a
+                // report without either indicates an old or malformed client.
+                // Log at debug to avoid an anomalous sender spamming warn.
                 None => {
-                    warn!(
+                    debug!(
                         "Ignore flow state report without node identity (no header.member_id and no peer.id): {value:?}"
                     );
                 }

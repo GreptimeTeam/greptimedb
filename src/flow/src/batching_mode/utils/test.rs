@@ -2028,8 +2028,35 @@ fn test_df_plan_to_sql_does_not_quote_plain_lowercase() {
 
     let sql = df_plan_to_sql(&plan).unwrap();
     assert!(
-        sql.contains("SELECT plain_table.value FROM catalog.schema.plain_table"),
-        "plain lowercase identifiers should stay unquoted in {sql}"
+        sql.contains("plain_table") && !sql.contains("\"plain_table\""),
+        "plain lowercase table should stay unquoted in {sql}"
+    );
+    // `value` is not a reserved word, so the column stays unquoted.
+    assert!(
+        sql.contains("plain_table.value"),
+        "column unquoted in {sql}"
     );
     assert!(!sql.contains('`'), "no backtick quoting in {sql}");
+}
+
+#[test]
+fn test_df_plan_to_sql_quotes_digit_leading_table_name() {
+    // A table literally named `123metrics` starts with a digit and must be
+    // quoted, otherwise the re-parsed SQL is invalid.
+    let table = single_row_u32_table("123metrics", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "123metrics");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .project(vec![datafusion_expr::col("value")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("\"123metrics\""),
+        "expected digit-leading table name quoted in {sql}"
+    );
 }

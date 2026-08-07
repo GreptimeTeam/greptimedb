@@ -970,24 +970,26 @@ pub(crate) async fn gen_plan_with_matching_schema(
 
 pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
     /// A dialect that forces identifiers to be quoted when they contain
-    /// anything other than lowercase alphanumerics and underscores.
+    /// anything other than lowercase alphanumerics and underscores, or start
+    /// with a digit.
     ///
     /// Unquoted identifiers are normalized to lowercase by the SQL parser, so
     /// uppercase letters need quoting to preserve case. Special characters
     /// (e.g. ':' in Prometheus-style table names like
-    /// `kube_pod_cpu_cores:sum`, '.', '-', spaces, keywords) would produce
-    /// invalid SQL if left unquoted, so they are quoted as well.
+    /// `kube_pod_cpu_cores:sum`, '.', '-', spaces) and digit-leading names
+    /// (e.g. `123metrics`) would produce invalid SQL if left unquoted, so they
+    /// are quoted as well. SQL keywords are intentionally not checked here:
+    /// quoting every ALL_KEYWORDS member would also quote common column names
+    /// like `number`; the unparse failure path has an InsertIntoPlan fallback.
     struct ForceQuoteIdentifiers;
     impl datafusion::sql::unparser::dialect::Dialect for ForceQuoteIdentifiers {
         fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
-            if identifier
-                .chars()
-                .any(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
-            {
-                Some('"')
-            } else {
-                None
-            }
+            let is_plain = !identifier.is_empty()
+                && !identifier.starts_with(|c: char| c.is_ascii_digit())
+                && identifier
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if is_plain { None } else { Some('"') }
         }
     }
     let unparser = Unparser::new(&ForceQuoteIdentifiers);
