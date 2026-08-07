@@ -168,6 +168,43 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
     }
 }
 
+/// Check whether the string value at index `i` is null for string or
+/// dictionary-encoded string arrays.
+///
+/// Returns `true` when the value is null or the array type is not a string
+/// type, which corresponds to [`string_array_value_at_index`] returning `None`.
+///
+/// # Panics
+///
+/// If index `i` is out of bounds.
+pub fn is_string_null_at(array: &ArrayRef, i: usize) -> bool {
+    match array.data_type() {
+        DataType::Utf8 => {
+            let array = array.as_string::<i32>();
+            !array.is_valid(i)
+        }
+        DataType::LargeUtf8 => {
+            let array = array.as_string::<i64>();
+            !array.is_valid(i)
+        }
+        DataType::Utf8View => {
+            let array = array.as_string_view();
+            !array.is_valid(i)
+        }
+        DataType::Dictionary(key_type, value_type)
+            if key_type.is_integer() && value_type.is_string() =>
+        {
+            downcast_dictionary_array! {
+                array => array
+                    .key(i)
+                    .map_or(true, |key| is_string_null_at(array.values(), key)),
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
+
 /// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
 ///
 /// Note: This method does not check for nulls and the value is arbitrary
