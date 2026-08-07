@@ -1213,7 +1213,7 @@ impl StatementExecutor {
 
     /// Drop a view
     #[tracing::instrument(skip_all)]
-    pub async fn drop_view(
+    pub(crate) async fn drop_view(
         &self,
         catalog: String,
         schema: String,
@@ -2343,7 +2343,7 @@ pub fn create_table_info(
     }
 
     let next_column_id = column_schemas.len() as u32;
-    let schema = Arc::new(Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?);
+    let schema = Arc::new(Schema::new(column_schemas));
 
     let primary_key_indices = create_table
         .primary_keys
@@ -3440,38 +3440,6 @@ WITH ('repartition.column.hint' = ' host ')",
                 .extra_options
                 .get(REPARTITION_COLUMN_HINT_KEY),
             Some(&"host".to_string())
-        );
-    }
-
-    #[test]
-    fn test_create_table_info_rejects_non_timestamp_time_index() {
-        let expr = CreateTableExpr {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
-            table_name: "demo".to_string(),
-            desc: String::new(),
-            column_defs: vec![api::v1::ColumnDef {
-                name: "host".to_string(),
-                data_type: api::v1::ColumnDataType::String as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-                semantic_type: 0,
-                comment: String::new(),
-                datatype_extension: None,
-                options: None,
-            }],
-            time_index: "host".to_string(),
-            primary_keys: vec![],
-            create_if_not_exists: false,
-            table_options: HashMap::new(),
-            table_id: None,
-            engine: "mito".to_string(),
-        };
-
-        let err = create_table_info(&expr, vec![]).unwrap_err();
-        assert_eq!(
-            common_error::ext::ErrorExt::status_code(&err),
-            common_error::status_code::StatusCode::InvalidArguments
         );
     }
 

@@ -155,7 +155,7 @@ SELECT count(*) FROM filtered;
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                           |
 |               | Projection: count(Int64(1)) AS count(*)                                                                                                                   |
-|               |   Aggregate: groupBy=[[]], aggr=[[count(filtered.ts) AS count(Int64(1))]]                                                                                 |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                                                       |
 |               |     SubqueryAlias: filtered                                                                                                                               |
 |               |       Projection: tql_data.ts, tql_data.val                                                                                                               |
 |               |         SubqueryAlias: tql_data                                                                                                                           |
@@ -642,7 +642,7 @@ SELECT count(*) as high_values FROM final;
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                   |
 |               | Projection: count(Int64(1)) AS count(*) AS high_values                                                                                                            |
-|               |   Aggregate: groupBy=[[]], aggr=[[count(final.ts) AS count(Int64(1))]]                                                                                            |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                                                               |
 |               |     SubqueryAlias: final                                                                                                                                          |
 |               |       Projection: processed.ts AS ts, processed.percent AS percent                                                                                                |
 |               |         Projection: processed.ts, processed.percent                                                                                                               |
