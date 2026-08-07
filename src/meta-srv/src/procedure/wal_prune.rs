@@ -25,8 +25,8 @@ use common_meta::lock_key::RemoteWalLock;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
-    Procedure, ProcedureState, Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
+    LockKey, Procedure, ProcedureState, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{info, warn};
 use manager::{WalPruneProcedureGuard, WalPruneProcedureTracker};
@@ -213,7 +213,10 @@ impl Procedure for WalPruneProcedure {
         LockKey::new(vec![lock_key])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(WAL_PRUNE_EVENT_TYPE) {
             return None;
         }
@@ -503,7 +506,7 @@ mod tests {
         let mut procedure =
             WalPruneProcedure::new(context, None, "test_topic".to_string(), 42, false);
         let running = ProcedureState::Running;
-        let event_context = |trigger, lifecycle_state, event_type_filter| EventContext {
+        let runtime_context = |trigger, lifecycle_state, event_type_filter| EventRuntimeContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
@@ -513,13 +516,13 @@ mod tests {
         for trigger in [EventTrigger::Submitted, EventTrigger::Recovered] {
             assert!(
                 procedure
-                    .event(&event_context(trigger, &running, EventTypeFilter::All))
+                    .event(&runtime_context(trigger, &running, EventTypeFilter::All))
                     .is_none()
             );
         }
 
         let retrying_event = procedure
-            .event(&event_context(
+            .event(&runtime_context(
                 EventTrigger::Retrying {
                     phase: common_procedure::RetryPhase::Execute,
                     attempt: 1,
@@ -537,7 +540,7 @@ mod tests {
         procedure.observed_latest_offset = Some(100);
         for trigger in [EventTrigger::Failed, EventTrigger::Poisoned] {
             let event = procedure
-                .event(&event_context(trigger, &running, EventTypeFilter::All))
+                .event(&runtime_context(trigger, &running, EventTypeFilter::All))
                 .unwrap();
             assert_eq!(
                 event.extra_rows().unwrap()[0].values[2].value_data,
@@ -548,7 +551,7 @@ mod tests {
         let done_without_output = ProcedureState::Done { output: None };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done_without_output,
                     EventTypeFilter::All,
@@ -560,7 +563,7 @@ mod tests {
         };
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done_with_wrong_output,
                     EventTypeFilter::All,
@@ -572,7 +575,7 @@ mod tests {
             output: Some(Arc::new(WalPruneOutcome) as Output),
         };
         let event = procedure
-            .event(&event_context(
+            .event(&runtime_context(
                 EventTrigger::Succeeded,
                 &done,
                 EventTypeFilter::All,
@@ -589,7 +592,7 @@ mod tests {
 
         assert!(
             procedure
-                .event(&event_context(
+                .event(&runtime_context(
                     EventTrigger::Succeeded,
                     &done,
                     EventTypeFilter::Only(HashSet::new()),

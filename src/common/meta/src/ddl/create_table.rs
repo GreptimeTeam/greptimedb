@@ -23,8 +23,8 @@ use common_procedure::error::{
 };
 use common_procedure::local::DynamicKeyLockGuard;
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
-    ProcedureState, Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureId, ProcedureState, Status,
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
 use crate::peer::PeerAllocContext;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::ddl::{CreateTableTask, QueryContext};
+use crate::rpc::ddl::{CreateTableTask, EventContext, QueryContext};
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 use crate::wal_provider::{
     RegionWalOptions, acquire_remote_wal_read_locks, optional_region_wal_options_serde,
@@ -84,20 +84,17 @@ fn build_executor_from_create_table_data(
 impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
-    pub fn new(task: CreateTableTask, context: DdlContext) -> Result<Self> {
-        Self::new_with_query_context(task, QueryContext::default(), context)
-    }
-
-    pub fn new_with_query_context(
+    pub fn new(
         task: CreateTableTask,
         query_context: QueryContext,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Result<Self> {
         let executor = build_executor_from_create_table_data(&task.create_table)?;
 
         Ok(Self {
             context,
-            data: CreateTableData::new(task, query_context),
+            data: CreateTableData::new_with_query_context(task, event_context, query_context),
             opening_regions: vec![],
             executor,
             remote_wal_lock_guards: vec![],
@@ -399,7 +396,10 @@ impl Procedure for CreateTableProcedure {
         ])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::CreateTable.as_str())
@@ -416,6 +416,7 @@ impl Procedure for CreateTableProcedure {
                     locator,
                     create_table.create_if_not_exists,
                     &create_table.engine,
+                    self.data.event_context.clone(),
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
@@ -452,6 +453,8 @@ pub struct CreateTableData {
     #[serde(default)]
     pub query_context: QueryContext,
     #[serde(default)]
+    pub event_context: EventContext,
+    #[serde(default)]
     pub column_metadatas: Vec<ColumnMetadata>,
     /// None stands for not allocated yet.
     pub(crate) table_route: Option<PhysicalTableRouteValue>,
@@ -462,12 +465,21 @@ pub struct CreateTableData {
 }
 
 impl CreateTableData {
-    pub fn new(task: CreateTableTask, query_context: QueryContext) -> Self {
+    pub fn new(task: CreateTableTask, event_context: EventContext) -> Self {
+        Self::new_with_query_context(task, event_context, QueryContext::default())
+    }
+
+    pub fn new_with_query_context(
+        task: CreateTableTask,
+        event_context: EventContext,
+        query_context: QueryContext,
+    ) -> Self {
         CreateTableData {
             state: CreateTableState::Prepare,
             column_metadatas: vec![],
             task,
             query_context,
+            event_context,
             table_route: None,
             region_wal_options: None,
         }
