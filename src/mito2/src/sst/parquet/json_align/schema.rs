@@ -18,8 +18,7 @@ use std::sync::Arc;
 use arrow_schema::{DataType as ArrowDataType, FieldRef};
 use datatypes::arrow::datatypes::Schema;
 use datatypes::extension::json::{
-    JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout, is_json2_extension_type,
-    json2_remainder_field,
+    JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout, is_json2_extension_type, json2_remainder_field,
 };
 use snafu::ResultExt;
 use store_api::storage::NestedPath;
@@ -200,7 +199,9 @@ fn new_jsonb_field(name: &str) -> FieldRef {
 #[cfg(test)]
 mod tests {
     use arrow_schema::Field;
-    use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, JsonMetadata};
+    use datatypes::extension::json::{
+        JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, JsonMetadata,
+    };
     use datatypes::json::JsonSettings;
     use datatypes::vectors::json::variant::variant_field;
 
@@ -223,7 +224,9 @@ mod tests {
                     ArrowDataType::Struct(fields.into_iter().collect()),
                     true,
                 )
-                .with_extension_type(Json2ExtensionType::default()),
+                .with_extension_type(Json2ExtensionType::new(Arc::new(
+                    JsonMetadata::new_with(JsonSettings::default(), 1),
+                ))),
             )
         }
 
@@ -335,9 +338,7 @@ mod tests {
                 ),
                 true,
             )
-            .with_extension_type(JsonExtensionType::new(Arc::new(
-                JsonMetadata::new_v2(Some(JsonSettings::default())),
-            ))),
+            .with_extension_type(Json2ExtensionType::default()),
         );
         let mut schema = Schema::new([root.clone()]);
         let paths = [vec![

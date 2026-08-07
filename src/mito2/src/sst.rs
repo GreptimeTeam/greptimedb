@@ -1036,8 +1036,7 @@ mod tests {
         use ::parquet::basic::LogicalType;
         use ::parquet::variant::{VariantType, json_to_variant};
         use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
-        use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
-        use datatypes::json::JsonSettings;
+        use datatypes::extension::json::Json2ExtensionType;
 
         let json: ArrayRef = Arc::new(StringArray::from(vec![
             Some(r#"{}"#),
@@ -1069,9 +1068,7 @@ mod tests {
             ArrowDataType::Struct(vec![remainder_field, hot_field].into()),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
-            Some(JsonSettings::default()),
-        ))));
+        .with_extension_type(Json2ExtensionType::default());
         let schema = Arc::new(Schema::new(vec![data_field]));
         let source = RecordBatch::try_new(schema.clone(), vec![data_array])?;
 

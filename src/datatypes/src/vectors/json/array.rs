@@ -549,8 +549,7 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, JsonExtensionType, JsonMetadata};
-    use crate::json::JsonSettings;
+    use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType};
     use crate::vectors::json::variant::{json_values_to_variant, variant_field};
 
     #[test]
@@ -1038,11 +1037,8 @@ mod test {
             ],
             None,
         ));
-        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
-            JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
-                Some(JsonSettings::default()),
-            ))),
-        );
+        let field = Field::new("data", DataType::Struct(fields), true)
+            .with_extension_type(Json2ExtensionType::default());
 
         assert_eq!(
             json!({

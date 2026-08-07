@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
 use std::sync::Arc;
 
-use arrow_array::ArrayRef;
-#[cfg(test)]
-use arrow_array::StringArray;
+use arrow_array::{ArrayRef, StringArray};
 use arrow_schema::Field;
-#[cfg(test)]
-use parquet_variant_compute::json_to_variant;
-use parquet_variant_compute::{VariantArray, VariantArrayBuilder};
+use parquet_variant_compute::{VariantArray, VariantArrayBuilder, json_to_variant};
 use parquet_variant_json::VariantToJson;
 use snafu::ResultExt;
 
@@ -39,7 +34,6 @@ pub fn variant_field(name: impl Into<String>, nullable: bool) -> Field {
 ///
 /// `None` represents an Arrow null while `Some(Value::Null)` represents a JSON
 /// null, preserving the distinction required by JSON2.
-#[cfg(test)]
 pub(crate) fn json_values_to_variant(values: &[Option<serde_json::Value>]) -> Result<ArrayRef> {
     let json = StringArray::from_iter(
         values

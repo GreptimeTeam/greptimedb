@@ -45,17 +45,10 @@ pub struct Json2PhysicalLayout {
 impl Json2PhysicalLayout {
     /// Parses and validates a JSON2 physical root field.
     pub fn try_from_root(field: &Field) -> DatatypesResult<Self> {
-        let extension = field
-            .try_extension_type::<JsonExtensionType>()
-            .map_err(|e| {
-                InvalidJson2LayoutSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
-        let version = extension
-            .metadata()
-            .layout_version
+        let version = field
+            .try_extension_type::<Json2ExtensionType>()
+            .ok()
+            .and_then(|x| x.metadata().layout_version)
             .unwrap_or(JSON2_LAYOUT_V1);
 
         match version {
@@ -132,7 +125,7 @@ pub fn json2_remainder_field(field: &Field) -> DatatypesResult<&FieldRef> {
         })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonMetadata {
     /// JSON2 settings stored in Arrow extension metadata.
     json_settings: JsonSettings,
@@ -145,16 +138,32 @@ pub struct JsonMetadata {
 
 impl JsonMetadata {
     /// Creates metadata for the bounded JSON2 layout.
-    pub fn new_v2(json_settings: JsonSettings) -> Self {
+    pub fn new(json_settings: JsonSettings) -> Self {
         Self {
             json_settings,
             layout_version: Some(JSON2_LAYOUT_V2),
         }
     }
 
+    pub fn new_with(json_settings: JsonSettings, layout_version: u8) -> Self {
+        Self {
+            json_settings,
+            layout_version: Some(layout_version),
+        }
+    }
+
     /// Returns the JSON2 settings.
     pub fn json_settings(&self) -> &JsonSettings {
         &self.json_settings
+    }
+}
+
+impl Default for JsonMetadata {
+    fn default() -> Self {
+        Self {
+            json_settings: JsonSettings::default(),
+            layout_version: Some(JSON2_LAYOUT_V2),
+        }
     }
 }
 
@@ -340,6 +349,7 @@ mod tests {
     use arrow_schema::{Field, Fields};
 
     use super::*;
+    use crate::vectors::json::variant::variant_field;
 
     #[test]
     fn test_json2_extension_type_detection() {
@@ -395,22 +405,14 @@ mod tests {
         assert!(JsonExtensionType::try_new(&DataType::Null, ()).is_ok());
         assert!(JsonExtensionType::try_new(&DataType::Struct(Fields::empty()), ()).is_err());
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::vectors::json::variant::variant_field;
 
     #[test]
     fn test_json_metadata_layout_version_compatibility() -> serde_json::Result<()> {
-        let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":null}"#)?;
+        let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":{}}"#)?;
         assert_eq!(legacy.layout_version, None);
 
         let metadata = JsonMetadata {
-            json_settings: None,
+            json_settings: JsonSettings::default(),
             layout_version: Some(JSON2_LAYOUT_V2),
         };
         let serialized = serde_json::to_string(&metadata)?;
@@ -433,8 +435,8 @@ mod tests {
             ),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata {
-            json_settings: Some(JsonSettings::default()),
+        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata {
+            json_settings: JsonSettings::default(),
             layout_version: None,
         })));
         let layout = Json2PhysicalLayout::try_from_root(&legacy)?;
@@ -451,9 +453,7 @@ mod tests {
             ),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
-            Some(JsonSettings::default()),
-        ))));
+        .with_extension_type(Json2ExtensionType::default());
         let layout = Json2PhysicalLayout::try_from_root(&v2)?;
         assert!(layout.is_version_2());
         assert_eq!(
@@ -465,9 +465,7 @@ mod tests {
 
     #[test]
     fn test_reject_invalid_json2_v2_layout() {
-        let metadata = JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(Some(
-            JsonSettings::default(),
-        ))));
+        let metadata = Json2ExtensionType::default();
         let missing = Field::new("data", DataType::Struct([].into()), true)
             .with_extension_type(metadata.clone());
         assert!(matches!(

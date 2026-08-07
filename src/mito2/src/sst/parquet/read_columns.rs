@@ -404,8 +404,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field};
-    use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, JsonExtensionType, JsonMetadata};
-    use datatypes::json::JsonSettings;
+    use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType};
     use datatypes::vectors::json::variant::variant_field;
     use parquet::basic::{ConvertedType, LogicalType, Repetition};
     use parquet::errors::ParquetError;
@@ -831,9 +830,7 @@ mod tests {
             ),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::new_v2(
-            Some(JsonSettings::default()),
-        ))));
+        .with_extension_type(Json2ExtensionType::default());
         Ok((parquet, Schema::new(vec![root])))
     }
 
