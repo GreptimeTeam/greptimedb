@@ -35,7 +35,14 @@ Edit the example TOMLs and/or the template, then regenerate. Do not edit
 
 ## Grafana dashboards
 
-Generated artifacts; regenerate rather than editing by hand.
+For the metrics dashboards, edit
+`grafana/dashboards/metrics/cluster/dashboard.json`. The generator derives the
+standalone `dashboard.json` by removing instance filters, then produces
+`dashboard.yaml` and `dashboard.md` for both cluster and standalone variants.
+Do not hand-edit those five derived files.
+
+`grafana/dashboards/events/dashboard.json` and
+`grafana/dashboards/logs/dashboard.json` are not outputs of this generator.
 
 ```bash
 make dashboards
@@ -56,5 +63,8 @@ dependency.
 
 ## License headers
 
-Managed by the license-header tooling and the pre-commit hooks; let the tooling
-add/fix them rather than editing headers by hand.
+License headers are checked by `korandoru/hawkeye@v5` in
+`.github/workflows/checks.yml`; this repository's pre-commit configuration does
+not manage them. Use the current Hawkeye formatter for normal headers. For
+enterprise-gated files, also update both license lists and run
+`make check-enterprise-license`.
