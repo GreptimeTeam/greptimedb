@@ -71,6 +71,18 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
             .context(RegionQuerySnafu)
     }
 
+    async fn do_get_encoded(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+        encoded_plan: Vec<u8>,
+    ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
+        self.do_get_encoded_inner(target, request, encoded_plan)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
+
     async fn handle_remote_dyn_filter_update(
         &self,
         target: &RegionQueryTarget,
@@ -123,6 +135,20 @@ impl FrontendRegionQueryHandler {
             .datanode(target.peer())
             .await
             .handle_query(request)
+            .await
+            .context(RequestQuerySnafu)
+    }
+
+    async fn do_get_encoded_inner(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+        encoded_plan: Vec<u8>,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream> {
+        self.node_manager
+            .datanode(target.peer())
+            .await
+            .handle_query_encoded(request, encoded_plan)
             .await
             .context(RequestQuerySnafu)
     }

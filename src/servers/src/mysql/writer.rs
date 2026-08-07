@@ -230,6 +230,9 @@ impl MysqlResultWriter {
     ) -> Result<()> {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
+        // The session timezone is fixed for the whole query, hoist it out of the
+        // per-cell loop to avoid an RwLock read + `Timezone` clone for every timestamp.
+        let timezone = query_context.timezone();
         let mut timestamp_slots = vec![None; record_batch.num_columns()];
         let mut staged_timestamps = record_batch
             .columns()
@@ -250,7 +253,7 @@ impl MysqlResultWriter {
                 if !column.is_null(i) {
                     let timestamp = datatypes::arrow_array::timestamp_array_value(column, i);
                     let datetime = timestamp
-                        .to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
+                        .to_chrono_datetime_with_timezone(Some(&timezone))
                         .with_context(|| TimestampOverflowSnafu {
                             error: format!(
                                 "timestamp {} overflow with unit {}",
