@@ -12,13 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use protobuf_build::Builder;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use protoc_rust::{Codegen, Customize};
+
+fn usable_protoc(protoc: &Path) -> bool {
+    let Ok(output) = Command::new(protoc).arg("--version").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let Some(version) = std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|output| output.trim().strip_prefix("libprotoc "))
+    else {
+        return false;
+    };
+    let mut components = version.split('.');
+    matches!(
+        (
+            components.next().and_then(|part| part.parse::<u32>().ok()),
+            components.next().and_then(|part| part.parse::<u32>().ok()),
+        ),
+        (Some(major), Some(minor)) if (major, minor) >= (3, 1)
+    )
+}
+
+fn protoc_path() -> PathBuf {
+    if let Some(protoc) = env::var_os("PROTOC") {
+        let protoc = PathBuf::from(protoc);
+        assert!(usable_protoc(&protoc), "PROTOC version not usable");
+        return protoc;
+    }
+
+    let protoc = PathBuf::from("protoc");
+    if usable_protoc(&protoc) {
+        return protoc;
+    }
+
+    protoc_bin_vendored::protoc_bin_path().expect("no bundled protoc for this platform")
+}
 
 fn main() {
-    let base = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    Builder::new()
-        .search_dir_for_protos(&format!("{base}/proto"))
-        .includes(&[format!("{base}/include"), format!("{base}/proto")])
-        .include_google_protos()
-        .generate()
+    let base =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+    let proto_dir = base.join("proto");
+    let proto = proto_dir.join("logstore.proto");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set")).join("protos");
+
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-changed={}", proto.display());
+    std::fs::create_dir_all(&out_dir).expect("failed to create protobuf output directory");
+
+    Codegen::new()
+        .protoc_path(protoc_path())
+        .out_dir(out_dir)
+        .input(proto)
+        .include(proto_dir)
+        .customize(Customize {
+            gen_mod_rs: Some(true),
+            ..Default::default()
+        })
+        .run()
+        .expect("failed to generate log-store protobuf bindings")
 }
