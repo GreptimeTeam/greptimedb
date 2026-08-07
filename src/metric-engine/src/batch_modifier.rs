@@ -18,7 +18,7 @@ use std::sync::Arc;
 use datatypes::arrow::array::{Array, ArrayRef, BinaryBuilder, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::arrow_array::string_array_value_at_index;
+use datatypes::arrow_array::{is_string_null_at, string_array_value_at_index};
 use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use snafu::ResultExt;
@@ -65,9 +65,7 @@ pub fn compute_tsid_array(
 
     let mut tsid_values = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
-        let has_null = tag_arrays
-            .iter()
-            .any(|arr| string_array_value_at_index(arr, row).is_none());
+        let has_null = tag_arrays.iter().any(|arr| is_string_null_at(arr, row));
 
         let tsid = if !has_null {
             let mut hasher = FxHasher::default();
@@ -82,7 +80,7 @@ pub fn compute_tsid_array(
         } else {
             let mut name_hasher = FxHasher::default();
             for (tc, arr) in sorted_tag_columns.iter().zip(tag_arrays.iter()) {
-                if string_array_value_at_index(arr, row).is_some() {
+                if !is_string_null_at(arr, row) {
                     name_hasher.write(tc.name.as_bytes());
                     name_hasher.write_u8(0xff);
                 }
