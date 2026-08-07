@@ -234,7 +234,11 @@ impl Procedure for DropFlowProcedure {
                 self.data.task.flow_id,
                 self.data.task.drop_if_exists,
             ),
-            _ => FlowDdlEvent::drop_lifecycle(),
+            _ => FlowDdlEvent::drop_lifecycle(
+                &self.data.task.catalog_name,
+                &self.data.task.flow_name,
+                self.data.task.flow_id,
+            ),
         };
 
         Some(Box::new(event))

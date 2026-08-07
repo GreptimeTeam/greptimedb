@@ -93,12 +93,12 @@ impl RepartitionEvent {
         }
     }
 
-    pub(crate) fn lifecycle() -> Self {
+    pub(crate) fn lifecycle(persistent_ctx: &RepartitionPersistentContext) -> Self {
         Self {
-            catalog_name: None,
-            schema_name: None,
-            table_name: None,
-            table_id: None,
+            catalog_name: Some(persistent_ctx.catalog_name.clone()),
+            schema_name: Some(persistent_ctx.schema_name.clone()),
+            table_name: Some(persistent_ctx.table_name.clone()),
+            table_id: Some(persistent_ctx.table_id),
             payload: None,
         }
     }
@@ -263,14 +263,14 @@ impl RepartitionGroupEvent {
         }
     }
 
-    pub(crate) fn lifecycle() -> Self {
+    pub(crate) fn lifecycle(persistent_ctx: &GroupPersistentContext) -> Self {
         Self {
-            catalog_name: None,
-            schema_name: None,
-            table_name: None,
-            table_id: None,
-            parent_procedure_id: None,
-            group_id: None,
+            catalog_name: Some(persistent_ctx.catalog_name.clone()),
+            schema_name: Some(persistent_ctx.schema_name.clone()),
+            table_name: persistent_ctx.table_name.clone(),
+            table_id: Some(persistent_ctx.table_id),
+            parent_procedure_id: persistent_ctx.parent_procedure_id.map(|id| id.to_string()),
+            group_id: Some(persistent_ctx.group_id.to_string()),
             topology: None,
             payload: None,
         }
@@ -361,7 +361,7 @@ mod tests {
     use std::time::Duration;
 
     use api::v1::value::ValueData;
-    use api::v1::{ColumnSchema, Row, Value};
+    use api::v1::{ColumnSchema, Row};
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
         PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
@@ -620,22 +620,31 @@ mod tests {
     }
 
     #[test]
-    fn test_lifecycle_events_are_lightweight() {
-        let parent = RepartitionEvent::lifecycle();
+    fn test_lifecycle_events_preserve_locators_and_null_payloads() {
+        let parent_ctx = parent_persistent_ctx();
+        let parent = RepartitionEvent::lifecycle(&parent_ctx);
         assert_event_contract(
             &parent,
             REPARTITION_EVENT_TYPE,
             &parent_schema(),
-            &[null_row(parent_schema().len())],
+            &[Row {
+                values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("public".to_string()).into(),
+                    ValueData::StringValue("repartition_events".to_string()).into(),
+                    ValueData::U32Value(1024).into(),
+                ],
+            }],
         );
         assert_eq!(parent.json_payload().unwrap(), serde_json::Value::Null);
 
-        let group = RepartitionGroupEvent::lifecycle();
+        let group_ctx = new_persistent_context(1024, vec![], vec![]);
+        let group = RepartitionGroupEvent::lifecycle(&group_ctx);
         assert_event_contract(
             &group,
             REPARTITION_GROUP_EVENT_TYPE,
             &group_schema(),
-            &[null_row(group_schema().len())],
+            &[group.extra_row(None)],
         );
         assert_eq!(group.json_payload().unwrap(), serde_json::Value::Null);
     }
@@ -735,14 +744,6 @@ mod tests {
                 ValueData::U32Value(target_region_id.region_number()).into(),
                 ValueData::StringValue(target_partition_expr.to_string()).into(),
             ],
-        }
-    }
-
-    fn null_row(column_count: usize) -> Row {
-        Row {
-            values: (0..column_count)
-                .map(|_| Value { value_data: None })
-                .collect(),
         }
     }
 }

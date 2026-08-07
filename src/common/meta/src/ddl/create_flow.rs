@@ -430,9 +430,16 @@ impl Procedure for CreateFlowProcedure {
                         .or(self.data.flow_id),
                     _ => self.data.flow_id,
                 };
-                FlowDdlEvent::create_succeeded(flow_id)
+                FlowDdlEvent::create_succeeded(
+                    &self.data.task.catalog_name,
+                    &self.data.task.flow_name,
+                    flow_id,
+                )
             }
-            _ => FlowDdlEvent::create_lifecycle(),
+            _ => FlowDdlEvent::create_lifecycle(
+                &self.data.task.catalog_name,
+                &self.data.task.flow_name,
+            ),
         };
 
         Some(Box::new(event))
