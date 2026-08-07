@@ -5586,7 +5586,6 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datafusion-expr",
- "datanode",
  "datatypes",
  "futures",
  "hostname 0.4.1",
@@ -5596,7 +5595,6 @@ dependencies = [
  "lazy_static",
  "log-query",
  "meta-client",
- "meta-srv",
  "num_cpus",
  "opentelemetry-proto 0.31.0",
  "opentelemetry-semantic-conventions 0.31.0",
@@ -14108,6 +14106,7 @@ dependencies = [
 name = "standalone"
 version = "1.3.0"
 dependencies = [
+ "api",
  "async-trait",
  "catalog",
  "client",
@@ -14121,6 +14120,7 @@ dependencies = [
  "common-options",
  "common-procedure",
  "common-query",
+ "common-recordbatch",
  "common-stat",
  "common-telemetry",
  "common-time",
