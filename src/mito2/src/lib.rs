@@ -38,6 +38,7 @@ pub mod gc;
 pub mod manifest;
 pub mod memtable;
 mod metrics;
+pub mod pk_index;
 pub mod read;
 pub mod region;
 mod region_write_ctx;
