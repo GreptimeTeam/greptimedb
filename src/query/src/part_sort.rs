@@ -455,6 +455,13 @@ impl PartSortStream {
         sort_column: &ArrayRef,
         min_max_idx: (usize, usize),
     ) -> datafusion_common::Result<()> {
+        // Rows beyond the last declared partition range are merged into the last
+        // group's output; there is no declared range left to validate them
+        // against, so skip the check.
+        if self.cur_part_idx >= self.partition_ranges.len() {
+            return Ok(());
+        }
+
         // Use the group's effective range instead of the current partition range
         let Some(cur_range) = self.get_current_group_effective_range() else {
             internal_err!(
@@ -480,6 +487,14 @@ impl PartSortStream {
     ///
     /// Returns `None` if no such data is found, and `Some(idx)` where idx points to
     /// the first data that exceeds the current partition range.
+    ///
+    /// NULLs are handled with nulls-last semantics: a NULL has no value and
+    /// therefore belongs to no declared range, so when a batch spans a range
+    /// boundary the split point is moved back to the first NULL preceding the
+    /// boundary. This defers such NULLs (together with the rest of the batch's
+    /// tail) to later ranges instead of attributing them to the current
+    /// (earlier) range's group. NULLs in a batch that is fully contained in the
+    /// current range stay where they are.
     fn try_find_next_range(
         &self,
         sort_column: &ArrayRef,
@@ -488,14 +503,10 @@ impl PartSortStream {
             return Ok(None);
         }
 
-        // check if the current partition index is out of range
+        // All declared ranges are exhausted: any remaining input is tail data
+        // beyond the last range and belongs to the last group's output.
         if self.cur_part_idx >= self.partition_ranges.len() {
-            internal_err!(
-                "Partition index out of range: {} >= {} at {}",
-                self.cur_part_idx,
-                self.partition_ranges.len(),
-                snafu::location!()
-            )?;
+            return Ok(None);
         }
         let cur_range = project_partition_range_for_sort(
             self.partition_ranges[self.cur_part_idx],
@@ -509,17 +520,34 @@ impl PartSortStream {
                 sort_column.data_type()
             )?,
         );
+        let values: Vec<(usize, Option<i64>)> = sort_column_iter.collect();
 
-        for (idx, val) in sort_column_iter {
-            // ignore vacant time index data
+        // Find the first non-null value that falls outside the current range.
+        let mut first_out_of_range = None;
+        for (idx, val) in &values {
             if let Some(val) = val
-                && (val >= cur_range.end.value() || val < cur_range.start.value())
+                && (*val >= cur_range.end.value() || *val < cur_range.start.value())
             {
-                return Ok(Some(idx));
+                first_out_of_range = Some(*idx);
+                break;
+            }
+        }
+        let Some(idx) = first_out_of_range else {
+            return Ok(None);
+        };
+
+        // Nulls-last: defer NULLs that precede the range boundary to the later
+        // range (they are part of the batch tail that moves past the boundary).
+        for (i, val) in &values {
+            if *i >= idx {
+                break;
+            }
+            if val.is_none() {
+                return Ok(Some(*i));
             }
         }
 
-        Ok(None)
+        Ok(Some(idx))
     }
 
     fn push_buffer(
@@ -888,23 +916,39 @@ impl PartSortStream {
         }
 
         if check_range {
-            self.check_in_range(
-                &sort_column,
-                (
-                    indices.value(0) as usize,
-                    indices.value(indices.len() - 1) as usize,
-                ),
-            )
-            .inspect_err(|_e| {
-                #[cfg(debug_assertions)]
-                common_telemetry::error!(
-                    "Fail to check sort column in range at {}, current_idx: {}, num_rows: {}, err: {}",
-                    self.partition,
-                    self.cur_part_idx,
-                    sort_column.len(),
-                    _e
-                );
-            })?;
+            // Skip NULL slots when locating the sorted extremes: reading a NULL
+            // slot via `value()` yields a garbage value and would distort the
+            // in-range validation. An all-NULL sort column has no value to
+            // validate against the partition range.
+            let mut first_nn = 0;
+            while first_nn < indices.len() && sort_column.is_null(indices.value(first_nn) as usize)
+            {
+                first_nn += 1;
+            }
+            let mut last_nn = indices.len();
+            while last_nn > first_nn && sort_column.is_null(indices.value(last_nn - 1) as usize) {
+                last_nn -= 1;
+            }
+
+            if first_nn < last_nn {
+                self.check_in_range(
+                    &sort_column,
+                    (
+                        indices.value(first_nn) as usize,
+                        indices.value(last_nn - 1) as usize,
+                    ),
+                )
+                .inspect_err(|_e| {
+                    #[cfg(debug_assertions)]
+                    common_telemetry::error!(
+                        "Fail to check sort column in range at {}, current_idx: {}, num_rows: {}, err: {}",
+                        self.partition,
+                        self.cur_part_idx,
+                        sort_column.len(),
+                        _e
+                    );
+                })?;
+            }
         }
 
         // reserve memory for the concat input and sorted output
@@ -1038,10 +1082,16 @@ impl PartSortStream {
         // Step to next proper PartitionRange
         self.cur_part_idx += 1;
 
-        // If we've processed all partitions, mark completion.
+        // If we've processed all partitions, any remaining rows are tail data
+        // beyond the last declared range: merge them into the last group's
+        // buffer instead of silently dropping them. We must NOT mark the input
+        // complete here, because more tail rows may still arrive from upstream
+        // and they are all part of the result (the top-k buffer stays bounded
+        // by the limit through compaction).
         if self.cur_part_idx >= self.partition_ranges.len() {
-            debug_assert!(remaining_range.num_rows() == 0);
-            self.input_complete = true;
+            if remaining_range.num_rows() != 0 {
+                self.push_buffer(remaining_range, sort_column.data_type())?;
+            }
             return Ok(());
         }
 
@@ -1101,10 +1151,13 @@ impl PartSortStream {
         // Step to next proper PartitionRange
         self.cur_part_idx += 1;
 
-        // If we've processed all partitions, sort and output
+        // If we've processed all partitions, merge any remaining rows (tail data
+        // beyond the last declared range) into the last group's buffer instead
+        // of silently dropping them, then sort and output the final group.
         if self.cur_part_idx >= self.partition_ranges.len() {
-            // assert there is no data beyond the last partition range (remaining is empty).
-            debug_assert!(remaining_range.num_rows() == 0);
+            if remaining_range.num_rows() != 0 {
+                self.push_buffer(remaining_range, sort_column.data_type())?;
+            }
 
             // Sort and output the final group
             return self.sorted_buffer_if_non_empty();
@@ -1166,17 +1219,9 @@ impl PartSortStream {
             if let Some(evaluating_batch) = self.evaluating_batch.take()
                 && evaluating_batch.num_rows() != 0
             {
-                // Check if we've already processed all partitions
-                if self.cur_part_idx >= self.partition_ranges.len() {
-                    // All partitions processed, discard remaining data
-                    if let Some(sorted_batch) = self.sorted_buffer_if_non_empty()? {
-                        self.mark_dynamic_filter_complete();
-                        return Poll::Ready(Some(Ok(sorted_batch)));
-                    }
-                    self.mark_dynamic_filter_complete();
-                    return Poll::Ready(None);
-                }
-
+                // When all declared ranges are exhausted the batch is tail data
+                // beyond the last range: `split_batch` merges it into the last
+                // group's buffer instead of discarding it.
                 if let Some(sorted_batch) = self.split_batch(evaluating_batch)? {
                     return Poll::Ready(Some(Ok(sorted_batch)));
                 }
@@ -3116,6 +3161,346 @@ mod test {
             Some(2),
             expected_output,
             Some(7), // Must read to detect early stop condition
+        )
+        .await;
+    }
+
+    /// Test that rows whose sort values exceed the last declared partition range
+    /// are not silently dropped: they are merged into the last group's output.
+    ///
+    /// This covers two states:
+    /// - without a limit, every row (including the out-of-range tail) must appear
+    ///   in the output;
+    /// - with a limit, tail rows that fit into the top-k must be kept instead of
+    ///   being discarded when the last declared range is exhausted.
+    #[tokio::test]
+    async fn rows_beyond_last_partition_range_are_not_dropped() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+
+        // Ranges: [0,10) and [10,20). The second (last) partition streams two
+        // batches whose tail values (20, 25, 30) exceed the last declared range
+        // [10,20): the first batch triggers the range-exhaustion point, and the
+        // second batch is a pure out-of-range tail batch.
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
+                    num_rows: 2,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![1, 2])])
+                        .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 5,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![10, 12, 20])],
+                    )
+                    .unwrap(),
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![25, 30])])
+                        .unwrap(),
+                ],
+            ),
+        ];
+
+        // Without a limit every row must show up in the output.
+        let expected_output = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![1, 2, 10, 12, 20, 25, 30])],
+            )
+            .unwrap(),
+        );
+        run_test(
+            4000,
+            input_ranged_data.clone(),
+            schema.clone(),
+            SortOptions {
+                descending: false,
+                ..Default::default()
+            },
+            None,
+            expected_output,
+            None,
+        )
+        .await;
+
+        // With a limit, tail rows that qualify for the top-k must be kept
+        // (only 30 is dropped, and only because of the limit).
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
+                    num_rows: 2,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, vec![1, 2])])
+                        .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 5,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_ts_array(unit, vec![10, 12, 20, 25, 30])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+        let expected_output = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_ts_array(unit, vec![1, 2, 10, 12, 20, 25])],
+            )
+            .unwrap(),
+        );
+        run_test(
+            4001,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: false,
+                ..Default::default()
+            },
+            Some(6),
+            expected_output,
+            None,
+        )
+        .await;
+    }
+
+    /// Test that NULL timestamps in a later partition's batch are attributed to
+    /// the later (last) group instead of leaking into an earlier group, so the
+    /// global output order keeps NULLs at the end.
+    ///
+    /// The sort column is nullable: a NULL has no value and therefore belongs to
+    /// no declared range. With nulls-last semantics it is deferred past the
+    /// range boundary together with the batch tail, so it lands in the last
+    /// group (at the very end of the output when the sort declares NULLS LAST).
+    /// The within-group ordering still honors the user-declared null ordering,
+    /// so with the default nulls_first the NULL is deferred to the last group
+    /// without leaking into an earlier one.
+    #[tokio::test]
+    async fn null_timestamps_in_later_partition_sort_last() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            true, // nullable
+        )]));
+
+        let new_nullable_ts_array = |unit: TimeUnit, arr: Vec<Option<i64>>| -> ArrayRef {
+            match unit {
+                TimeUnit::Second => Arc::new(TimestampSecondArray::from(arr)) as ArrayRef,
+                TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(arr)) as ArrayRef,
+                TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(arr)) as ArrayRef,
+                TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(arr)) as ArrayRef,
+            }
+        };
+
+        // Case 1: ascending, NULLS LAST. The later partition's batch is
+        // [NULL, 12]: the NULL precedes the range boundary and must not be
+        // attributed to the first range's group.
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
+                    num_rows: 2,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![Some(1), Some(5)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 2,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![None, Some(12)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        let expected_output = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_nullable_ts_array(
+                    unit,
+                    vec![Some(1), Some(5), Some(12), None],
+                )],
+            )
+            .unwrap(),
+        );
+        run_test(
+            4002,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: false,
+                nulls_first: false,
+            },
+            None,
+            expected_output,
+            None,
+        )
+        .await;
+
+        // Case 2: descending, NULLS LAST. The later partition's batch is
+        // [NULL, 5, 3]: the NULL precedes the range boundary and must end up at
+        // the very end of the global output.
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 2,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![Some(15), Some(18)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![None, Some(5), Some(3)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        let expected_output = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_nullable_ts_array(
+                    unit,
+                    vec![Some(18), Some(15), Some(5), Some(3), None],
+                )],
+            )
+            .unwrap(),
+        );
+        run_test(
+            4003,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+            None,
+            expected_output,
+            None,
+        )
+        .await;
+
+        // Case 3: descending with the DEFAULT sort options (nulls_first=true).
+        // The later partition's batch is [NULL, 5, 3]: the fix must still defer
+        // the NULL to the LAST group instead of leaking it into the first
+        // group; within the last group the default null ordering applies, so
+        // the NULL appears at the front of the last group's output.
+        let input_ranged_data = vec![
+            (
+                PartitionRange {
+                    start: Timestamp::new(10, unit.into()),
+                    end: Timestamp::new(20, unit.into()),
+                    num_rows: 2,
+                    identifier: 0,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![Some(15), Some(18)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                PartitionRange {
+                    start: Timestamp::new(0, unit.into()),
+                    end: Timestamp::new(10, unit.into()),
+                    num_rows: 3,
+                    identifier: 1,
+                },
+                vec![
+                    DfRecordBatch::try_new(
+                        schema.clone(),
+                        vec![new_nullable_ts_array(unit, vec![None, Some(5), Some(3)])],
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+
+        let expected_output = Some(
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![new_nullable_ts_array(
+                    unit,
+                    vec![Some(18), Some(15), None, Some(5), Some(3)],
+                )],
+            )
+            .unwrap(),
+        );
+        run_test(
+            4004,
+            input_ranged_data,
+            schema.clone(),
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            None,
+            expected_output,
+            None,
         )
         .await;
     }
