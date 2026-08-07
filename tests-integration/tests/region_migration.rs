@@ -1367,7 +1367,7 @@ async fn check_region_migration_events_system_table(
 
     let expected = "\
 +---------------------------------+-----------------+-------------------+---------------------+
-| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context     |
+| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context       |
 +---------------------------------+-----------------+-------------------+---------------------+
 | Manual                          | Running         | Submitted         | {\"reason\":\"manual\"} |
 | Manual                          | Done            | Succeeded         |                     |
