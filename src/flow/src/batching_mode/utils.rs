@@ -969,12 +969,22 @@ pub(crate) async fn gen_plan_with_matching_schema(
 }
 
 pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
-    /// A dialect that forces identifiers to be quoted when have uppercase
+    /// A dialect that forces identifiers to be quoted when they contain
+    /// anything other than lowercase alphanumerics and underscores.
+    ///
+    /// Unquoted identifiers are normalized to lowercase by the SQL parser, so
+    /// uppercase letters need quoting to preserve case. Special characters
+    /// (e.g. ':' in Prometheus-style table names like
+    /// `kube_pod_cpu_cores:sum`, '.', '-', spaces, keywords) would produce
+    /// invalid SQL if left unquoted, so they are quoted as well.
     struct ForceQuoteIdentifiers;
     impl datafusion::sql::unparser::dialect::Dialect for ForceQuoteIdentifiers {
         fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
-            if identifier.to_lowercase() != identifier {
-                Some('`')
+            if identifier
+                .chars()
+                .any(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            {
+                Some('"')
             } else {
                 None
             }
