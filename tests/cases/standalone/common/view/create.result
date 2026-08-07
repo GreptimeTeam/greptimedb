@@ -88,7 +88,10 @@ Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_cat
 -- SQLNESS REPLACE (\s\d+\s) ID
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
 -- SQLNESS REPLACE [\u0020\-]+
-SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
+SELECT *
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA != 'greptime_private'
+ORDER BY TABLE_NAME, TABLE_TYPE;
 
 +++++++++++++++++++++++++
 |table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|temporary|
