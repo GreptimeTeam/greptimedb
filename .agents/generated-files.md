@@ -64,7 +64,5 @@ dependency.
 ## License headers
 
 License headers are checked by `korandoru/hawkeye@v5` in
-`.github/workflows/checks.yml`; this repository's pre-commit configuration does
-not manage them. Use the current Hawkeye formatter for normal headers. For
-enterprise-gated files, also update both license lists and run
-`make check-enterprise-license`.
+`.github/workflows/checks.yml`. For enterprise-gated files, also update both
+license lists and run `make check-enterprise-license`.
