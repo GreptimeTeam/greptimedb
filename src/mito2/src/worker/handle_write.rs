@@ -35,6 +35,7 @@ use crate::metrics::{
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
+use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -110,35 +111,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_wal"])
                 .start_timer();
-            let mut wal_writer = self.wal.writer();
-            for region_ctx in region_ctxs.values_mut() {
-                if region_ctx.skip_wal() {
-                    continue;
-                }
-                if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
-                    region_ctx.set_error(e);
-                }
-            }
-            match wal_writer.write_to_wal().await.map_err(Arc::new) {
-                Ok(response) => {
-                    for (region_id, region_ctx) in region_ctxs.iter_mut() {
-                        if region_ctx.skip_wal() {
-                            continue;
-                        }
-
-                        // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
-                        // response is returned or the last entry ids for each region do exist.
-                        let last_entry_id = response.last_entry_ids.get(region_id).unwrap();
-                        region_ctx.set_next_entry_id(last_entry_id + 1);
-                    }
-                }
-                Err(e) => {
-                    // Failed to write wal.
-                    for mut region_ctx in region_ctxs.into_values() {
-                        region_ctx.set_error(e.clone());
-                    }
-                    return;
-                }
+            if !write_wal(&self.wal, &mut region_ctxs).await {
+                // Failed to write to the WAL, all waiters are notified with the error.
+                return;
             }
         }
 
@@ -625,6 +600,55 @@ impl<S> RegionWorkerLoop<S> {
     }
 }
 
+/// Writes WAL entries of all region contexts to the WAL in one batch and updates
+/// the next entry id of each region on success.
+///
+/// Returns `false` if the batch fails to be written to the WAL. In this case all
+/// contexts are consumed and their waiters are notified with the error, so the
+/// caller should skip the memtable phase.
+async fn write_wal<S: LogStore>(
+    wal: &Wal<S>,
+    region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
+) -> bool {
+    let mut wal_writer = wal.writer();
+    for region_ctx in region_ctxs.values_mut() {
+        if region_ctx.skip_wal() {
+            continue;
+        }
+        if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
+            region_ctx.set_error(e);
+        }
+    }
+    match wal_writer.write_to_wal().await.map_err(Arc::new) {
+        Ok(response) => {
+            for (region_id, region_ctx) in region_ctxs.iter_mut() {
+                if region_ctx.skip_wal() {
+                    continue;
+                }
+                // The entry of a failed region (e.g. failed to build its WAL entry) is
+                // not in the batch so the response has no last entry id for it. Its
+                // waiters are already notified with the error.
+                if region_ctx.is_failed() {
+                    continue;
+                }
+
+                // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
+                // response is returned or the last entry ids for each region in the batch do exist.
+                let last_entry_id = response.last_entry_ids.get(region_id).unwrap();
+                region_ctx.set_next_entry_id(last_entry_id + 1);
+            }
+            true
+        }
+        Err(e) => {
+            // Failed to write wal.
+            for (_, mut region_ctx) in region_ctxs.drain() {
+                region_ctx.set_error(e.clone());
+            }
+            false
+        }
+    }
+}
+
 /// Send rejected error to all `write_requests`.
 fn reject_write_requests(
     write_requests: &mut Vec<SenderWriteRequest>,
@@ -706,4 +730,209 @@ fn check_partition_expr_version(
         .fail();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::{Row, Rows};
+    use futures::stream;
+    use log_store::error::{
+        Error as LogStoreError, IllegalStateSnafu, InvalidProviderSnafu, Result as LogStoreResult,
+    };
+    use store_api::logstore::entry::{Entry, NaiveEntry};
+    use store_api::logstore::provider::Provider;
+    use store_api::logstore::{AppendBatchResponse, EntryId, SendableEntryStream, WalIndex};
+    use store_api::region_request::AffectedRows;
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::request::OptionOutputTx;
+    use crate::test_util::version_util::VersionControlBuilder;
+
+    /// A log store that fails to build entries for `failing_region` and fails the
+    /// whole batch when `fail_append` is true.
+    #[derive(Debug, Default)]
+    struct MockLogStore {
+        failing_region: Option<RegionId>,
+        fail_append: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LogStore for MockLogStore {
+        type Error = LogStoreError;
+
+        async fn stop(&self) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        async fn append_batch(&self, entries: Vec<Entry>) -> LogStoreResult<AppendBatchResponse> {
+            if self.fail_append {
+                return IllegalStateSnafu {}.fail();
+            }
+            let mut last_entry_ids = HashMap::new();
+            for entry in &entries {
+                let last_entry_id = last_entry_ids.entry(entry.region_id()).or_insert(0);
+                *last_entry_id = entry.entry_id().max(*last_entry_id);
+            }
+            Ok(AppendBatchResponse { last_entry_ids })
+        }
+
+        async fn read(
+            &self,
+            _provider: &Provider,
+            _entry_id: EntryId,
+            _index: Option<WalIndex>,
+        ) -> LogStoreResult<SendableEntryStream<'static, Entry, Self::Error>> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn create_namespace(&self, _ns: &Provider) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        async fn delete_namespace(&self, _ns: &Provider) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        async fn list_namespaces(&self) -> LogStoreResult<Vec<Provider>> {
+            Ok(vec![])
+        }
+
+        async fn obsolete(
+            &self,
+            _provider: &Provider,
+            _region_id: RegionId,
+            _entry_id: EntryId,
+        ) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        async fn obsolete_all(
+            &self,
+            _provider: &Provider,
+            _region_id: RegionId,
+        ) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        fn entry(
+            &self,
+            data: Vec<u8>,
+            entry_id: EntryId,
+            region_id: RegionId,
+            provider: &Provider,
+        ) -> LogStoreResult<Entry> {
+            if self.failing_region == Some(region_id) {
+                return InvalidProviderSnafu {
+                    expected: "raft_engine",
+                    actual: "mock",
+                }
+                .fail();
+            }
+            Ok(Entry::Naive(NaiveEntry {
+                provider: provider.clone(),
+                region_id,
+                entry_id,
+                data,
+            }))
+        }
+
+        fn latest_entry_id(&self, _provider: &Provider) -> LogStoreResult<EntryId> {
+            Ok(0)
+        }
+    }
+
+    /// Creates a write context for `region_id` with one pending mutation of one row.
+    fn new_region_ctx(
+        region_id: RegionId,
+    ) -> (RegionWriteCtx, oneshot::Receiver<Result<AffectedRows>>) {
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        ctx.push_mutation(
+            OpType::Put as i32,
+            Some(Rows {
+                schema: vec![],
+                rows: vec![Row { values: vec![] }],
+            }),
+            None,
+            OptionOutputTx::from(tx),
+            None,
+        );
+        (ctx, rx)
+    }
+
+    #[tokio::test]
+    async fn test_write_wal_skips_region_failed_to_build_entry() {
+        let failing_region = RegionId::new(1, 1);
+        let ok_region = RegionId::new(1, 2);
+        let wal = Wal::new(Arc::new(MockLogStore {
+            failing_region: Some(failing_region),
+            ..Default::default()
+        }));
+
+        let mut region_ctxs = HashMap::new();
+        let (ctx, failing_rx) = new_region_ctx(failing_region);
+        region_ctxs.insert(failing_region, ctx);
+        let (ctx, ok_rx) = new_region_ctx(ok_region);
+        region_ctxs.insert(ok_region, ctx);
+        let entry_id = region_ctxs[&ok_region].next_entry_id();
+
+        // The failed region must not fail the batch or panic the worker.
+        assert!(write_wal(&wal, &mut region_ctxs).await);
+
+        assert!(region_ctxs[&failing_region].is_failed());
+        assert!(!region_ctxs[&ok_region].is_failed());
+        assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
+
+        // Waiters of the failed region get the error while others get the result.
+        drop(region_ctxs);
+        assert!(failing_rx.await.unwrap().is_err());
+        assert_eq!(1, ok_rx.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_write_wal_all_regions_failed_to_build_entries() {
+        let failing_region = RegionId::new(1, 1);
+        let wal = Wal::new(Arc::new(MockLogStore {
+            failing_region: Some(failing_region),
+            ..Default::default()
+        }));
+
+        let mut region_ctxs = HashMap::new();
+        let (ctx, rx) = new_region_ctx(failing_region);
+        region_ctxs.insert(failing_region, ctx);
+
+        // Writing an empty batch to the WAL succeeds, the failed region must not panic
+        // the worker.
+        assert!(write_wal(&wal, &mut region_ctxs).await);
+
+        assert!(region_ctxs[&failing_region].is_failed());
+        drop(region_ctxs);
+        assert!(rx.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_wal_append_batch_failure() {
+        let region_id = RegionId::new(1, 1);
+        let wal = Wal::new(Arc::new(MockLogStore {
+            fail_append: true,
+            ..Default::default()
+        }));
+
+        let mut region_ctxs = HashMap::new();
+        let (ctx, rx) = new_region_ctx(region_id);
+        region_ctxs.insert(region_id, ctx);
+
+        assert!(!write_wal(&wal, &mut region_ctxs).await);
+
+        // All contexts are consumed and waiters are notified with the error.
+        assert!(region_ctxs.is_empty());
+        assert!(rx.await.unwrap().is_err());
+    }
 }
