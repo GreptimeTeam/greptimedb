@@ -63,15 +63,15 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, NativeHistogramAbsentOverTime,
-    NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
-    NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDrop,
-    NativeHistogramFraction, NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramPresentOverTime, NativeHistogramQuantile,
-    NativeHistogramRate, NativeHistogramResets, NativeHistogramStddev, NativeHistogramStdvar,
-    NativeHistogramSum, NativeHistogramSumOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
-    quantile_udaf,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    NativeHistogramAbsentOverTime, NativeHistogramAvg, NativeHistogramAvgOverTime,
+    NativeHistogramChanges, NativeHistogramCount, NativeHistogramCountOverTime,
+    NativeHistogramDelta, NativeHistogramDrop, NativeHistogramFraction, NativeHistogramIDelta,
+    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
+    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramStddev, NativeHistogramStdvar, NativeHistogramSum,
+    NativeHistogramSumOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets,
+    Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -2833,6 +2833,90 @@ impl PromPlanner {
         Ok(result)
     }
 
+    fn create_mixed_range_function_exprs(
+        &mut self,
+        func: &Function,
+        mut other_input_exprs: VecDeque<DfExpr>,
+        float_field: &str,
+        histogram_field: &str,
+    ) -> Result<Option<Vec<DfExpr>>> {
+        let returns_histogram = matches!(
+            func.name,
+            "rate"
+                | "increase"
+                | "delta"
+                | "idelta"
+                | "irate"
+                | "avg_over_time"
+                | "sum_over_time"
+                | "last_over_time"
+        );
+        if !returns_histogram
+            && !matches!(
+                func.name,
+                "changes"
+                    | "resets"
+                    | "deriv"
+                    | "min_over_time"
+                    | "max_over_time"
+                    | "count_over_time"
+                    | "absent_over_time"
+                    | "present_over_time"
+                    | "stddev_over_time"
+                    | "stdvar_over_time"
+                    | "quantile_over_time"
+                    | "predict_linear"
+                    | "double_exponential_smoothing"
+                    | "holt_winters"
+            )
+        {
+            return Ok(None);
+        }
+
+        if func.name == "predict_linear" {
+            other_input_exprs[0] = DfExpr::Cast(Cast {
+                expr: Box::new(other_input_exprs[0].clone()),
+                data_type: ArrowDataType::Int64,
+            });
+        }
+
+        let mut args = Vec::with_capacity(other_input_exprs.len() + 6);
+        args.push(lit(func.name));
+        args.push(DfExpr::Column(Column::from_name(
+            RangeManipulate::build_timestamp_range_name(
+                self.ctx.time_index_column.as_ref().unwrap(),
+            ),
+        )));
+        args.push(DfExpr::Column(Column::from_name(float_field)));
+        args.push(DfExpr::Column(Column::from_name(histogram_field)));
+        args.extend(other_input_exprs);
+        if matches!(func.name, "rate" | "increase" | "delta") {
+            args.push(self.create_time_index_column_expr()?);
+            args.push(lit(self.ctx.range.context(ExpectRangeSelectorSnafu)?));
+        }
+
+        let float_expr = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(MixedRange::float_udf(self.promql_annotations.clone())),
+            args: args.clone(),
+        });
+        let exprs = if returns_histogram {
+            self.ctx.field_columns = vec![float_field.to_string(), histogram_field.to_string()];
+            vec![
+                float_expr.alias(float_field),
+                DfExpr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(MixedRange::histogram_udf(self.promql_annotations.clone())),
+                    args,
+                })
+                .alias(histogram_field),
+            ]
+        } else {
+            let display_name = float_expr.schema_name().to_string();
+            self.ctx.field_columns = vec![display_name.clone()];
+            vec![float_expr.alias(display_name)]
+        };
+        Ok(Some(exprs))
+    }
+
     /// Creates function expressions for projection and returns the expressions and new tags.
     ///
     /// # Side Effects
@@ -2847,6 +2931,18 @@ impl PromPlanner {
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
+        if let Some((float_field, histogram_field)) =
+            Self::alternative_sample_range_columns(input_schema, &self.ctx.field_columns)
+                .map(|(float, histogram)| (float.to_string(), histogram.to_string()))
+            && let Some(exprs) = self.create_mixed_range_function_exprs(
+                func,
+                other_input_exprs.clone(),
+                &float_field,
+                &histogram_field,
+            )?
+        {
+            return Ok((exprs, vec![]));
+        }
         let alternative_samples =
             Self::field_columns_are_alternative_samples(input_schema, &self.ctx.field_columns);
         let all_field_columns_are_native_histogram_ranges =
@@ -4444,6 +4540,17 @@ impl PromPlanner {
             .is_some_and(|data_type| data_type == &Self::native_histogram_arrow_type())
     }
 
+    fn field_column_is_float_range(schema: &DFSchemaRef, field_column: &str) -> bool {
+        Self::field_column_type(schema, field_column).is_some_and(|data_type| {
+            matches!(
+                data_type,
+                ArrowDataType::Dictionary(key_type, value_type)
+                    if key_type.as_ref() == &ArrowDataType::Int64
+                        && value_type.as_ref() == &ArrowDataType::Float64
+            )
+        })
+    }
+
     fn field_columns_are_alternative_samples(
         schema: &DFSchemaRef,
         field_columns: &[String],
@@ -4461,11 +4568,13 @@ impl PromPlanner {
 
         let canonical_float = field_columns.iter().find(|field| {
             field.as_str() == greptime_value()
-                && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+                && (Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+                    || Self::field_column_is_float_range(schema, field))
         });
         let canonical_histogram = field_columns.iter().find(|field| {
             field.as_str() == greptime_native_histogram()
-                && Self::field_column_is_native_histogram(schema, field)
+                && (Self::field_column_is_native_histogram(schema, field)
+                    || Self::field_column_is_native_histogram_range(schema, field))
         });
         if let (Some(float), Some(histogram)) = (canonical_float, canonical_histogram) {
             return Some((float, histogram));
@@ -4473,21 +4582,34 @@ impl PromPlanner {
 
         let float = field_columns.iter().find(|field| {
             field.starts_with(OR_FLOAT_FIELD_PREFIX)
-                && Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+                && (Self::field_column_type(schema, field) == Some(&ArrowDataType::Float64)
+                    || Self::field_column_is_float_range(schema, field))
         })?;
         let histogram = field_columns.iter().find(|field| {
             field.starts_with(OR_HISTOGRAM_FIELD_PREFIX)
-                && Self::field_column_is_native_histogram(schema, field)
+                && (Self::field_column_is_native_histogram(schema, field)
+                    || Self::field_column_is_native_histogram_range(schema, field))
         })?;
         Some((float, histogram))
+    }
+
+    fn alternative_sample_range_columns<'a>(
+        schema: &DFSchemaRef,
+        field_columns: &'a [String],
+    ) -> Option<(&'a str, &'a str)> {
+        Self::alternative_sample_columns(schema, field_columns).filter(|(float, histogram)| {
+            Self::field_column_is_float_range(schema, float)
+                && Self::field_column_is_native_histogram_range(schema, histogram)
+        })
     }
 
     fn field_column_is_native_histogram_range(schema: &DFSchemaRef, field_column: &str) -> bool {
         Self::field_column_type(schema, field_column).is_some_and(|data_type| {
             matches!(
                 data_type,
-                ArrowDataType::Dictionary(_, value_type)
-                    if value_type.as_ref() == &Self::native_histogram_arrow_type()
+                ArrowDataType::Dictionary(key_type, value_type)
+                    if key_type.as_ref() == &ArrowDataType::Int64
+                        && value_type.as_ref() == &Self::native_histogram_arrow_type()
             )
         })
     }
@@ -5617,7 +5739,10 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::prelude::{greptime_native_histogram, greptime_timestamp};
+    use common_query::native_histogram::{
+        CounterResetHint, NativeHistogram, build_histogram_array,
+    };
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_query::test_util::DummyDecoder;
     use datafusion::arrow::array::{
         Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
@@ -5788,6 +5913,23 @@ mod test {
                 Self::Int64(v) => Arc::new(Int64Array::from(vec![*v])),
                 Self::Utf8(v) => Arc::new(StringArray::from(vec![*v])),
             }
+        }
+    }
+
+    fn direct_or_histogram() -> NativeHistogram {
+        NativeHistogram {
+            schema: 0,
+            zero_threshold: 0.0,
+            sum: 1.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: vec![],
+            positive_spans: vec![],
+            negative_spans: vec![],
+            count: 1.0,
+            zero_count: 1.0,
+            positive_buckets: vec![],
+            negative_buckets: vec![],
         }
     }
 
@@ -8919,6 +9061,175 @@ mod test {
             let plan = native_histogram_plan(query).await;
             assert!(plan.contains(expected_udf), "{query}\n{plan}");
         }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_histogram_ranges_use_coordinated_udfs() {
+        let dual_output = [
+            "increase(some_metric[5m])",
+            "rate(some_metric[5m])",
+            "delta(some_metric[5m])",
+            "idelta(some_metric[5m])",
+            "irate(some_metric[5m])",
+            "avg_over_time(some_metric[5m])",
+            "sum_over_time(some_metric[5m])",
+            "last_over_time(some_metric[5m])",
+        ];
+        let float_output = [
+            "resets(some_metric[5m])",
+            "changes(some_metric[5m])",
+            "deriv(some_metric[5m])",
+            "min_over_time(some_metric[5m])",
+            "max_over_time(some_metric[5m])",
+            "count_over_time(some_metric[5m])",
+            "absent_over_time(some_metric[5m])",
+            "present_over_time(some_metric[5m])",
+            "stddev_over_time(some_metric[5m])",
+            "stdvar_over_time(some_metric[5m])",
+            "quantile_over_time(0.9, some_metric[5m])",
+            "predict_linear(some_metric[5m], 60)",
+            "double_exponential_smoothing(some_metric[5m], 0.5, 0.5)",
+        ];
+
+        for query in dual_output.iter().chain(float_output.iter()) {
+            let plan = PromPlanner::stmt_to_plan(
+                build_test_mixed_native_histogram_table_provider("some_metric").await,
+                &build_eval_stmt(query),
+                &build_query_engine_state(),
+            )
+            .await
+            .unwrap()
+            .display_indent_schema()
+            .to_string();
+            assert!(plan.contains("prom_mixed_range_float"), "{query}\n{plan}");
+            assert_eq!(
+                plan.contains("prom_mixed_range_histogram"),
+                dual_output.contains(query),
+                "{query}\n{plan}"
+            );
+        }
+
+        let plan = PromPlanner::stmt_to_plan(
+            build_test_mixed_native_histogram_table_provider("some_metric").await,
+            &build_eval_stmt("sum_over_time(rate(some_metric[5m])[10m:1m])"),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap()
+        .display_indent_schema()
+        .to_string();
+        let expected = r#"Filter: greptime_value IS NOT NULL OR greptime_native_histogram IS NOT NULL [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+  Projection: some_metric.timestamp, prom_mixed_range_float(Utf8("sum_over_time"), timestamp_range, greptime_value, greptime_native_histogram) AS greptime_value, prom_mixed_range_histogram(Utf8("sum_over_time"), timestamp_range, greptime_value, greptime_native_histogram) AS greptime_native_histogram, some_metric.tag_0 [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=["greptime_value", "greptime_native_histogram"] [timestamp:Timestamp(ms), greptime_value:Dictionary(Int64, Float64);N, greptime_native_histogram:Dictionary(Int64, Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64)));N, tag_0:Utf8, timestamp_range:Dictionary(Int64, Timestamp(ms))]
+      PromSeriesDivide: tags=["tag_0"] [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+        Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+          Filter: greptime_value IS NOT NULL OR greptime_native_histogram IS NOT NULL [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+            Projection: some_metric.timestamp, prom_mixed_range_float(Utf8("rate"), timestamp_range, greptime_value, greptime_native_histogram, some_metric.timestamp, Int64(300000)) AS greptime_value, prom_mixed_range_histogram(Utf8("rate"), timestamp_range, greptime_value, greptime_native_histogram, some_metric.timestamp, Int64(300000)) AS greptime_native_histogram, some_metric.tag_0 [timestamp:Timestamp(ms), greptime_value:Float64;N, greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, tag_0:Utf8]
+              PromRangeManipulate: req range=[-540000..100000000], interval=[60000], eval range=[300000], time index=[timestamp], values=["greptime_native_histogram", "greptime_value"] [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Dictionary(Int64, Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64)));N, greptime_value:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]
+                PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]
+                  PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]
+                    Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]
+                      Filter: some_metric.timestamp >= TimestampMillisecond(-839999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]
+                        TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(UInt32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(UInt32), "count_u64": UInt64, "zero_count_u64": UInt64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]"#;
+        assert_eq!(plan, expected);
+    }
+
+    #[tokio::test]
+    async fn mixed_native_histogram_rate_executes_real_ranges() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(greptime_value(), ArrowDataType::Float64, true),
+            Field::new(
+                greptime_native_histogram(),
+                native_histogram_value_type().as_arrow_type(),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                Arc::new(Float64Array::from(vec![Some(1.0), None, Some(3.0)])),
+                build_histogram_array(&[None, Some(direct_or_histogram()), None]),
+            ],
+        )
+        .unwrap();
+        let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+        let input = LogicalPlanBuilder::scan("mixed", provider_as_source(table), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let collector = PromqlAnnotationCollector::default();
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext {
+                start: 3000,
+                end: 3000,
+                interval: 1000,
+                range: Some(3000),
+                time_index_column: Some("timestamp".to_string()),
+                field_columns: vec![
+                    greptime_native_histogram().to_string(),
+                    greptime_value().to_string(),
+                ],
+                ..Default::default()
+            },
+            promql_annotations: Some(collector.clone()),
+        };
+        let input = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RangeManipulate::new(
+                    3000,
+                    3000,
+                    1000,
+                    3000,
+                    "timestamp".to_string(),
+                    planner.ctx.field_columns.clone(),
+                    input,
+                )
+                .unwrap(),
+            ),
+        });
+        let PromExpr::Call(call) = parser::parse("rate(mixed[3s])").unwrap() else {
+            unreachable!()
+        };
+        let preserve_any_value = PromPlanner::field_columns_are_alternative_samples(
+            input.schema(),
+            &planner.ctx.field_columns,
+        );
+        let state = build_query_engine_state();
+        let (mut exprs, _) = planner
+            .create_function_expr(&call.func, vec![], input.schema(), &state)
+            .unwrap();
+        exprs.insert(0, planner.create_time_index_column_expr().unwrap());
+        let plan = LogicalPlanBuilder::from(input)
+            .project(exprs)
+            .unwrap()
+            .filter(
+                planner
+                    .create_empty_values_filter_expr(preserve_any_value)
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        let mut warnings = Vec::new();
+        collector.append_to(&mut warnings, &mut Vec::new());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("mix of float and native histogram"))
+        );
     }
 
     #[tokio::test]

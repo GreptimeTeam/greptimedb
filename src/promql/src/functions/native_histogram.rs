@@ -25,7 +25,8 @@ use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Float64Builder, Int64Array, StringBuilder,
     StructArray, TimestampMillisecondArray, UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::arrow::compute::filter;
+use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
 use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
@@ -33,7 +34,11 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl, Signature, create_udaf, create_udf};
 
-use crate::functions::{extract_array, extract_range_dict};
+use crate::functions::{
+    AvgOverTime, Deriv, DoubleExponentialSmoothing, IDelta, Increase, LastOverTime, MaxOverTime,
+    MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime,
+    SumOverTime, extract_array, extract_range_dict,
+};
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -1264,6 +1269,778 @@ impl NativeHistogramResets {
     }
 }
 
+/// Coordinated float/native-histogram range evaluation.
+///
+/// The function name is passed as the first scalar argument so these two UDF names are enough for
+/// distributed plan decoding. The remaining leading arguments are timestamp, float, and histogram
+/// ranges, followed by the ordinary function arguments.
+pub struct MixedRange;
+
+impl MixedRange {
+    const fn float_name() -> &'static str {
+        "prom_mixed_range_float"
+    }
+
+    const fn histogram_name() -> &'static str {
+        "prom_mixed_range_histogram"
+    }
+
+    pub fn float_udf(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
+        ScalarUDF::new_from_impl(MixedRangeUdf::new(MixedRangeOutput::Float, collector))
+    }
+
+    pub fn histogram_udf(collector: Option<PromqlAnnotationCollector>) -> ScalarUDF {
+        ScalarUDF::new_from_impl(MixedRangeUdf::new(MixedRangeOutput::Histogram, collector))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MixedRangeOutput {
+    Float,
+    Histogram,
+}
+
+impl MixedRangeOutput {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Float => MixedRange::float_name(),
+            Self::Histogram => MixedRange::histogram_name(),
+        }
+    }
+
+    fn data_type(self) -> DataType {
+        match self {
+            Self::Float => DataType::Float64,
+            Self::Histogram => native_histogram_arrow_type(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MixedRangeUdf {
+    output: MixedRangeOutput,
+    signature: Signature,
+    collector: Option<PromqlAnnotationCollector>,
+}
+
+impl MixedRangeUdf {
+    fn new(output: MixedRangeOutput, collector: Option<PromqlAnnotationCollector>) -> Self {
+        Self {
+            output,
+            signature: Signature::variadic_any(Volatility::Volatile),
+            collector,
+        }
+    }
+}
+
+impl PartialEq for MixedRangeUdf {
+    fn eq(&self, other: &Self) -> bool {
+        self.output == other.output
+    }
+}
+
+impl Eq for MixedRangeUdf {}
+
+impl Hash for MixedRangeUdf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.output.hash(state);
+    }
+}
+
+impl ScalarUDFImpl for MixedRangeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        self.output.name()
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DfResult<DataType> {
+        Ok(self.output.data_type())
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
+        let collector = args
+            .config_options
+            .extensions
+            .get::<PromqlAnnotationCollector>()
+            .cloned()
+            .or_else(|| self.collector.clone());
+        mixed_range(&args, self.output, collector)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MixedRangeFunction {
+    Rate,
+    Increase,
+    Delta,
+    IDelta,
+    IRate,
+    Changes,
+    Resets,
+    AvgOverTime,
+    MinOverTime,
+    MaxOverTime,
+    SumOverTime,
+    CountOverTime,
+    LastOverTime,
+    AbsentOverTime,
+    PresentOverTime,
+    StddevOverTime,
+    StdvarOverTime,
+    QuantileOverTime,
+    Deriv,
+    PredictLinear,
+    DoubleExponentialSmoothing,
+    HoltWinters,
+}
+
+impl MixedRangeFunction {
+    fn parse(value: &ColumnarValue) -> DfResult<Self> {
+        let name = match value {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(name)))
+            | ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(name)))
+            | ColumnarValue::Scalar(ScalarValue::Utf8View(Some(name))) => name.as_str(),
+            other => {
+                return Err(DataFusionError::Execution(format!(
+                    "mixed range function name must be a non-null string scalar, found {}",
+                    other.data_type()
+                )));
+            }
+        };
+
+        match name {
+            "rate" => Ok(Self::Rate),
+            "increase" => Ok(Self::Increase),
+            "delta" => Ok(Self::Delta),
+            "idelta" => Ok(Self::IDelta),
+            "irate" => Ok(Self::IRate),
+            "changes" => Ok(Self::Changes),
+            "resets" => Ok(Self::Resets),
+            "avg_over_time" => Ok(Self::AvgOverTime),
+            "min_over_time" => Ok(Self::MinOverTime),
+            "max_over_time" => Ok(Self::MaxOverTime),
+            "sum_over_time" => Ok(Self::SumOverTime),
+            "count_over_time" => Ok(Self::CountOverTime),
+            "last_over_time" => Ok(Self::LastOverTime),
+            "absent_over_time" => Ok(Self::AbsentOverTime),
+            "present_over_time" => Ok(Self::PresentOverTime),
+            "stddev_over_time" => Ok(Self::StddevOverTime),
+            "stdvar_over_time" => Ok(Self::StdvarOverTime),
+            "quantile_over_time" => Ok(Self::QuantileOverTime),
+            "deriv" => Ok(Self::Deriv),
+            "predict_linear" => Ok(Self::PredictLinear),
+            "double_exponential_smoothing" => Ok(Self::DoubleExponentialSmoothing),
+            "holt_winters" => Ok(Self::HoltWinters),
+            _ => Err(DataFusionError::Execution(format!(
+                "unsupported mixed range function: {name}"
+            ))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rate => "rate",
+            Self::Increase => "increase",
+            Self::Delta => "delta",
+            Self::IDelta => "idelta",
+            Self::IRate => "irate",
+            Self::Changes => "changes",
+            Self::Resets => "resets",
+            Self::AvgOverTime => "avg_over_time",
+            Self::MinOverTime => "min_over_time",
+            Self::MaxOverTime => "max_over_time",
+            Self::SumOverTime => "sum_over_time",
+            Self::CountOverTime => "count_over_time",
+            Self::LastOverTime => "last_over_time",
+            Self::AbsentOverTime => "absent_over_time",
+            Self::PresentOverTime => "present_over_time",
+            Self::StddevOverTime => "stddev_over_time",
+            Self::StdvarOverTime => "stdvar_over_time",
+            Self::QuantileOverTime => "quantile_over_time",
+            Self::Deriv => "deriv",
+            Self::PredictLinear => "predict_linear",
+            Self::DoubleExponentialSmoothing => "double_exponential_smoothing",
+            Self::HoltWinters => "holt_winters",
+        }
+    }
+
+    fn policy(self) -> MixedRangePolicy {
+        match self {
+            Self::Rate | Self::Increase | Self::Delta | Self::AvgOverTime | Self::SumOverTime => {
+                MixedRangePolicy::DropMixed
+            }
+            Self::IDelta | Self::IRate => MixedRangePolicy::LastTwo,
+            Self::LastOverTime => MixedRangePolicy::Last,
+            Self::Changes
+            | Self::Resets
+            | Self::CountOverTime
+            | Self::AbsentOverTime
+            | Self::PresentOverTime => MixedRangePolicy::Combined,
+            Self::MinOverTime
+            | Self::MaxOverTime
+            | Self::StddevOverTime
+            | Self::StdvarOverTime
+            | Self::QuantileOverTime
+            | Self::Deriv
+            | Self::PredictLinear
+            | Self::DoubleExponentialSmoothing
+            | Self::HoltWinters => MixedRangePolicy::FloatOnly,
+        }
+    }
+
+    fn float_udf(self) -> Option<ScalarUDF> {
+        match self {
+            Self::Rate => Some(Rate::scalar_udf()),
+            Self::Increase => Some(Increase::scalar_udf()),
+            Self::Delta => Some(crate::functions::Delta::scalar_udf()),
+            Self::IDelta => Some(IDelta::<false>::scalar_udf()),
+            Self::IRate => Some(IDelta::<true>::scalar_udf()),
+            Self::AvgOverTime => Some(AvgOverTime::scalar_udf()),
+            Self::MinOverTime => Some(MinOverTime::scalar_udf()),
+            Self::MaxOverTime => Some(MaxOverTime::scalar_udf()),
+            Self::SumOverTime => Some(SumOverTime::scalar_udf()),
+            Self::LastOverTime => Some(LastOverTime::scalar_udf()),
+            Self::StddevOverTime => Some(StddevOverTime::scalar_udf()),
+            Self::StdvarOverTime => Some(StdvarOverTime::scalar_udf()),
+            Self::QuantileOverTime => Some(QuantileOverTime::scalar_udf()),
+            Self::Deriv => Some(Deriv::scalar_udf()),
+            Self::PredictLinear => Some(PredictLinear::scalar_udf()),
+            Self::DoubleExponentialSmoothing | Self::HoltWinters => {
+                Some(DoubleExponentialSmoothing::scalar_udf())
+            }
+            Self::Changes
+            | Self::Resets
+            | Self::CountOverTime
+            | Self::AbsentOverTime
+            | Self::PresentOverTime => None,
+        }
+    }
+
+    fn histogram_udf(self, collector: Option<PromqlAnnotationCollector>) -> Option<ScalarUDF> {
+        match self {
+            Self::Rate => Some(NativeHistogramRate::scalar_udf_with_collector(collector)),
+            Self::Increase => Some(NativeHistogramIncrease::scalar_udf_with_collector(
+                collector,
+            )),
+            Self::Delta => Some(NativeHistogramDelta::scalar_udf_with_collector(collector)),
+            Self::IDelta => Some(NativeHistogramIDelta::scalar_udf_with_collector(collector)),
+            Self::IRate => Some(NativeHistogramIRate::scalar_udf_with_collector(collector)),
+            Self::AvgOverTime => Some(NativeHistogramAvgOverTime::scalar_udf_with_collector(
+                collector,
+            )),
+            Self::SumOverTime => Some(NativeHistogramSumOverTime::scalar_udf_with_collector(
+                collector,
+            )),
+            Self::LastOverTime => Some(NativeHistogramLastOverTime::scalar_udf()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MixedRangePolicy {
+    DropMixed,
+    LastTwo,
+    Last,
+    Combined,
+    FloatOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SampleLane {
+    Float,
+    Histogram,
+}
+
+fn mixed_range(
+    args: &ScalarFunctionArgs,
+    output: MixedRangeOutput,
+    collector: Option<PromqlAnnotationCollector>,
+) -> DfResult<ColumnarValue> {
+    if args.args.len() < 4 {
+        return Err(DataFusionError::Plan(format!(
+            "{} function should have at least 4 inputs",
+            output.name()
+        )));
+    }
+    let function = MixedRangeFunction::parse(&args.args[0])?;
+    let name = function.name();
+    let ts_range = extract_range_dict(
+        &args.args[1],
+        name,
+        "timestamp range vector",
+        &DataType::Timestamp(TimeUnit::Millisecond, None),
+    )?;
+    let float_range = extract_range_dict(
+        &args.args[2],
+        name,
+        "float range vector",
+        &DataType::Float64,
+    )?;
+    let histogram_range = extract_range_dict(
+        &args.args[3],
+        name,
+        "native histogram range vector",
+        &native_histogram_arrow_type(),
+    )?;
+    let keys = ts_range.keys().values();
+    if float_range.keys().values() != keys || histogram_range.keys().values() != keys {
+        return Err(DataFusionError::Execution(format!(
+            "{name}: timestamp, float, and native histogram ranges should have the same layout"
+        )));
+    }
+    if args.number_rows != keys.len() {
+        return Err(DataFusionError::Execution(format!(
+            "{name}: range inputs have {} windows but the batch has {} rows",
+            keys.len(),
+            args.number_rows
+        )));
+    }
+
+    let timestamps = ts_range
+        .values()
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .expect("validated timestamp range");
+    let floats = float_range
+        .values()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("validated float range");
+    let histograms = histogram_range
+        .values()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("validated native histogram range");
+    if floats.len() != timestamps.len() || histograms.len() != timestamps.len() {
+        return Err(DataFusionError::Execution(format!(
+            "{name}: timestamp, float, and native histogram values should be row-aligned"
+        )));
+    }
+
+    let bounds = checked_window_bounds(keys, timestamps.len(), name)?;
+    let float_valid = (0..floats.len())
+        .map(|row| floats.is_valid(row))
+        .collect::<Vec<_>>();
+    let histogram_valid = (0..histograms.len())
+        .map(|row| histograms.is_valid(row))
+        .collect::<Vec<_>>();
+    let float_prefix = validity_prefix(&float_valid, name)?;
+    let histogram_prefix = validity_prefix(&histogram_valid, name)?;
+
+    if matches!(function.policy(), MixedRangePolicy::Combined) {
+        if output != MixedRangeOutput::Float {
+            return Err(DataFusionError::Execution(format!(
+                "{name} does not return native histograms"
+            )));
+        }
+        return combined_range_float(
+            function,
+            &bounds,
+            timestamps,
+            floats,
+            histograms,
+            &float_valid,
+            &histogram_valid,
+            &float_prefix,
+            &histogram_prefix,
+        );
+    }
+
+    let selections = select_mixed_range_lanes(
+        function,
+        &bounds,
+        timestamps,
+        &float_valid,
+        &histogram_valid,
+        &float_prefix,
+        &histogram_prefix,
+        &collector,
+    );
+    let (lane, values, valid, prefix) = match output {
+        MixedRangeOutput::Float => (
+            SampleLane::Float,
+            floats as &dyn Array,
+            float_valid.as_slice(),
+            float_prefix.as_slice(),
+        ),
+        MixedRangeOutput::Histogram => (
+            SampleLane::Histogram,
+            histograms as &dyn Array,
+            histogram_valid.as_slice(),
+            histogram_prefix.as_slice(),
+        ),
+    };
+    let input = compact_lane_input(
+        timestamps,
+        values,
+        valid,
+        prefix,
+        &bounds,
+        &selections,
+        lane,
+        name,
+    )?;
+
+    let udf = match output {
+        MixedRangeOutput::Float => function.float_udf(),
+        MixedRangeOutput::Histogram => function.histogram_udf(collector),
+    }
+    .ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "{name} does not return {} values",
+            match output {
+                MixedRangeOutput::Float => "float",
+                MixedRangeOutput::Histogram => "native histogram",
+            }
+        ))
+    })?;
+    let mut input = input;
+    input.extend_from_slice(&args.args[4..]);
+    invoke_range_udf(udf, input, args, bounds.len())
+}
+
+/// Decodes packed range keys into validated half-open `(offset, end)` bounds.
+fn checked_window_bounds(
+    keys: &[i64],
+    value_len: usize,
+    name: &str,
+) -> DfResult<Vec<(usize, usize)>> {
+    keys.iter()
+        .map(|key| {
+            let (offset, length) = unpack(*key);
+            let offset = offset as usize;
+            let end = offset
+                .checked_add(length as usize)
+                .filter(|end| *end <= value_len)
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "{name}: invalid range ({offset}, {length}) for {value_len} values"
+                    ))
+                })?;
+            Ok((offset, end))
+        })
+        .collect()
+}
+
+/// Builds prefix counts where `prefix[i]` is the number of valid samples in `valid[..i]`.
+fn validity_prefix(valid: &[bool], name: &str) -> DfResult<Vec<usize>> {
+    let capacity = valid.len().checked_add(1).ok_or_else(|| {
+        DataFusionError::Execution(format!("{name}: sample validity length overflow"))
+    })?;
+    let mut prefix = Vec::with_capacity(capacity);
+    prefix.push(0usize);
+    for is_valid in valid {
+        prefix.push(
+            prefix
+                .last()
+                .copied()
+                .unwrap()
+                .checked_add(usize::from(*is_valid))
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!("{name}: sample count overflow"))
+                })?,
+        );
+    }
+    Ok(prefix)
+}
+
+/// Returns the number of valid samples in the half-open window `[offset, end)`.
+fn valid_count(prefix: &[usize], offset: usize, end: usize) -> usize {
+    prefix[end]
+        .checked_sub(prefix[offset])
+        .expect("validity prefix is monotonic")
+}
+
+/// Selects the sample lane for each window and records policy-required annotations.
+#[allow(clippy::too_many_arguments)]
+fn select_mixed_range_lanes(
+    function: MixedRangeFunction,
+    bounds: &[(usize, usize)],
+    timestamps: &TimestampMillisecondArray,
+    float_valid: &[bool],
+    histogram_valid: &[bool],
+    float_prefix: &[usize],
+    histogram_prefix: &[usize],
+    collector: &Option<PromqlAnnotationCollector>,
+) -> Vec<Option<SampleLane>> {
+    bounds
+        .iter()
+        .map(|(offset, end)| {
+            let float_count = valid_count(float_prefix, *offset, *end);
+            let histogram_count = valid_count(histogram_prefix, *offset, *end);
+            match function.policy() {
+                MixedRangePolicy::DropMixed => match (float_count > 0, histogram_count > 0) {
+                    (true, true) => {
+                        record_warning(
+                            collector,
+                            format!(
+                                "{}: encountered a mix of float and native histogram samples",
+                                function.name()
+                            ),
+                        );
+                        None
+                    }
+                    (true, false) => Some(SampleLane::Float),
+                    (false, true) => Some(SampleLane::Histogram),
+                    (false, false) => None,
+                },
+                MixedRangePolicy::FloatOnly => {
+                    if float_count > 0 && histogram_count > 0 {
+                        record_info(
+                            collector,
+                            format!(
+                                "{}: ignored native histogram samples",
+                                function.name()
+                            ),
+                        );
+                    }
+                    (float_count > 0).then_some(SampleLane::Float)
+                }
+                MixedRangePolicy::Last => (*offset..*end).rev().find_map(|row| {
+                    if histogram_valid[row] {
+                        Some(SampleLane::Histogram)
+                    } else if float_valid[row] {
+                        Some(SampleLane::Float)
+                    } else {
+                        None
+                    }
+                }),
+                MixedRangePolicy::LastTwo => {
+                    let mut last_two = Vec::with_capacity(2);
+                    for row in (*offset..*end).rev() {
+                        // Prometheus keeps a float as the newest sample if both lanes have the
+                        // same timestamp, while the histogram becomes the preceding sample.
+                        if float_valid[row] {
+                            last_two.push((SampleLane::Float, timestamps.value(row)));
+                        }
+                        if last_two.len() < 2 && histogram_valid[row] {
+                            last_two.push((SampleLane::Histogram, timestamps.value(row)));
+                        }
+                        if last_two.len() == 2 {
+                            break;
+                        }
+                    }
+                    if last_two.len() < 2 || last_two[0].1 == last_two[1].1 {
+                        None
+                    } else if last_two[0].0 == last_two[1].0 {
+                        Some(last_two[0].0)
+                    } else {
+                        record_warning(
+                            collector,
+                            format!(
+                                "{}: encountered a mix of float and native histogram samples in the last two points",
+                                function.name()
+                            ),
+                        );
+                        None
+                    }
+                }
+                MixedRangePolicy::Combined => unreachable!(),
+            }
+        })
+        .collect()
+}
+
+/// Filters null placeholders from one sample lane and remaps its selected windows.
+/// Windows assigned to the other lane become empty.
+#[allow(clippy::too_many_arguments)]
+fn compact_lane_input(
+    timestamps: &TimestampMillisecondArray,
+    values: &dyn Array,
+    valid: &[bool],
+    prefix: &[usize],
+    bounds: &[(usize, usize)],
+    selections: &[Option<SampleLane>],
+    lane: SampleLane,
+    name: &str,
+) -> DfResult<Vec<ColumnarValue>> {
+    let mask = BooleanArray::from(valid.to_vec());
+    let filtered_timestamps = filter(timestamps, &mask)?;
+    let filtered_values = filter(values, &mask)?;
+    let ranges = bounds
+        .iter()
+        .zip(selections)
+        .map(|((offset, end), selected)| {
+            let compact_offset = prefix[*offset];
+            let compact_length = if *selected == Some(lane) {
+                valid_count(prefix, *offset, *end)
+            } else {
+                0
+            };
+            Ok((
+                u32::try_from(compact_offset).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "{name}: compacted range offset exceeds u32"
+                    ))
+                })?,
+                u32::try_from(compact_length).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "{name}: compacted range length exceeds u32"
+                    ))
+                })?,
+            ))
+        })
+        .collect::<DfResult<Vec<_>>>()?;
+    let timestamp_range = RangeArray::from_ranges(filtered_timestamps, ranges.clone())
+        .map_err(DataFusionError::from)?;
+    let value_range =
+        RangeArray::from_ranges(filtered_values, ranges).map_err(DataFusionError::from)?;
+    Ok(vec![
+        ColumnarValue::Array(Arc::new(timestamp_range.into_dict())),
+        ColumnarValue::Array(Arc::new(value_range.into_dict())),
+    ])
+}
+
+fn invoke_range_udf(
+    udf: ScalarUDF,
+    input: Vec<ColumnarValue>,
+    outer_args: &ScalarFunctionArgs,
+    number_rows: usize,
+) -> DfResult<ColumnarValue> {
+    let arg_fields = input
+        .iter()
+        .enumerate()
+        .map(|(index, value)| Arc::new(Field::new(format!("arg_{index}"), value.data_type(), true)))
+        .collect();
+    udf.invoke_with_args(ScalarFunctionArgs {
+        args: input,
+        arg_fields,
+        number_rows,
+        return_field: outer_args.return_field.clone(),
+        config_options: outer_args.config_options.clone(),
+    })
+}
+
+enum MixedSample {
+    Float(f64),
+    Histogram(NativeHistogram),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn combined_range_float(
+    function: MixedRangeFunction,
+    bounds: &[(usize, usize)],
+    timestamps: &TimestampMillisecondArray,
+    floats: &Float64Array,
+    histograms: &StructArray,
+    float_valid: &[bool],
+    histogram_valid: &[bool],
+    float_prefix: &[usize],
+    histogram_prefix: &[usize],
+) -> DfResult<ColumnarValue> {
+    let mut result = Float64Builder::with_capacity(bounds.len());
+    for (offset, end) in bounds {
+        let sample_count = valid_count(float_prefix, *offset, *end)
+            .checked_add(valid_count(histogram_prefix, *offset, *end))
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!("{}: sample count overflow", function.name()))
+            })?;
+        match function {
+            MixedRangeFunction::CountOverTime => {
+                if sample_count == 0 {
+                    result.append_null();
+                } else {
+                    result.append_value(sample_count as f64);
+                }
+            }
+            MixedRangeFunction::AbsentOverTime => {
+                if sample_count == 0 {
+                    result.append_value(1.0);
+                } else {
+                    result.append_null();
+                }
+            }
+            MixedRangeFunction::PresentOverTime => {
+                if sample_count == 0 {
+                    result.append_null();
+                } else {
+                    result.append_value(1.0);
+                }
+            }
+            MixedRangeFunction::Changes | MixedRangeFunction::Resets => {
+                if sample_count == 0 {
+                    result.append_null();
+                    continue;
+                }
+                let mut count = 0usize;
+                let mut previous = None;
+                for row in *offset..*end {
+                    if float_valid[row] {
+                        count += mixed_transition(
+                            function,
+                            &mut previous,
+                            timestamps.value(row),
+                            MixedSample::Float(floats.value(row)),
+                        );
+                    }
+                    if histogram_valid[row] {
+                        let histogram = read_histogram(histograms, row)?
+                            .expect("validated native histogram sample");
+                        count += mixed_transition(
+                            function,
+                            &mut previous,
+                            timestamps.value(row),
+                            MixedSample::Histogram(histogram),
+                        );
+                    }
+                }
+                result.append_value(count as f64);
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(ColumnarValue::Array(Arc::new(result.finish())))
+}
+
+fn mixed_transition(
+    function: MixedRangeFunction,
+    previous: &mut Option<(i64, MixedSample)>,
+    timestamp: i64,
+    current: MixedSample,
+) -> usize {
+    let changed = previous.as_ref().is_some_and(|(previous_ts, previous)| {
+        match (function, previous, &current) {
+            (
+                MixedRangeFunction::Changes,
+                MixedSample::Float(previous),
+                MixedSample::Float(current),
+            ) => current != previous && !(current.is_nan() && previous.is_nan()),
+            (
+                MixedRangeFunction::Changes,
+                MixedSample::Histogram(previous),
+                MixedSample::Histogram(current),
+            ) => !current.promql_eq(previous),
+            (MixedRangeFunction::Changes, _, _) => true,
+            (
+                MixedRangeFunction::Resets,
+                MixedSample::Float(previous),
+                MixedSample::Float(current),
+            ) => current < previous,
+            (
+                MixedRangeFunction::Resets,
+                MixedSample::Histogram(previous),
+                MixedSample::Histogram(current),
+            ) => {
+                (previous.reset_hint == GAUGE_RESET_HINT)
+                    != (current.reset_hint == GAUGE_RESET_HINT)
+                    || current.detect_counter_reset(previous, *previous_ts, timestamp)
+            }
+            (MixedRangeFunction::Resets, _, _) => true,
+            _ => unreachable!(),
+        }
+    });
+    *previous = Some((timestamp, current));
+    usize::from(changed)
+}
+
 fn native_histogram_scalar(histogram: Option<NativeHistogram>) -> ScalarValue {
     let array = build_histogram_array(&[histogram]);
     let histogram = array
@@ -2024,6 +2801,53 @@ mod tests {
         ]
     }
 
+    fn mixed_range_input(
+        name: &str,
+        floats: Vec<Option<f64>>,
+        histograms: Vec<Option<NativeHistogram>>,
+    ) -> Vec<ColumnarValue> {
+        assert_eq!(floats.len(), histograms.len());
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            (0..floats.len()).map(|idx| Some((idx as i64 + 1) * 1000)),
+        ));
+        let floats = Arc::new(Float64Array::from(floats));
+        let histograms = build_histogram_array(&histograms);
+        let range = [(0, u32::try_from(floats.len()).unwrap())];
+        vec![
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(name.to_string()))),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(timestamps, range)
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(floats, range).unwrap().into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(histograms, range)
+                    .unwrap()
+                    .into_dict(),
+            )),
+        ]
+    }
+
+    fn mixed_float_result(udf: ScalarUDF, input: Vec<ColumnarValue>) -> Option<f64> {
+        let result = run_udf(udf, input, DataType::Float64);
+        let result = extract_array(&result).unwrap();
+        let result = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        result.is_valid(0).then(|| result.value(0))
+    }
+
+    fn mixed_histogram_result(
+        udf: ScalarUDF,
+        input: Vec<ColumnarValue>,
+    ) -> Option<NativeHistogram> {
+        let result = run_udf(udf, input, native_histogram_arrow_type());
+        let result = extract_array(&result).unwrap();
+        let result = result.as_any().downcast_ref::<StructArray>().unwrap();
+        read_histogram(result, 0).unwrap()
+    }
+
     fn run_histogram_range_udf(
         udf: ScalarUDF,
         histograms: Vec<NativeHistogram>,
@@ -2096,6 +2920,170 @@ mod tests {
         let mut warnings = Vec::new();
         collector.append_to(&mut warnings, &mut Vec::new());
         warnings
+    }
+
+    fn collected_infos(collector: &PromqlAnnotationCollector) -> Vec<String> {
+        let mut infos = Vec::new();
+        collector.append_to(&mut Vec::new(), &mut infos);
+        infos
+    }
+
+    #[test]
+    fn mixed_ranges_follow_prometheus_sample_type_semantics() {
+        let first = sample_histogram(1.0, 1.0, vec![1.0]);
+        let second = sample_histogram(3.0, 3.0, vec![3.0]);
+        let collector = PromqlAnnotationCollector::default();
+
+        let mut rate = mixed_range_input(
+            "rate",
+            vec![Some(1.0), None, Some(3.0)],
+            vec![None, Some(first.clone()), None],
+        );
+        rate.push(ColumnarValue::Array(Arc::new(
+            TimestampMillisecondArray::from(vec![3000]),
+        )));
+        rate.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![3000]))));
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(Some(collector.clone())), rate.clone()),
+            None
+        );
+        assert_eq!(
+            mixed_histogram_result(MixedRange::histogram_udf(Some(collector.clone())), rate),
+            None
+        );
+        assert!(
+            collected_warnings(&collector)
+                .iter()
+                .any(|warning| warning.contains("mix of float and native histogram"))
+        );
+
+        let pure_rate = |floats, histograms| {
+            let mut input = mixed_range_input("rate", floats, histograms);
+            input.push(ColumnarValue::Array(Arc::new(
+                TimestampMillisecondArray::from(vec![3000]),
+            )));
+            input.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![3000]))));
+            input
+        };
+        let pure_float = pure_rate(
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            vec![None, None, None],
+        );
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), pure_float.clone()),
+            Some(1.0)
+        );
+        assert_eq!(
+            mixed_histogram_result(MixedRange::histogram_udf(None), pure_float),
+            None
+        );
+        let pure_histogram = pure_rate(
+            vec![None, None, None],
+            vec![
+                Some(sample_histogram(1.0, 1.0, vec![1.0])),
+                Some(sample_histogram(2.0, 2.0, vec![2.0])),
+                Some(sample_histogram(3.0, 3.0, vec![3.0])),
+            ],
+        );
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), pure_histogram.clone()),
+            None
+        );
+        assert_eq!(
+            mixed_histogram_result(MixedRange::histogram_udf(None), pure_histogram)
+                .unwrap()
+                .count,
+            1.0
+        );
+
+        let idelta = mixed_range_input(
+            "idelta",
+            vec![Some(10.0), None, None],
+            vec![None, Some(first.clone()), Some(second.clone())],
+        );
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), idelta.clone()),
+            None
+        );
+        assert_eq!(
+            mixed_histogram_result(MixedRange::histogram_udf(None), idelta)
+                .unwrap()
+                .count,
+            2.0
+        );
+
+        let alternating = || {
+            mixed_range_input(
+                "changes",
+                vec![Some(1.0), None, None, Some(1.0)],
+                vec![None, Some(first.clone()), Some(first.clone()), None],
+            )
+        };
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), alternating()),
+            Some(2.0)
+        );
+        let mut resets = alternating();
+        resets[0] = ColumnarValue::Scalar(ScalarValue::Utf8(Some("resets".to_string())));
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), resets),
+            Some(2.0)
+        );
+
+        for (name, expected) in [
+            ("count_over_time", Some(4.0)),
+            ("present_over_time", Some(1.0)),
+            ("absent_over_time", None),
+        ] {
+            let mut input = alternating();
+            input[0] = ColumnarValue::Scalar(ScalarValue::Utf8(Some(name.to_string())));
+            assert_eq!(
+                mixed_float_result(MixedRange::float_udf(None), input),
+                expected,
+                "{name}"
+            );
+        }
+
+        let last = mixed_range_input(
+            "last_over_time",
+            vec![None, Some(4.0)],
+            vec![Some(first.clone()), None],
+        );
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(None), last.clone()),
+            Some(4.0)
+        );
+        assert_eq!(
+            mixed_histogram_result(MixedRange::histogram_udf(None), last),
+            None
+        );
+
+        let collector = PromqlAnnotationCollector::default();
+        let histogram_only_min =
+            mixed_range_input("min_over_time", vec![None], vec![Some(first.clone())]);
+        assert_eq!(
+            mixed_float_result(
+                MixedRange::float_udf(Some(collector.clone())),
+                histogram_only_min,
+            ),
+            None
+        );
+        assert!(collected_infos(&collector).is_empty());
+
+        let min = mixed_range_input(
+            "min_over_time",
+            vec![Some(3.0), None, Some(1.0)],
+            vec![None, Some(first), None],
+        );
+        assert_eq!(
+            mixed_float_result(MixedRange::float_udf(Some(collector.clone())), min),
+            Some(1.0)
+        );
+        assert!(
+            collected_infos(&collector)
+                .iter()
+                .any(|info| info.contains("ignored native histogram"))
+        );
     }
 
     #[test]
