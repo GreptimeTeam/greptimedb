@@ -35,7 +35,8 @@ use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
-    AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
+    AutoCreateTableType, InserterRef, apply_per_table_semantic_options, build_create_table_expr,
+    fill_table_options_for_create,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -267,6 +268,10 @@ impl PendingRowsSchemaAlterer for Instance {
 
             let mut table_options = std::collections::HashMap::with_capacity(4);
             fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+            // Remote write v2 per-series metadata (metric type/unit, declared
+            // quality) rides the per-table index; the batched create path
+            // bypasses the operator's auto-create, so fold it in here too.
+            apply_per_table_semantic_options(&mut table_options, &ctx, table_name);
             create_table_expr.table_options.extend(table_options);
             create_exprs.push(create_table_expr);
         }
