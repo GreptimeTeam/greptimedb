@@ -13,8 +13,13 @@
 // limitations under the License.
 
 //! Runtime metrics
+use catio::Scheduler;
 use lazy_static::lazy_static;
+use prometheus::core::{Collector, Desc};
+use prometheus::proto::MetricFamily;
 use prometheus::*;
+
+use crate::global::{QUERY_TASK_CLASS, WRITE_TASK_CLASS};
 
 pub const THREAD_NAME_LABEL: &str = "thread_name";
 
@@ -31,4 +36,77 @@ lazy_static! {
         &[THREAD_NAME_LABEL]
     )
     .unwrap();
+}
+
+#[derive(Clone)]
+struct WorkloadSchedulerCollector {
+    scheduler: Scheduler,
+    polls: IntGaugeVec,
+    queued: IntGaugeVec,
+    active: IntGauge,
+}
+
+impl WorkloadSchedulerCollector {
+    fn new(scheduler: Scheduler) -> Self {
+        Self {
+            scheduler,
+            polls: IntGaugeVec::new(
+                Opts::new(
+                    "greptime_workload_scheduler_polls",
+                    "Cumulative task polls admitted by the workload scheduler",
+                ),
+                &["workload"],
+            )
+            .unwrap(),
+            queued: IntGaugeVec::new(
+                Opts::new(
+                    "greptime_workload_scheduler_queued_tasks",
+                    "Tasks queued in the workload scheduler",
+                ),
+                &["workload"],
+            )
+            .unwrap(),
+            active: IntGauge::new(
+                "greptime_workload_scheduler_active_polls",
+                "Task polls admitted to Tokio but not yet completed",
+            )
+            .unwrap(),
+        }
+    }
+
+    fn update(&self) {
+        let stats = self.scheduler.stats();
+        for (class, workload) in [(QUERY_TASK_CLASS, "query"), (WRITE_TASK_CLASS, "write")] {
+            let class_stats = stats.classes.get(&class).cloned().unwrap_or_default();
+            self.polls
+                .with_label_values(&[workload])
+                .set(class_stats.polls.min(i64::MAX as u64) as i64);
+            self.queued
+                .with_label_values(&[workload])
+                .set(class_stats.queued.min(i64::MAX as usize) as i64);
+        }
+        self.active
+            .set(stats.active_polls.min(i64::MAX as usize) as i64);
+    }
+}
+
+impl Collector for WorkloadSchedulerCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        let mut desc = self.polls.desc();
+        desc.extend(self.queued.desc());
+        desc.extend(self.active.desc());
+        desc
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        self.update();
+        let mut families = self.polls.collect();
+        families.extend(self.queued.collect());
+        families.extend(self.active.collect());
+        families
+    }
+}
+
+pub(crate) fn register_workload_scheduler_metrics(scheduler: Scheduler) {
+    let _ = register(Box::new(WorkloadSchedulerCollector::new(scheduler)));
 }
