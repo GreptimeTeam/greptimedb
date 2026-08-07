@@ -717,6 +717,12 @@ fn coerce_log_value_data(
         return align_timestamp_value(value_data, target_unit, column_name, table_name).map(Some);
     }
 
+    // Lossless signed -> unsigned integer cast for built-in fields moving from
+    // unsigned to signed types (e.g. an existing UInt64/UInt32 log column
+    // receiving new Int64/Int32 ingest). Lets existing tables keep their
+    // unsigned columns without an `ALTER`; the built-in values are always
+    // non-negative. In the mutually-exclusive `else` of the String branch so
+    // the move stays local to non-String targets.
     if target_type == ColumnDataType::String {
         if let Ok(value_data) =
             coerce_value_data(&Some(value_data.clone()), target_type, request_type)
@@ -726,6 +732,10 @@ fn coerce_log_value_data(
         if let Some(value_data) = stringify_scalar_value(value_data) {
             return Ok(Some(value_data));
         }
+    } else if let Ok(Some(value_data)) =
+        coerce_value_data(&Some(value_data), target_type, request_type)
+    {
+        return Ok(Some(value_data));
     }
 
     InvalidParameterSnafu {
@@ -1312,6 +1322,34 @@ mod tests {
         assert_eq!(
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Field as i32
+        );
+    }
+
+    #[test]
+    fn test_existing_uint64_column_keeps_type_and_coerces_int64_request() {
+        // An existing UInt64 column keeps its type when new signed (Int64)
+        // ingest arrives, without an `ALTER`. The built-in models move to
+        // signed while existing unsigned tables stay byte-for-byte unchanged.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("counter", ConcreteDataType::uint64_datatype()),
+            ],
+            &[],
+        );
+
+        let rows = parse_with_select(
+            request_with_log_attrs(vec![kv("counter", OtlpValue::IntValue(42))]),
+            "counter",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "counter");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint64 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U64Value(42))
         );
     }
 }

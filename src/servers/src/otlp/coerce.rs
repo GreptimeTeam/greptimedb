@@ -30,6 +30,15 @@ pub enum TraceCoerceError {
 // - String to Int64
 // - String to Float64
 // - String to Boolean
+//
+// Lossless signed-to-unsigned integer casts. These let the built-in data
+// models move from unsigned to signed integers while existing unsigned tables
+// keep accepting new signed ingest without an `ALTER TABLE`: an existing
+// UInt64/UInt32 column coerces an incoming Int64/Int32 request into the
+// existing type. Lossless for the non-negative values these built-in fields
+// always carry (counts, durations, flags):
+// - Int64 to UInt64  (e.g. trace `duration_nano`)
+// - Int32 to UInt32  (e.g. log `trace_flags`)
 pub fn is_supported_trace_coercion(
     request_type: ColumnDataType,
     target_type: ColumnDataType,
@@ -43,6 +52,8 @@ pub fn is_supported_trace_coercion(
             | (ColumnDataType::String, ColumnDataType::Int64)
             | (ColumnDataType::String, ColumnDataType::Float64)
             | (ColumnDataType::String, ColumnDataType::Boolean)
+            | (ColumnDataType::Int64, ColumnDataType::Uint64)
+            | (ColumnDataType::Int32, ColumnDataType::Uint32)
     )
 }
 
@@ -87,6 +98,14 @@ pub fn coerce_non_null_value(
         }
         (ColumnDataType::String, ColumnDataType::Boolean, ValueData::StringValue(s)) => {
             s.parse::<bool>().ok().map(ValueData::BoolValue)
+        }
+        // Lossless signed -> unsigned casts for built-in fields moving to
+        // signed types (durations, counts, flags are always non-negative).
+        (ColumnDataType::Int64, ColumnDataType::Uint64, ValueData::I64Value(n)) => {
+            Some(ValueData::U64Value(*n as u64))
+        }
+        (ColumnDataType::Int32, ColumnDataType::Uint32, ValueData::I32Value(n)) => {
+            Some(ValueData::U32Value(*n as u32))
         }
         _ => None,
     }
@@ -241,6 +260,41 @@ mod tests {
     }
 
     #[test]
+    fn test_coerce_int64_to_uint64() {
+        // Non-negative durations coerce losslessly into an existing UInt64
+        // column, so built-in fields moving to signed keep accepting writes.
+        let result = coerce_value_data(
+            &Some(ValueData::I64Value(123)),
+            ColumnDataType::Uint64,
+            ColumnDataType::Int64,
+        );
+        assert_eq!(result, Ok(Some(ValueData::U64Value(123))));
+    }
+
+    #[test]
+    fn test_coerce_int32_to_uint32() {
+        let result = coerce_value_data(
+            &Some(ValueData::I32Value(7)),
+            ColumnDataType::Uint32,
+            ColumnDataType::Int32,
+        );
+        assert_eq!(result, Ok(Some(ValueData::U32Value(7))));
+    }
+
+    #[test]
+    fn test_coerce_uint_to_int_not_supported() {
+        // Only the signed -> unsigned direction is supported (the direction
+        // the no-ALTER transition needs); the reverse would be lossy for
+        // values above the signed range and is intentionally rejected.
+        let result = coerce_value_data(
+            &Some(ValueData::U64Value(9)),
+            ColumnDataType::Int64,
+            ColumnDataType::Uint64,
+        );
+        assert_eq!(result, Err(TraceCoerceError::Unsupported));
+    }
+
+    #[test]
     fn test_coerce_none_value() {
         let result = coerce_value_data(&None, ColumnDataType::Float64, ColumnDataType::Int64);
         assert_eq!(result, Ok(None));
@@ -279,6 +333,20 @@ mod tests {
         assert!(!is_supported_trace_coercion(
             ColumnDataType::Binary,
             ColumnDataType::Json
+        ));
+        // Signed -> unsigned casts are supported (built-in no-ALTER transition).
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Int64,
+            ColumnDataType::Uint64
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Int32,
+            ColumnDataType::Uint32
+        ));
+        // The reverse direction is intentionally not supported (lossy).
+        assert!(!is_supported_trace_coercion(
+            ColumnDataType::Uint64,
+            ColumnDataType::Int64
         ));
     }
 
