@@ -25,6 +25,7 @@ use arrow_schema::{
 };
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_meta::peer::Peer;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{RecordBatchMetrics, region_scan_output_bytes};
@@ -59,7 +60,8 @@ use session::context::{
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table_name::TableName;
 use tokio::time;
 use tokio::time::Instant;
@@ -77,8 +79,8 @@ use crate::dist_plan::{
 };
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
-use crate::query_engine::QueryEngineState;
-use crate::region_query::RegionQueryHandlerRef;
+use crate::query_engine::{DefaultSerializer, QueryEngineState};
+use crate::region_query::{RegionQueryHandlerRef, RegionQueryTarget};
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
@@ -98,6 +100,29 @@ fn record_merge_scan_schema_error() {
 
     #[cfg(test)]
     TEST_MERGE_SCAN_SCHEMA_ERRORS.with(|count| count.set(count.get() + 1));
+}
+
+/// Returns true when any timestamp field of `actual` differs from `expected` in
+/// timezone only, i.e. when [`patch_batch_timezone`] would cast a column.
+///
+/// Mirrors the cast condition inside `patch_batch_timezone` (same time unit,
+/// different timezone). RecordBatch construction guarantees that each column's
+/// data type equals its schema field's data type, so comparing the schemas is
+/// equivalent to the per-column comparison the patch performs.
+fn needs_timezone_patch(expected: &ArrowSchema, actual: &ArrowSchema) -> bool {
+    expected
+        .fields()
+        .iter()
+        .zip(actual.fields().iter())
+        .any(|(expected_field, actual_field)| {
+            matches!(
+                (expected_field.data_type(), actual_field.data_type()),
+                (
+                    ArrowDataType::Timestamp(expected_unit, expected_tz),
+                    ArrowDataType::Timestamp(actual_unit, actual_tz),
+                ) if expected_unit == actual_unit && expected_tz != actual_tz
+            )
+        })
 }
 
 #[cfg(test)]
@@ -380,6 +405,11 @@ pub struct MergeScanExec {
     target_partition: usize,
     partition_cols: AliasMapping,
     enable_per_region_metrics: bool,
+    /// Region → leader peer map resolved once per query from the table route
+    /// snapshot fetched during planning. `to_stream` consults it instead of
+    /// re-resolving the leader per region, falling back to `select_target` on
+    /// miss (the leader may be absent from the snapshot).
+    region_leader_map: Arc<HashMap<RegionNumber, Peer>>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -480,7 +510,18 @@ impl MergeScanExec {
             target_partition,
             partition_cols,
             enable_per_region_metrics,
+            region_leader_map: Arc::default(),
         })
+    }
+
+    /// Attaches the region → leader map resolved during planning so that
+    /// `to_stream` can skip per-region leader resolution.
+    pub fn with_region_leader_map(
+        mut self,
+        region_leader_map: HashMap<RegionNumber, Peer>,
+    ) -> Self {
+        self.region_leader_map = Arc::new(region_leader_map);
+        self
     }
 
     pub fn to_stream(
@@ -497,6 +538,7 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
+        let region_leader_map = self.region_leader_map.clone();
         let target_partition = self.target_partition;
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
@@ -522,6 +564,15 @@ impl MergeScanExec {
             if partition == 0 {
                 MERGE_SCAN_REGIONS.observe(regions.len() as f64);
             }
+
+            // Encode the pushed-down plan once per stream: the encoded bytes are
+            // region-invariant (region_id is a sibling request field, not part of
+            // the plan), so reusing them across regions avoids re-encoding the
+            // same plan once per region.
+            let encoded_plan = DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+                .to_vec();
 
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
@@ -550,14 +601,17 @@ impl MergeScanExec {
                     &captured_remote_dyn_filters,
                 );
                 let select_target_start = Instant::now();
-                let target = region_query_handler
-                    .select_target(read_preference, region_id)
-                    .instrument(region_span.clone())
-                    .await
-                    .map_err(|e| {
-                        MERGE_SCAN_ERRORS_TOTAL.inc();
-                        DataFusionError::External(Box::new(e))
-                    })?;
+                let target = match region_leader_map.get(&region_id.region_number()) {
+                    Some(peer) => RegionQueryTarget::new(peer.clone()),
+                    None => region_query_handler
+                        .select_target(read_preference, region_id)
+                        .instrument(region_span.clone())
+                        .await
+                        .map_err(|e| {
+                            MERGE_SCAN_ERRORS_TOTAL.inc();
+                            DataFusionError::External(Box::new(e))
+                        })?,
+                };
                 let select_target_cost = select_target_start.elapsed();
                 let mut subscriber_rollback =
                     remote_dyn_filter_registry_lease.as_ref().map(|lease| {
@@ -604,7 +658,7 @@ impl MergeScanExec {
 
                 let do_get_start = Instant::now();
                 let do_get_result = region_query_handler
-                    .do_get(&target, request)
+                    .do_get_encoded(&target, request, encoded_plan.clone())
                     .instrument(region_span.clone())
                     .await;
                 if do_get_result.is_err() {
@@ -625,6 +679,12 @@ impl MergeScanExec {
                     "advertised remote stream",
                 )
                 .inspect_err(|_| record_merge_scan_schema_error())?;
+                // The timezone patch is only needed when a timestamp column's
+                // timezone differs between the expected schema and the remote
+                // schema. Precompute it once per region stream so batches pass
+                // through unchanged when no cast is required.
+                let mut needs_tz_patch =
+                    needs_timezone_patch(arrow_schema.as_ref(), advertised_schema.as_ref());
                 let do_get_cost = select_target_cost + do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
@@ -678,9 +738,23 @@ impl MergeScanExec {
                         )
                         .inspect_err(|_| record_merge_scan_schema_error())?;
                         advertised_schema = df_batch.schema_ref().clone();
+                        needs_tz_patch =
+                            needs_timezone_patch(arrow_schema.as_ref(), advertised_schema.as_ref());
                     }
-                    let batch =
-                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
+                    let batch = if needs_tz_patch
+                        || df_batch.schema_ref().as_ref() != arrow_schema.as_ref()
+                    {
+                        // Either a timestamp column needs a timezone cast, or the
+                        // batch still carries a schema that differs from the
+                        // expected one (e.g. top-level metadata): rebuild it
+                        // exactly like before.
+                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?
+                    } else {
+                        // No cast is needed and the batch schema already matches
+                        // the expected one, so the rebuild would be a no-op: pass
+                        // the incoming batch through directly.
+                        df_batch
+                    };
                     metric.record_output_batch_rows(batch.num_rows());
                     if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
@@ -846,6 +920,7 @@ impl MergeScanExec {
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
             enable_per_region_metrics: self.enable_per_region_metrics,
+            region_leader_map: self.region_leader_map.clone(),
         })
     }
 

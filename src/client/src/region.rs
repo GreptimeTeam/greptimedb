@@ -80,6 +80,14 @@ impl Datanode for RegionRequester {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?
             .to_vec();
+        self.handle_query_encoded(request, plan).await
+    }
+
+    async fn handle_query_encoded(
+        &self,
+        request: QueryRequest,
+        plan: Vec<u8>,
+    ) -> MetaResult<SendableRecordBatchStream> {
         let request = api::v1::region::QueryRequest {
             header: request.header,
             region_id: request.region_id.as_u64(),
