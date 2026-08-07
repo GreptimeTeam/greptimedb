@@ -82,6 +82,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 arrow.workspace = true
+cache.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-function.workspace = true
 common-macro.workspace = true

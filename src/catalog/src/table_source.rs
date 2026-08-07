@@ -17,10 +17,11 @@ use std::sync::Arc;
 
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::{SubstraitPlanDecoderRef, rename_logical_plan_columns};
+use datafusion::common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{TableProvider, provider_as_source};
-use datafusion::logical_expr::TableSource;
+use datafusion::logical_expr::{LogicalPlan, TableSource};
 use itertools::Itertools;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -32,11 +33,42 @@ use table::TableRef;
 
 use crate::CatalogManagerRef;
 use crate::error::{
-    CastManagerSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
+    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
     QueryAccessDeniedSnafu, Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
     ViewPlanColumnsChangedSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
+
+/// Finds the first table scan in a plan (including scans nested inside scalar
+/// subqueries, EXISTS / IN subqueries, etc.) that references a catalog other
+/// than the given default catalog.
+///
+/// The view plan decoder resolves tables through the catalog manager but does
+/// not enforce the `disallow_cross_catalog_query` restriction, so a persisted
+/// view could otherwise silently bypass it. Walking the decoded plan with
+/// subqueries mirrors how `extract_and_rewrite_full_table_names` rewrites
+/// fully-qualified table names for view creation.
+struct CrossCatalogReferenceChecker<'a> {
+    default_catalog: &'a str,
+    violation: Option<(String, String)>,
+}
+
+impl TreeNodeVisitor<'_> for CrossCatalogReferenceChecker<'_> {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, node: &Self::Node) -> datafusion::common::Result<TreeNodeRecursion> {
+        if let LogicalPlan::TableScan(scan) = node
+            && let TableReference::Full {
+                catalog, schema, ..
+            } = &scan.table_name
+            && catalog.as_ref() != self.default_catalog
+        {
+            self.violation = Some((catalog.to_string(), schema.to_string()));
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    }
+}
 
 pub struct DfTableSourceProvider {
     catalog_manager: CatalogManagerRef,
@@ -155,6 +187,24 @@ impl DfTableSourceProvider {
             .context(DecodePlanSnafu {
                 name: &table.table_info().name,
             })?;
+
+        // If cross-catalog queries are disallowed, make sure the view's plan
+        // does not reference any other catalog — including references nested
+        // inside scalar subqueries, EXISTS or IN subqueries. The plan decoder
+        // resolves tables against the catalog manager but does not enforce
+        // this restriction, so the view must not be able to bypass it.
+        if self.disallow_cross_catalog_query {
+            let mut checker = CrossCatalogReferenceChecker {
+                default_catalog: &self.default_catalog,
+                violation: None,
+            };
+            logical_plan
+                .visit_with_subqueries(&mut checker)
+                .context(DatafusionSnafu)?;
+            if let Some((catalog, schema)) = checker.violation {
+                return QueryAccessDeniedSnafu { catalog, schema }.fail();
+            }
+        }
 
         let columns: Vec<_> = view_info.columns.iter().map(|c| c.as_str()).collect();
 
