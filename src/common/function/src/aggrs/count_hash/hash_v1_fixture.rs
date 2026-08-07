@@ -28,7 +28,7 @@ use datatypes::arrow::datatypes::{i256, *};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{
+use crate::aggrs::count_hash::{
     CountHashAccumulator, CountHashGroupAccumulator, RANDOM_SEED_0, RANDOM_SEED_1, RANDOM_SEED_2,
     RANDOM_SEED_3,
 };
