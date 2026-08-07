@@ -243,7 +243,7 @@ async fn test_table_ddl_procedure_events() {
             "purge_dropped_table",
             &purge_table_procedure_id,
             "Succeeded",
-            None,
+            Some(TABLE),
             Some(table_id),
         )
         .await;
