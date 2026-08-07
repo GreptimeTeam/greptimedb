@@ -2208,6 +2208,7 @@ dependencies = [
  "similar-asserts",
  "smallvec",
  "snafu 0.8.6",
+ "sql",
  "sqlparser",
  "standalone",
  "store-api",

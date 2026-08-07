@@ -1,0 +1,90 @@
+# SQL LIMIT over an append-only flat-SST table. append_mode tables are read via
+# UnorderedScan (mito2 read/scan_region.rs use_unordered_scan); a LIMIT cannot
+# currently stop the scan early (S1: honor ScanRequest.limit in UnorderedScan).
+# 128 SSTs x 4096 rows = 524288 rows; the S1 probe (`SELECT ts ... LIMIT 100`)
+# pays the full part-build/scan cost on the base and would stop early with S1.
+#
+# NOTE: the canonical S1 queries `SELECT * FROM <table> LIMIT 100` and
+# `SELECT host, count(*) ... GROUP BY host ORDER BY count(*) DESC LIMIT 10`
+# project Dictionary-encoded tag columns and are BLOCKED on main 9fab11271b by a
+# pre-existing MergeScan metadata-mismatch bug (frontend plan schema drops
+# greptime:inverted_index/greptime:skipping_index field metadata that the
+# datanode scan stream keeps). The ts-only LIMIT query below exercises the same
+# UnorderedScan+limit path and is measurable today. Re-enable the tag-projection
+# queries once that bug is fixed.
+
+[case]
+name = "sql_limit_unordered_scan"
+description = "S1: LIMIT queries over an append-only table scanned with UnorderedScan"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 1302
+
+
+[[scenario.tables]]
+database = "public"
+name = "sql_limit_unordered_scan"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 64, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "cpu"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 128
+rows_per_sst = 4096
+row_group_size = 1024
+series_count = 64
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "select_ts_limit_100"
+kind = "sql"
+query = "SELECT ts FROM sql_limit_unordered_scan LIMIT 100"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "select_ts_scan_all"
+kind = "sql"
+query = "SELECT ts FROM sql_limit_unordered_scan"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "min_max_ts"
+kind = "sql"
+query = "SELECT min(ts), max(ts) FROM sql_limit_unordered_scan"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
