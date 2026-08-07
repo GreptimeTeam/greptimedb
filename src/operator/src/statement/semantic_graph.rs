@@ -42,6 +42,10 @@ use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, ScalarUDF, c
 /// service-graph convention.
 const BIN_NANOS: i64 = 60 * 1_000_000_000;
 
+/// Time index column of the graph tables: when an edge/entity observation was
+/// recorded. The provider extracts the query window from predicates on it.
+pub const OBSERVED_AT_COLUMN: &str = "observed_at";
+
 /// A single table's entity-identity declaration, projected from
 /// `information_schema.table_semantics` (`greptime.semantic.entity.<type>.*`).
 #[derive(Debug, Clone)]
@@ -62,33 +66,85 @@ pub struct EntityDeclaration {
     pub scope_columns: Vec<String>,
 }
 
-/// The read-time query window as scalar [`Expr`]s. Kept as expressions so the
-/// provider can fill them from a scan's time predicate or the product default.
+/// The read-time query window, resolved from the scan's `observed_at` predicate
+/// (or the product default). Two half-open `[start, end)` millisecond ranges:
+///
+/// - *observed*: the queried `observed_at` range. The scan's filters are
+///   re-applied above the computed table (`FilterPushDownType::Inexact`), so
+///   every emitted row's `observed_at` must fall inside it. The declared-edge
+///   branch also runs its validity overlap against this range.
+/// - *source scan*: `observed` widened to whole 60s buckets. Derived rows are
+///   `date_bin('60s')` aggregates keyed by the bucket start, so a bucket the
+///   observed range selects must be scanned over its full extent — filtering
+///   the source rows to the observed range instead would silently truncate the
+///   RED numbers of the boundary buckets.
+///
+/// The bounds are plain millisecond values turned into timestamp literals on
+/// demand — wall-clock snapshot semantics like `now()`, but as constants they
+/// prune the source table scans without depending on constant-folding.
 #[derive(Debug, Clone)]
-pub struct GraphWindow {
-    pub start: Expr,
-    pub end: Expr,
+pub struct GraphQueryWindow {
+    observed_start_ms: i64,
+    observed_end_ms: i64,
+    source_start_ms: i64,
+    source_end_ms: i64,
 }
 
-impl GraphWindow {
+impl GraphQueryWindow {
+    /// Builds the window for the queried `observed_at` range `[start_ms, end_ms)`.
+    pub fn from_observed(start_ms: i64, end_ms: i64) -> Self {
+        const BIN_MS: i64 = BIN_NANOS / 1_000_000;
+        // Ceiling division that stays correct for pre-epoch (negative) values.
+        let ceil_to_bin = |ms: i64| {
+            ms.div_euclid(BIN_MS) * BIN_MS
+                + if ms.rem_euclid(BIN_MS) == 0 {
+                    0
+                } else {
+                    BIN_MS
+                }
+        };
+        // A bucket `b` (a 60s multiple, `date_bin`'s floor of its rows) is
+        // selected when `start <= b < end`: the first is ceil(start) and the
+        // last one's rows extend to ceil(end).
+        Self {
+            observed_start_ms: start_ms,
+            observed_end_ms: end_ms,
+            source_start_ms: ceil_to_bin(start_ms),
+            source_end_ms: ceil_to_bin(end_ms),
+        }
+    }
+
     /// Conservative default when a query carries no explicit time predicate: the
     /// last hour, so a bare `SELECT * FROM semantic_entities` never scans every
     /// declaring table's full history. This is a product default, not a cap.
-    ///
-    /// The bounds are timestamp literals taken from the wall clock at plan-build
-    /// time — the same snapshot semantics `now()` would give, but as plain
-    /// constants they prune the source table scans without depending on
-    /// constant-folding.
     pub fn default_last_hour() -> Self {
         let end_ms = common_time::util::current_time_millis();
-        Self {
-            start: lit(ScalarValue::TimestampMillisecond(
-                Some(end_ms - 60 * 60 * 1000),
-                None,
-            )),
-            end: lit(ScalarValue::TimestampMillisecond(Some(end_ms), None)),
-        }
+        Self::from_observed(end_ms - 60 * 60 * 1000, end_ms)
     }
+
+    /// Start of the queried `observed_at` range (inclusive).
+    pub fn observed_start(&self) -> Expr {
+        ts_ms_lit(self.observed_start_ms)
+    }
+
+    /// End of the queried `observed_at` range (exclusive).
+    pub fn observed_end(&self) -> Expr {
+        ts_ms_lit(self.observed_end_ms)
+    }
+
+    /// Start of the source-table scan range (inclusive).
+    pub fn source_start(&self) -> Expr {
+        ts_ms_lit(self.source_start_ms)
+    }
+
+    /// End of the source-table scan range (exclusive).
+    pub fn source_end(&self) -> Expr {
+        ts_ms_lit(self.source_end_ms)
+    }
+}
+
+fn ts_ms_lit(ms: i64) -> Expr {
+    lit(ScalarValue::TimestampMillisecond(Some(ms), None))
 }
 
 /// An `INTERVAL` literal of `nanos` nanoseconds.
@@ -254,14 +310,14 @@ fn registry_source(
     first: &EntityDeclaration,
     rest: &[EntityDeclaration],
     df: DataFrame,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
     let ts = ident(&first.time_index);
     let bin = bin_ms(ts.clone());
     let window_predicate = ts
         .clone()
-        .gt_eq(window.start.clone())
-        .and(ts.lt(window.end.clone()));
+        .gt_eq(window.source_start())
+        .and(ts.lt(window.source_end()));
 
     let mut arrays = vec![Vec::new(); REGISTRY_COLUMNS.len() + 1];
     for decl in std::iter::once(first).chain(rest) {
@@ -362,7 +418,7 @@ pub struct CallsSource {
 /// empty.
 pub fn build_registry_plan(
     sources: Vec<RegistrySource>,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
     for source in sources {
@@ -419,7 +475,7 @@ const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 /// trace table.
 pub fn build_calls_plan(
     traces: Vec<CallsSource>,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
     for trace in traces {
@@ -473,12 +529,12 @@ pub fn build_calls_plan(
 fn calls_pairs(
     service: &EntityDeclaration,
     trace: DataFrame,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
     let mut client_pred = ident(SPAN_KIND_COLUMN)
         .eq(lit(SPAN_KIND_CLIENT))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.start.clone()))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone()));
+        .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.source_start()))
+        .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.source_end()));
     let mut server_pred = ident(SPAN_KIND_COLUMN)
         .eq(lit(SPAN_KIND_SERVER))
         // Static bounds implied by the window and the join's time-proximity
@@ -486,10 +542,10 @@ fn calls_pairs(
         // cannot prune the server-side scan.
         .and(
             ident(TRACE_TIMESTAMP_COLUMN)
-                .gt_eq(window.start.clone() - interval(CHILD_SPAN_EARLY_NANOS)),
+                .gt_eq(window.source_start() - interval(CHILD_SPAN_EARLY_NANOS)),
         )
         .and(
-            ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone() + interval(CHILD_SPAN_LATE_NANOS)),
+            ident(TRACE_TIMESTAMP_COLUMN).lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)),
         );
     // A NULL identity component identifies nothing, on either endpoint.
     for id in &service.id_columns {
@@ -541,14 +597,34 @@ mod tests {
 
     use super::*;
 
-    fn test_window() -> GraphWindow {
-        GraphWindow {
-            start: lit(ScalarValue::TimestampMillisecond(Some(0), None)),
-            end: lit(ScalarValue::TimestampMillisecond(
-                Some(10 * 60 * 1000),
-                None,
-            )),
-        }
+    fn test_window() -> GraphQueryWindow {
+        GraphQueryWindow::from_observed(0, 10 * 60 * 1000)
+    }
+
+    #[test]
+    fn window_source_scan_covers_whole_buckets() {
+        // Buckets selected by [10:30.5', 11:30') is exactly {11:00'}; its source
+        // rows span [11:00', 12:00').
+        let window = GraphQueryWindow::from_observed(630_000, 690_000);
+        assert_eq!(
+            (window.source_start_ms, window.source_end_ms),
+            (660_000, 720_000)
+        );
+
+        // Aligned bounds stay put.
+        let window = GraphQueryWindow::from_observed(600_000, 720_000);
+        assert_eq!(
+            (window.source_start_ms, window.source_end_ms),
+            (600_000, 720_000)
+        );
+
+        // A sub-bucket range that selects no bucket start scans nothing.
+        let window = GraphQueryWindow::from_observed(610_000, 650_000);
+        assert!(window.source_start_ms >= window.source_end_ms);
+
+        // Pre-epoch bounds round toward the correct buckets.
+        let window = GraphQueryWindow::from_observed(-90_000, -30_000);
+        assert_eq!((window.source_start_ms, window.source_end_ms), (-60_000, 0));
     }
 
     async fn collect(ctx: &SessionContext, plan: LogicalPlan) -> Vec<RecordBatch> {

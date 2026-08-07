@@ -42,12 +42,13 @@ use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::warn;
+use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, EntityDeclaration, GraphWindow, RegistrySource, build_calls_plan,
-    build_registry_plan,
+    CallsSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource,
+    build_calls_plan, build_registry_plan,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -55,6 +56,7 @@ use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::TableRef;
 use table::metadata::TableInfo;
+use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
     EntityRole, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
 };
@@ -98,11 +100,14 @@ impl EntityGraphProviderImpl {
         let Some(ctx) = query_ctx else {
             return Ok(true);
         };
-        match self.permission_checker.as_ref().check_permission_with_table_targets(
-            ctx.current_user(),
-            PermissionReq::Action(SEMANTIC_GRAPH_QUERY),
-            targets,
-        ) {
+        match self
+            .permission_checker
+            .as_ref()
+            .check_permission_with_table_targets(
+                ctx.current_user(),
+                PermissionReq::Action(SEMANTIC_GRAPH_QUERY),
+                targets,
+            ) {
             Ok(_) => Ok(true),
             Err(err) if err.status_code() == StatusCode::PermissionDenied => Ok(false),
             Err(err) => Err(BoxedError::new(err)),
@@ -302,15 +307,39 @@ impl EntityGraphProviderImpl {
         Ok((declarations, traces))
     }
 
-    /// The time window to derive over, taken from the scan's time predicate.
+    /// The time window to derive over, taken from the scan's `observed_at`
+    /// predicate.
     ///
-    /// TODO(entity-graph): read the `observed_at` bounds out of `request.filters`
-    /// and build the window from them. Until then this always returns the default
-    /// (last hour), so a query whose time filter falls entirely outside the last
-    /// hour derives nothing and returns empty — a known limitation tracked for the
-    /// scan-time-predicate-pushdown follow-up.
-    fn query_window(_request: &ScanRequest) -> GraphWindow {
-        GraphWindow::default_last_hour()
+    /// The contract (RFC "The contract"): no `observed_at` predicate → the
+    /// product default (last hour); a missing upper bound means "up to now"; a
+    /// predicate without a lower bound or in a shape that cannot be safely
+    /// extracted is an error asking for an explicit range — never a silent
+    /// fallback into incomplete results.
+    fn query_window(request: &ScanRequest) -> Result<GraphQueryWindow, BoxedError> {
+        let invalid =
+            |err_msg: String| Err(BoxedError::new(error::InvalidSqlSnafu { err_msg }.build()));
+        match extract_time_range_strict(OBSERVED_AT_COLUMN, TimeUnit::Millisecond, &request.filters)
+        {
+            TimeRangeExtraction::Absent => Ok(GraphQueryWindow::default_last_hour()),
+            TimeRangeExtraction::Extracted(range) => {
+                let Some(start) = range.start() else {
+                    return invalid(format!(
+                        "the {OBSERVED_AT_COLUMN} filter has no lower bound; the graph cannot \
+                         derive over unbounded history — add e.g. {OBSERVED_AT_COLUMN} >= \
+                         '2026-01-01 00:00:00'"
+                    ));
+                };
+                let end_ms = range
+                    .end()
+                    .map(|ts| ts.value())
+                    .unwrap_or_else(common_time::util::current_time_millis);
+                Ok(GraphQueryWindow::from_observed(start.value(), end_ms))
+            }
+            TimeRangeExtraction::Unsupported => invalid(format!(
+                "cannot derive the graph window from the {OBSERVED_AT_COLUMN} filter; use plain \
+                 range predicates (>=, <, BETWEEN) with literal bounds"
+            )),
+        }
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame, BoxedError> {
@@ -364,7 +393,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(source.table)?,
             });
         }
-        let window = Self::query_window(&request);
+        let window = Self::query_window(&request)?;
         let Some(plan) = build_registry_plan(plans, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
@@ -388,7 +417,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(trace)?,
             });
         }
-        let window = Self::query_window(&request);
+        let window = Self::query_window(&request)?;
         let Some(plan) = build_calls_plan(scans, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
