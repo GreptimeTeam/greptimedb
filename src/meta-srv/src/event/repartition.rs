@@ -21,11 +21,11 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, PARENT_PROCEDURE_ID_COLUMN, REPARTITION_GROUP_ID_COLUMN,
-    SCHEMA_NAME_COLUMN, SOURCE_PARTITION_EXPR_COLUMN, SOURCE_REGION_ID_COLUMN,
-    SOURCE_REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TARGET_PARTITION_EXPR_COLUMN,
-    TARGET_REGION_ID_COLUMN, TARGET_REGION_NUMBER_COLUMN, column_schemas, nullable_string,
-    nullable_value,
+    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PARENT_PROCEDURE_ID_COLUMN,
+    REPARTITION_GROUP_ID_COLUMN, SCHEMA_NAME_COLUMN, SOURCE_PARTITION_EXPR_COLUMN,
+    SOURCE_REGION_ID_COLUMN, SOURCE_REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN,
+    TARGET_PARTITION_EXPR_COLUMN, TARGET_REGION_ID_COLUMN, TARGET_REGION_NUMBER_COLUMN,
+    column_schemas, nullable_json, nullable_string, nullable_value,
 };
 use serde::Serialize;
 use snafu::ResultExt;
@@ -61,6 +61,7 @@ pub(crate) struct RepartitionEvent {
     table_name: Option<String>,
     table_id: Option<TableId>,
     payload: Option<RepartitionSubmittedPayload>,
+    event_context: Option<common_meta::rpc::ddl::EventContext>,
 }
 
 impl RepartitionEvent {
@@ -90,6 +91,7 @@ impl RepartitionEvent {
                 target_partition_columns: intent.target_partition_columns().map(ToOwned::to_owned),
                 timeout: persistent_ctx.timeout,
             }),
+            event_context: Some(persistent_ctx.event_context.clone()),
         }
     }
 
@@ -100,10 +102,17 @@ impl RepartitionEvent {
             table_name: None,
             table_id: None,
             payload: None,
+            event_context: None,
         }
     }
 
     fn schema() -> Vec<ColumnSchema> {
+        let mut schema = Self::base_schema();
+        schema.push(EVENT_CONTEXT_COLUMN.column_schema());
+        schema
+    }
+
+    fn base_schema() -> Vec<ColumnSchema> {
         column_schemas([
             &CATALOG_NAME_COLUMN,
             &SCHEMA_NAME_COLUMN,
@@ -132,12 +141,19 @@ impl Event for RepartitionEvent {
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
+        let event_context = self
+            .event_context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .context(SerializeEventSnafu)?;
         Ok(vec![Row {
             values: vec![
                 nullable_string(self.catalog_name.as_deref()),
                 nullable_string(self.schema_name.as_deref()),
                 nullable_string(self.table_name.as_deref()),
                 nullable_value(self.table_id.map(ValueData::U32Value)),
+                nullable_json(event_context.as_ref()),
             ],
         }])
     }
@@ -307,7 +323,7 @@ impl RepartitionGroupEvent {
     }
 
     fn schema() -> Vec<ColumnSchema> {
-        let mut schema = RepartitionEvent::schema();
+        let mut schema = RepartitionEvent::base_schema();
         schema.extend(column_schemas([
             &PARENT_PROCEDURE_ID_COLUMN,
             &REPARTITION_GROUP_ID_COLUMN,
@@ -368,6 +384,7 @@ mod tests {
         PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
+    use common_meta::rpc::ddl::EventContext;
     use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
     use table::table_name::TableName;
     use uuid::Uuid;
@@ -385,6 +402,7 @@ mod tests {
             TableName::new("greptime", "public", "repartition_events"),
             1024,
             Some(Duration::from_secs(30)),
+            EventContext::default(),
         )
     }
 
@@ -420,6 +438,9 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    jsonb_value(&serde_json::json!({
+                        "reason": "unknown",
+                    })),
                 ],
             }],
         );
@@ -674,6 +695,9 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    jsonb_value(&serde_json::json!({
+                        "reason": "unknown",
+                    })),
                 ],
             }],
         );
@@ -685,11 +709,12 @@ mod tests {
             &SCHEMA_NAME_COLUMN,
             &TABLE_NAME_COLUMN,
             &TABLE_ID_COLUMN,
+            &EVENT_CONTEXT_COLUMN,
         ])
     }
 
     fn group_schema() -> Vec<ColumnSchema> {
-        let mut schema = parent_schema();
+        let mut schema = RepartitionEvent::base_schema();
         schema.extend(column_schemas([
             &PARENT_PROCEDURE_ID_COLUMN,
             &REPARTITION_GROUP_ID_COLUMN,

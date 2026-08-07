@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::rpc::ddl::EventContext;
 use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
@@ -213,6 +214,7 @@ async fn test_gc_basic(store_type: &StorageType) {
         false,                   // full_file_listing
         Duration::from_secs(10), // timeout
         Default::default(),
+        EventContext::default(),
     );
 
     // Submit the procedure to the procedure manager

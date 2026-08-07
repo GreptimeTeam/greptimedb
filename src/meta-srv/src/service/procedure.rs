@@ -102,7 +102,6 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
         restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
-
         let resp = self
             .ddl_manager()
             .submit_ddl_task(

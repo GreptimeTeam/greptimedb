@@ -18,6 +18,7 @@ use std::time::Instant;
 use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
+use common_meta::rpc::ddl::EventContext;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
@@ -36,7 +37,7 @@ use crate::gc::tracker::RegionGcInfo;
 use crate::metrics::METRIC_META_GC_CANDIDATE_REGIONS;
 
 impl GcScheduler {
-    pub(crate) async fn trigger_gc(&self) -> Result<GcJobReport> {
+    pub(crate) async fn trigger_gc(&self, event_context: EventContext) -> Result<GcJobReport> {
         let start_time = Instant::now();
         info!("Starting GC cycle");
 
@@ -107,6 +108,7 @@ impl GcScheduler {
                 datanode_to_candidates,
                 dropped_assignment.force_full_listing,
                 dropped_assignment.region_routes_override,
+                event_context,
             )
             .instrument(common_telemetry::tracing::info_span!(
                 "meta_gc_dispatch_to_datanodes"
@@ -210,6 +212,7 @@ impl GcScheduler {
         datanode_to_candidates: HashMap<Peer, Vec<(TableId, GcCandidate)>>,
         force_full_listing_by_peer: HashMap<Peer, HashSet<RegionId>>,
         region_routes_override_by_peer: HashMap<Peer, Region2Peers>,
+        event_context: EventContext,
     ) -> GcJobReport {
         let mut per_datanode_reports = HashMap::new();
         let mut failed_datanodes: HashMap<_, Vec<_>> = HashMap::new();
@@ -231,6 +234,7 @@ impl GcScheduler {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default();
+            let event_context = event_context.clone();
             async move {
                 (
                     peer,
@@ -240,6 +244,7 @@ impl GcScheduler {
                             candidates,
                             force_full_listing,
                             region_routes_override,
+                            event_context,
                         )
                         .await,
                 )
@@ -278,6 +283,7 @@ impl GcScheduler {
         candidates: Vec<(TableId, GcCandidate)>,
         force_full_listing: HashSet<RegionId>,
         region_routes_override: Region2Peers,
+        event_context: EventContext,
     ) -> Result<GcReport> {
         info!(
             "Starting GC for datanode {} with {} candidate regions",
@@ -327,6 +333,7 @@ impl GcScheduler {
                         false,
                         self.config.mailbox_timeout,
                         region_routes_override.clone(),
+                        event_context.clone(),
                     )
                     .instrument(common_telemetry::tracing::info_span!(
                         "meta_gc_call_datanode",
@@ -359,6 +366,7 @@ impl GcScheduler {
                         true,
                         self.config.mailbox_timeout,
                         region_routes_override,
+                        event_context,
                     )
                     .instrument(common_telemetry::tracing::info_span!(
                         "meta_gc_call_datanode",

@@ -24,6 +24,7 @@ use api::v1::{
 use client::Output;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::warn;
 use datatypes::prelude::ConcreteDataType;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -1678,7 +1679,7 @@ impl Instance {
 
         if let Err(err) = self
             .statement_executor
-            .alter_table_inner(alter_expr, ctx.clone())
+            .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
             .await
         {
             let table = self

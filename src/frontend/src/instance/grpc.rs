@@ -31,6 +31,7 @@ use auth::{
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
@@ -187,7 +188,12 @@ impl GrpcQueryHandler for Instance {
                             operator::expr_helper::validate_create_expr(&expr)?;
                             let _ = self
                                 .statement_executor
-                                .create_table_inner(&mut expr, None, ctx.clone())
+                                .create_table_inner(
+                                    &mut expr,
+                                    None,
+                                    ctx.clone(),
+                                    TriggerReason::Manual,
+                                )
                                 .await?;
                             Output::new_with_affected_rows(0)
                         }
@@ -200,7 +206,7 @@ impl GrpcQueryHandler for Instance {
                         }
                         DdlExpr::AlterTable(expr) => {
                             self.statement_executor
-                                .alter_table_inner(expr, ctx.clone())
+                                .alter_table_inner(expr, ctx.clone(), TriggerReason::Manual)
                                 .await?
                         }
                         DdlExpr::CreateDatabase(expr) => {

@@ -1347,6 +1347,10 @@ async fn check_region_migration_events_system_table(
             Expr::cust("json_get_string(procedure_trigger, 'type')"),
             Alias::new("procedure_trigger"),
         )
+        .expr_as(
+            Expr::cust("json_to_string(event_context)"),
+            Alias::new("event_context"),
+        )
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
@@ -1362,11 +1366,11 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+---------------------------------+-----------------+-------------------+
-| region_migration_trigger_reason | procedure_state | procedure_trigger |
-+---------------------------------+-----------------+-------------------+
-| Manual                          | Running         | Submitted         |
-| Manual                          | Done            | Succeeded         |
-+---------------------------------+-----------------+-------------------+";
++---------------------------------+-----------------+-------------------+---------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context       |
++---------------------------------+-----------------+-------------------+---------------------+
+| Manual                          | Running         | Submitted         | {\"reason\":\"manual\"} |
+| Manual                          | Done            | Succeeded         |                     |
++---------------------------------+-----------------+-------------------+---------------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }
