@@ -212,15 +212,47 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let last_value = all_values[end - 1];
 
             let result_value = if IS_COUNTER {
-                // Adjacent normalized windows usually slide forward by one sample. Reuse the
-                // previous window's accumulated reset correction and adjust only the dropped and
-                // newly added edges, falling back to a full scan when the layout changes.
-                if prev_offset != usize::MAX && offset == prev_offset + 1 && length == prev_length {
-                    if all_values[prev_offset + 1] < all_values[prev_offset] {
-                        counter_correction -= all_values[prev_offset];
+                // Normalized windows of the same series usually overlap as they slide forward.
+                // Reuse the previous window's accumulated reset correction and adjust only the
+                // adjacent pairs that leave or enter the window: any pair `(i, i + 1)` fully
+                // inside a window `[o, e)` has `i` in `[o, e - 1)`. The new window `B = [offset,
+                // end)` overlaps the previous `A = [prev_offset, prev_end)` when `offset >=
+                // prev_offset` and `offset < prev_end`, in which case the pairs of `A \ B` are
+                // `[prev_offset, offset)` (left) and `[end - 1, prev_end - 1)` (right), and the
+                // pairs of `B \ A` are `[prev_end - 1, end - 1)` (right). Otherwise fall back to
+                // a full scan of the new window.
+                if prev_offset != usize::MAX
+                    && offset >= prev_offset
+                    && offset < prev_offset + prev_length
+                {
+                    // The incremental path accumulates counter_correction across sliding
+                    // windows, which is not guaranteed to be bit-exact with the full-window
+                    // rescan below: floating-point addition is not associative, so the
+                    // summation order can differ by a few f64 epsilons (Prometheus behaves
+                    // the same way). Tests rely on integer sample values, which are exactly
+                    // representable, to keep expectations precise.
+                    let prev_end = prev_offset + prev_length;
+                    // Pairs whose left sample leaves the window on the left.
+                    for i in prev_offset..offset {
+                        if all_values[i + 1] < all_values[i] {
+                            counter_correction -= all_values[i];
+                        }
                     }
-                    if all_values[end - 1] < all_values[end - 2] {
-                        counter_correction += all_values[end - 2];
+                    // Pairs whose right sample leaves the window on the right.
+                    if end < prev_end {
+                        for i in (end - 1)..(prev_end - 1) {
+                            if all_values[i + 1] < all_values[i] {
+                                counter_correction -= all_values[i];
+                            }
+                        }
+                    }
+                    // Pairs that enter the window on the right.
+                    if end > prev_end {
+                        for i in (prev_end - 1)..(end - 1) {
+                            if all_values[i + 1] < all_values[i] {
+                                counter_correction += all_values[i];
+                            }
+                        }
                     }
                 } else {
                     counter_correction = 0.0;
@@ -883,5 +915,212 @@ mod test {
             timestamps,
             vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
+    }
+
+    /// Asserts that a single `calc` call over all windows (which takes the incremental
+    /// counter-reset path whenever consecutive windows overlap) produces bit-exactly the same
+    /// output as an oracle that runs `calc` once per window (which forces a full scan every
+    /// time). Integer values keep the counter corrections exact in `f64`.
+    fn assert_incremental_matches_full_scan(
+        ts: &[i64],
+        values: &[f64],
+        ranges: &[(u32, u32)],
+        eval_ts: &[i64],
+    ) {
+        let range_length = 5;
+        let ts_arr = Arc::new(TimestampMillisecondArray::from_iter(
+            ts.iter().copied().map(Some),
+        ));
+        let values_arr = Arc::new(Float64Array::from_iter(values.iter().copied()));
+
+        let run = |ts_range: RangeArray, value_range: RangeArray, eval_ts: &[i64]| {
+            let input = vec![
+                ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+                ColumnarValue::Array(Arc::new(value_range.into_dict())),
+                ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from_iter(
+                    eval_ts.iter().copied().map(Some),
+                ))),
+                ColumnarValue::Array(Arc::new(Int64Array::from(vec![range_length]))),
+            ];
+            extract_array(
+                &ExtrapolatedRate::<true, false>::new(range_length)
+                    .calc(&input)
+                    .unwrap(),
+            )
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .clone()
+        };
+
+        // Incremental path: a single calc over all windows.
+        let actual = run(
+            RangeArray::from_ranges(ts_arr.clone(), ranges.to_vec()).unwrap(),
+            RangeArray::from_ranges(values_arr.clone(), ranges.to_vec()).unwrap(),
+            eval_ts,
+        );
+
+        // Full-scan oracle: one window per calc call, so every window starts from a full scan.
+        let expected = (0..ranges.len())
+            .map(|i| {
+                let (offset, length) = ranges[i];
+                let out = run(
+                    RangeArray::from_ranges(ts_arr.clone(), [(offset, length)]).unwrap(),
+                    RangeArray::from_ranges(values_arr.clone(), [(offset, length)]).unwrap(),
+                    &[eval_ts[i]],
+                );
+                if out.is_null(0) {
+                    None
+                } else {
+                    Some(out.value(0))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual.len(), expected.len());
+        for (i, exp) in expected.iter().enumerate() {
+            let act = if actual.is_null(i) {
+                None
+            } else {
+                Some(actual.value(i))
+            };
+            assert_eq!(
+                act.map(f64::to_bits),
+                exp.map(f64::to_bits),
+                "window {i} (offset={}, length={}) disagrees with the full-scan oracle",
+                ranges[i].0,
+                ranges[i].1
+            );
+        }
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_slide_two() {
+        // Slide by two samples with a constant window length; resets (4 -> 1 and 3 -> 1)
+        // cross the moving window edges.
+        let ts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let values = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
+        let ranges = [(0, 4), (2, 4), (4, 4), (6, 4)];
+        let eval_ts = [4, 6, 8, 10];
+        assert_incremental_matches_full_scan(&ts, &values, &ranges, &eval_ts);
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_len_change() {
+        // Slide by several samples while both widening and narrowing the window.
+        let ts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let values = [
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+        ];
+        let ranges = [(0, 4), (3, 5), (5, 3), (7, 6)];
+        let eval_ts = [4, 8, 8, 13];
+        assert_incremental_matches_full_scan(&ts, &values, &ranges, &eval_ts);
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_same_offset() {
+        // Same offset with a growing then shrinking window; the reset (2 -> 1) leaves the
+        // window through the right edge.
+        let ts = [1, 2, 3, 4, 5, 6];
+        let values = [1.0, 2.0, 1.0, 2.0, 3.0, 4.0];
+        let ranges = [(0, 3), (0, 5), (0, 2)];
+        let eval_ts = [3, 5, 2];
+        assert_incremental_matches_full_scan(&ts, &values, &ranges, &eval_ts);
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_fallback_reentry() {
+        // Slide forward, fall back to a full scan after a backward jump, then re-enter the
+        // incremental path.
+        let ts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let values = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let ranges = [(0, 4), (2, 4), (1, 4), (3, 4)];
+        let eval_ts = [4, 6, 5, 7];
+        assert_incremental_matches_full_scan(&ts, &values, &ranges, &eval_ts);
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_disjoint_and_short() {
+        // Disjoint windows, a single-sample and an empty window in between, then re-entry
+        // into the incremental path.
+        let ts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let values = [
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0,
+        ];
+        let ranges = [(0, 4), (6, 2), (8, 2), (8, 1), (10, 4), (12, 4), (16, 0)];
+        let eval_ts = [4, 8, 10, 9, 14, 16, 16];
+        assert_incremental_matches_full_scan(&ts, &values, &ranges, &eval_ts);
+    }
+
+    #[test]
+    fn increase_counter_reset_incremental_zone_layouts() {
+        // Window A = [0, 6) and window B = [2, 8) overlap, putting resets into the
+        // left-leaving zone (pair (1, 2)), the overlap zone (pair (3, 4)) and the
+        // right-adding zone (pair (6, 7)). ts/eval_ts are arranged so the extrapolation
+        // factor is exactly 1.0, making the counter correction directly observable from the
+        // output: `output == last - first + counter_correction`.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [98, 99, 100, 101, 102, 103, 104, 105].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 10.0, 5.0, 20.0, 7.0, 9.0, 30.0, 8.0,
+        ]));
+        let ranges = [(0, 6), (2, 6)];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [103, 105].into_iter().map(Some),
+        )) as _;
+        // Full-scan corrections: A = pair (1, 2) + pair (3, 4) = 10 + 20, B = pair (3, 4) +
+        // pair (6, 7) = 20 + 30. Incrementally, B starts from A's 30, drops the left-leaving
+        // 10 and adds the right-adding 30.
+        let correction_a = 10.0 + 20.0;
+        let correction_b = 20.0 + 30.0;
+        extrapolated_rate_runner::<true, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![(9.0 - 1.0) + correction_a, (8.0 - 5.0) + correction_b],
+        );
+    }
+
+    #[test]
+    fn increase_counter_reset_slide_two() {
+        // Lock the exact output for windows sliding by two samples over a reset.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+        ]));
+        let ranges = [(0, 4), (2, 4), (4, 4), (6, 4)];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [4, 6, 8, 10].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<true, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![4.0, 3.5, 4.0, 3.5],
+        );
+    }
+
+    #[test]
+    fn increase_counter_reset_same_offset_len_change() {
+        // Lock the exact output for windows sharing the same offset while the length grows.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4, 5].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([0.0, 1.0, 0.0, 1.0, 2.0]));
+        let ranges = [(0, 3), (0, 5)];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter(
+            [3, 5].into_iter().map(Some),
+        )) as _;
+        extrapolated_rate_runner::<true, false>(ts_range, value_range, timestamps, vec![1.0, 3.0]);
     }
 }
