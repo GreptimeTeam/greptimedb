@@ -173,12 +173,20 @@ impl ScalarUDFImpl for NativeHistogramAnnotationUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
-        if let Some(collector) = args
-            .config_options
-            .extensions
-            .get::<PromqlAnnotationCollector>()
-            .cloned()
-            .or_else(|| self.collector.clone())
+        let has_dropped_sample = !args.args.is_empty()
+            && (0..args.number_rows).any(|row| {
+                args.args.iter().all(|arg| match arg {
+                    ColumnarValue::Array(array) => array.is_valid(row),
+                    ColumnarValue::Scalar(value) => !value.is_null(),
+                })
+            });
+        if has_dropped_sample
+            && let Some(collector) = args
+                .config_options
+                .extensions
+                .get::<PromqlAnnotationCollector>()
+                .cloned()
+                .or_else(|| self.collector.clone())
         {
             collector.record_info(self.message.clone());
         }

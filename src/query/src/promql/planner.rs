@@ -394,6 +394,8 @@ pub struct PromPlanner {
     promql_annotations: Option<PromqlAnnotationCollector>,
 }
 
+type BinaryFieldPair<'a> = (&'a String, &'a String);
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -1435,7 +1437,7 @@ impl PromPlanner {
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
                 let broadcast_scalar = !is_comparison_op;
-                let field_groups = Self::align_binary_field_columns(
+                let (field_groups, invalid_field_pairs) = Self::align_binary_field_columns(
                     left_input.schema(),
                     right_input.schema(),
                     &left_field_columns,
@@ -1484,6 +1486,46 @@ impl PromPlanner {
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
                 let promql_annotations = self.promql_annotations.clone();
+                // These predicates always pass; they only evaluate otherwise-discarded pairs
+                // while collecting annotations.
+                let invalid_pair_predicates = invalid_field_pairs
+                    .into_iter()
+                    .filter(|_| promql_annotations.is_some())
+                    .map(|(left_col_name, right_col_name)| {
+                        let left_field = join_plan_schema
+                            .qualified_field_with_name(Some(&left_table_ref), left_col_name)
+                            .context(DataFusionPlanningSnafu)?;
+                        let right_field = join_plan_schema
+                            .qualified_field_with_name(Some(&right_table_ref), right_col_name)
+                            .context(DataFusionPlanningSnafu)?;
+                        let left_is_histogram =
+                            left_field.1.data_type() == &Self::native_histogram_arrow_type();
+                        let right_is_histogram =
+                            right_field.1.data_type() == &Self::native_histogram_arrow_type();
+                        let drop_expr = Self::native_histogram_binary_expr(
+                            *op,
+                            DfExpr::Column(left_field.into()),
+                            left_is_histogram,
+                            DfExpr::Column(right_field.into()),
+                            right_is_histogram,
+                            true,
+                            promql_annotations.clone(),
+                        )?
+                        .with_context(|| UnexpectedPlanExprSnafu {
+                            desc: "invalid native histogram pair produced no drop expression",
+                        })?;
+                        Ok(DfExpr::Not(Box::new(drop_expr)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let join_plan = if let Some(predicate) = conjunction(invalid_pair_predicates) {
+                    LogicalPlanBuilder::from(join_plan)
+                        .filter(predicate)
+                        .context(DataFusionPlanningSnafu)?
+                        .build()
+                        .context(DataFusionPlanningSnafu)?
+                } else {
+                    join_plan
+                };
 
                 let bin_expr_builder = |_: &String| {
                     let (_, field_pairs) =
@@ -4826,7 +4868,10 @@ impl PromPlanner {
         op: TokenType,
         left_is_scalar: bool,
         right_is_scalar: bool,
-    ) -> Vec<(String, Vec<(&'a String, &'a String)>)> {
+    ) -> (
+        Vec<(String, Vec<BinaryFieldPair<'a>>)>,
+        Vec<BinaryFieldPair<'a>>,
+    ) {
         // Mixed vectors store mutually exclusive float and histogram samples in two columns.
         // Retain each valid sample combination and group expressions by their output lane.
         let left_alternative = Self::alternative_sample_columns(left_schema, left_field_columns);
@@ -4855,6 +4900,7 @@ impl PromPlanner {
             )),
             _ => None,
         };
+        let mut invalid_pairs = Vec::new();
         if let Some(((float_output, histogram_output), field_pairs)) = alternative_alignment {
             let mut float_pairs = Vec::new();
             let mut histogram_pairs = Vec::new();
@@ -4865,39 +4911,51 @@ impl PromPlanner {
                 match Self::binary_result_is_histogram(op, left_is_histogram, right_is_histogram) {
                     Some(false) => float_pairs.push((left, right)),
                     Some(true) => histogram_pairs.push((left, right)),
-                    None => {}
+                    None => invalid_pairs.push((left, right)),
                 }
             }
             if !float_pairs.is_empty() || !histogram_pairs.is_empty() {
-                return [
-                    (!float_pairs.is_empty()).then(|| (float_output.to_string(), float_pairs)),
-                    (!histogram_pairs.is_empty())
-                        .then(|| (histogram_output.to_string(), histogram_pairs)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
+                return (
+                    [
+                        (!float_pairs.is_empty()).then(|| (float_output.to_string(), float_pairs)),
+                        (!histogram_pairs.is_empty())
+                            .then(|| (histogram_output.to_string(), histogram_pairs)),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                    invalid_pairs,
+                );
             }
         }
 
         if left_is_scalar && !right_is_scalar && left_field_columns.len() == 1 {
-            return right_field_columns
-                .iter()
-                .map(|right| (right.clone(), vec![(&left_field_columns[0], right)]))
-                .collect();
+            return (
+                right_field_columns
+                    .iter()
+                    .map(|right| (right.clone(), vec![(&left_field_columns[0], right)]))
+                    .collect(),
+                invalid_pairs,
+            );
         }
         if right_is_scalar && !left_is_scalar && right_field_columns.len() == 1 {
-            return left_field_columns
-                .iter()
-                .map(|left| (left.clone(), vec![(left, &right_field_columns[0])]))
-                .collect();
+            return (
+                left_field_columns
+                    .iter()
+                    .map(|left| (left.clone(), vec![(left, &right_field_columns[0])]))
+                    .collect(),
+                invalid_pairs,
+            );
         }
 
-        left_field_columns
-            .iter()
-            .zip(right_field_columns.iter())
-            .map(|(left, right)| (left.clone(), vec![(left, right)]))
-            .collect()
+        (
+            left_field_columns
+                .iter()
+                .zip(right_field_columns.iter())
+                .map(|(left, right)| (left.clone(), vec![(left, right)]))
+                .collect(),
+            invalid_pairs,
+        )
     }
 
     fn binary_result_is_histogram(
@@ -11741,6 +11799,38 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     }
 
     #[tokio::test]
+    async fn test_mixed_binary_operator_reports_only_dropped_samples() {
+        for (query, expected_rows, expected_infos) in [
+            ("(lf or on(tag) lh) + on(tag) (rf or on(tag) rh)", 0, 1),
+            ("(lf or on(tag) lh) + on(tag) (lf or on(tag) lh)", 2, 0),
+            ("(lf or on(tag) lh) % on(tag) lh", 0, 1),
+        ] {
+            let state = build_query_engine_state();
+            let annotations = PromqlAnnotationCollector::default();
+            let plan = PromPlanner::stmt_to_plan_with_annotations(
+                operator_table_provider(),
+                &operator_eval_stmt(query),
+                &state,
+                Some(annotations.clone()),
+            )
+            .await
+            .unwrap();
+
+            let (_, batches) = execute(plan, &state).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows,
+                "{query}"
+            );
+            let mut warnings = vec![];
+            let mut infos = vec![];
+            annotations.append_to(&mut warnings, &mut infos);
+            assert!(warnings.is_empty(), "{query}: {warnings:?}");
+            assert_eq!(infos.len(), expected_infos, "{query}: {infos:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_mixed_or_can_feed_another_or() {
         let state = build_query_engine_state();
         let plan = PromPlanner::stmt_to_plan(
@@ -11790,7 +11880,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             unreachable!()
         };
 
-        let groups = PromPlanner::align_binary_field_columns(
+        let (groups, invalid_pairs) = PromPlanner::align_binary_field_columns(
             mixed.schema(),
             scale.schema(),
             &planner.ctx.field_columns,
@@ -11799,6 +11889,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             false,
             false,
         );
+        assert!(invalid_pairs.is_empty());
         assert_eq!(
             groups
                 .iter()
@@ -11814,7 +11905,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 .all(|(_, right)| *right == &scale_fields[0])
         );
 
-        let groups = PromPlanner::align_binary_field_columns(
+        let (groups, invalid_pairs) = PromPlanner::align_binary_field_columns(
             scale.schema(),
             mixed.schema(),
             &scale_fields,
@@ -11823,6 +11914,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             false,
             false,
         );
+        assert!(invalid_pairs.is_empty());
         assert_eq!(
             groups
                 .iter()
