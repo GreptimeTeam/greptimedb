@@ -123,8 +123,8 @@ pub struct PkIndexWriterMetrics {
     pub input_batches: usize,
     /// Number of logical rows passed to the writer.
     pub input_rows: usize,
-    /// Number of aggregated primary-key rows produced by the writer.
-    pub index_rows: usize,
+    /// Number of unique time series (primary keys) aggregated by the writer.
+    pub num_series: usize,
     /// Size of the committed index file. This remains zero for an aborted writer.
     pub output_bytes: u64,
     /// Time spent opening the object-store and Parquet writers.
@@ -443,7 +443,7 @@ impl PkIndexWriter {
         self.current_primary_key = None;
         if let Some(row) = self.current_row.take() {
             self.buffered_rows.push(row);
-            self.metrics.index_rows += 1;
+            self.metrics.num_series += 1;
         }
         if self.buffered_rows.len() >= WRITE_BATCH_SIZE {
             self.flush_rows().await?;
@@ -854,7 +854,7 @@ mod tests {
         let metrics = writer.finish().await.unwrap();
         assert_eq!(metrics.input_batches, 2);
         assert_eq!(metrics.input_rows, 11);
-        assert_eq!(metrics.index_rows, 2);
+        assert_eq!(metrics.num_series, 2);
         assert!(!metrics.aborted);
 
         let (output_bytes, row_groups, batches) = read_index(&store, "pk.parquet").await;
@@ -951,7 +951,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(empty.input_rows, 0);
-        assert_eq!(empty.index_rows, 0);
+        assert_eq!(empty.num_series, 0);
         let (output_bytes, _, batches) = read_index(&store, "empty.parquet").await;
         assert_eq!(empty.output_bytes, output_bytes);
         assert!(batches.is_empty());
