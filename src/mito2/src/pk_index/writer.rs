@@ -24,10 +24,11 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::timestamp::timestamp_array_to_primitive;
 use datatypes::value::Value;
 use futures::future::BoxFuture;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
-use object_store::{ErrorKind, ObjectStore, Writer};
+use object_store::{ObjectStore, Writer};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -168,7 +169,7 @@ pub struct PkIndexWriter {
     tag_columns: Vec<(ColumnId, String)>,
     schema: SchemaRef,
     object_store: ObjectStore,
-    path: String,
+    file_name: String,
     writer: Option<ParquetWriter>,
     current_primary_key: Option<Vec<u8>>,
     current_row: Option<PkIndexRow>,
@@ -179,10 +180,13 @@ pub struct PkIndexWriter {
 
 impl PkIndexWriter {
     /// Creates a writer for `path` in `object_store`.
+    ///
+    /// The file name in `path` must be unique in the object store so aborting
+    /// the writer only removes temporary files that belong to this writer.
     pub async fn try_new(
         metadata: RegionMetadataRef,
         object_store: ObjectStore,
-        path: impl Into<String>,
+        path: &str,
         options: PkIndexWriterOptions,
     ) -> Result<Self> {
         let open_start = Instant::now();
@@ -194,9 +198,9 @@ impl PkIndexWriter {
         );
         let schema = pk_columns_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
-        let path = path.into();
+        let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
         let output = object_store
-            .writer_with(&path)
+            .writer_with(path)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
@@ -218,7 +222,7 @@ impl PkIndexWriter {
             tag_columns,
             schema,
             object_store,
-            path,
+            file_name,
             writer: Some(writer),
             current_primary_key: None,
             current_row: None,
@@ -317,7 +321,8 @@ impl PkIndexWriter {
                     reason: "primary-key index input contains null primary keys",
                 }
             );
-            self.write_binary_primary_keys(array, timestamps).await
+            self.write_binary_primary_keys(array, timestamps.values())
+                .await
         } else if let Some(array) = primary_keys
             .as_any()
             .downcast_ref::<DictionaryArray<UInt32Type>>()
@@ -328,7 +333,8 @@ impl PkIndexWriter {
                     reason: "primary-key index input contains null primary keys",
                 }
             );
-            self.write_dictionary_primary_keys(array, timestamps).await
+            self.write_dictionary_primary_keys(array, timestamps.values())
+                .await
         } else {
             InvalidRecordBatchSnafu {
                 reason: format!(
@@ -497,14 +503,7 @@ impl PkIndexWriter {
         self.current_row = None;
         self.buffered_rows.clear();
 
-        if let Err(error) = self.object_store.delete(&self.path).await
-            && error.kind() != ErrorKind::NotFound
-        {
-            common_telemetry::warn!(error; "Failed to delete incomplete primary-key index file: {}", self.path);
-        }
-        if let Some(file_name) = self.path.rsplit('/').next() {
-            TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[file_name]).await;
-        }
+        TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[&self.file_name]).await;
         self.metrics.output_bytes = 0;
         self.metrics.cleanup_elapsed += start.elapsed();
     }
@@ -589,33 +588,26 @@ fn is_reserved_column(column_id: ColumnId) -> bool {
     column_id == ReservedColumnId::table_id() || column_id == ReservedColumnId::tsid()
 }
 
-fn timestamp_values(array: &ArrayRef) -> Result<&[i64]> {
-    macro_rules! timestamp_values {
-        ($ty:ty) => {
-            if let Some(array) = array.as_any().downcast_ref::<$ty>() {
-                ensure!(
-                    array.null_count() == 0,
-                    InvalidRecordBatchSnafu {
-                        reason: "primary-key index input contains null timestamps",
-                    }
-                );
-                return Ok(array.values());
-            }
-        };
-    }
-
-    timestamp_values!(Int64Array);
-    timestamp_values!(datatypes::arrow::array::TimestampSecondArray);
-    timestamp_values!(datatypes::arrow::array::TimestampMillisecondArray);
-    timestamp_values!(datatypes::arrow::array::TimestampMicrosecondArray);
-    timestamp_values!(datatypes::arrow::array::TimestampNanosecondArray);
-    InvalidRecordBatchSnafu {
-        reason: format!(
-            "primary-key index requires an Int64 or timestamp time index, got {:?}",
-            array.data_type()
-        ),
-    }
-    .fail()
+fn timestamp_values(array: &ArrayRef) -> Result<Int64Array> {
+    let timestamps = if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
+        array.clone()
+    } else {
+        timestamp_array_to_primitive(array)
+            .map(|(array, _)| array)
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!(
+                    "primary-key index requires an Int64 or timestamp time index, got {:?}",
+                    array.data_type()
+                ),
+            })?
+    };
+    ensure!(
+        timestamps.null_count() == 0,
+        InvalidRecordBatchSnafu {
+            reason: "primary-key index input contains null timestamps",
+        }
+    );
+    Ok(timestamps)
 }
 
 // TODO(yingwen): Bench and optimize the performance if this is costly.
@@ -702,9 +694,13 @@ fn rows_to_batch(schema: &SchemaRef, rows: &[PkIndexRow]) -> Result<RecordBatch>
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::{BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array};
+    use datatypes::arrow::array::{
+        BinaryDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    };
     use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
+    use object_store::ErrorKind;
     use object_store::services::Memory;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use store_api::codec::PrimaryKeyEncoding;
@@ -802,6 +798,31 @@ mod tests {
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         assert!(pk_columns_schema(&dense).is_err());
+    }
+
+    #[test]
+    fn test_timestamp_values() {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1, 2])),
+            Arc::new(TimestampSecondArray::from(vec![1, 2])),
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
+            Arc::new(TimestampMicrosecondArray::from(vec![1, 2])),
+            Arc::new(TimestampNanosecondArray::from(vec![1, 2])),
+        ];
+        for array in arrays {
+            assert_eq!(timestamp_values(&array).unwrap().values().as_ref(), &[1, 2]);
+        }
+
+        let nulls: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![Some(1), None]));
+        let error = timestamp_values(&nulls).unwrap_err();
+        assert!(error.to_string().contains("null timestamps"), "{error}");
+
+        let unsupported: ArrayRef = Arc::new(UInt8Array::from(vec![1, 2]));
+        let error = timestamp_values(&unsupported).unwrap_err();
+        assert!(
+            error.to_string().contains("requires an Int64 or timestamp"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -981,12 +1002,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not sorted"), "{error}");
+        store
+            .write("abort.parquet", Bytes::from_static(b"existing"))
+            .await
+            .unwrap();
         let metrics = writer.abort().await.unwrap();
         assert!(metrics.aborted);
         assert_eq!(metrics.output_bytes, 0);
         assert_eq!(
-            store.stat("abort.parquet").await.unwrap_err().kind(),
-            ErrorKind::NotFound
+            store.read("abort.parquet").await.unwrap().to_bytes(),
+            Bytes::from_static(b"existing")
         );
 
         let mut writer = PkIndexWriter::try_new(
