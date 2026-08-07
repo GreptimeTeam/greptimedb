@@ -44,6 +44,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
+use common_session::channel_protocol;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -1670,23 +1671,7 @@ pub struct QueryContext {
 impl QueryContext {
     /// Returns the protocol name represented by the wire channel value.
     pub fn channel_protocol(&self) -> Option<&'static str> {
-        match self.channel {
-            1 => Some("mysql"),
-            2 => Some("postgres"),
-            3 => Some("httpsql"),
-            4 => Some("prometheus"),
-            5 => Some("otlp"),
-            6 => Some("grpc"),
-            7 => Some("influx"),
-            8 => Some("opentsdb"),
-            9 => Some("loki"),
-            10 => Some("elasticsearch"),
-            11 => Some("jaeger"),
-            12 => Some("log"),
-            13 => Some("promql"),
-            14 => Some("splunk"),
-            _ => None,
-        }
+        channel_protocol(self.channel)
     }
 }
 
@@ -1745,8 +1730,6 @@ impl Default for TriggerContext {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum TriggerReason {
-    #[default]
-    Unknown,
     Manual,
     AutoCreate,
     AutoAlter,
@@ -1754,6 +1737,9 @@ pub enum TriggerReason {
     AutoRebalance,
     RegionFailover,
     ScheduledGc,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 impl TriggerReason {
@@ -2333,6 +2319,12 @@ mod tests {
         assert_eq!(pb_roundtrip.extensions, pb.extensions);
         assert_eq!(pb_roundtrip.channel, pb.channel);
         assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_trigger_reason_deserializes_unknown_value() {
+        let reason: TriggerReason = serde_json::from_str("\"future_reason\"").unwrap();
+        assert_eq!(TriggerReason::Unknown, reason);
     }
 
     #[test]

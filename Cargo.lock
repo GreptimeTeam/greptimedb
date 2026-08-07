@@ -2640,6 +2640,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-session",
  "common-telemetry",
  "common-test-util",
  "common-time",
