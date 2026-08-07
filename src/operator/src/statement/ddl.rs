@@ -379,6 +379,8 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        expr_helper::validate_create_expr(create_table)?;
+
         ensure!(
             !is_readonly_schema(&create_table.schema_name),
             SchemaReadOnlySnafu {

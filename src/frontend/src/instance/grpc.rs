@@ -176,9 +176,6 @@ impl GrpcQueryHandler for Instance {
 
                     match expr {
                         DdlExpr::CreateTable(mut expr) => {
-                            // Direct gRPC DDL bypasses the SQL parser, so validate the
-                            // request here (e.g. the time index must be a timestamp).
-                            operator::expr_helper::validate_create_expr(&expr)?;
                             let _ = self
                                 .statement_executor
                                 .create_table_inner(&mut expr, None, ctx.clone())
