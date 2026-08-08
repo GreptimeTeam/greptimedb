@@ -768,7 +768,7 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .await;
     let create = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("compaction.twcs.trigger_file_num", "4")
         .build();
     let column_schemas = create
         .column_metadatas
@@ -780,7 +780,9 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
         .await
         .unwrap();
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
-    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    put_and_flush(&engine, region_id, &column_schemas, 30..40).await;
 
     let commit_guard = gate.arm_commit();
     let compact_engine = engine.clone();
@@ -804,7 +806,7 @@ async fn test_truncate_waits_for_non_cancellable_compaction_commit() {
                 RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges {
                     time_ranges: vec![(
                         Timestamp::new_millisecond(0),
-                        Timestamp::new_millisecond(19_000),
+                        Timestamp::new_millisecond(39_000),
                     )],
                 }),
             )
@@ -1529,7 +1531,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("compaction.twcs.trigger_file_num", "4")
         .build();
 
     let column_schemas = request
@@ -1542,7 +1544,9 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
         .await
         .unwrap();
     let listener_guard = CompactionListenerGuard::new(listener.clone());
-    // Flush 2 SSTs for compaction.
+    // Flush 4 balanced SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
 
@@ -1573,7 +1577,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
         .await
         .unwrap();
     assert_eq!(
-        2,
+        4,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -1614,7 +1618,7 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .insert_option("compaction.twcs.trigger_file_num", "4")
         .build();
     let column_schemas = request
         .column_metadatas
@@ -1627,6 +1631,8 @@ async fn test_local_compaction_cancellation_notifies_before_pending_ddl_dispatch
         .unwrap();
 
     let merge_guard = gate.arm_merge();
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
 
