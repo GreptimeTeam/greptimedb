@@ -487,8 +487,8 @@ ORDER BY ts;
 |               | ]]                                                                                                                                                                                                                                                                                                                                                                          |
 | physical_plan | ProjectionExec: expr=[ts@0 as ts, val@1 as val, lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@2 as prev_value]                                                                                                                                                                                         |
 |               |   BoundedWindowAggExec: wdw=[lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Float64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
-|               |     SortPreservingMergeExec: [ts@0 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                          |
-|               |       SortExec: expr=[ts@0 ASC NULLS LAST], preserve_REDACTED
+|               |     SortExec: expr=[ts@0 ASC NULLS LAST], preserve_REDACTED
+|               |       CooperativeExec                                                                                                                                                                                                                                                                                                                                                       |
 |               |         MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                                                                                                                             |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -765,11 +765,15 @@ LIMIT 5;
 |               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                            |
 |               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@0, cpu@1, host@4] |
 |               |         RepartitionExec: REDACTED
-|               |           ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu, date_trunc(second, ts@0) as date_trunc(Utf8("second"),t.ts)]                                               |
-|               |             MergeScanExec: REDACTED
+|               |           ProjectionExec: expr=[ts@0 as ts, cpu@1 as cpu, date_trunc(second, ts@0) as date_trunc(Utf8("second"),t.ts)]                                               |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu]                                                                                                        |
+|               |                 MergeScanExec: REDACTED
 |               |         RepartitionExec: REDACTED
 |               |           ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                             |
-|               |             MergeScanExec: REDACTED
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                      |
+|               |                 MergeScanExec: REDACTED
 |               |                                                                                                                                                                      |
 +---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -843,11 +847,15 @@ LIMIT 5;
 |               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                            |
 |               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
 |               |         RepartitionExec: REDACTED
-|               |           ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts, date_trunc(second, ts@2) as date_trunc(Utf8("second"),t.ts)]                                               |
-|               |             MergeScanExec: REDACTED
+|               |           ProjectionExec: expr=[cpu@0 as cpu, ts@1 as ts, date_trunc(second, ts@1) as date_trunc(Utf8("second"),t.ts)]                                               |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts]                                                                                                        |
+|               |                 MergeScanExec: REDACTED
 |               |         RepartitionExec: REDACTED
 |               |           ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                             |
-|               |             MergeScanExec: REDACTED
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                      |
+|               |                 MergeScanExec: REDACTED
 |               |                                                                                                                                                                      |
 +---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 

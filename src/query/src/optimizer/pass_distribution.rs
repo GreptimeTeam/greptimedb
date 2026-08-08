@@ -277,8 +277,10 @@ mod tests {
             panic!("expected right merge scan hash partitioning");
         };
 
-        assert_eq!(*left_count, 32);
-        assert_eq!(*right_count, 32);
+        // MergeScan declares only the partitions it actually populates: the
+        // test scans have 2 regions, so 2 partitions despite target = 32.
+        assert_eq!(*left_count, 2);
+        assert_eq!(*right_count, 2);
         assert_eq!(
             column_names(left_exprs),
             vec![DATA_SCHEMA_TSID_COLUMN_NAME, "greptime_timestamp"]
@@ -331,6 +333,7 @@ mod tests {
             partition_cols,
             Some(RemoteDynFilterProducerId::new(1)),
             false,
+            None,
         )
         .unwrap()
     }

@@ -21,7 +21,7 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -35,6 +35,7 @@ use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
+use common_base::Plugins;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
@@ -57,6 +58,7 @@ use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
+use query::dist_plan::{RegionRowCountProvider, RegionRowCountProviderRef};
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
@@ -473,6 +475,28 @@ impl RegionServer {
             Some(e) => e.region_statistic(region_id),
             None => None,
         }
+    }
+
+    /// Registers a [`RegionRowCountProviderRef`] backed by this server's
+    /// in-memory region statistics into `plugins`, so that query planning can
+    /// report real per-region row counts for `MergeScanExec` statistics.
+    ///
+    /// The provider reports a count only for a [`RegionEngineWithStatus::Ready`]
+    /// region; a region that is unknown, still registering, being deregistered,
+    /// or whose engine cannot report a statistic yields `None`, keeping the
+    /// estimate unknown instead of fabricated.
+    ///
+    /// The registered provider holds only a weak reference to the server's
+    /// inner state, mirroring the remote-dynamic-filter plugin: the server
+    /// owns the query engine, whose shared [`Plugins`] map would otherwise
+    /// form a strong reference cycle (`RegionServer -> query engine ->
+    /// Plugins -> provider -> RegionServer`) that keeps the server alive
+    /// forever.
+    pub fn install_region_row_count_provider(&self, plugins: &Plugins) {
+        let provider: RegionRowCountProviderRef = Arc::new(WeakRegionRowCountProvider {
+            inner: Arc::downgrade(&self.inner),
+        });
+        plugins.insert::<RegionRowCountProviderRef>(provider);
     }
 
     /// Stop the region server.
@@ -909,6 +933,30 @@ impl Stream for RegionWatermarkStream {
     }
 }
 
+impl RegionRowCountProvider for RegionServer {
+    fn row_count(&self, region: RegionId) -> Option<u64> {
+        self.inner.region_row_count(region)
+    }
+}
+
+/// Weak-backed [`RegionRowCountProvider`] adapter registered by
+/// [`RegionServer::install_region_row_count_provider`].
+///
+/// The adapter holds only a `Weak` reference to [`RegionServerInner`] so the
+/// shared [`Plugins`] map does not create a strong `RegionServer -> query
+/// engine -> Plugins -> provider -> RegionServer` cycle. After the server is
+/// dropped the upgrade fails and the provider reports `None` (fail-open),
+/// exactly like the remote-dynamic-filter plugin's weak server handle.
+struct WeakRegionRowCountProvider {
+    inner: Weak<RegionServerInner>,
+}
+
+impl RegionRowCountProvider for WeakRegionRowCountProvider {
+    fn row_count(&self, region: RegionId) -> Option<u64> {
+        self.inner.upgrade()?.region_row_count(region)
+    }
+}
+
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
@@ -1142,6 +1190,31 @@ impl Debug for CurrentEngine {
 }
 
 impl RegionServerInner {
+    /// Returns the stable row count for `region` using a single `region_map`
+    /// read, or `None` when the count is unavailable.
+    ///
+    /// Only a Ready region has a trustworthy, stable row count. Regions that
+    /// are Registering or Deregistering are mid-transition: their engine may
+    /// still answer a statistic, but the count is not stable, so the provider
+    /// fails open (`None`). Missing regions and regions whose engine reports
+    /// no statistic also yield `None`.
+    ///
+    /// The readiness guard and the statistic lookup share a single
+    /// `region_map` read so the engine queried is the same one whose status
+    /// was checked (no check-then-lookup TOCTOU window).
+    fn region_row_count(&self, region: RegionId) -> Option<u64> {
+        match self.region_map.get(&region) {
+            Some(status) => match &*status {
+                RegionEngineWithStatus::Ready(engine) => {
+                    engine.region_statistic(region).map(|stat| stat.num_rows)
+                }
+                RegionEngineWithStatus::Registering(_)
+                | RegionEngineWithStatus::Deregistering(_) => None,
+            },
+            None => None,
+        }
+    }
+
     pub fn new(
         query_engine: QueryEngineRef,
         runtime: Runtime,
@@ -2023,6 +2096,123 @@ mod tests {
         assert!(!RegionServerInner::is_ingest_request(
             &RegionRequest::Compact(RegionCompactRequest::default()),
         ));
+    }
+
+    fn region_server_with_row_count(region_id: RegionId, num_rows: u64) -> RegionServer {
+        region_server_with_row_count_status(region_id, num_rows, RegionEngineWithStatus::Ready)
+    }
+
+    /// Registers a region with the given lifecycle status whose engine reports
+    /// `num_rows` for any region. The engine map is intentionally untouched:
+    /// the row-count provider only reads `region_map`.
+    fn region_server_with_row_count_status(
+        region_id: RegionId,
+        num_rows: u64,
+        status: fn(RegionEngineRef) -> RegionEngineWithStatus,
+    ) -> RegionServer {
+        let server = mock_region_server();
+        let (engine, _rx) = MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
+            engine.handle_region_statistic_mock_fn = Some(Box::new(move |_| {
+                Some(RegionStatistic {
+                    num_rows,
+                    ..Default::default()
+                })
+            }));
+        });
+        let engine: RegionEngineRef = engine;
+        server.inner.region_map.insert(region_id, status(engine));
+        server
+    }
+
+    #[test]
+    fn region_row_count_provider_returns_real_num_rows() {
+        let region_id = RegionId::new(1024, 1);
+        let server = region_server_with_row_count(region_id, 42);
+        let provider: RegionRowCountProviderRef = Arc::new(server);
+
+        assert_eq!(provider.row_count(region_id), Some(42));
+    }
+
+    #[test]
+    fn region_row_count_provider_returns_none_for_missing_region() {
+        let server = mock_region_server();
+        let provider: RegionRowCountProviderRef = Arc::new(server);
+
+        assert_eq!(provider.row_count(RegionId::new(1024, 99)), None);
+    }
+
+    #[test]
+    fn region_row_count_provider_returns_none_when_engine_reports_no_statistic() {
+        let region_id = RegionId::new(1024, 1);
+        // Register a region whose engine has no statistic (unsupported region):
+        // the provider must report None instead of fabricating an estimate.
+        let server = mock_region_server();
+        let (engine, _rx) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        server.register_test_region(region_id, engine);
+        let provider: RegionRowCountProviderRef = Arc::new(server);
+
+        assert_eq!(provider.row_count(region_id), None);
+    }
+
+    #[test]
+    fn region_row_count_provider_returns_none_for_registering_region() {
+        // A region that is still registering can already answer an engine
+        // statistic, but its count is not stable yet: the provider must fail
+        // open instead of reporting a mid-transition count.
+        let region_id = RegionId::new(1024, 1);
+        let server =
+            region_server_with_row_count_status(region_id, 42, RegionEngineWithStatus::Registering);
+        let provider: RegionRowCountProviderRef = Arc::new(server);
+
+        assert_eq!(provider.row_count(region_id), None);
+    }
+
+    #[test]
+    fn region_row_count_provider_returns_none_for_deregistering_region() {
+        // A region that is being deregistered can still answer an engine
+        // statistic, but its count is not stable yet: the provider must fail
+        // open instead of reporting a mid-transition count.
+        let region_id = RegionId::new(1024, 1);
+        let server = region_server_with_row_count_status(
+            region_id,
+            42,
+            RegionEngineWithStatus::Deregistering,
+        );
+        let provider: RegionRowCountProviderRef = Arc::new(server);
+
+        assert_eq!(provider.row_count(region_id), None);
+    }
+
+    #[test]
+    fn install_region_row_count_provider_registers_into_plugins() {
+        let region_id = RegionId::new(1024, 1);
+        let server = region_server_with_row_count(region_id, 7);
+        let plugins = Plugins::new();
+        server.install_region_row_count_provider(&plugins);
+
+        let provider = plugins.get::<RegionRowCountProviderRef>().unwrap();
+        assert_eq!(provider.row_count(region_id), Some(7));
+        assert_eq!(provider.row_count(RegionId::new(1024, 99)), None);
+    }
+
+    #[test]
+    fn region_row_count_provider_uses_weak_reference_and_fails_open_after_server_drop() {
+        // The provider registered into Plugins must not keep the server alive
+        // through a strong Arc cycle (`RegionServer -> query engine -> Plugins
+        // -> provider -> RegionServer`). After the last strong reference to
+        // the server drops, the weak-backed adapter fails open (None) instead
+        // of holding the server, its engines, and the query engine forever.
+        let region_id = RegionId::new(1024, 1);
+        let plugins = Plugins::new();
+        let server = region_server_with_row_count(region_id, 7);
+        server.install_region_row_count_provider(&plugins);
+
+        let provider = plugins.get::<RegionRowCountProviderRef>().unwrap();
+        assert_eq!(provider.row_count(region_id), Some(7));
+
+        // Drop the only strong reference to the server (and its `inner` Arc).
+        drop(server);
+        assert_eq!(provider.row_count(region_id), None);
     }
 
     fn single_value_stream() -> SendableRecordBatchStream {

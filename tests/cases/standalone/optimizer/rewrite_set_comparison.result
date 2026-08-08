@@ -81,11 +81,12 @@ EXPLAIN SELECT v FROM sc_t WHERE v > ANY(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                                |
 |               |           FilterExec: mark@1 OR NOT mark@1 AND NULL                                                           |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 > v@1) IS NOT DISTINCT FROM true              |
-|               |               CoalescePartitionsExec                                                                          |
-|               |                 ProjectionExec: expr=[v@1 as v]                                                               |
-|               |                   MergeScanExec: REDACTED
-|               |               MergeScanExec: REDACTED
-|               |         MergeScanExec: REDACTED
+|               |               ProjectionExec: expr=[v@1 as v]                                                                 |
+|               |                 MergeScanExec: REDACTED
+|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                           |
+|               |                 MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                                 |
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                               |
 +---------------+---------------------------------------------------------------------------------------------------------------+
 
@@ -135,11 +136,12 @@ EXPLAIN SELECT v FROM sc_t WHERE v != ALL(SELECT v FROM sc_s) ORDER BY v;
 |               |         CoalescePartitionsExec                                                                     |
 |               |           FilterExec: NOT mark@1, projection=[v@0]                                                 |
 |               |             NestedLoopJoinExec: join_type=LeftMark, filter=(v@0 != v@1) IS NOT DISTINCT FROM false |
-|               |               CoalescePartitionsExec                                                               |
-|               |                 ProjectionExec: expr=[v@1 as v]                                                    |
-|               |                   MergeScanExec: REDACTED
-|               |               MergeScanExec: REDACTED
-|               |         MergeScanExec: REDACTED
+|               |               ProjectionExec: expr=[v@1 as v]                                                      |
+|               |                 MergeScanExec: REDACTED
+|               |               RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                |
+|               |                 MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1                      |
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                    |
 +---------------+----------------------------------------------------------------------------------------------------+
 

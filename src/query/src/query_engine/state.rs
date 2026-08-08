@@ -56,7 +56,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
-    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
+    MergeSortExtensionPlanner, RegionRowCountProviderRef, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
@@ -176,6 +176,11 @@ impl QueryEngineState {
         let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
         let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder)?;
 
+        // Optional provider of real per-region row counts, wired by the process
+        // that owns the statistics source (e.g. standalone's region server).
+        // `None` keeps MergeScan statistics unknown (fail-open).
+        let region_row_count_provider = plugins.get::<RegionRowCountProviderRef>();
+
         // Apply extension rules
         let mut extension_rules = Vec::new();
 
@@ -263,6 +268,7 @@ impl QueryEngineState {
                 catalog_list.clone(),
                 partition_rule_manager,
                 region_query_handler.clone(),
+                region_row_count_provider,
                 options.enable_per_region_metrics,
             )))
             .with_optimizer_rules(optimizer.rules)
@@ -542,6 +548,7 @@ impl DfQueryPlanner {
         catalog_manager: CatalogManagerRef,
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        region_row_count_provider: Option<RegionRowCountProviderRef>,
         enable_per_region_metrics: bool,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
@@ -557,6 +564,7 @@ impl DfQueryPlanner {
                 partition_rule_manager,
                 region_query_handler,
                 enable_per_region_metrics,
+                region_row_count_provider,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }

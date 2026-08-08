@@ -21,6 +21,7 @@ mod merge_sort;
 mod planner;
 mod predicate_extractor;
 mod region_pruner;
+mod region_statistics;
 mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;
 
@@ -31,6 +32,7 @@ pub(crate) use merge_sort::MergeSortExec;
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;
 pub use region_pruner::ConstraintPruner;
+pub use region_statistics::{RegionRowCountProvider, RegionRowCountProviderRef};
 pub use remote_dyn_filter_receiver::{
     RemoteDynFilterReceiverExtensionPlanner, RemoteDynFilterReceiverInjector,
     RemoteDynFilterReceiverInjectorRef, RemoteDynFilterReceiverLogicalPlan,

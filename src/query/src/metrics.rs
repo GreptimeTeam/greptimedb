@@ -496,6 +496,7 @@ mod tests {
                 BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
                 Some(RemoteDynFilterProducerId::new(0)),
                 false,
+                None,
             )
             .unwrap(),
         )
