@@ -46,6 +46,7 @@ use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
+use crate::dist_plan::region_statistics::RegionRowCountProviderRef;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -137,6 +138,7 @@ pub struct DistExtensionPlanner {
     partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
     enable_per_region_metrics: bool,
+    region_row_count_provider: Option<RegionRowCountProviderRef>,
 }
 
 impl DistExtensionPlanner {
@@ -145,12 +147,14 @@ impl DistExtensionPlanner {
         partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
         enable_per_region_metrics: bool,
+        region_row_count_provider: Option<RegionRowCountProviderRef>,
     ) -> Self {
         Self {
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
             enable_per_region_metrics,
+            region_row_count_provider,
         }
     }
 }
@@ -212,6 +216,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
+            self.region_row_count_provider.clone(),
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
@@ -712,6 +717,7 @@ mod tests {
             partition_rule_manager,
             Arc::new(UnusedRegionQueryHandler),
             false,
+            None,
         );
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(logical_table),

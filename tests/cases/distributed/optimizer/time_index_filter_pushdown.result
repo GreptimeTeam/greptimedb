@@ -130,8 +130,8 @@ WHERE
 | physical_plan | HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(greptime_timestamp@0, greptime_timestamp@2)], projection=[rack@1, os@2, greptime_timestamp@3]_|
 |_|_MergeSortExec: [greptime_timestamp@0 DESC], fetch=1_|
 |_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=5_|
 |_|_ProjectionExec: expr=[rack@0 as rack, os@1 as os, greptime_timestamp@3 as greptime_timestamp]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

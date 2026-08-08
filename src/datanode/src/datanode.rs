@@ -469,6 +469,7 @@ impl DatanodeBuilder {
             opts.grpc.flight_compression,
         );
         region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
+        region_server.install_region_row_count_provider(&self.plugins);
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = self

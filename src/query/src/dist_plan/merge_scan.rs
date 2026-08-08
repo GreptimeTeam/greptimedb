@@ -42,8 +42,9 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_common::stats::Precision;
+use datafusion_common::{Column as ColumnExpr, DataFusionError, Result, Statistics};
+use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::{
@@ -72,6 +73,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
 };
+use crate::dist_plan::region_statistics::RegionRowCountProviderRef;
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -82,6 +84,179 @@ use crate::region_query::RegionQueryHandlerRef;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
+}
+
+/// Largest aggregate row-count estimate that may be reported.
+///
+/// DataFusion's join cardinality estimation multiplies two input row-count
+/// estimates (`estimate_inner_join_cardinality`), so any estimate we report
+/// must satisfy `estimate * estimate <= usize::MAX` to keep that multiplication
+/// overflow-free in debug builds (which panic on overflow) and release builds
+/// (which wrap). `i32::MAX` satisfies this with a wide margin on 64-bit
+/// platforms (the only supported targets): `i32::MAX^2 ≈ 4.6e18` versus
+/// `usize::MAX ≈ 1.8e19`. On 32-bit platforms `u16::MAX` is used so its square
+/// still fits in `usize`.
+const MAX_SAFE_NUM_ROWS_ESTIMATE: usize = if usize::BITS >= 64 {
+    i32::MAX as usize
+} else {
+    u16::MAX as usize
+};
+
+/// Live provider row counts below this floor are reported as unknown.
+///
+/// Live counts differ by deployment (a standalone frontend has the
+/// region-server-backed provider, a distributed frontend has none) and by
+/// timing (flush state, freshly-created tables). Plan decisions that hinge on
+/// a small live count — most importantly JoinSelection's CollectLeft
+/// threshold — would then differ between environments, and the sqlness
+/// goldens under `tests/cases/*/common` (shared between the standalone and
+/// distributed runs via symlink) would flap. At or above the floor the count
+/// cannot flip a CollectLeft decision relative to Absent, so reporting it is
+/// safe; below the floor it is treated as unknown, which is what a
+/// distributed frontend reports anyway.
+///
+/// The floor is the *byte*-threshold-safe value, not merely DataFusion's
+/// 128K row threshold. DataFusion's `supports_collect_by_thresholds` checks
+/// `total_byte_size` first against `hash_join_single_partition_threshold`
+/// (default 1 MiB) and only then falls back to `num_rows` against
+/// `hash_join_single_partition_threshold_rows` (default 128K). A
+/// `ProjectionExec` above the scan recomputes `total_byte_size` from
+/// `num_rows` and the projected primitive column widths
+/// (`project_statistics` -> `calculate_total_byte_size`), so a narrow
+/// all-primitive projection of a live count just above 128K rows can still
+/// land below 1 MiB (e.g. 200_000 rows x a 4-byte Int32 = 800 KiB) and pick
+/// CollectLeft standalone while the provider-absent distributed frontend
+/// stays Partitioned. 1 MiB rows is the smallest count whose all-primitive
+/// projections (minimum width 1 byte, e.g. Int8/UInt8) are always >= 1 MiB,
+/// so a provider-derived estimate can never rehydrate a collectable byte
+/// estimate.
+const MIN_TRUSTED_LIVE_ROW_COUNT: usize = 1024 * 1024;
+
+/// Best-effort upper bound on the number of rows the remote plan can emit
+/// **per selected region**.
+///
+/// Returns `Some(bound)` when the remote plan has a statically-known row cap:
+/// - a [`LogicalPlan::Limit`] with a literal `fetch`
+/// - a [`LogicalPlan::Sort`] with a `fetch` (top-N sort)
+/// - a global [`LogicalPlan::Aggregate`] (no grouping expressions), which
+///   always emits exactly one row
+///
+/// Pass-through nodes ([`LogicalPlan::Projection`], [`LogicalPlan::Filter`],
+/// [`LogicalPlan::SubqueryAlias`], [`LogicalPlan::Distinct`],
+/// [`LogicalPlan::Window`], row-preserving [`LogicalPlan::Repartition`], and
+/// plain grouping [`LogicalPlan::Aggregate`]s, which are row-non-increasing)
+/// delegate to their input. When a cap is present, it is combined with the
+/// input's bound via `min`, so a tighter nested cap (e.g. `LIMIT 50` over
+/// `LIMIT 20`) is not discarded. Grouping-set aggregates can emit more rows
+/// than their input and are therefore not pass-through: they fail open
+/// (`None`). Plain scans, joins, and other nodes remain uncapped (`None`),
+/// so the region total reported by [`MergeScanExec::partition_statistics`] is
+/// not inflated beyond what the plan can actually produce (e.g. a bounded CTE
+/// side of a join).
+fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
+    match plan {
+        LogicalPlan::Limit(limit) => {
+            let input_bound = remote_plan_row_bound(&limit.input);
+            match limit.get_fetch_type() {
+                Ok(FetchType::Literal(Some(fetch))) => Some(match input_bound {
+                    Some(bound) => fetch.min(bound),
+                    None => fetch,
+                }),
+                _ => input_bound,
+            }
+        }
+        LogicalPlan::Sort(sort) => {
+            let input_bound = remote_plan_row_bound(&sort.input);
+            match sort.fetch {
+                Some(fetch) => Some(match input_bound {
+                    Some(bound) => fetch.min(bound),
+                    None => fetch,
+                }),
+                None => input_bound,
+            }
+        }
+        LogicalPlan::Projection(projection) => remote_plan_row_bound(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_row_bound(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_row_bound(&alias.input),
+        LogicalPlan::Window(window) => remote_plan_row_bound(&window.input),
+        // A repartition only redistributes rows; the child's cap survives.
+        LogicalPlan::Repartition(repartition) => remote_plan_row_bound(&repartition.input),
+        LogicalPlan::Aggregate(aggregate) => {
+            // A grouping-set aggregate (group_expr containing an
+            // `Expr::GroupingSet`) emits one row per grouping set and can
+            // therefore produce more rows than its input: the child's bound
+            // is not a sound upper bound, so fail open.
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                return None;
+            }
+            // A global aggregate (no grouping expressions) emits exactly one
+            // row even from an empty input (e.g. `LIMIT 0`), so report its
+            // one-row output instead of inheriting the child's (possibly
+            // zero) bound.
+            if aggregate.group_expr.is_empty() {
+                return Some(1);
+            }
+            // A plain GROUP BY is row-non-increasing (each output row
+            // corresponds to at least one input row): the child's bound
+            // remains a sound upper bound.
+            remote_plan_row_bound(&aggregate.input)
+        }
+        LogicalPlan::Distinct(distinct) => remote_plan_row_bound(distinct.input()),
+        _ => None,
+    }
+}
+
+/// Returns true when the remote plan never emits more rows than its input
+/// for a single region, i.e. the region's stored row total remains a sound
+/// upper bound even without a statically-known cap.
+///
+/// Row-non-increasing operators delegate to their input:
+/// [`LogicalPlan::Projection`], [`LogicalPlan::Filter`],
+/// [`LogicalPlan::SubqueryAlias`], [`LogicalPlan::Distinct`],
+/// [`LogicalPlan::Window`], [`LogicalPlan::Repartition`] (row-preserving),
+/// and plain grouping [`LogicalPlan::Aggregate`]s. A global aggregate emits
+/// exactly one row. Scans (the base of the remote plan) are inherently
+/// row-non-increasing. Joins, grouping-set aggregates, unions, and unknown
+/// operators are NOT row-non-increasing: they can emit more rows than the
+/// underlying region stores, so a live provider total would not be a sound
+/// upper bound and must not be reported.
+fn remote_plan_is_row_non_increasing(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::TableScan(_) | LogicalPlan::EmptyRelation(_) => true,
+        LogicalPlan::Projection(projection) => remote_plan_is_row_non_increasing(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_is_row_non_increasing(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_is_row_non_increasing(&alias.input),
+        LogicalPlan::Distinct(distinct) => remote_plan_is_row_non_increasing(distinct.input()),
+        LogicalPlan::Window(window) => remote_plan_is_row_non_increasing(&window.input),
+        LogicalPlan::Repartition(repartition) => {
+            remote_plan_is_row_non_increasing(&repartition.input)
+        }
+        LogicalPlan::Sort(sort) => remote_plan_is_row_non_increasing(&sort.input),
+        LogicalPlan::Limit(limit) => remote_plan_is_row_non_increasing(&limit.input),
+        LogicalPlan::Aggregate(aggregate) => {
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                // Grouping sets can emit more rows than their input.
+                return false;
+            }
+            if aggregate.group_expr.is_empty() {
+                // A global aggregate emits exactly one row regardless of its
+                // input's cardinality, so the region total remains an upper
+                // bound (though [`remote_plan_row_bound`] already reports the
+                // tighter cap of one row per region).
+                return true;
+            }
+            remote_plan_is_row_non_increasing(&aggregate.input)
+        }
+        _ => false,
+    }
 }
 
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
@@ -380,6 +555,9 @@ pub struct MergeScanExec {
     target_partition: usize,
     partition_cols: AliasMapping,
     enable_per_region_metrics: bool,
+    /// Optional best-effort row-count provider used by `partition_statistics`.
+    /// `None` keeps statistics unknown (fail-open).
+    region_row_count_provider: Option<RegionRowCountProviderRef>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -406,6 +584,7 @@ impl MergeScanExec {
         partition_cols: AliasMapping,
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
+        region_row_count_provider: Option<RegionRowCountProviderRef>,
     ) -> Result<Self> {
         let arrow_schema = maybe_amend_json2_field(arrow_schema);
 
@@ -456,7 +635,16 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+        // Declare only the partitions this scan actually populates: regions are
+        // striped across partitions, so declaring `target_partition` partitions
+        // for fewer regions leaves the extra ones permanently empty and hides
+        // the skew from the optimizer — EnforceDistribution then skips the
+        // round-robin repartition that would restore parallelism above a
+        // single-region scan (e.g. the probe side of a CollectLeft hash join).
+        let partitioning = Partitioning::Hash(
+            partition_exprs,
+            Self::output_partition_count(regions.len(), target_partition),
+        );
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -480,7 +668,111 @@ impl MergeScanExec {
             target_partition,
             partition_cols,
             enable_per_region_metrics,
+            region_row_count_provider,
         })
+    }
+
+    /// Best-effort aggregate row-count estimate for the selected regions.
+    ///
+    /// **Determinism contract:** any estimate that can influence plan shape
+    /// for the small tables used in sqlness goldens must be a function of the
+    /// plan and the selected region set only — never of where the planner
+    /// runs or when live statistics arrive. `tests/cases/distributed/common`
+    /// is a symlink to `tests/cases/standalone/common`, so both environments
+    /// exercise the same `.result` files: a standalone frontend has the
+    /// region-server-backed provider while a distributed frontend has none,
+    /// and any provider-dependent plan difference makes those goldens flap
+    /// between runs. The rules, in order:
+    ///
+    /// 1. An empty selected region set is exactly 0 rows — deterministic,
+    ///    provider not consulted.
+    /// 2. A plan-structural bound ([`remote_plan_row_bound`], e.g. a CTE side
+    ///    with `LIMIT 50`) is reported as the per-region bound scaled by the
+    ///    number of selected regions, provider not consulted. The remote plan
+    ///    is executed independently per region (see [`Self::to_stream`]), so a
+    ///    whole-scan bound must multiply the per-region cap by the region
+    ///    count; checked arithmetic keeps overflow Absent. This is what lets
+    ///    DataFusion's `JoinSelection` pick the bounded side as the hash-join
+    ///    build side (`try_collect_left` needs only one side's statistics),
+    ///    identically in standalone and distributed mode. The provider total
+    ///    is deliberately NOT used to refine the bound downward — that
+    ///    refinement would differ between environments.
+    /// 3. Otherwise, when the remote plan is row-non-increasing (it never
+    ///    emits more rows than its input; see
+    ///    [`remote_plan_is_row_non_increasing`]), the live provider total is
+    ///    reported only when it is at least [`MIN_TRUSTED_LIVE_ROW_COUNT`]:
+    ///    small or freshly-created tables (every sqlness table) plan
+    ///    identically whether or not the provider is present, while genuinely
+    ///    large tables — where the estimate actually matters for join-side
+    ///    selection — still benefit. Expanding plans (joins, grouping sets,
+    ///    etc.) can emit more rows than the underlying regions store, so a
+    ///    live provider total is NOT a sound upper bound for them and they
+    ///    remain Absent.
+    ///    [`Precision::Absent`] otherwise (no provider, unknown region,
+    ///    below-floor count, an unsafe total, or an oversized estimate) so
+    ///    incomplete statistics never look complete.
+    ///
+    /// Aggregation is checked, not saturating, by choice: per-region counts are
+    /// `u64` while DataFusion's `Statistics::num_rows` is `usize`, and
+    /// DataFusion's join cardinality estimation multiplies input row counts
+    /// (`estimate_inner_join_cardinality`). Saturating an overflowing sum to a
+    /// near-maximum value would make that multiplication panic in debug builds
+    /// or wrap in release builds, so an overflowing sum is reported as unknown
+    /// instead. The final `u64` -> `usize` conversion is also checked, and an
+    /// estimate above [`MAX_SAFE_NUM_ROWS_ESTIMATE`] is reported as unknown
+    /// even when the sum itself fits, because two such estimates could still
+    /// overflow DataFusion's multiplication.
+    fn estimated_num_rows(&self) -> Precision<usize> {
+        if self.regions.is_empty() {
+            return Precision::Inexact(0);
+        }
+        if let Some(bound) = remote_plan_row_bound(&self.plan) {
+            // The remote plan is executed once per selected region, so the
+            // whole-scan bound is the per-region cap scaled by the region
+            // count. An overflowing product is not a conservative bound and
+            // stays Absent.
+            let Some(bound) = bound.checked_mul(self.regions.len()) else {
+                return Precision::Absent;
+            };
+            if bound > MAX_SAFE_NUM_ROWS_ESTIMATE {
+                return Precision::Absent;
+            }
+            return Precision::Inexact(bound);
+        }
+        // Without a structural cap, a live provider total is only a sound
+        // upper bound when the remote plan is row-non-increasing. Joins,
+        // grouping sets, and other expanding plans can emit more rows than
+        // the selected regions store, so they must stay Absent even with a
+        // provider.
+        if !remote_plan_is_row_non_increasing(&self.plan) {
+            return Precision::Absent;
+        }
+        let Some(provider) = self.region_row_count_provider.as_ref() else {
+            return Precision::Absent;
+        };
+        let mut total: u64 = 0;
+        for region in &self.regions {
+            let Some(region_rows) = provider.row_count(*region) else {
+                return Precision::Absent;
+            };
+            let Some(next) = total.checked_add(region_rows) else {
+                return Precision::Absent;
+            };
+            total = next;
+        }
+        let Some(total) = usize::try_from(total).ok() else {
+            return Precision::Absent;
+        };
+        if !(MIN_TRUSTED_LIVE_ROW_COUNT..=MAX_SAFE_NUM_ROWS_ESTIMATE).contains(&total) {
+            return Precision::Absent;
+        }
+        Precision::Inexact(total)
+    }
+
+    /// Number of output partitions this scan actually populates. Must stay in
+    /// sync with the region striping in [`Self::to_stream`].
+    fn output_partition_count(num_regions: usize, target_partition: usize) -> usize {
+        num_regions.max(1).min(target_partition.max(1))
     }
 
     pub fn to_stream(
@@ -497,7 +789,10 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
-        let target_partition = self.target_partition;
+        // Stride by the declared partition count so every region is covered
+        // by exactly the partitions DataFusion will actually execute.
+        let target_partition =
+            Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -834,7 +1129,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.target_partition),
+                Partitioning::Hash(overlaps, self.properties.partitioning.partition_count()),
                 self.properties.emission_type,
                 self.properties.boundedness,
             )),
@@ -846,6 +1141,7 @@ impl MergeScanExec {
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
             enable_per_region_metrics: self.enable_per_region_metrics,
+            region_row_count_provider: self.region_row_count_provider.clone(),
         })
     }
 
@@ -884,8 +1180,13 @@ impl MergeScanExec {
                 .all(|region_id| region_id.table_id() == sink_table_id)
     }
 
+    /// Number of output partitions this scan actually populates. This is the
+    /// effective count used by [`PlanProperties`], [`Self::to_stream`] region
+    /// striping, and [`Self::try_with_new_distribution`] — not the raw
+    /// `target_partition` hint, which can exceed the region count (declaring
+    /// empty partitions would hide the skew from the optimizer).
     pub fn partition_count(&self) -> usize {
-        self.target_partition
+        Self::output_partition_count(self.regions.len(), self.target_partition)
     }
 
     pub fn region_count(&self) -> usize {
@@ -1153,6 +1454,19 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        // Per-partition row counts are unknown: the hash distribution of rows
+        // across output partitions is data-dependent. The whole-plan estimate
+        // is what JoinSelection and other consumers use for join-order and
+        // collect-left decisions.
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(&self.arrow_schema));
+        }
+        let mut statistics = Statistics::new_unknown(&self.arrow_schema);
+        statistics.num_rows = self.estimated_num_rows();
+        Ok(statistics)
+    }
+
     fn name(&self) -> &str {
         "MergeScanExec"
     }
@@ -1315,15 +1629,21 @@ mod tests {
     use common_recordbatch::{
         DfRecordBatch, EmptyRecordBatchStream, RecordBatch, RecordBatchStream,
     };
+    use datafusion::common::NullEquality;
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_optimizer::join_selection::JoinSelection;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+    use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion_common::TableReference;
-    use datafusion_expr::{LogicalPlanBuilder, col, lit};
-    use datafusion_physical_expr::Distribution;
+    use datafusion_common::stats::Precision;
+    use datafusion_expr::{JoinType, LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
+    use datafusion_physical_expr::{Distribution, PhysicalExpr};
     use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1338,7 +1658,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::dist_plan::DynFilterRegistryManager;
+    use crate::dist_plan::{DynFilterRegistryManager, RegionRowCountProvider};
     use crate::options::QueryOptions;
     use crate::query_engine::{QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
@@ -1410,6 +1730,81 @@ mod tests {
             AliasMapping::new(),
             None,
             false,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A deterministic [`RegionRowCountProvider`] backed by a static map.
+    #[derive(Clone)]
+    struct TestRegionRowCountProvider {
+        rows: StdHashMap<RegionId, u64>,
+    }
+
+    impl TestRegionRowCountProvider {
+        fn new(rows: Vec<(RegionId, u64)>) -> Self {
+            Self {
+                rows: rows.into_iter().collect(),
+            }
+        }
+    }
+
+    impl RegionRowCountProvider for TestRegionRowCountProvider {
+        fn row_count(&self, region: RegionId) -> Option<u64> {
+            self.rows.get(&region).copied()
+        }
+    }
+
+    fn merge_scan_exec_with_row_count_provider(
+        regions: Vec<RegionId>,
+        provider: Option<RegionRowCountProviderRef>,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+
+        MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            1,
+            AliasMapping::new(),
+            None,
+            false,
+            provider,
+        )
+        .unwrap()
+    }
+
+    fn merge_scan_exec_with_plan_and_row_count_provider(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        provider: Option<RegionRowCountProviderRef>,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let schema = plan.schema().as_arrow().clone();
+
+        MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            1,
+            AliasMapping::new(),
+            None,
+            false,
+            provider,
         )
         .unwrap()
     }
@@ -1447,6 +1842,7 @@ mod tests {
             AliasMapping::new(),
             Some(RemoteDynFilterProducerId::new(42)),
             false,
+            None,
         )
         .unwrap()
     }
@@ -1511,27 +1907,1090 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_does_not_advertise_ordering_when_partition_may_merge_regions() {
-        let exec = merge_scan_exec_with_sorted_input(3, 2);
+    fn merge_scan_advertises_ordering_only_when_partitions_never_merge_regions() {
+        // target_partition < region_count means one output partition may
+        // concatenate multiple sorted region streams, so the ordering must
+        // not be advertised; otherwise each partition reads at most one
+        // region and the input ordering is preserved.
+        let cases = [
+            ("partition_may_merge_regions", 3, 2, false),
+            ("each_partition_reads_at_most_one_region", 3, 3, true),
+            ("partitions_exceed_regions", 3, 4, true),
+        ];
+        for (name, region_count, target_partition, expect_ordering) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target_partition);
+            assert_eq!(
+                exec.properties().output_ordering().is_some(),
+                expect_ordering,
+                "case: {name}"
+            );
+        }
+    }
 
+    #[test]
+    fn partition_count_reports_effective_output_partitions() {
+        // `partition_count()` must report the count DataFusion actually
+        // executes (`output_partition_count`), not the raw `target_partition`
+        // hint: zero/fewer regions and targets larger than the region count
+        // all collapse to the populated partition count.
+        let cases = [
+            (0, 10, 1), // no regions: one (empty) partition
+            (1, 10, 1), // fewer regions than target
+            (3, 3, 3),  // equal
+            (3, 2, 2),  // target caps
+            (5, 10, 5), // more regions than target
+        ];
+        for (region_count, target, expected) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target);
+            assert_eq!(
+                exec.partition_count(),
+                expected,
+                "region_count={region_count}, target={target}"
+            );
+            // The accessor must agree with the properties DataFusion reads.
+            assert_eq!(
+                exec.partition_count(),
+                exec.properties().output_partitioning().partition_count()
+            );
+        }
+    }
+
+    #[test]
+    fn partition_count_agrees_with_properties_and_striping_after_distribution_rewrite() {
+        // try_with_new_distribution must keep the same effective partition
+        // count as PlanProperties and to_stream's striping stride.
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let mut partition_cols = AliasMapping::new();
+        partition_cols.insert(
+            "ts".to_string(),
+            BTreeSet::from([ColumnExpr::new(Some(TableReference::bare("table")), "ts")]),
+        );
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![
+                RegionId::new(1024, 1),
+                RegionId::new(1024, 2),
+                RegionId::new(1024, 3),
+            ],
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            10,
+            partition_cols,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(exec.partition_count(), 3);
+        assert_eq!(
+            exec.partition_count(),
+            exec.properties().output_partitioning().partition_count()
+        );
+
+        let new_dist = Distribution::HashPartitioned(vec![
+            Arc::new(Column::new("ts", 0)),
+            Arc::new(Column::new("other", 1)),
+        ]);
+        let rewritten = exec
+            .try_with_new_distribution(new_dist)
+            .expect("expected a cloned exec with overlapping partition col");
+
+        assert_eq!(rewritten.partition_count(), 3);
+        assert_eq!(
+            rewritten.partition_count(),
+            rewritten
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+        // to_stream strides by the same count.
+        assert_eq!(
+            rewritten.partition_count(),
+            MergeScanExec::output_partition_count(rewritten.regions.len(), 10)
+        );
+    }
+
+    /// Table-driven coverage for the `num_rows` value reported by
+    /// `partition_statistics`, combining live provider estimates with
+    /// plan-structural bounds. A `None` plan means the uncapped default
+    /// projection from [`merge_scan_exec_with_row_count_provider`].
+    #[test]
+    fn partition_statistics_num_rows_cases() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        let region3 = RegionId::new(1024, 3);
+        let two_regions = vec![region1, region2];
+        // Counts must clear MIN_TRUSTED_LIVE_ROW_COUNT (1 MiB rows) to be
+        // reported, so each trusted region holds at least half of that.
+        let trusted_rows = vec![(region1, 600_000), (region2, 600_000)];
+
+        let limit_50_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let overflowing_limit_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(usize::MAX / 2 + 1))
+            .unwrap()
+            .build()
+            .unwrap();
+        let global_aggregate_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![count(lit(1))])
+            .unwrap()
+            .build()
+            .unwrap();
+        let join_plan = {
+            let left = LogicalPlanBuilder::empty(true)
+                .project(vec![lit(1i64).alias("a")])
+                .unwrap()
+                .build()
+                .unwrap();
+            let right = LogicalPlanBuilder::empty(true)
+                .project(vec![lit(1i64).alias("b")])
+                .unwrap()
+                .build()
+                .unwrap();
+            LogicalPlanBuilder::from(left)
+                .join(right, JoinType::Inner, (vec!["a"], vec!["b"]), None)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let grouping_set_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .aggregate(
+                vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                    vec![],
+                    vec![col("col")],
+                ]))],
+                Vec::<datafusion_expr::Expr>::new(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let repartition_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .repartition(datafusion_expr::Partitioning::RoundRobinBatch(4))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(
+            &str,
+            Vec<RegionId>,
+            Option<Vec<(RegionId, u64)>>,
+            Option<LogicalPlan>,
+            Precision<usize>,
+        )> = vec![
+            // All regions have trusted estimates: the sum is reported.
+            (
+                "inexact_when_all_regions_have_estimates",
+                two_regions.clone(),
+                Some(trusted_rows.clone()),
+                None,
+                Precision::Inexact(1_200_000),
+            ),
+            // The provider only knows region1: the incomplete estimate must
+            // stay absent.
+            (
+                "absent_when_any_region_estimate_is_missing",
+                two_regions.clone(),
+                Some(vec![(region1, 42)]),
+                None,
+                Precision::Absent,
+            ),
+            // Fail-open: without a provider the estimate is unknown, never
+            // fabricated.
+            (
+                "absent_without_provider",
+                two_regions.clone(),
+                None,
+                None,
+                Precision::Absent,
+            ),
+            // An empty selected-region set scans no regions, so it emits zero
+            // rows — deterministically, with or without a provider, so both
+            // the standalone and distributed frontends plan it identically.
+            (
+                "zero_for_empty_selected_region_set_with_provider",
+                vec![],
+                Some(vec![]),
+                None,
+                Precision::Inexact(0),
+            ),
+            (
+                "zero_for_empty_selected_region_set_without_provider",
+                vec![],
+                None,
+                None,
+                Precision::Inexact(0),
+            ),
+            // A small live count could flip JoinSelection's CollectLeft
+            // decision relative to a frontend without the provider
+            // (distributed mode), and the standalone/distributed sqlness runs
+            // share the same goldens. It must be treated as unknown.
+            (
+                "absent_below_trusted_live_count_floor",
+                two_regions.clone(),
+                Some(vec![(region1, 42), (region2, 58)]),
+                None,
+                Precision::Absent,
+            ),
+            // The distributed frontend has no row-count provider, but a
+            // plan-structural bound (a CTE side with `LIMIT 50`) must still
+            // be reported so the CTE join fix works — and plans identically —
+            // in both standalone and distributed mode. The remote plan runs
+            // once per selected region, so two regions can emit up to 2 x 50
+            // rows.
+            (
+                "bounded_plan_reports_region_scaled_bound_without_provider",
+                two_regions.clone(),
+                None,
+                Some(limit_50_plan.clone()),
+                Precision::Inexact(100),
+            ),
+            // The remote plan executes independently per region (`to_stream`
+            // stripes regions over partitions but each runs the same plan),
+            // so a whole-scan `LIMIT 50` bound is 50 x region_count, not 50.
+            (
+                "structural_bound_is_scaled_by_selected_region_count",
+                vec![region1, region2, region3],
+                None,
+                Some(limit_50_plan.clone()),
+                Precision::Inexact(150),
+            ),
+            // A global aggregate emits one row per region, so the whole-scan
+            // estimate is region_count, not the per-region cap of 1.
+            (
+                "global_aggregate_bound_is_scaled_by_selected_region_count",
+                two_regions.clone(),
+                None,
+                Some(global_aggregate_plan),
+                Precision::Inexact(2),
+            ),
+            // `usize::MAX / 2 + 1` per region over two regions overflows the
+            // checked multiplication; the unsafe product must stay Absent
+            // rather than wrapping to a bogus small bound.
+            (
+                "structural_bound_overflow_after_region_scaling_stays_absent",
+                two_regions.clone(),
+                None,
+                Some(overflowing_limit_plan),
+                Precision::Absent,
+            ),
+            // A join can emit more rows than the underlying regions store, so
+            // the live provider total is not a sound upper bound even when
+            // the provider knows large region counts.
+            (
+                "absent_for_join_plan_even_with_provider",
+                two_regions.clone(),
+                Some(trusted_rows.clone()),
+                Some(join_plan),
+                Precision::Absent,
+            ),
+            // A grouping-set aggregate can emit more rows than its input, so
+            // the provider total is not a sound upper bound.
+            (
+                "absent_for_grouping_set_even_with_provider",
+                two_regions.clone(),
+                Some(trusted_rows.clone()),
+                Some(grouping_set_plan),
+                Precision::Absent,
+            ),
+            // A repartition only redistributes rows, so the child's row count
+            // is preserved and the live provider total remains a sound upper
+            // bound.
+            (
+                "uses_provider_for_row_preserving_repartition",
+                two_regions.clone(),
+                Some(trusted_rows.clone()),
+                Some(repartition_plan),
+                Precision::Inexact(1_200_000),
+            ),
+            // The u64 sum overflows. Saturating to a huge value would be
+            // unsafe: DataFusion's join cardinality estimation multiplies
+            // input row counts, so a near-maximum estimate could panic in
+            // debug or wrap in release. The estimate must stay unknown.
+            (
+                "absent_on_aggregation_overflow",
+                two_regions.clone(),
+                Some(vec![(region1, u64::MAX), (region2, 1)]),
+                None,
+                Precision::Absent,
+            ),
+            // Each individual count fits, but the total exceeds the
+            // product-safe bound: two such scan estimates would overflow
+            // DataFusion's join cardinality multiplication.
+            (
+                "absent_above_product_safe_bound",
+                two_regions.clone(),
+                Some(vec![(region1, u32::MAX as u64), (region2, u32::MAX as u64)]),
+                None,
+                Precision::Absent,
+            ),
+            // The remote plan runs once per selected region, so two regions
+            // can emit up to 2 x 50 = 100 rows even though each region is
+            // capped at 50 and the provider knows far more rows.
+            (
+                "capped_by_remote_plan_row_bound",
+                two_regions.clone(),
+                Some(vec![(region1, 10_000), (region2, 10_000)]),
+                Some(limit_50_plan.clone()),
+                Precision::Inexact(100),
+            ),
+            // An uncapped plan must not discard the provider estimate.
+            (
+                "ignores_uncapped_plan_when_regions_are_known",
+                two_regions.clone(),
+                Some(trusted_rows.clone()),
+                None,
+                Precision::Inexact(1_200_000),
+            ),
+            // The sum of the region totals exceeds MAX_SAFE_NUM_ROWS_ESTIMATE,
+            // but the remote plan caps the output at 50 rows per region: the
+            // plan-structural bound is reported directly (the provider is not
+            // consulted for a bounded plan), so two regions report 100, not
+            // Absent.
+            (
+                "caps_oversized_complete_total_with_small_logical_bound",
+                two_regions.clone(),
+                Some(vec![(region1, u32::MAX as u64), (region2, u32::MAX as u64)]),
+                Some(limit_50_plan.clone()),
+                Precision::Inexact(100),
+            ),
+        ];
+
+        for (name, regions, provider_rows, plan, expected) in cases {
+            let provider = provider_rows.map(|rows| {
+                Arc::new(TestRegionRowCountProvider::new(rows)) as RegionRowCountProviderRef
+            });
+            let exec = match plan {
+                Some(plan) => {
+                    merge_scan_exec_with_plan_and_row_count_provider(regions, plan, provider)
+                }
+                None => merge_scan_exec_with_row_count_provider(regions, provider),
+            };
+            let stats = exec.partition_statistics(None).unwrap();
+            assert_eq!(stats.num_rows, expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn partition_statistics_reports_only_num_rows() {
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        let provider = Arc::new(TestRegionRowCountProvider::new(vec![
+            (region1, 600_000),
+            (region2, 600_000),
+        ])) as RegionRowCountProviderRef;
+        let exec = merge_scan_exec_with_row_count_provider(vec![region1, region2], Some(provider));
+
+        let stats = exec.partition_statistics(None).unwrap();
+        assert_eq!(stats.num_rows, Precision::Inexact(1_200_000));
+        // Only num_rows is reported; byte size and column stats stay unknown.
+        assert_eq!(stats.total_byte_size, Precision::Absent);
         assert!(
-            exec.properties().output_ordering().is_none(),
-            "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
+            stats
+                .column_statistics
+                .iter()
+                .all(|column| column.null_count.is_exact().is_none())
         );
     }
 
     #[test]
-    fn merge_scan_advertises_ordering_when_each_partition_reads_at_most_one_region() {
-        let exec = merge_scan_exec_with_sorted_input(3, 3);
+    fn large_estimates_do_not_overflow_join_statistics() {
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        let big_provider = Arc::new(TestRegionRowCountProvider::new(vec![
+            (region1, u32::MAX as u64),
+            (region2, u32::MAX as u64),
+        ])) as RegionRowCountProviderRef;
+        let left = Arc::new(merge_scan_exec_with_row_count_provider(
+            vec![region1, region2],
+            Some(big_provider.clone()),
+        )) as Arc<dyn ExecutionPlan>;
+        let right = Arc::new(merge_scan_exec_with_row_count_provider(
+            vec![region1, region2],
+            Some(big_provider),
+        )) as Arc<dyn ExecutionPlan>;
 
-        assert!(exec.properties().output_ordering().is_some());
+        // The safe semantics must hold per scan: an oversized total is reported
+        // as unknown, never as a huge value that could overflow DataFusion's
+        // join cardinality multiplication.
+        assert_eq!(
+            left.partition_statistics(None).unwrap().num_rows,
+            Precision::Absent
+        );
+        assert_eq!(
+            right.partition_statistics(None).unwrap().num_rows,
+            Precision::Absent
+        );
+
+        let on = vec![(
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        // And DataFusion's join statistics estimation must not panic or wrap.
+        let stats = join.partition_statistics(None).unwrap();
+        assert_eq!(stats.num_rows, Precision::Absent);
     }
 
     #[test]
-    fn merge_scan_advertises_ordering_when_partitions_exceed_regions() {
-        let exec = merge_scan_exec_with_sorted_input(3, 4);
+    fn partition_statistics_survive_plan_rewrites() {
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        let provider = Arc::new(TestRegionRowCountProvider::new(vec![
+            (region1, 600_000),
+            (region2, 600_000),
+        ])) as RegionRowCountProviderRef;
+        let expected = Precision::Inexact(1_200_000);
+        let exec =
+            merge_scan_exec_with_row_count_provider(vec![region1, region2], Some(provider.clone()));
 
-        assert!(exec.properties().output_ordering().is_some());
+        let cloned = exec.clone();
+        assert_eq!(
+            cloned.partition_statistics(None).unwrap().num_rows,
+            expected
+        );
+
+        // DataFusion rewrites children unconditionally; the estimate must survive.
+        let rewritten = Arc::new(exec)
+            .with_new_children(vec![])
+            .unwrap()
+            .as_any()
+            .downcast_ref::<MergeScanExec>()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            rewritten.partition_statistics(None).unwrap().num_rows,
+            expected
+        );
+
+        // try_with_new_distribution needs partition_cols overlapping the new
+        // distribution, so build a dedicated exec for that rewrite.
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let mut partition_cols = AliasMapping::new();
+        partition_cols.insert(
+            "col1".to_string(),
+            BTreeSet::from([ColumnExpr::new(Some(TableReference::bare("table")), "col1")]),
+        );
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![region1, region2],
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+            1,
+            partition_cols,
+            None,
+            false,
+            Some(provider),
+        )
+        .unwrap();
+
+        // A distribution that differs from the current partitioning but shares a
+        // column name present in partition_cols, so try_with_new_distribution
+        // produces a clone instead of returning None.
+        let new_dist = Distribution::HashPartitioned(vec![
+            Arc::new(Column::new("col1", 0)),
+            Arc::new(Column::new("col2", 1)),
+        ]);
+        let rewritten = exec
+            .try_with_new_distribution(new_dist)
+            .expect("expected a cloned exec with overlapping partition col");
+        assert_eq!(
+            rewritten.partition_statistics(None).unwrap().num_rows,
+            expected
+        );
+    }
+
+    /// Table-driven coverage for [`remote_plan_row_bound`]: static caps from
+    /// LIMIT/SORT fetches survive row-preserving wrappers, nested caps combine
+    /// with `min`, and row-multiplying nodes fail open (`None`).
+    #[test]
+    fn remote_plan_row_bound_cases() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let cases: Vec<(&str, LogicalPlan, Option<usize>)> = vec![
+            (
+                "caps_at_limit_fetch",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            (
+                "caps_at_sort_fetch",
+                LogicalPlan::Sort(datafusion_expr::Sort {
+                    expr: vec![col("col").sort(false, true)],
+                    input: Arc::new(
+                        LogicalPlanBuilder::empty(true)
+                            .project(vec![lit(1i64).alias("col")])
+                            .unwrap()
+                            .build()
+                            .unwrap(),
+                    ),
+                    fetch: Some(30),
+                }),
+                Some(30),
+            ),
+            (
+                "returns_none_for_uncapped_plan",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                None,
+            ),
+            // A join is not a pass-through node and has no statically-known cap.
+            (
+                "returns_none_for_join_without_cap",
+                LogicalPlanBuilder::from(
+                    LogicalPlanBuilder::empty(true)
+                        .project(vec![lit(1i64).alias("a")])
+                        .unwrap()
+                        .build()
+                        .unwrap(),
+                )
+                .join(
+                    LogicalPlanBuilder::empty(true)
+                        .project(vec![lit(1i64).alias("b")])
+                        .unwrap()
+                        .build()
+                        .unwrap(),
+                    JoinType::Inner,
+                    (vec!["a"], vec!["b"]),
+                    None,
+                )
+                .unwrap()
+                .build()
+                .unwrap(),
+                None,
+            ),
+            // Each supported pass-through wrapper is built as the OUTER node
+            // over a `LIMIT 50` child and the bound must survive it. Each
+            // builder call wraps the current plan, so the wrapper must be
+            // applied after limit.
+            (
+                "passes_through_filter",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .filter(col("col").gt(lit(0)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            (
+                "passes_through_alias",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .alias("cte")
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            (
+                "passes_through_projection",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .project(vec![col("col")])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            (
+                "passes_through_grouped_aggregate",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .aggregate(vec![col("col")], Vec::<datafusion_expr::Expr>::new())
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            (
+                "passes_through_distinct",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .distinct()
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            // A repartition is row-preserving: a `LIMIT 50` below it must
+            // still produce a per-region cap of 50 (the whole scan then
+            // scales it).
+            (
+                "preserves_cap_through_repartition",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .repartition(datafusion_expr::Partitioning::RoundRobinBatch(4))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(50),
+            ),
+            // A tighter nested cap must not be discarded: `LIMIT 50` over
+            // `LIMIT 20` reports 20.
+            (
+                "combines_nested_caps_with_min",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .limit(0, Some(20))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(20),
+            ),
+            // A global aggregate (no grouping expressions) always emits
+            // exactly one row, even from an empty input (`LIMIT 0`). The
+            // bound must be 1, not the child's unsound zero cap.
+            (
+                "global_aggregate_over_limit_zero_reports_one",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(0))
+                    .unwrap()
+                    .aggregate(Vec::<datafusion_expr::Expr>::new(), vec![count(lit(1))])
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                Some(1),
+            ),
+            // A grouping-set aggregate can emit more rows than its input (one
+            // row per grouping set), so the child's cap is not a sound upper
+            // bound: fail open instead of passing `LIMIT 50` through.
+            (
+                "grouping_set_returns_none",
+                LogicalPlanBuilder::empty(true)
+                    .project(vec![lit(1i64).alias("col")])
+                    .unwrap()
+                    .limit(0, Some(50))
+                    .unwrap()
+                    .aggregate(
+                        vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                            vec![],
+                            vec![col("col")],
+                        ]))],
+                        Vec::<datafusion_expr::Expr>::new(),
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                None,
+            ),
+        ];
+
+        for (name, plan, expected) in cases {
+            assert_eq!(remote_plan_row_bound(&plan), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn join_selection_makes_cte_side_with_limit_the_hash_build_side() {
+        // Both sides of the join read the SAME table with the SAME real row
+        // counts, so a region-only estimate cannot distinguish them. Only the
+        // CTE side carries a logical `LIMIT 50`; the logical bound must make
+        // that side the smaller estimate and therefore the hash build side.
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        let provider = Arc::new(TestRegionRowCountProvider::new(vec![
+            (region1, 600_000),
+            (region2, 600_000),
+        ])) as RegionRowCountProviderRef;
+
+        // Base table side: full scan, no logical cap.
+        let base = Arc::new(merge_scan_exec_with_row_count_provider(
+            vec![region1, region2],
+            Some(provider.clone()),
+        )) as Arc<dyn ExecutionPlan>;
+
+        // CTE side: `SELECT ... FROM t LIMIT 50`.
+        let cte_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let cte = Arc::new(merge_scan_exec_with_plan_and_row_count_provider(
+            vec![region1, region2],
+            cte_plan,
+            Some(provider),
+        )) as Arc<dyn ExecutionPlan>;
+
+        let on = vec![(
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                base,
+                cte,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Auto,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized = JoinSelection::new()
+            .optimize(join, &ConfigOptions::default())
+            .unwrap();
+
+        // Swapping rewrites output column order, so the join may be wrapped in a
+        // projection. Walk down to the actual HashJoinExec.
+        let mut current = optimized.as_ref();
+        while current.as_any().downcast_ref::<HashJoinExec>().is_none() {
+            current = current.children()[0].as_ref();
+        }
+        let hash_join = current.as_any().downcast_ref::<HashJoinExec>().unwrap();
+
+        // The CTE side (1_200_000 rows in the table, but at most 100 rows
+        // through the per-region LIMIT, 50 per region x 2 regions) becomes the
+        // left (build) side in CollectLeft mode, while the unbounded base scan
+        // stays on the probe side.
+        assert_eq!(hash_join.partition_mode(), &PartitionMode::CollectLeft);
+        assert_eq!(
+            hash_join
+                .left()
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
+        assert_eq!(
+            hash_join
+                .right()
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(1_200_000)
+        );
+    }
+
+    #[test]
+    fn join_selection_makes_bounded_merge_scan_the_build_side_without_provider() {
+        // Distributed frontends have no row-count provider. The CollectLeft
+        // pick must still work there, driven purely by the plan-structural
+        // bound — and identically to standalone, because the standalone and
+        // distributed sqlness runs share the same goldens.
+        let bounded_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let small = Arc::new(merge_scan_exec_with_plan_and_row_count_provider(
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            bounded_plan,
+            None,
+        )) as Arc<dyn ExecutionPlan>;
+        let unknown = Arc::new(merge_scan_exec_with_row_count_provider(
+            vec![RegionId::new(1024, 3), RegionId::new(1024, 4)],
+            None,
+        )) as Arc<dyn ExecutionPlan>;
+
+        let on = vec![(
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                unknown,
+                small,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Auto,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized = JoinSelection::new()
+            .optimize(join, &ConfigOptions::default())
+            .unwrap();
+
+        // Swapping rewrites output column order, so the join may be wrapped in a
+        // projection. Walk down to the actual HashJoinExec.
+        let mut current = optimized.as_ref();
+        while current.as_any().downcast_ref::<HashJoinExec>().is_none() {
+            current = current.children()[0].as_ref();
+        }
+        let hash_join = current.as_any().downcast_ref::<HashJoinExec>().unwrap();
+
+        // The bounded MergeScan becomes the left (build) side in CollectLeft
+        // mode, while the unknown peer stays on the probe side. The bound is
+        // per-region: two regions can emit up to 2 x 50 = 100 rows.
+        assert_eq!(hash_join.partition_mode(), &PartitionMode::CollectLeft);
+        assert_eq!(
+            hash_join
+                .left()
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
+        assert_eq!(
+            hash_join
+                .right()
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+    }
+
+    /// Builds a narrow `ProjectionExec` over a `MergeScanExec`: a single
+    /// all-primitive column, so `ProjectionExec::project_statistics`
+    /// recomputes `total_byte_size` from `num_rows` and the column width.
+    fn narrow_projection_merge_scan(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        provider: Option<RegionRowCountProviderRef>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let exec = merge_scan_exec_with_plan_and_row_count_provider(regions, plan, provider);
+        let projection = ProjectionExec::try_new(
+            vec![(
+                Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+                "col".to_string(),
+            )],
+            Arc::new(exec),
+        )
+        .unwrap();
+        Arc::new(projection)
+    }
+
+    #[test]
+    fn join_selection_narrow_projection_with_provider_matches_provider_absent() {
+        // DataFusion's `supports_collect_by_thresholds` checks
+        // `total_byte_size` FIRST against `hash_join_single_partition_threshold`
+        // (default 1 MiB), and a `ProjectionExec` above the scan recomputes
+        // bytes from `num_rows` x primitive width. If the provider rehydrated
+        // a collectable byte estimate (200_000 rows x 4-byte Int32 = 800 KiB
+        // < 1 MiB), standalone (provider present) would pick CollectLeft while
+        // distributed (provider absent) stays Partitioned. The byte-safe live
+        // floor must keep both environments identical.
+        let region1 = RegionId::new(1024, 1);
+        let region2 = RegionId::new(1024, 2);
+        // 100_000 rows per region, 200_000 total: below the byte-safe floor
+        // (1 MiB rows), so the provider estimate is Absent — exactly what a
+        // provider-less distributed frontend reports. Under the old 128K
+        // floor, 200_000 rows would have been reported and the narrow Int32
+        // projection would have rehydrated a collectable 800 KiB estimate.
+        let provider = Arc::new(TestRegionRowCountProvider::new(vec![
+            (region1, 100_000),
+            (region2, 100_000),
+        ])) as RegionRowCountProviderRef;
+
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let provider_present =
+            narrow_projection_merge_scan(vec![region1, region2], plan.clone(), Some(provider));
+        let provider_absent =
+            narrow_projection_merge_scan(vec![region1, region2], plan.clone(), None);
+        // Peer side with the same narrow schema (provider absent) so the join
+        // on-column types match.
+        let unknown = narrow_projection_merge_scan(
+            vec![RegionId::new(1024, 3), RegionId::new(1024, 4)],
+            plan,
+            None,
+        );
+
+        let on = vec![(
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+
+        for narrow in [provider_present, provider_absent] {
+            let join = Arc::new(
+                HashJoinExec::try_new(
+                    narrow,
+                    unknown.clone(),
+                    on.clone(),
+                    None,
+                    &JoinType::Inner,
+                    None,
+                    PartitionMode::Auto,
+                    NullEquality::NullEqualsNothing,
+                    false,
+                )
+                .unwrap(),
+            ) as Arc<dyn ExecutionPlan>;
+
+            let optimized = JoinSelection::new()
+                .optimize(join, &ConfigOptions::default())
+                .unwrap();
+
+            let mut current = optimized.as_ref();
+            while current.as_any().downcast_ref::<HashJoinExec>().is_none() {
+                current = current.children()[0].as_ref();
+            }
+            let hash_join = current.as_any().downcast_ref::<HashJoinExec>().unwrap();
+
+            // The narrow projection must NOT rehydrate a collectable byte
+            // estimate: both sides are unknown, so the join stays Partitioned
+            // in standalone exactly as it does in distributed mode.
+            assert_eq!(
+                hash_join.partition_mode(),
+                &PartitionMode::Partitioned,
+                "provider-derived estimates must not flip JoinSelection into CollectLeft"
+            );
+        }
+    }
+
+    #[test]
+    fn join_selection_narrow_projection_bounded_cte_still_collects_left() {
+        // The byte-safe floor must NOT regress the issue #6874 behavior: a
+        // bounded CTE side (`LIMIT 50`, two regions -> 100 rows) still
+        // produces a small byte estimate even through a narrow projection, so
+        // JoinSelection keeps CollectLeft — identically with or without a
+        // provider, because the structural bound is provider-independent.
+        let bounded_plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let small = narrow_projection_merge_scan(
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            bounded_plan.clone(),
+            None,
+        );
+        let unknown = narrow_projection_merge_scan(
+            vec![RegionId::new(1024, 3), RegionId::new(1024, 4)],
+            bounded_plan,
+            None,
+        );
+
+        let on = vec![(
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("col", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                unknown,
+                small,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Auto,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized = JoinSelection::new()
+            .optimize(join, &ConfigOptions::default())
+            .unwrap();
+
+        let mut current = optimized.as_ref();
+        while current.as_any().downcast_ref::<HashJoinExec>().is_none() {
+            current = current.children()[0].as_ref();
+        }
+        let hash_join = current.as_any().downcast_ref::<HashJoinExec>().unwrap();
+
+        // The bounded CTE side (100 rows through the per-region LIMIT, 50 per
+        // region x 2 regions) becomes the CollectLeft build side.
+        assert_eq!(hash_join.partition_mode(), &PartitionMode::CollectLeft);
+        assert_eq!(
+            hash_join
+                .left()
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(100)
+        );
     }
 
     #[test]
@@ -1651,6 +3110,7 @@ mod tests {
             AliasMapping::new(),
             Some(RemoteDynFilterProducerId::new(42)),
             false,
+            None,
         )
         .unwrap();
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
@@ -2398,6 +3858,7 @@ mod tests {
             AliasMapping::new(),
             None,
             false,
+            None,
         )
         .unwrap()
     }
@@ -2987,6 +4448,7 @@ mod tests {
             partition_cols,
             Some(remote_dyn_filter_producer_id),
             false,
+            None,
         )
         .unwrap();
 
@@ -3041,6 +4503,7 @@ mod tests {
             AliasMapping::new(),
             Some(remote_dyn_filter_producer_id),
             false,
+            None,
         )
         .unwrap();
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
@@ -3147,6 +4610,7 @@ mod tests {
             AliasMapping::new(),
             None,
             true,
+            None,
         )
         .unwrap();
 
@@ -3216,6 +4680,7 @@ mod tests {
             AliasMapping::new(),
             None,
             true,
+            None,
         )
         .unwrap();
 

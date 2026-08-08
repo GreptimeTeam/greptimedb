@@ -322,6 +322,7 @@ explain select first_value(ts order by ts) from t;
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]_|
+|_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -345,6 +346,7 @@ explain analyze
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__first_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
@@ -411,6 +413,7 @@ order by time_window, ordered_host;
 |_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[first_value(t.host) ORDER BY [t.ts ASC NULLS LAST], first_value(t.val) ORDER BY [t.ts ASC NULLS LAST], first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]_|
 |_|_RepartitionExec: REDACTED
 |_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[first_value(t.host) ORDER BY [t.ts ASC NULLS LAST], first_value(t.val) ORDER BY [t.ts ASC NULLS LAST], first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]_|
+|_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -444,6 +447,7 @@ order by time_window, ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[first_value(t.host) ORDER BY [t.ts ASC NULLS LAST], first_value(t.val) ORDER BY [t.ts ASC NULLS LAST], first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[first_value(t.host) ORDER BY [t.ts ASC NULLS LAST], first_value(t.val) ORDER BY [t.ts ASC NULLS LAST], first_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[__first_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __first_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __first_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
@@ -522,6 +526,7 @@ explain
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]_|
+|_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -545,6 +550,7 @@ explain analyze
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__first_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
@@ -705,6 +711,7 @@ order by time_window, ordered_host;
 |_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[first_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]_|
 |_|_RepartitionExec: REDACTED
 |_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[first_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]]_|
+|_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -738,6 +745,7 @@ order by time_window, ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[first_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[first_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST], first_value(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[__first_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __first_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __first_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
