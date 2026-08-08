@@ -90,6 +90,84 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
     }
 }
 
+#[apply(both_instances_cases)]
+async fn test_admin_discard_unflushed_data(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    execute_sql(
+        &instance,
+        r#"CREATE TABLE discard_unflushed_data_test (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = mito"#,
+    )
+    .await;
+    execute_sql(
+        &instance,
+        "INSERT INTO discard_unflushed_data_test VALUES ('persisted', 1, 1)",
+    )
+    .await;
+    execute_sql(
+        &instance,
+        "ADMIN FLUSH_TABLE('discard_unflushed_data_test')",
+    )
+    .await;
+    execute_sql(
+        &instance,
+        "INSERT INTO discard_unflushed_data_test VALUES ('unflushed', 2, 2)",
+    )
+    .await;
+
+    let region_output = execute_sql(
+        &instance,
+        "SELECT greptime_partition_id FROM information_schema.partitions \
+         WHERE table_name = 'discard_unflushed_data_test' LIMIT 1",
+    )
+    .await;
+    let OutputData::Stream(stream) = region_output.data else {
+        panic!("expected region id stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let region_ids = batches[0].column(0);
+    let region_ids = region_ids.as_any().downcast_ref::<UInt64Array>().unwrap();
+    let region_id = region_ids.value(0);
+
+    let admin_sql = format!("ADMIN discard_unflushed_data({region_id})");
+    for _ in 0..2 {
+        let output = execute_sql(&instance, &admin_sql).await;
+        let OutputData::RecordBatches(batches) = output.data else {
+            panic!("expected ADMIN result batches");
+        };
+        let result = batches.iter().next().unwrap().column(0);
+        let result = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(0, result.value(0));
+    }
+
+    let output = execute_sql(
+        &instance,
+        "SELECT host, val FROM discard_unflushed_data_test ORDER BY host",
+    )
+    .await;
+    assert_eq!(
+        "+-----------+-----+\n\
+         | host      | val |\n\
+         +-----------+-----+\n\
+         | persisted | 1.0 |\n\
+         +-----------+-----+",
+        output.data.pretty_print().await
+    );
+
+    assert!(
+        try_execute_sql(
+            &instance,
+            &format!("SELECT discard_unflushed_data({region_id})"),
+        )
+        .await
+        .is_err()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_distributed_scalar_latest_with_query_parallelism_below_regions() {
     common_telemetry::init_default_ut_logging();

@@ -26,6 +26,7 @@ use table::requests::{
     BuildIndexTableRequest, CompactTableRequest, DeleteRequest as TableDeleteRequest,
     FlushTableRequest, InsertRequest as TableInsertRequest,
 };
+use table::table_name::TableName;
 
 use crate::delete::DeleterRef;
 use crate::insert::InserterRef;
@@ -128,6 +129,30 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.requester
             .handle_region_compaction(region_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn discard_unflushed_data(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_unflushed_data(region_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn discard_unflushed_data_by_table(
+        &self,
+        table_name: TableName,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_unflushed_data_by_table(table_name, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)
