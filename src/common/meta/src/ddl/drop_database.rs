@@ -23,7 +23,7 @@ use std::fmt::Debug;
 use common_error::ext::BoxedError;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
@@ -38,11 +38,13 @@ use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
+use crate::rpc::ddl::EventContext;
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
     runtime_context: DdlContext,
     context: DropDatabaseContext,
+    event_context: EventContext,
 
     state: Box<dyn State>,
 }
@@ -85,9 +87,16 @@ pub(crate) trait State: Send + Debug {
 impl DropDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropDatabase";
 
-    pub fn new(catalog: String, schema: String, drop_if_exists: bool, context: DdlContext) -> Self {
+    pub fn new(
+        catalog: String,
+        schema: String,
+        drop_if_exists: bool,
+        event_context: EventContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             runtime_context: context,
+            event_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -104,11 +113,13 @@ impl DropDatabaseProcedure {
             catalog,
             schema,
             drop_if_exists,
+            event_context,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
         Ok(Self {
             runtime_context,
+            event_context,
             context: DropDatabaseContext {
                 catalog,
                 schema,
@@ -159,6 +170,7 @@ impl Procedure for DropDatabaseProcedure {
             catalog: &self.context.catalog,
             schema: &self.context.schema,
             drop_if_exists: self.context.drop_if_exists,
+            event_context: &self.event_context,
             state: self.state.as_ref(),
         };
 
@@ -174,7 +186,10 @@ impl Procedure for DropDatabaseProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(DROP_DATABASE_EVENT_TYPE) {
             return None;
         }
@@ -184,6 +199,7 @@ impl Procedure for DropDatabaseProcedure {
                 &self.context.catalog,
                 &self.context.schema,
                 self.context.drop_if_exists,
+                self.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::drop_lifecycle()
@@ -199,6 +215,7 @@ struct DropDatabaseData<'a> {
     // The schema name
     schema: &'a str,
     drop_if_exists: bool,
+    event_context: &'a EventContext,
     state: &'a dyn State,
 }
 
@@ -209,5 +226,7 @@ struct DropDatabaseOwnedData {
     // The schema name
     schema: String,
     drop_if_exists: bool,
+    #[serde(default)]
+    event_context: EventContext,
     state: Box<dyn State>,
 }

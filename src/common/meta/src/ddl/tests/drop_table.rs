@@ -65,9 +65,9 @@ use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::KvBackend;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
-use crate::rpc::ddl::DropTableTask;
+use crate::rpc::ddl::{DropTableTask, EventContext};
 #[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
+use crate::rpc::ddl::{PurgeDroppedTableTask, QueryContext, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
 #[cfg(feature = "enterprise")]
 use crate::rpc::store::{BatchDeleteRequest, PutRequest};
@@ -128,7 +128,11 @@ async fn undrop_at_restore_metadata(
     table_id: TableId,
 ) -> UndropTableProcedure {
     create_dropped_table(context, table_id, Some(1), Some(i64::MAX)).await;
-    let mut undrop = UndropTableProcedure::new(new_undrop_table_task(table_id), context.clone());
+    let mut undrop = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        context.clone(),
+        EventContext::default(),
+    );
     let procedure_context = new_test_procedure_context();
     undrop.execute(&procedure_context).await.unwrap();
     undrop.execute(&procedure_context).await.unwrap();
@@ -157,6 +161,7 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
     let procedure = DropTableProcedure::new(
         new_drop_table_task("foo", 1024, false),
         runtime_context.clone(),
+        EventContext::default(),
     );
     let mut old_data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     old_data
@@ -164,6 +169,7 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
         .unwrap()
         .remove("soft_drop_enabled");
     old_data.as_object_mut().unwrap().remove("dropped_at");
+    old_data.as_object_mut().unwrap().remove("event_context");
 
     let recovered = DropTableProcedure::from_json(&old_data.to_string(), runtime_context).unwrap();
     let recovered_data: serde_json::Value =
@@ -171,12 +177,20 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
 
     assert_eq!(recovered_data["soft_drop_enabled"], false);
     assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
+    assert_eq!(
+        recovered_data["event_context"],
+        serde_json::json!({"reason": "unknown"})
+    );
 }
 
 #[test]
 fn test_drop_table_lock_key_includes_table_name() {
     let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        context,
+        EventContext::default(),
+    );
 
     let keys = procedure
         .lock_key()
@@ -205,7 +219,11 @@ fn test_new_drop_table_procedure_disables_soft_drop_without_enterprise() {
     let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
     context.soft_drop_enabled = true;
 
-    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        context,
+        EventContext::default(),
+    );
 
     assert!(!procedure.data.soft_drop_enabled);
 }
@@ -216,7 +234,11 @@ fn test_new_drop_table_procedure_preserves_soft_drop_with_enterprise() {
     let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
     context.soft_drop_enabled = true;
 
-    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        context,
+        EventContext::default(),
+    );
 
     assert!(procedure.data.soft_drop_enabled);
 }
@@ -251,6 +273,7 @@ async fn test_recovered_soft_drop_preserves_persisted_mode() {
     let procedure = DropTableProcedure::new(
         new_drop_table_task("foo", table_id, false),
         soft_context.clone(),
+        EventContext::default(),
     );
 
     let hard_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
@@ -290,9 +313,13 @@ async fn test_legacy_soft_drop_prepare_preserves_persisted_mode() {
         .unwrap();
 
     let mut persisted: serde_json::Value = serde_json::from_str(
-        &DropTableProcedure::new(new_drop_table_task("foo", table_id, false), context.clone())
-            .dump()
-            .unwrap(),
+        &DropTableProcedure::new(
+            new_drop_table_task("foo", table_id, false),
+            context.clone(),
+            EventContext::default(),
+        )
+        .dump()
+        .unwrap(),
     )
     .unwrap();
     persisted["soft_drop_enabled"] = true.into();
@@ -322,7 +349,11 @@ async fn test_disabled_soft_drop_creates_hard_drop_procedure() {
     context.soft_drop_enabled = false;
     context.soft_drop_retention = Some(Duration::from_millis(100));
 
-    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        context,
+        EventContext::default(),
+    );
 
     assert!(!procedure.data.soft_drop_enabled);
     assert_eq!(None, procedure.data.dropped_at);
@@ -356,6 +387,7 @@ async fn test_recovered_hard_drop_ignores_soft_runtime_context() {
     let procedure = DropTableProcedure::new(
         new_drop_table_task("foo", table_id, false),
         hard_context.clone(),
+        EventContext::default(),
     );
 
     let mut soft_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
@@ -397,7 +429,7 @@ async fn test_on_prepare_table_not_exists_err() {
         .unwrap();
 
     let task = new_drop_table_task("bar", table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context, EventContext::default());
     assert_eq!(procedure.data.dropped_at, None);
     assert_eq!(procedure.data.retention_expires_at, None);
     let err = procedure.on_prepare().await.unwrap_err();
@@ -427,6 +459,7 @@ async fn test_soft_drop_prepare_assigns_stable_deadline_and_recovers_it() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task("foo", table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
 
     procedure.on_prepare().await.unwrap();
@@ -463,6 +496,7 @@ async fn test_soft_drop_prepare_rejects_deadline_overflow_before_metadata_delete
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task("foo", table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
 
     let error = procedure.on_prepare().await.unwrap_err();
@@ -502,13 +536,13 @@ async fn test_on_prepare_table() {
 
     let task = new_drop_table_task("bar", table_id, true);
     // Drop if exists
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.rollback_supported());
 
     let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
-    let mut procedure = DropTableProcedure::new(task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context, EventContext::default());
     procedure.on_prepare().await.unwrap();
 }
 
@@ -559,7 +593,7 @@ async fn test_on_datanode_drop_regions() {
 
     let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
-    let mut procedure = DropTableProcedure::new(task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context, EventContext::default());
     procedure.on_prepare().await.unwrap();
     procedure.on_datanode_drop_regions(false).await.unwrap();
 
@@ -628,7 +662,7 @@ async fn test_on_datanode_drop_regions_remaps_addresses_when_retrying() {
         .unwrap();
 
     let task = new_drop_table_task(table_name, table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
     procedure.on_prepare().await.unwrap();
 
     put_datanode_address(&ddl_context, 1, "new-leader").await;
@@ -687,7 +721,7 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         .unwrap();
 
     let task = new_drop_table_task(table_name, table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
 
     execute_procedure_until_done(&mut procedure).await;
 
@@ -801,7 +835,7 @@ async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
         .unwrap();
 
     let task = new_drop_table_task(table_name, table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
     put_datanode_address(&ddl_context, 1, "new-leader").await;
@@ -888,6 +922,7 @@ async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
     let procedure = DropTableProcedure::new(
         new_drop_table_task("foo", table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     assert_eq!(procedure.data.dropped_at, None);
     let mut procedure = procedure;
@@ -958,7 +993,7 @@ async fn test_hard_drop_keeps_delete_tombstone_flow() {
         .unwrap();
 
     let task = new_drop_table_task(table_name, table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
 
     execute_procedure_until(&mut procedure, |p| {
         p.data.state == DropTableState::DeleteTombstone
@@ -1001,13 +1036,20 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
         .unwrap();
 
     let drop_task = new_drop_table_task(table_name, dropped_table_id, false);
-    let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
+    let mut drop_procedure =
+        DropTableProcedure::new(drop_task, ddl_context.clone(), EventContext::default());
     execute_procedure_until_done(&mut drop_procedure).await;
 
     let mut create_task = test_create_table_task(table_name, 1025);
     create_task.create_table.table_id = None;
     create_task.table_info.ident.table_id = 0;
-    let mut create_procedure = CreateTableProcedure::new(create_task, ddl_context.clone()).unwrap();
+    let mut create_procedure = CreateTableProcedure::new(
+        create_task,
+        QueryContext::default(),
+        EventContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     execute_procedure_until_done(&mut create_procedure).await;
 
     let live_table = ddl_context
@@ -1052,7 +1094,8 @@ async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
         .unwrap();
 
     let drop_task = new_drop_table_task(table_name, original_table_id, false);
-    let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
+    let mut drop_procedure =
+        DropTableProcedure::new(drop_task, ddl_context.clone(), EventContext::default());
     execute_procedure_until_done(&mut drop_procedure).await;
     ddl_context.soft_drop_enabled = false;
 
@@ -1069,6 +1112,7 @@ async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, recreated_table_id, false),
         ddl_context,
+        EventContext::default(),
     );
     let err = procedure.on_prepare().await.unwrap_err();
 
@@ -1098,7 +1142,8 @@ async fn test_hard_drop_recreated_table_ignores_previous_orphan_tombstone() {
         .unwrap();
 
     let drop_task = new_drop_table_task(table_name, original_table_id, false);
-    let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
+    let mut drop_procedure =
+        DropTableProcedure::new(drop_task, ddl_context.clone(), EventContext::default());
     execute_procedure_until(&mut drop_procedure, |p| {
         p.data.state == DropTableState::DeleteTombstone
     })
@@ -1117,6 +1162,7 @@ async fn test_hard_drop_recreated_table_ignores_previous_orphan_tombstone() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, recreated_table_id, false),
         ddl_context,
+        EventContext::default(),
     );
 
     procedure.on_prepare().await.unwrap();
@@ -1156,6 +1202,7 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     assert!(
@@ -1172,8 +1219,11 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
 
     while rx.try_recv().is_ok() {}
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     execute_procedure_until_done(&mut procedure).await;
 
     let live_table = ddl_context
@@ -1264,12 +1314,16 @@ async fn test_undrop_table_opens_regions_before_restoring_live_metadata() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     while rx.try_recv().is_ok() {}
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
     procedure.execute(&ctx).await.unwrap();
@@ -1333,13 +1387,17 @@ async fn test_undrop_logical_table_skips_datanode_open() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, logical_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
 
     while rx.try_recv().is_ok() {}
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(logical_table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(logical_table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     execute_procedure_until_done(&mut procedure).await;
 
     let live_table = ddl_context
@@ -1370,6 +1428,7 @@ async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task("foo", logical_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.data.soft_drop_enabled);
@@ -1413,6 +1472,7 @@ async fn test_soft_drop_metric_physical_table_remains_enabled() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut procedure).await;
 
@@ -1457,6 +1517,7 @@ async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.data.soft_drop_enabled);
@@ -1493,6 +1554,7 @@ async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, recreated_table_id, false),
         ddl_context,
+        EventContext::default(),
     );
     procedure.on_prepare().await.unwrap();
 
@@ -1508,8 +1570,11 @@ async fn test_undrop_metric_logical_table_fails() {
     let logical_table_id =
         create_metric_logical_table_tombstone(&ddl_context, physical_table_id, "foo").await;
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(logical_table_id), ddl_context);
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(logical_table_id),
+        ddl_context,
+        EventContext::default(),
+    );
     let err = procedure.on_prepare().await.unwrap_err();
 
     assert_eq!(err.status_code(), StatusCode::Unsupported);
@@ -1527,6 +1592,7 @@ async fn test_purge_metric_logical_table_fails() {
     let mut procedure = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(logical_table_id),
         ddl_context,
+        EventContext::default(),
     );
     let err = procedure
         .execute(&new_test_procedure_context())
@@ -1558,6 +1624,7 @@ async fn test_undrop_table_fails_when_live_name_exists() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, dropped_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     ddl_context
@@ -1570,8 +1637,11 @@ async fn test_undrop_table_fails_when_live_name_exists() {
         .await
         .unwrap();
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context);
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(dropped_table_id),
+        ddl_context,
+        EventContext::default(),
+    );
     let err = procedure.on_prepare().await.unwrap_err();
 
     assert_matches!(err, Error::TableAlreadyExists { .. });
@@ -1599,11 +1669,15 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, dropped_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(dropped_table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     procedure.on_prepare().await.unwrap();
     ddl_context
         .table_metadata_manager
@@ -1667,13 +1741,17 @@ async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_wit
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, dropped_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     while rx.try_recv().is_ok() {}
     detector_controller.clear().await;
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(dropped_table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
     procedure.execute(&ctx).await.unwrap();
@@ -1767,6 +1845,7 @@ async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare(
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
 
@@ -1781,6 +1860,7 @@ async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare(
         new_undrop_table_task(table_id),
         ddl_context,
         Some(original_table_name),
+        EventContext::default(),
     );
 
     let keys = procedure
@@ -1848,10 +1928,12 @@ async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
         new_undrop_table_task(original_table_id),
         ddl_context.clone(),
         Some(original_table_name.clone()),
+        EventContext::default(),
     );
     let mut hard_drop = DropTableProcedure::new(
         new_drop_table_task(table_name, recreated_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut hard_drop).await;
     assert!(
@@ -1906,11 +1988,15 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
     procedure.execute(&ctx).await.unwrap();
@@ -2014,6 +2100,7 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     while rx.try_recv().is_ok() {}
@@ -2022,6 +2109,7 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
     let mut procedure = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut procedure).await;
 
@@ -2100,6 +2188,7 @@ async fn test_automatic_purge_rechecks_unexpired_tombstone() {
     let procedure = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     data["check_expired"] = true.into();
@@ -2156,6 +2245,7 @@ async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
     let procedure = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     data["check_expired"] = true.into();
@@ -2233,6 +2323,7 @@ async fn test_recovered_automatic_purge_obeys_runtime_disable() {
     let procedure = PurgeDroppedTableProcedure::new_if_expired(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     let mut recovered =
         PurgeDroppedTableProcedure::from_json(&procedure.dump().unwrap(), ddl_context.clone())
@@ -2264,6 +2355,7 @@ async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
     let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
         new_purge_dropped_table_task(table_id),
         enabled_context.clone(),
+        EventContext::default(),
     );
     procedure
         .execute(&new_test_procedure_context())
@@ -2327,6 +2419,7 @@ async fn test_recovered_automatic_purge_ignores_foreign_generation_claim() {
     let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     procedure
         .execute(&new_test_procedure_context())
@@ -2369,8 +2462,11 @@ async fn test_undrop_rejects_table_claimed_for_purge() {
         .await
         .unwrap();
 
-    let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     let error = procedure.on_prepare().await.unwrap_err();
 
     assert_eq!(StatusCode::TableNotFound, error.status_code());
@@ -2392,8 +2488,11 @@ async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
     let table_id = 1024;
     create_dropped_table(&ddl_context, table_id, Some(1), Some(i64::MAX)).await;
 
-    let mut undrop =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut undrop = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     undrop.on_prepare().await.unwrap();
     let open_regions_state = undrop.dump().unwrap();
     undrop.execute(&new_test_procedure_context()).await.unwrap();
@@ -2402,6 +2501,7 @@ async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
     let mut purge = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut purge).await;
 
@@ -2433,8 +2533,11 @@ async fn test_recovered_undrop_rejects_replacement_generation() {
         .await
         .unwrap();
 
-    let mut undrop =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut undrop = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     undrop.on_prepare().await.unwrap();
     let persisted = undrop.dump().unwrap();
     kv_backend
@@ -2500,8 +2603,11 @@ async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
     assert_eq!(dropped_tables.len(), 1);
     assert_eq!(dropped_tables[0].dropped_at, None);
 
-    let mut undrop =
-        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let mut undrop = UndropTableProcedure::new(
+        new_undrop_table_task(table_id),
+        ddl_context.clone(),
+        EventContext::default(),
+    );
     execute_procedure_until_done(&mut undrop).await;
 
     ddl_context
@@ -2518,6 +2624,7 @@ async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
     let mut purge = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut purge).await;
     assert!(
@@ -2560,6 +2667,7 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     let mut drop_procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, dropped_table_id, false),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
     ddl_context
@@ -2576,6 +2684,7 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     let mut procedure = PurgeDroppedTableProcedure::new(
         new_purge_dropped_table_task(dropped_table_id),
         ddl_context.clone(),
+        EventContext::default(),
     );
     execute_procedure_until_done(&mut procedure).await;
 
@@ -2626,8 +2735,12 @@ async fn test_on_rollback() {
     let physical_table_id = table_id;
     // Creates the logical table metadata.
     let task = test_create_logical_table_task("foo");
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context.clone());
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task],
+        physical_table_id,
+        EventContext::default(),
+        ddl_context.clone(),
+    );
     procedure.on_prepare().await.unwrap();
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
@@ -2640,7 +2753,8 @@ async fn test_on_rollback() {
     // Drops the physical table
     {
         let task = new_drop_table_task("phy_table", physical_table_id, false);
-        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+        let mut procedure =
+            DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
         procedure.on_prepare().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
@@ -2651,7 +2765,8 @@ async fn test_on_rollback() {
 
         // The physical table can be dropped again after the metadata rollback.
         let retry_task = new_drop_table_task("phy_table", physical_table_id, false);
-        let mut retry = DropTableProcedure::new(retry_task, ddl_context.clone());
+        let mut retry =
+            DropTableProcedure::new(retry_task, ddl_context.clone(), EventContext::default());
         retry.on_prepare().await.unwrap();
         retry.on_delete_metadata().await.unwrap();
         retry.rollback(&ctx).await.unwrap();
@@ -2668,7 +2783,7 @@ async fn test_on_rollback() {
     // Drops the logical table
     ddl_context.soft_drop_enabled = false;
     let task = new_drop_table_task("foo", table_ids[0], false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.rollback_supported());
 }
@@ -2765,7 +2880,8 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let logical_table_id = create_logical_table(ddl_context.clone(), physical_table_id, "s").await;
 
     let inner_test = |task: DropTableTask| async {
-        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+        let mut procedure =
+            DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
         execute_procedure_until(&mut procedure, |p| {
             p.data.state == DropTableState::InvalidateTableCache
         })
@@ -2817,7 +2933,8 @@ async fn test_from_json() {
 
         let physical_table_id = create_physical_table(&ddl_context, "t").await;
         let task = new_drop_table_task("t", physical_table_id, false);
-        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+        let mut procedure =
+            DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
         execute_procedure_until(&mut procedure, |p| p.data.state == state).await;
         let data = procedure.dump().unwrap();
         assert_eq!(
@@ -2846,7 +2963,7 @@ async fn test_from_json() {
 
     let physical_table_id = create_physical_table(&ddl_context, "t").await;
     let task = new_drop_table_task("t", physical_table_id, false);
-    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone(), EventContext::default());
     execute_procedure_until_done(&mut procedure).await;
     let data = procedure.dump().unwrap();
     assert_eq!(

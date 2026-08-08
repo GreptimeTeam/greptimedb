@@ -2567,6 +2567,15 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
+    // The direct Prom remote-write handler creates tables without going through
+    // the generic inserter. Its submitted events must retain this origin.
+    wait_for_event_data(
+        &client,
+        "SELECT DISTINCT json_to_string(event_context) FROM greptime_private.events WHERE type IN ('create_table', 'create_logical_tables') AND json_get_string(procedure_trigger, 'type') = 'Submitted' AND json_get_string(event_context, 'protocol') = 'prometheus' AND json_get_string(event_context, 'reason') = 'auto_create'",
+        r#"[["{\"protocol\":\"prometheus\",\"reason\":\"auto_create\"}"]]"#,
+    )
+    .await;
+
     let expected = "[[\"demo\"],[\"demo_metrics\"],[\"demo_metrics_with_nanos\"],[\"greptime_physical_table\"],[\"metric1\"],[\"metric2\"],[\"metric3\"],[\"mito\"],[\"multi_labels\"],[\"numbers\"],[\"phy\"],[\"phy2\"],[\"phy_ns\"]]";
     validate_data("prometheus_remote_write", &client, "show tables;", expected).await;
 
@@ -2608,6 +2617,15 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .await;
 
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Adding a label is handled by PendingRowsSchemaAlterer, which is another
+    // direct DDL path outside the generic inserter.
+    wait_for_event_data(
+        &client,
+        "SELECT DISTINCT json_to_string(event_context) FROM greptime_private.events WHERE type IN ('alter_table', 'alter_logical_tables') AND json_get_string(procedure_trigger, 'type') = 'Submitted' AND json_get_string(event_context, 'protocol') = 'prometheus' AND json_get_string(event_context, 'reason') = 'auto_alter'",
+        r#"[["{\"protocol\":\"prometheus\",\"reason\":\"auto_alter\"}"]]"#,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -3017,12 +3035,12 @@ pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType)
     guard.remove_all().await;
 }
 
-fn qx_077_schema_series(schema: &str, value: f64) -> TimeSeries {
+fn schema_series(schema: &str, value: f64) -> TimeSeries {
     TimeSeries {
         labels: vec![
             Label {
                 name: "__name__".to_string(),
-                value: "qx_077_schema_metric".to_string(),
+                value: "schema_metric".to_string(),
             },
             Label {
                 name: "__schema__".to_string(),
@@ -3041,10 +3059,10 @@ fn qx_077_schema_series(schema: &str, value: f64) -> TimeSeries {
     }
 }
 
-fn qx_077_schema_query(schema: Option<&str>) -> Query {
+fn schema_query(schema: Option<&str>) -> Query {
     let mut matchers = vec![LabelMatcher {
         name: "__name__".to_string(),
-        value: "qx_077_schema_metric".to_string(),
+        value: "schema_metric".to_string(),
         r#type: MatcherType::Eq as i32,
     }];
     if let Some(schema) = schema {
@@ -3063,7 +3081,7 @@ fn qx_077_schema_query(schema: Option<&str>) -> Query {
     }
 }
 
-async fn post_qx_077_remote_read(client: &TestClient, queries: Vec<Query>) -> ReadResponse {
+async fn post_remote_read(client: &TestClient, queries: Vec<Query>) -> ReadResponse {
     let read_request = ReadRequest {
         queries,
         ..Default::default()
@@ -3083,10 +3101,7 @@ async fn post_qx_077_remote_read(client: &TestClient, queries: Vec<Query>) -> Re
     ReadResponse::decode(decompressed_response.as_slice()).unwrap()
 }
 
-async fn post_qx_077_remote_read_from_schema_a(
-    client: &TestClient,
-    queries: Vec<Query>,
-) -> ReadResponse {
+async fn post_remote_read_from_schema_a(client: &TestClient, queries: Vec<Query>) -> ReadResponse {
     let read_request = ReadRequest {
         queries,
         ..Default::default()
@@ -3096,7 +3111,7 @@ async fn post_qx_077_remote_read_from_schema_a(
 
     let response = client
         .post("/v1/prometheus/read")
-        .header(GREPTIME_DB_HEADER_NAME.clone(), "qx_077_schema_a")
+        .header(GREPTIME_DB_HEADER_NAME.clone(), "schema_a")
         .body(compressed_request)
         .send()
         .await;
@@ -3107,7 +3122,7 @@ async fn post_qx_077_remote_read_from_schema_a(
     ReadResponse::decode(decompressed_response.as_slice()).unwrap()
 }
 
-fn qx_077_read_sample_values(read_response: ReadResponse) -> Vec<f64> {
+fn read_sample_values(read_response: ReadResponse) -> Vec<f64> {
     read_response
         .results
         .into_iter()
@@ -3127,8 +3142,8 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
         setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_schema_labels").await;
     let client = TestClient::new(app).await;
 
-    const SCHEMA_A: &str = "qx_077_schema_a";
-    const SCHEMA_B: &str = "qx_077_schema_b";
+    const SCHEMA_A: &str = "schema_a";
+    const SCHEMA_B: &str = "schema_b";
 
     for schema in [SCHEMA_A, SCHEMA_B] {
         let res = client
@@ -3142,8 +3157,8 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
     // Both series have the same metric, non-schema labels, and timestamp.
     let write_request = WriteRequest {
         timeseries: vec![
-            qx_077_schema_series(SCHEMA_A, 101.0),
-            qx_077_schema_series(SCHEMA_B, 202.0),
+            schema_series(SCHEMA_A, 101.0),
+            schema_series(SCHEMA_B, 202.0),
         ],
         ..Default::default()
     };
@@ -3160,36 +3175,26 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
 
     // Independent controls establish that each selector resolves its own schema.
     assert_eq!(
-        qx_077_read_sample_values(
-            post_qx_077_remote_read(&client, vec![qx_077_schema_query(Some(SCHEMA_A))]).await,
-        ),
+        read_sample_values(post_remote_read(&client, vec![schema_query(Some(SCHEMA_A))]).await,),
         vec![101.0]
     );
     assert_eq!(
-        qx_077_read_sample_values(
-            post_qx_077_remote_read(&client, vec![qx_077_schema_query(Some(SCHEMA_B))]).await,
-        ),
+        read_sample_values(post_remote_read(&client, vec![schema_query(Some(SCHEMA_B))]).await,),
         vec![202.0]
     );
 
     // Results must stay aligned with the request query order.
-    let forward_values = qx_077_read_sample_values(
-        post_qx_077_remote_read(
+    let forward_values = read_sample_values(
+        post_remote_read(
             &client,
-            vec![
-                qx_077_schema_query(Some(SCHEMA_A)),
-                qx_077_schema_query(Some(SCHEMA_B)),
-            ],
+            vec![schema_query(Some(SCHEMA_A)), schema_query(Some(SCHEMA_B))],
         )
         .await,
     );
-    let reverse_values = qx_077_read_sample_values(
-        post_qx_077_remote_read(
+    let reverse_values = read_sample_values(
+        post_remote_read(
             &client,
-            vec![
-                qx_077_schema_query(Some(SCHEMA_B)),
-                qx_077_schema_query(Some(SCHEMA_A)),
-            ],
+            vec![schema_query(Some(SCHEMA_B)), schema_query(Some(SCHEMA_A))],
         )
         .await,
     );
@@ -3199,23 +3204,17 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
     );
 
     // With request database A, unqualified queries must resolve to A independently.
-    let explicit_then_default_values = qx_077_read_sample_values(
-        post_qx_077_remote_read_from_schema_a(
+    let explicit_then_default_values = read_sample_values(
+        post_remote_read_from_schema_a(
             &client,
-            vec![
-                qx_077_schema_query(Some(SCHEMA_B)),
-                qx_077_schema_query(None),
-            ],
+            vec![schema_query(Some(SCHEMA_B)), schema_query(None)],
         )
         .await,
     );
-    let default_then_explicit_values = qx_077_read_sample_values(
-        post_qx_077_remote_read_from_schema_a(
+    let default_then_explicit_values = read_sample_values(
+        post_remote_read_from_schema_a(
             &client,
-            vec![
-                qx_077_schema_query(None),
-                qx_077_schema_query(Some(SCHEMA_B)),
-            ],
+            vec![schema_query(None), schema_query(Some(SCHEMA_B))],
         )
         .await,
     );
@@ -7123,6 +7122,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     let res = send_trace_v1_req(&client, existing_int_table_name, existing_int_req, false).await;
     assert_eq!(StatusCode::OK, res.status());
 
+    // Trace schema reconciliation widens the existing column through a direct
+    // alter-table call, so it must identify itself as an OTLP auto alteration.
+    wait_for_event_data(
+        &client,
+        "SELECT DISTINCT json_to_string(event_context) FROM greptime_private.events WHERE type = 'alter_table' AND json_get_string(procedure_trigger, 'type') = 'Submitted' AND json_get_string(event_context, 'protocol') = 'otlp' AND json_get_string(event_context, 'reason') = 'auto_alter'",
+        r#"[["{\"protocol\":\"otlp\",\"reason\":\"auto_alter\"}"]]"#,
+    )
+    .await;
+
     validate_data(
         "otlp_traces_v1_existing_int_widens_rows",
         &client,
@@ -9873,7 +9881,20 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
 }
 
 async fn wait_for_data(client: &TestClient, sql: &str, expected: &str) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    wait_for_data_with_timeout(client, sql, expected, Duration::from_secs(10)).await;
+}
+
+async fn wait_for_event_data(client: &TestClient, sql: &str, expected: &str) {
+    wait_for_data_with_timeout(client, sql, expected, Duration::from_secs(30)).await;
+}
+
+async fn wait_for_data_with_timeout(
+    client: &TestClient,
+    sql: &str,
+    expected: &str,
+    timeout: Duration,
+) {
+    tokio::time::timeout(timeout, async {
         let encoded_sql = encode(sql);
         loop {
             let res = client

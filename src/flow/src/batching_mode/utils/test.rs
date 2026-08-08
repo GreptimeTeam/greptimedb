@@ -268,7 +268,7 @@ async fn test_sql_plan_convert() {
     let new_sql = df_plan_to_sql(&new).unwrap();
 
     assert_eq!(
-        r#"SELECT `UPPERCASE_NUMBERS_WITH_TS`.`NUMBER` FROM `UPPERCASE_NUMBERS_WITH_TS`"#,
+        r#"SELECT "UPPERCASE_NUMBERS_WITH_TS"."NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#,
         new_sql
     );
 }
@@ -1983,5 +1983,80 @@ async fn test_gen_plan_with_matching_schema_last_non_null_rejects_extra_flow_col
     assert!(
         err.contains("Flow output schema does not match sink table schema"),
         "{err}"
+    );
+}
+
+#[test]
+fn test_df_plan_to_sql_quotes_colon_table_name() {
+    // Prometheus-style table names contain ':' (e.g.
+    // `kube_pod_cpu_cores:sum`). The unparser dialect must quote them,
+    // otherwise the re-parsed SQL is invalid (`keyword: :`).
+    let table = single_row_u32_table("kube_pod_cpu_cores:sum", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "kube_pod_cpu_cores:sum");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("\"kube_pod_cpu_cores:sum\""),
+        "expected quoted table name in {sql}"
+    );
+    // The only occurrence of `cores:sum` must be inside the quoted identifier.
+    assert_eq!(
+        sql.matches("cores:sum").count(),
+        1,
+        "colon should only appear inside quotes in {sql}"
+    );
+}
+
+#[test]
+fn test_df_plan_to_sql_does_not_quote_plain_lowercase() {
+    let table = single_row_u32_table("plain_table", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "plain_table");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .project(vec![datafusion_expr::col("value")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("plain_table") && !sql.contains("\"plain_table\""),
+        "plain lowercase table should stay unquoted in {sql}"
+    );
+    // `value` is not a reserved word, so the column stays unquoted.
+    assert!(
+        sql.contains("plain_table.value"),
+        "column unquoted in {sql}"
+    );
+    assert!(!sql.contains('`'), "no backtick quoting in {sql}");
+}
+
+#[test]
+fn test_df_plan_to_sql_quotes_digit_leading_table_name() {
+    // A table literally named `123metrics` starts with a digit and must be
+    // quoted, otherwise the re-parsed SQL is invalid.
+    let table = single_row_u32_table("123metrics", vec!["value"]);
+    let provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(provider));
+    let table_ref = TableReference::full("catalog", "schema", "123metrics");
+    let plan = LogicalPlanBuilder::scan(table_ref, table_source, None)
+        .unwrap()
+        .project(vec![datafusion_expr::col("value")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sql = df_plan_to_sql(&plan).unwrap();
+    assert!(
+        sql.contains("\"123metrics\""),
+        "expected digit-leading table name quoted in {sql}"
     );
 }

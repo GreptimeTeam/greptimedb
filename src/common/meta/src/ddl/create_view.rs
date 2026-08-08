@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
-    Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureState, Status,
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::CreateViewTask;
+use crate::rpc::ddl::{CreateViewTask, EventContext};
 
 // The procedure to execute `[CreateViewTask]`.
 pub struct CreateViewProcedure {
@@ -46,13 +46,14 @@ pub struct CreateViewProcedure {
 impl CreateViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateView";
 
-    pub fn new(task: CreateViewTask, context: DdlContext) -> Self {
+    pub fn new(task: CreateViewTask, event_context: EventContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateViewData {
                 state: CreateViewState::Prepare,
                 task,
                 need_update: false,
+                event_context,
             },
         }
     }
@@ -271,7 +272,7 @@ impl Procedure for CreateViewProcedure {
         ])
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx.event_type_filter.allows(CREATE_VIEW_EVENT_TYPE) {
             return None;
         }
@@ -289,6 +290,7 @@ impl Procedure for CreateViewProcedure {
                         referenced_table_count: self.data.task.table_names().len(),
                         column_count: self.data.task.columns().len(),
                     },
+                    self.data.event_context.clone(),
                 )
             }
             EventTrigger::Succeeded => match ctx.lifecycle_state {
@@ -321,6 +323,8 @@ pub struct CreateViewData {
     pub task: CreateViewTask,
     /// Whether to update the view info.
     pub need_update: bool,
+    #[serde(default)]
+    pub event_context: EventContext,
 }
 
 impl CreateViewData {

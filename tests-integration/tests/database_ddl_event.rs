@@ -22,7 +22,7 @@ use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
 
-use crate::event_recorder_test_util::assert_single_event;
+use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
 
 const DATABASE_NAME: &str = "database_ddl_events";
 
@@ -122,6 +122,15 @@ WHERE type = '{event_type}'
   AND {submitted_payload_predicate}"#
     );
     assert_single_event(instance, &submitted).await;
+    let actual = find_eventually_string(
+        instance,
+        &format!(
+            "SELECT json_to_string(event_context) AS event_context FROM greptime_private.events WHERE type = '{event_type}' AND procedure_state = 'Running' AND json_path_match(procedure_trigger, '$.type == \"Submitted\"') ORDER BY timestamp DESC LIMIT 1"
+        ),
+        "event_context",
+    )
+    .await;
+    assert_eq!(r#"{"reason":"manual"}"#, actual);
 
     let lifecycle = format!(
         r#"SELECT count(*) AS event_count

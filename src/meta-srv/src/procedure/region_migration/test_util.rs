@@ -27,6 +27,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
+use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
@@ -45,9 +46,7 @@ use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
-use crate::procedure::region_migration::manager::{
-    RegionMigrationProcedureTracker, RegionMigrationTriggerReason,
-};
+use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
 use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
@@ -191,7 +190,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         Peer::empty(to),
         vec![region_id],
         Duration::from_secs(10),
-        RegionMigrationTriggerReason::default(),
+        EventContext::default(),
     )
 }
 

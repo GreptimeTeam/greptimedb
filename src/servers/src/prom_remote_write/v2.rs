@@ -45,7 +45,6 @@ use crate::row_writer::{self, TableData};
 
 type PromTags = Vec<(String, String)>;
 type ResolvedSeriesLabels = (PromCtx, String, PromTags);
-const MIN_REMOTE_WRITE_V2_SCHEMA: i32 = -4;
 const MAX_REMOTE_WRITE_V2_SCHEMA: i32 = 8;
 const MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA: i32 = 52;
 
@@ -346,7 +345,7 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
 }
 
 fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> Result<()> {
-    validate_native_histogram_schema(histogram.schema)?;
+    let exponential_overflow_index = validate_native_histogram_schema(histogram.schema)?;
     validate_native_histogram_custom_values(histogram)?;
 
     if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
@@ -379,8 +378,11 @@ fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> 
             histogram.negative_deltas.len(),
         )
     };
-    let custom_max_index = if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
-        Some(
+    let bucket_index_range = if let Some(overflow_index) = exponential_overflow_index {
+        (i32::MIN, overflow_index)
+    } else {
+        (
+            0,
             i32::try_from(histogram.custom_values.len()).ok().context(
                 error::InvalidPromRemoteRequestSnafu {
                     msg: "remote write v2 custom native histogram has too many custom_values"
@@ -388,30 +390,30 @@ fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> 
                 },
             )?,
         )
-    } else {
-        None
     };
     validate_native_histogram_spans(
         "positive",
         &histogram.positive_spans,
         positive_buckets,
-        custom_max_index,
+        bucket_index_range,
     )?;
     validate_native_histogram_spans(
         "negative",
         &histogram.negative_spans,
         negative_buckets,
-        None,
+        bucket_index_range,
     )?;
 
     Ok(())
 }
 
-fn validate_native_histogram_schema(schema: i32) -> Result<()> {
-    if schema == CUSTOM_BUCKETS_SCHEMA
-        || (MIN_REMOTE_WRITE_V2_SCHEMA..=MAX_REMOTE_WRITE_V2_SCHEMA).contains(&schema)
-    {
-        return Ok(());
+fn validate_native_histogram_schema(schema: i32) -> Result<Option<i32>> {
+    if schema == CUSTOM_BUCKETS_SCHEMA {
+        return Ok(None);
+    }
+
+    if let Some(overflow_index) = exponential_overflow_bucket_index(schema) {
+        return Ok(Some(overflow_index));
     }
 
     if (MAX_REMOTE_WRITE_V2_SCHEMA + 1..=MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA).contains(&schema) {
@@ -467,7 +469,7 @@ fn validate_native_histogram_spans(
     name: &str,
     spans: &[BucketSpan],
     bucket_count: usize,
-    custom_max_index: Option<i32>,
+    bucket_index_range: (i32, i32),
 ) -> Result<()> {
     let span_len = spans
         .iter()
@@ -487,7 +489,7 @@ fn validate_native_histogram_spans(
     let mut current_index = 0i32;
     for (span_index, span) in spans.iter().enumerate() {
         ensure!(
-            span.offset >= 0 || (span_index == 0 && custom_max_index.is_none()),
+            span.offset >= 0 || (span_index == 0 && bucket_index_range.0 == i32::MIN),
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 native histogram {name} span {} has negative offset {}",
@@ -509,16 +511,14 @@ fn validate_native_histogram_spans(
         };
 
         for _ in 0..span.length {
-            if let Some(max_index) = custom_max_index {
-                ensure!(
-                    (0..=max_index).contains(&current_index),
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "remote write v2 custom native histogram {name} bucket index {current_index} is out of range"
-                        ),
-                    }
-                );
-            }
+            ensure!(
+                (bucket_index_range.0..=bucket_index_range.1).contains(&current_index),
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 native histogram {name} bucket index {current_index} is out of range"
+                    ),
+                }
+            );
             current_index =
                 current_index
                     .checked_add(1)
@@ -1471,6 +1471,82 @@ mod tests {
             request,
             "contains both samples and native histograms",
         );
+    }
+
+    #[test]
+    fn test_into_context_req_rejects_metric_kind_conflict_across_label_sets() {
+        let request = Request {
+            symbols: vec![
+                "".to_string(),
+                METRIC_NAME_LABEL.to_string(),
+                "metric".to_string(),
+                "job".to_string(),
+                "api".to_string(),
+                "worker".to_string(),
+            ],
+            timeseries: vec![
+                TimeSeries {
+                    labels_refs: vec![1, 2, 3, 4],
+                    samples: vec![Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                        start_timestamp: 0,
+                    }],
+                    ..Default::default()
+                },
+                TimeSeries {
+                    labels_refs: vec![1, 2, 3, 5],
+                    histograms: vec![Histogram::default()],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        assert_invalid(
+            "same metric kind conflict across label sets",
+            request,
+            "contains both samples and native histograms",
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_validates_exponential_overflow_bucket_index() {
+        for schema in [-4, 0, 8] {
+            let max_index = exponential_overflow_bucket_index(schema).unwrap();
+            for positive in [true, false] {
+                let mut histogram = Histogram {
+                    schema,
+                    count: Some(Count::CountInt(1)),
+                    ..Default::default()
+                };
+                if positive {
+                    histogram.positive_spans = vec![BucketSpan {
+                        offset: max_index,
+                        length: 1,
+                    }];
+                    histogram.positive_deltas = vec![1];
+                } else {
+                    histogram.negative_spans = vec![BucketSpan {
+                        offset: max_index,
+                        length: 1,
+                    }];
+                    histogram.negative_deltas = vec![1];
+                }
+                into_write_requests(request_with_histogram(histogram.clone())).unwrap();
+
+                let beyond = max_index + 1;
+                if positive {
+                    histogram.positive_spans[0].offset = beyond;
+                } else {
+                    histogram.negative_spans[0].offset = beyond;
+                }
+                assert_invalid(
+                    "exponential overflow bucket index",
+                    request_with_histogram(histogram),
+                    &format!("bucket index {beyond} is out of range"),
+                );
+            }
+        }
     }
 
     #[test]
