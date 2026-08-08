@@ -2124,63 +2124,65 @@ mod tests {
         server
     }
 
+    /// The provider reports a real count only for a `Ready` region whose
+    /// engine has a statistic; everything else fails open (`None`).
     #[test]
-    fn region_row_count_provider_returns_real_num_rows() {
-        let region_id = RegionId::new(1024, 1);
-        let server = region_server_with_row_count(region_id, 42);
-        let provider: RegionRowCountProviderRef = Arc::new(server);
+    fn region_row_count_provider_row_count_cases() {
+        #[allow(clippy::type_complexity)]
+        let cases: [(&str, fn(RegionId) -> RegionServer, Option<u64>); 5] = [
+            (
+                "real_num_rows_for_ready_region",
+                |region_id| region_server_with_row_count(region_id, 42),
+                Some(42),
+            ),
+            ("none_for_missing_region", |_| mock_region_server(), None),
+            (
+                // A registered region whose engine has no statistic
+                // (unsupported region): the provider must report None instead
+                // of fabricating an estimate.
+                "none_when_engine_reports_no_statistic",
+                |region_id| {
+                    let server = mock_region_server();
+                    let (engine, _rx) = MockRegionEngine::new(MITO_ENGINE_NAME);
+                    server.register_test_region(region_id, engine);
+                    server
+                },
+                None,
+            ),
+            (
+                // A region that is still registering can already answer an
+                // engine statistic, but its count is not stable yet: the
+                // provider must fail open instead of reporting a
+                // mid-transition count.
+                "none_for_registering_region",
+                |region_id| {
+                    region_server_with_row_count_status(
+                        region_id,
+                        42,
+                        RegionEngineWithStatus::Registering,
+                    )
+                },
+                None,
+            ),
+            (
+                // The same holds for a region that is being deregistered.
+                "none_for_deregistering_region",
+                |region_id| {
+                    region_server_with_row_count_status(
+                        region_id,
+                        42,
+                        RegionEngineWithStatus::Deregistering,
+                    )
+                },
+                None,
+            ),
+        ];
 
-        assert_eq!(provider.row_count(region_id), Some(42));
-    }
-
-    #[test]
-    fn region_row_count_provider_returns_none_for_missing_region() {
-        let server = mock_region_server();
-        let provider: RegionRowCountProviderRef = Arc::new(server);
-
-        assert_eq!(provider.row_count(RegionId::new(1024, 99)), None);
-    }
-
-    #[test]
-    fn region_row_count_provider_returns_none_when_engine_reports_no_statistic() {
-        let region_id = RegionId::new(1024, 1);
-        // Register a region whose engine has no statistic (unsupported region):
-        // the provider must report None instead of fabricating an estimate.
-        let server = mock_region_server();
-        let (engine, _rx) = MockRegionEngine::new(MITO_ENGINE_NAME);
-        server.register_test_region(region_id, engine);
-        let provider: RegionRowCountProviderRef = Arc::new(server);
-
-        assert_eq!(provider.row_count(region_id), None);
-    }
-
-    #[test]
-    fn region_row_count_provider_returns_none_for_registering_region() {
-        // A region that is still registering can already answer an engine
-        // statistic, but its count is not stable yet: the provider must fail
-        // open instead of reporting a mid-transition count.
-        let region_id = RegionId::new(1024, 1);
-        let server =
-            region_server_with_row_count_status(region_id, 42, RegionEngineWithStatus::Registering);
-        let provider: RegionRowCountProviderRef = Arc::new(server);
-
-        assert_eq!(provider.row_count(region_id), None);
-    }
-
-    #[test]
-    fn region_row_count_provider_returns_none_for_deregistering_region() {
-        // A region that is being deregistered can still answer an engine
-        // statistic, but its count is not stable yet: the provider must fail
-        // open instead of reporting a mid-transition count.
-        let region_id = RegionId::new(1024, 1);
-        let server = region_server_with_row_count_status(
-            region_id,
-            42,
-            RegionEngineWithStatus::Deregistering,
-        );
-        let provider: RegionRowCountProviderRef = Arc::new(server);
-
-        assert_eq!(provider.row_count(region_id), None);
+        for (name, setup, expected) in cases {
+            let region_id = RegionId::new(1024, 1);
+            let provider: RegionRowCountProviderRef = Arc::new(setup(region_id));
+            assert_eq!(provider.row_count(region_id), expected, "case: {name}");
+        }
     }
 
     #[test]
