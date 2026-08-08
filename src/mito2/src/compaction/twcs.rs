@@ -32,8 +32,8 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
-    FileGroup, Item, Ranged, find_sorted_runs, find_sorted_runs_by_time_range,
-    merge_primary_key_ranges, merge_seq_files, primary_key_ranges_overlap, reduce_runs,
+    FileGroup, Item, Ranged, SortedRun, find_sorted_runs, find_sorted_runs_by_time_range,
+    merge_primary_key_ranges, primary_key_ranges_overlap,
 };
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, Level, overlaps};
@@ -41,14 +41,14 @@ use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
 
-/// Default value for max compaction input file num.
-const DEFAULT_MAX_INPUT_FILE_NUM: usize = 32;
+/// Maximum number of logical FileGroups in one compaction input.
+const MAX_INPUT_FILE_GROUPS: usize = 32;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 #[derive(Clone, Debug)]
 pub struct TwcsPicker {
-    /// Minimum file num to trigger a compaction.
+    /// Minimum eligible FileGroup num to trigger a compaction.
     pub trigger_file_num: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
@@ -167,48 +167,10 @@ impl TwcsPicker {
             find_sorted_runs_by_time_range(&mut files_to_merge)
         };
         let found_runs = sorted_runs.len();
-        // We only remove deletion markers if we found less than 2 runs and not in append mode.
-        // because after compaction there will be no overlapping files.
-        let filter_deleted =
-            found_runs <= 2 && !self.append_mode && !window_has_overlap(files, windows);
-        if found_runs == 0 {
-            return (vec![], filter_deleted);
-        }
-
-        let mut inputs = if found_runs > 1 {
-            reduce_runs(sorted_runs)
-        } else {
-            let run = sorted_runs.last().unwrap();
-            if run.items().len() < self.trigger_file_num {
-                return (vec![], filter_deleted);
-            }
-            // no overlapping files, try merge small files
-            merge_seq_files(run.items(), self.max_output_file_size)
-        };
-
-        // Limits the number of input files.
-        let total_input_files: usize = inputs.iter().map(|fg| fg.num_files()).sum();
-        if total_input_files > DEFAULT_MAX_INPUT_FILE_NUM {
-            // Sorts file groups by size first.
-            inputs.sort_unstable_by_key(|fg| fg.size());
-            let mut num_picked_files = 0;
-            inputs = inputs
-                .into_iter()
-                .take_while(|fg| {
-                    let current_group_file_num = fg.num_files();
-                    if current_group_file_num + num_picked_files <= DEFAULT_MAX_INPUT_FILE_NUM {
-                        num_picked_files += current_group_file_num;
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .collect::<Vec<_>>();
-            info!(
-                "Compaction for region {} enforces max input file num limit: {}, current total: {}, input: {:?}",
-                region_id, DEFAULT_MAX_INPUT_FILE_NUM, total_input_files, inputs
-            );
-        }
+        let inputs = pick_count_first(sorted_runs, self.trigger_file_num);
+        let filter_deleted = !self.append_mode
+            && !window_has_overlap(files, windows)
+            && !selected_overlaps_unselected(&inputs, files);
 
         if inputs.len() > 1 {
             // If we have more than one group to compact.
@@ -225,6 +187,145 @@ impl TwcsPicker {
         }
         (inputs, filter_deleted)
     }
+}
+
+#[derive(Debug)]
+struct OrderedFileGroup<'a> {
+    group: &'a FileGroup,
+    run_id: usize,
+    position_in_run: usize,
+}
+
+#[derive(Debug)]
+struct CandidateScore {
+    num_file_groups: usize,
+    overlap_participants: usize,
+    size: usize,
+}
+
+impl CandidateScore {
+    fn is_better_than(&self, other: &Self) -> bool {
+        self.num_file_groups
+            .cmp(&other.num_file_groups)
+            .then_with(|| self.overlap_participants.cmp(&other.overlap_participants))
+            .then_with(|| other.size.cmp(&self.size))
+            .is_gt()
+    }
+}
+
+fn pick_count_first(
+    sorted_runs: Vec<SortedRun<FileGroup>>,
+    trigger_file_num: usize,
+) -> Vec<FileGroup> {
+    let mut groups = sorted_runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run_id, run)| {
+            run.items()
+                .iter()
+                .enumerate()
+                .map(move |(position_in_run, group)| OrderedFileGroup {
+                    group,
+                    run_id,
+                    position_in_run,
+                })
+        })
+        .collect::<Vec<_>>();
+    groups.sort_unstable_by(|lhs, rhs| {
+        let (lhs_start, lhs_end) = lhs.group.range();
+        let (rhs_start, rhs_end) = rhs.group.range();
+        lhs_start
+            .cmp(&rhs_start)
+            .then_with(|| rhs_end.cmp(&lhs_end))
+            .then_with(|| lhs.run_id.cmp(&rhs.run_id))
+            .then_with(|| lhs.position_in_run.cmp(&rhs.position_in_run))
+    });
+    // A multi-SST FileGroup is a compaction output that already exceeded the output size target
+    // and was split. Recompacting it cannot reduce physical files, so automatic TWCS treats it as
+    // stable. It remains in the original Window for tombstone overlap checks.
+    groups.retain(|group| group.group.num_files() == 1);
+
+    let mut best = None;
+    for left in 0..groups.len() {
+        let mut total_size = 0;
+        let mut largest_group_size = 0;
+        let mut overlap_participants = 0;
+        let right_bound = (left + MAX_INPUT_FILE_GROUPS).min(groups.len());
+        let mut participants: Vec<bool> = Vec::with_capacity(right_bound - left);
+        for right in left..right_bound {
+            let right_group = &groups[right];
+            let group_size = right_group.group.size();
+            total_size += group_size;
+            largest_group_size = largest_group_size.max(group_size);
+
+            let mut right_participates = false;
+            for (offset, other) in groups[left..right].iter().enumerate() {
+                if right_group.run_id != other.run_id
+                    && right_group.group.overlap_inclusive(other.group)
+                {
+                    if !participants[offset] {
+                        participants[offset] = true;
+                        overlap_participants += 1;
+                    }
+                    right_participates = true;
+                }
+            }
+            participants.push(right_participates);
+            if right_participates {
+                overlap_participants += 1;
+            }
+
+            let num_file_groups = right + 1 - left;
+            if num_file_groups < trigger_file_num || num_file_groups < 2 {
+                continue;
+            }
+            // A historical group is only rewritten after peers contribute at least the same
+            // amount of data, so every rewrite moves it into a larger size tier.
+            if largest_group_size > total_size - largest_group_size {
+                continue;
+            }
+
+            let score = CandidateScore {
+                num_file_groups,
+                overlap_participants,
+                size: total_size,
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _, _)| score.is_better_than(best_score))
+            {
+                best = Some((score, left, right));
+            }
+        }
+    }
+
+    let Some((_, left, right)) = best else {
+        return vec![];
+    };
+    groups[left..=right]
+        .iter()
+        .map(|group| group.group.clone())
+        .collect()
+}
+
+fn selected_overlaps_unselected(selected: &[FileGroup], window: &Window) -> bool {
+    let selected_file_ids = selected
+        .iter()
+        .flat_map(FileGroup::file_ids)
+        .collect::<HashSet<_>>();
+    window
+        .files()
+        .filter(|group| {
+            !group
+                .file_ids()
+                .iter()
+                .all(|file_id| selected_file_ids.contains(file_id))
+        })
+        .any(|unselected| {
+            selected
+                .iter()
+                .any(|selected| selected.overlap_inclusive(unselected))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,7 +1067,7 @@ mod tests {
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
             let output = TwcsPicker {
-                trigger_file_num: 4,
+                trigger_file_num: 2,
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
@@ -1053,7 +1154,7 @@ mod tests {
             .to_vec(),
             expected_outputs: vec![
                 ExpectedOutput {
-                    input_files: vec![2, 4],
+                    input_files: vec![2, 3, 4],
                     output_level: 1,
                 },
                 ExpectedOutput {
@@ -1066,8 +1167,9 @@ mod tests {
         .await;
 
         // Case 3:
-        // A compaction may split output into several files that have overlapping time ranges and same sequence,
-        // we should treat these files as one FileGroup.
+        // A compaction may split output into several files that have overlapping time ranges and
+        // the same sequence. We treat these files as one stable FileGroup and exclude it from
+        // automatic TWCS candidates.
         let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
         CompactionPickerTestCase {
             window_size: 3,
@@ -1079,10 +1181,7 @@ mod tests {
                 new_file_handle_with_sequence(file_ids[4], 11, 2990, 0, 3),
             ]
             .to_vec(),
-            expected_outputs: vec![ExpectedOutput {
-                input_files: vec![0, 1, 4],
-                output_level: 1,
-            }],
+            expected_outputs: vec![],
         }
         .check()
         .await;
@@ -1169,7 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_output_multiple_windows_with_zero_runs() {
-        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+        let file_ids = (0..7).map(|_| FileId::random()).collect::<Vec<_>>();
 
         let files = [
             // Window 0: Contains 3 files but not forming any runs (not enough files in sequence to reach trigger_file_num)
@@ -1180,6 +1279,7 @@ mod tests {
             new_file_handle_with_sequence(file_ids[3], 3000, 3999, 0, 4),
             new_file_handle_with_sequence(file_ids[4], 3000, 3999, 0, 5),
             new_file_handle_with_sequence(file_ids[5], 3000, 3999, 0, 6),
+            new_file_handle_with_sequence(file_ids[6], 3000, 3999, 0, 7),
         ];
 
         let windows = assign_to_windows(files.iter(), 3);
@@ -1409,7 +1509,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, output.len());
-        assert_eq!(output[0].inputs.len(), 2);
+        assert_eq!(output[0].inputs.len(), num_files);
     }
 
     #[tokio::test]
@@ -1553,6 +1653,379 @@ mod tests {
                 .iter()
                 .map(|file| file.file_id().file_id())
                 .collect::<HashSet<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_first_prefers_more_files_over_smaller_overlap() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 2, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 40, 50, 0, 3, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 5, 15, 0, 4, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(4, output[0].inputs.len());
+    }
+
+    #[tokio::test]
+    async fn test_count_first_trigger_counts_file_groups() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 2, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 3,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_count_first_does_not_compact_overlap_below_trigger() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 20, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 10, 30, 0, 2, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 3,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_filter_deleted_is_false_when_selected_files_overlap_unselected_file() {
+        let mut files = (0..32)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    idx * 10,
+                    idx * 10 + 9,
+                    0,
+                    idx as u64 + 1,
+                    10,
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push(new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            0,
+            320,
+            0,
+            33,
+            10,
+        ));
+        let windows = assign_to_windows(files.iter(), 1000);
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(1000),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(MAX_INPUT_FILE_GROUPS, output[0].inputs.len());
+        assert!(!output[0].filter_deleted);
+    }
+
+    #[tokio::test]
+    async fn test_filter_deleted_is_false_when_selected_overlaps_ignored_file_group() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 100, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 100, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 2, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 3, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 40, 50, 0, 4, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 60, 70, 0, 5, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(4, output[0].inputs.len());
+        assert!(!output[0].filter_deleted);
+    }
+
+    fn new_file_group(
+        start: i64,
+        end: i64,
+        sequence: u64,
+        num_files: usize,
+        file_size: u64,
+    ) -> FileGroup {
+        let mut group = FileGroup::new_with_file(new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            start,
+            end,
+            0,
+            sequence,
+            file_size,
+        ));
+        for _ in 1..num_files {
+            group.add_file(new_file_handle_with_size_and_sequence(
+                FileId::random(),
+                start,
+                end,
+                0,
+                sequence,
+                file_size,
+            ));
+        }
+        group
+    }
+
+    fn picked_ranges(groups: &[FileGroup]) -> Vec<(i64, i64)> {
+        groups
+            .iter()
+            .map(|group| {
+                let (start, end) = group.range();
+                (start.value(), end.value())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_count_first_counts_file_groups_not_physical_ssts() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 2, 10),
+                new_file_group(20, 29, 2, 1, 10),
+                new_file_group(40, 49, 3, 1, 10),
+            ])],
+            2,
+        );
+
+        assert_eq!(vec![(20, 29), (40, 49)], picked_ranges(&picked));
+    }
+
+    #[test]
+    fn test_count_first_ignores_multi_sst_groups_between_singletons() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 10),
+                new_file_group(10, 19, 2, 2, 10),
+                new_file_group(20, 29, 3, 1, 10),
+            ])],
+            2,
+        );
+
+        assert_eq!(vec![(0, 9), (20, 29)], picked_ranges(&picked));
+    }
+
+    #[test]
+    fn test_count_first_returns_empty_for_only_multi_sst_groups() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 2, 10),
+                new_file_group(20, 29, 2, 2, 10),
+            ])],
+            2,
+        );
+
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_rejects_dominant_historical_group() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 400),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+            ])],
+            4,
+        );
+
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_accepts_balanced_historical_group() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 400),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+                new_file_group(80, 89, 5, 1, 100),
+            ])],
+            4,
+        );
+
+        assert_eq!(
+            vec![(0, 9), (20, 29), (40, 49), (60, 69), (80, 89)],
+            picked_ranges(&picked)
+        );
+    }
+
+    #[test]
+    fn test_count_first_finds_smaller_balanced_interval_when_larger_one_is_unbalanced() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 1000),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+                new_file_group(80, 89, 5, 1, 100),
+            ])],
+            4,
+        );
+
+        assert_eq!(
+            vec![(20, 29), (40, 49), (60, 69), (80, 89)],
+            picked_ranges(&picked)
+        );
+    }
+
+    #[test]
+    fn test_count_first_prefers_overlap_participants_when_file_group_counts_match() {
+        let first_run = (0..MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                let end = if idx + 1 == MAX_INPUT_FILE_GROUPS {
+                    700
+                } else {
+                    start + 9
+                };
+                new_file_group(start, end, idx as u64 + 1, 1, 10)
+            })
+            .collect::<Vec<_>>();
+        let overlapping = new_file_group(690, 710, 100, 1, 10);
+
+        let picked = pick_count_first(
+            vec![
+                SortedRun::from(first_run),
+                SortedRun::from(vec![overlapping]),
+            ],
+            2,
+        );
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert!(!ranges.contains(&(0, 9)));
+        assert!(ranges.contains(&(690, 710)));
+    }
+
+    #[test]
+    fn test_count_first_prefers_smaller_bytes_when_file_group_counts_match() {
+        let groups = (0..=MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                let size = if idx == 0 {
+                    100
+                } else if idx == MAX_INPUT_FILE_GROUPS {
+                    1
+                } else {
+                    10
+                };
+                new_file_group(start, start + 9, idx as u64 + 1, 1, size)
+            })
+            .collect::<Vec<_>>();
+
+        let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert_eq!(Some(&(20, 29)), ranges.first());
+        assert_eq!(Some(&(640, 649)), ranges.last());
+    }
+
+    #[test]
+    fn test_count_first_prefers_earlier_time_on_exact_tie() {
+        let groups = (0..=MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                new_file_group(start, start + 9, idx as u64 + 1, 1, 10)
+            })
+            .collect::<Vec<_>>();
+
+        let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert_eq!(Some(&(0, 9)), ranges.first());
+        assert_eq!(Some(&(620, 629)), ranges.last());
+    }
+
+    #[test]
+    fn test_count_first_keeps_each_interleaved_run_contiguous() {
+        let picked = pick_count_first(
+            vec![
+                SortedRun::from(vec![
+                    new_file_group(0, 9, 1, 1, 1),
+                    new_file_group(20, 29, 2, 1, 1),
+                    new_file_group(40, 49, 3, 1, 1),
+                ]),
+                SortedRun::from(vec![
+                    new_file_group(10, 19, 4, 1, 1),
+                    new_file_group(30, 39, 5, 1, 1),
+                ]),
+            ],
+            2,
+        );
+
+        assert_eq!(
+            vec![(0, 9), (10, 19), (20, 29), (30, 39), (40, 49)],
+            picked_ranges(&picked)
         );
     }
 

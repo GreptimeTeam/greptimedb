@@ -20,14 +20,10 @@ use std::collections::BinaryHeap;
 
 use bytes::{Buf, Bytes};
 use common_base::BitVec;
-use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
 use smallvec::{SmallVec, smallvec};
 
 use crate::sst::file::{FileHandle, RegionFileId};
-
-/// Default max compaction output file size when not specified.
-const DEFAULT_MAX_OUTPUT_SIZE: u64 = ReadableSize::gb(2).as_bytes();
 
 /// Trait for any items with specific range (both boundaries are inclusive).
 pub trait Ranged {
@@ -553,124 +549,8 @@ where
     runs.into_iter().map(|x| x.run).collect()
 }
 
-/// Finds a set of files with minimum penalty to merge that can reduce the total num of runs.
-/// The penalty of merging is defined as the size of all overlapping files between two runs.
-pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> Vec<T> {
-    assert!(runs.len() > 1);
-    // sort runs by size
-    runs.sort_unstable_by_key(|a| a.size);
-    // limit max probe runs to 100
-    let probe_end = runs.len().min(100);
-    let mut min_penalty = usize::MAX;
-    let mut files = vec![];
-    let mut temp_files = vec![];
-    for i in 0..probe_end {
-        for j in i + 1..probe_end {
-            let (a, b) = runs.split_at_mut(j);
-            find_overlapping_items(&mut a[i], &mut b[0], &mut temp_files);
-            let penalty = temp_files.iter().map(|e| e.size()).sum();
-            if penalty < min_penalty {
-                min_penalty = penalty;
-                files.clear();
-                files.extend_from_slice(&temp_files);
-            }
-        }
-    }
-    files
-}
-
-/// Finds the optimal set of adjacent files to merge based on a scoring system.
-///
-/// This function evaluates all possible contiguous subsets of files to find the best
-/// candidates for merging, considering:
-///
-/// 1. File reduction - prioritizes merging more files to reduce the total count
-/// 2. Write amplification - minimizes the ratio of largest file to total size
-/// 3. Size efficiency - prefers merges that utilize available space effectively
-///
-/// When multiple merge candidates have the same score, older files (those with lower indices)
-/// are preferred.
-///
-/// # Arguments
-/// * `input_files` - Slice of files to consider for merging
-/// * `max_file_size` - Optional maximum size constraint for the merged file.
-///   If None, uses 1.5 times the average file size.
-///
-/// # Returns
-/// A vector containing the best set of adjacent files to merge.
-/// Returns an empty vector if input is empty or contains only one file.
-pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -> Vec<T> {
-    if input_files.is_empty() || input_files.len() == 1 {
-        return vec![];
-    }
-
-    // Limit the number of files to process to 100 to control time complexity
-    let files_to_process = if input_files.len() > 100 {
-        &input_files[0..100]
-    } else {
-        input_files
-    };
-
-    // Calculate target size based on max_file_size or average file size
-    let target_size = match max_file_size {
-        Some(size) => size as usize,
-        None => {
-            // Calculate 1.5*average_file_size if max_file_size is not provided and clamp to 2GB
-            let total_size: usize = files_to_process.iter().map(|f| f.size()).sum();
-            ((((total_size as f64) / (files_to_process.len() as f64)) * 1.5) as usize)
-                .min(DEFAULT_MAX_OUTPUT_SIZE as usize)
-        }
-    };
-
-    // Find the best group of adjacent files to merge
-    let mut best_group = Vec::new();
-    let mut best_score = f64::NEG_INFINITY;
-
-    // Try different starting positions - iterate from end to start to prefer older files
-    for start_idx in (0..files_to_process.len()).rev() {
-        // Try different ending positions - also iterate from end to start
-        for end_idx in (start_idx + 1..files_to_process.len()).rev() {
-            let group = &files_to_process[start_idx..=end_idx];
-            let total_size: usize = group.iter().map(|f| f.size()).sum();
-
-            // Skip if total size exceeds target size
-            if total_size > target_size {
-                continue; // Use continue instead of break to check smaller ranges
-            }
-
-            // Calculate amplification factor (largest file size / total size)
-            let largest_file_size = group.iter().map(|f| f.size()).max().unwrap_or(0);
-            let amplification_factor = largest_file_size as f64 / total_size as f64;
-
-            // Calculate file reduction (number of files that will be reduced)
-            let file_reduction = group.len() - 1;
-
-            // Calculate score based on multiple factors:
-            // 1. File reduction (higher is better)
-            // 2. Amplification factor (lower is better)
-            // 3. Size efficiency (how close to target size)
-            let file_reduction_score = file_reduction as f64 / files_to_process.len() as f64;
-            let amp_factor_score = (1.0 - amplification_factor) * 1.5; // Lower amplification is better
-            let size_efficiency = (total_size as f64 / target_size as f64).min(1.0); // Reward using available space
-
-            let score = file_reduction_score + amp_factor_score + size_efficiency;
-
-            // Check if this group is better than our current best
-            // Use >= instead of > to prefer older files (which we encounter first due to reverse iteration)
-            if score >= best_score {
-                best_score = score;
-                best_group = group.to_vec();
-            }
-        }
-    }
-
-    best_group
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use bytes::Bytes;
     use store_api::storage::FileId;
 
@@ -705,17 +585,6 @@ mod tests {
                 start: *start,
                 end: *end,
                 size: (*end - *start) as usize,
-            })
-            .collect()
-    }
-
-    fn build_items_with_size(items: &[(i64, i64, usize)]) -> Vec<MockFile> {
-        items
-            .iter()
-            .map(|(start, end, size)| MockFile {
-                start: *start,
-                end: *end,
-                size: *size,
             })
             .collect()
     }
@@ -842,99 +711,6 @@ mod tests {
         ] {
             check_find_sorted_runs_consistency(ranges);
         }
-    }
-
-    fn check_reduce_runs(
-        files: &[(i64, i64)],
-        expected_runs: &[Vec<(i64, i64)>],
-        expected: &[(i64, i64)],
-    ) {
-        let runs = check_sorted_runs(files, expected_runs);
-        if runs.len() <= 1 {
-            assert!(expected.is_empty());
-            return;
-        }
-        let files_to_merge = reduce_runs(runs);
-        let file_to_merge_timestamps = files_to_merge
-            .into_iter()
-            .map(|f| (f.start, f.end))
-            .collect::<HashSet<_>>();
-
-        let expected = expected.iter().cloned().collect::<HashSet<_>>();
-        assert_eq!(&expected, &file_to_merge_timestamps);
-    }
-
-    #[test]
-    fn test_reduce_runs() {
-        // [1..3]   [5..6]
-        //   [2..4]
-        check_reduce_runs(
-            &[(1, 3), (2, 4), (5, 6)],
-            &[vec![(1, 3), (5, 6)], vec![(2, 4)]],
-            &[(1, 3), (2, 4)],
-        );
-
-        // [1..2][3..5]
-        //         [4..6]
-        check_reduce_runs(
-            &[(1, 2), (3, 5), (4, 6)],
-            &[vec![(1, 2), (3, 5)], vec![(4, 6)]],
-            &[(3, 5), (4, 6)],
-        );
-
-        // [1..2][3..4]    [7..8]
-        //          [4..6]
-        check_reduce_runs(
-            &[(1, 2), (3, 4), (4, 6), (7, 8)],
-            &[vec![(1, 2), (3, 4), (4, 6), (7, 8)]],
-            &[],
-        );
-
-        // [1..2][3........6][7..8][8..9]
-        //       [3..4][5..6]
-        check_reduce_runs(
-            &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
-            &[vec![(1, 2), (3, 6), (7, 8), (8, 9)], vec![(3, 4), (5, 6)]],
-            &[(5, 6), (3, 4), (3, 6)], // already satisfied
-        );
-
-        // [1..2][3........6][7..8][8..9]
-        //       [3..4][5..6]
-        check_reduce_runs(
-            &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
-            &[vec![(1, 2), (3, 6), (7, 8), (8, 9)], vec![(3, 4), (5, 6)]],
-            &[(3, 4), (3, 6), (5, 6)],
-        );
-
-        // [10..20] [30..40] [50........80][80...100][100..110]
-        //                   [50..60]  [80..90]
-        //
-        check_reduce_runs(
-            &[
-                (10, 20),
-                (30, 40),
-                (50, 60),
-                (50, 80),
-                (80, 90),
-                (80, 100),
-                (100, 110),
-            ],
-            &[
-                vec![(10, 20), (30, 40), (50, 80), (80, 100), (100, 110)],
-                vec![(50, 60), (80, 90)],
-            ],
-            &[(50, 80), (80, 100), (50, 60), (80, 90)],
-        );
-
-        // [0..10]
-        // [0...11]
-        // [0....12]
-        // [0.....13]
-        check_reduce_runs(
-            &[(0, 10), (0, 11), (0, 12), (0, 13)],
-            &[vec![(0, 13)], vec![(0, 12)], vec![(0, 11)], vec![(0, 10)]],
-            &[(0, 10), (0, 11)],
-        );
     }
 
     #[test]
@@ -1186,79 +962,5 @@ mod tests {
             ));
 
         assert!(!lhs.overlap(&rhs));
-    }
-
-    #[test]
-    fn test_merge_seq_files() {
-        // Test empty input
-        let files = Vec::<MockFile>::new();
-        assert_eq!(merge_seq_files(&files, None), Vec::<MockFile>::new());
-
-        // Test single file input (should return empty vec as no merge needed)
-        let files = build_items(&[(1, 5)]);
-        assert_eq!(merge_seq_files(&files, None), Vec::<MockFile>::new());
-
-        // Test the example case: [10, 1, 1, 1] - should merge the last three files
-        let files = build_items_with_size(&[(1, 2, 10), (3, 4, 1), (5, 6, 1), (7, 8, 1)]);
-        let result = merge_seq_files(&files, None);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].size, 1);
-        assert_eq!(result[1].size, 1);
-        assert_eq!(result[2].size, 1);
-
-        // Test with files of equal size - should merge as many as possible
-        let files = build_items_with_size(&[(1, 2, 5), (3, 4, 5), (5, 6, 5), (7, 8, 5)]);
-        let result = merge_seq_files(&files, Some(20));
-        assert_eq!(result.len(), 4); // Should merge all 4 files as total size is 20
-
-        // Test with max_file_size constraint
-        let files = build_items_with_size(&[(1, 2, 5), (3, 4, 5), (5, 6, 5), (7, 8, 5)]);
-        let result = merge_seq_files(&files, Some(10));
-        assert_eq!(result.len(), 2); // Should merge only 2 files as max size is 10
-
-        // Test with uneven file sizes - should prioritize reducing file count
-        let files = build_items_with_size(&[(1, 2, 2), (3, 4, 3), (5, 6, 4), (7, 8, 10)]);
-        let result = merge_seq_files(&files, Some(10));
-        assert_eq!(result.len(), 3); // Should merge the first 3 files (total size 9)
-
-        // Test amplification factor prioritization
-        // Two possible merges: [5, 5] (amp factor 0.5) vs [10, 1, 1] (amp factor 0.83)
-        let files =
-            build_items_with_size(&[(1, 2, 5), (3, 4, 5), (5, 6, 10), (7, 8, 1), (9, 10, 1)]);
-        let result = merge_seq_files(&files, Some(12));
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].size, 5);
-        assert_eq!(result[1].size, 5);
-
-        // Test with large file preventing merges
-        let files = build_items_with_size(&[(1, 2, 100), (3, 4, 1), (5, 6, 1), (7, 8, 1)]);
-        let result = merge_seq_files(&files, Some(10));
-        assert_eq!(result.len(), 3); // Should merge the last 3 small files
-        assert_eq!(result[0].size, 1);
-        assert_eq!(result[1].size, 1);
-        assert_eq!(result[2].size, 1);
-
-        let files = build_items_with_size(&[(1, 2, 100), (3, 4, 20), (5, 6, 20), (7, 8, 20)]);
-        let result = merge_seq_files(&files, Some(200));
-        assert_eq!(result.len(), 4);
-
-        let files = build_items_with_size(&[(1, 2, 160), (3, 4, 20), (5, 6, 20), (7, 8, 20)]);
-        let result = merge_seq_files(&files, None);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].size, 20);
-        assert_eq!(result[1].size, 20);
-        assert_eq!(result[2].size, 20);
-
-        let files = build_items_with_size(&[(1, 2, 100), (3, 4, 1)]);
-        let result = merge_seq_files(&files, Some(200));
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].size, 100);
-        assert_eq!(result[1].size, 1);
-
-        let files = build_items_with_size(&[(1, 2, 20), (3, 4, 20), (5, 6, 20), (7, 8, 20)]);
-        let result = merge_seq_files(&files, Some(40));
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].start, 1);
-        assert_eq!(result[1].start, 3);
     }
 }
