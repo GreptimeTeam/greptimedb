@@ -382,16 +382,16 @@ impl StatementExecutor {
 
     /// Creates the declared-edge table of the entity graph with its canonical
     /// schema. Deliberately enters below the user-DDL guard
-    /// ([`ensure_table_writable`]): the table's definition is system-owned,
-    /// users only write rows to it. `create_if_not_exists` makes concurrent
-    /// first inserts race safely.
+    /// ([`ensure_table_definition_writable`]): the table's definition is
+    /// system-owned, users only write rows to it. `create_if_not_exists` makes
+    /// concurrent first inserts race safely.
     pub async fn create_declared_relationships_table(
         &self,
         catalog: &str,
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         let mut expr = super::semantic_graph::build_declared_relationships_expr(catalog);
-        self.create_non_logic_table(&mut expr, None, query_ctx)
+        self.create_non_logic_table(&mut expr, None, query_ctx, TriggerReason::AutoCreate)
             .await
     }
 
