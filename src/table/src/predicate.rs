@@ -217,6 +217,60 @@ pub fn build_time_range_predicate(
     res
 }
 
+/// The outcome of strictly extracting the time range of `ts_col_name` from a
+/// scan's filters. Unlike [`build_time_range_predicate`], which quietly widens
+/// to `min_to_max` on anything it cannot parse (fine for pruning), this
+/// distinguishes "the column is not filtered at all" from "it is filtered in a
+/// way that cannot be safely turned into a range" — for callers whose contract
+/// forbids silently falling back to a default window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeRangeExtraction {
+    /// No filter references the column.
+    Absent,
+    /// Every filter referencing the column was folded into this range, which
+    /// over-approximates the filters' satisfying set.
+    Extracted(TimestampRange),
+    /// At least one filter references the column in a shape that cannot be
+    /// safely extracted (e.g. under `OR`/`NOT`, or compared to a non-literal).
+    Unsupported,
+}
+
+/// Strictly extracts the time range of `ts_col_name` from the (implicitly
+/// AND-ed) scan filters. See [`TimeRangeExtraction`].
+pub fn extract_time_range_strict(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    filters: &[Expr],
+) -> TimeRangeExtraction {
+    let mut range: Option<TimestampRange> = None;
+    for expr in filters {
+        if !expr
+            .column_refs()
+            .iter()
+            .any(|column| column.name == ts_col_name)
+        {
+            continue;
+        }
+        // `Some` from the lenient extractor always over-approximates the
+        // expression's satisfying set (an `AND` side it cannot parse is dropped,
+        // which only widens; `OR` yields `Some` only when both sides parse), so
+        // intersecting extracted conjuncts stays an over-approximation.
+        match extract_time_range_from_expr(ts_col_name, ts_col_unit, expr) {
+            Some(extracted) => {
+                range = Some(match range {
+                    Some(acc) => acc.and(&extracted),
+                    None => extracted,
+                });
+            }
+            None => return TimeRangeExtraction::Unsupported,
+        }
+    }
+    match range {
+        Some(range) => TimeRangeExtraction::Extracted(range),
+        None => TimeRangeExtraction::Absent,
+    }
+}
+
 /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
 /// Return None if no time range can be found in expr.
 pub fn extract_time_range_from_expr(
@@ -590,6 +644,99 @@ mod tests {
         check_build_predicate(
             col("ts").lt_eq(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::until_end(Timestamp::new_millisecond(1000), true),
+        );
+    }
+
+    #[test]
+    fn test_extract_time_range_strict() {
+        fn ts_lit(ms: i64) -> Expr {
+            lit(ScalarValue::TimestampMillisecond(Some(ms), None))
+        }
+        let extract =
+            |filters: &[Expr]| extract_time_range_strict("ts", TimeUnit::Millisecond, filters);
+        let range = |start: i64, end: i64| {
+            TimestampRange::new(
+                Timestamp::new_millisecond(start),
+                Timestamp::new_millisecond(end),
+            )
+            .unwrap()
+        };
+
+        // No filter references the column.
+        assert_eq!(extract(&[]), TimeRangeExtraction::Absent);
+        assert_eq!(
+            extract(&[col("host").eq(lit("a"))]),
+            TimeRangeExtraction::Absent
+        );
+
+        // Both bounds across conjuncts; unrelated filters are ignored.
+        assert_eq!(
+            extract(&[
+                col("ts").gt_eq(ts_lit(1000)),
+                col("ts").lt(ts_lit(2000)),
+                col("host").eq(lit("a")),
+            ]),
+            TimeRangeExtraction::Extracted(range(1000, 2000))
+        );
+
+        // Lower bound only / upper bound only.
+        assert_eq!(
+            extract(&[col("ts").gt_eq(ts_lit(1000))]),
+            TimeRangeExtraction::Extracted(TimestampRange::from_start(Timestamp::new_millisecond(
+                1000
+            )))
+        );
+        assert_eq!(
+            extract(&[col("ts").lt(ts_lit(2000))]),
+            TimeRangeExtraction::Extracted(TimestampRange::until_end(
+                Timestamp::new_millisecond(2000),
+                false
+            ))
+        );
+
+        // BETWEEN is inclusive on both ends.
+        assert_eq!(
+            extract(&[col("ts").between(ts_lit(1000), ts_lit(2000))]),
+            TimeRangeExtraction::Extracted(range(1000, 2001))
+        );
+
+        // Equality pins a single point.
+        assert_eq!(
+            extract(&[col("ts").eq(ts_lit(1500))]),
+            TimeRangeExtraction::Extracted(TimestampRange::single(Timestamp::new_millisecond(
+                1500
+            )))
+        );
+
+        // An unparsable side under AND only widens; the extraction stays safe.
+        assert_eq!(
+            extract(&[col("ts").gt_eq(ts_lit(1000)).and(col("ts").lt(col("t2")))]),
+            TimeRangeExtraction::Extracted(TimestampRange::from_start(Timestamp::new_millisecond(
+                1000
+            )))
+        );
+
+        // Contradictory bounds collapse to the empty range, not an error.
+        let TimeRangeExtraction::Extracted(empty) =
+            extract(&[col("ts").gt_eq(ts_lit(2000)), col("ts").lt(ts_lit(1000))])
+        else {
+            panic!("expected an extraction");
+        };
+        assert!(empty.is_empty());
+
+        // Shapes that could widen the satisfying set beyond what is extractable
+        // must be refused: OR with an unparsable side, NOT, non-literal bounds.
+        assert_eq!(
+            extract(&[col("ts").gt(ts_lit(1000)).or(col("host").eq(lit("a")))]),
+            TimeRangeExtraction::Unsupported
+        );
+        assert_eq!(
+            extract(&[!col("ts").gt(ts_lit(1000))]),
+            TimeRangeExtraction::Unsupported
+        );
+        assert_eq!(
+            extract(&[col("ts").gt_eq(col("t2"))]),
+            TimeRangeExtraction::Unsupported
         );
     }
 

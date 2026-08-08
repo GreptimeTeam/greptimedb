@@ -167,6 +167,16 @@ pub fn is_readonly_table(schema: &str, table: &str) -> bool {
             ))
 }
 
+/// Returns true for tables whose *definition* is system-owned while their rows
+/// are user-written: the system creates them with a canonical schema on first
+/// write, so user CREATE, ALTER and RENAME-into are rejected. DML and
+/// DROP/TRUNCATE stay allowed — dropping loses nothing structural (the next
+/// write recreates the canonical table) and doubles as the cleanup/recovery
+/// path. Currently only the declared-edge table of the entity graph.
+pub fn is_ddl_reserved_table(schema: &str, table: &str) -> bool {
+    schema == DEFAULT_PRIVATE_SCHEMA_NAME && table == SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME
+}
+
 // ---- special table and fields ----
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";
@@ -208,4 +218,9 @@ pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
 /// Computed relationship set: the edge set of the observability graph, derived at
 /// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
 pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
+/// Physical table of hand-declared edges (`provenance = 'declared'`), unioned
+/// into the computed `semantic_relationships`. Created on first INSERT with a
+/// canonical schema; users write rows to it but must not redefine it (see
+/// [`is_ddl_reserved_table`]).
+pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
 // ---- End of entity relationship graph tables ----

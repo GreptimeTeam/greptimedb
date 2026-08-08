@@ -32,7 +32,8 @@ use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema, is_readonly_table,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_ddl_reserved_table, is_readonly_schema,
+    is_readonly_table,
 };
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
@@ -112,8 +113,8 @@ use crate::error::{
     InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
     InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
     SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -379,6 +380,21 @@ impl StatementExecutor {
             .await
     }
 
+    /// Creates the declared-edge table of the entity graph with its canonical
+    /// schema. Deliberately enters below the user-DDL guard
+    /// ([`ensure_table_definition_writable`]): the table's definition is
+    /// system-owned, users only write rows to it. `create_if_not_exists` makes
+    /// concurrent first inserts race safely.
+    pub async fn create_declared_relationships_table(
+        &self,
+        catalog: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        let mut expr = super::semantic_graph::build_declared_relationships_expr(catalog);
+        self.create_non_logic_table(&mut expr, None, query_ctx, TriggerReason::AutoCreate)
+            .await
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn create_table_inner(
         &self,
@@ -387,7 +403,7 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
-        ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
+        ensure_table_definition_writable(&create_table.schema_name, &create_table.table_name)?;
 
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -1540,7 +1556,7 @@ impl StatementExecutor {
         query_context: &QueryContextRef,
     ) -> Result<Output> {
         // Check if the schema is read-only.
-        ensure_table_writable(&request.schema_name, &request.table_name)?;
+        ensure_table_definition_writable(&request.schema_name, &request.table_name)?;
 
         let table_ref = TableReference::full(
             &request.catalog_name,
@@ -1823,7 +1839,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<Output> {
-        ensure_table_writable(&expr.schema_name, &expr.table_name)?;
+        ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
 
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
@@ -2328,7 +2344,7 @@ pub fn verify_alter(
         );
         // Renaming INTO a computed graph table's name would let the overlay
         // shadow the renamed physical table, orphaning its data.
-        ensure_table_writable(&table_info.schema_name, new_table_name)?;
+        ensure_table_definition_writable(&table_info.schema_name, new_table_name)?;
     } else if let AlterKind::AddColumns { columns } = alter_kind {
         // If all the columns are marked as add_if_not_exists and they already exist in the table,
         // there is no need to perform the alter.
@@ -2542,6 +2558,26 @@ fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
         !is_readonly_table(schema, table),
         TableReadOnlySnafu {
+            name: table.to_string()
+        }
+    );
+    Ok(())
+}
+
+/// [`ensure_table_writable`] plus the definition guard for system-defined
+/// tables whose rows are user-written but whose *shape* is not (the
+/// declared-edge table): user CREATE, ALTER and RENAME-into are rejected so the
+/// canonical schema cannot be squatted or mutated, while DROP and TRUNCATE stay
+/// allowed — dropping loses nothing structural, the next INSERT recreates the
+/// table canonically (via
+/// [`StatementExecutor::create_declared_relationships_table`], which enters
+/// below this guard), and DROP is also the recovery path should the canonical
+/// definition ever change across an upgrade.
+fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
+    ensure_table_writable(schema, table)?;
+    ensure!(
+        !is_ddl_reserved_table(schema, table),
+        TableDdlReservedSnafu {
             name: table.to_string()
         }
     );
