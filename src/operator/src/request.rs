@@ -232,7 +232,6 @@ impl Requester {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let full_table_name = table_name.to_string();
         let table = self
             .catalog_manager
             .table(
@@ -244,7 +243,7 @@ impl Requester {
             .await
             .context(CatalogSnafu)?;
         let table = table.with_context(|| TableNotFoundSnafu {
-            table_name: full_table_name.clone(),
+            table_name: table_name.to_string(),
         })?;
         let table_info = table.table_info();
         ensure_discard_unflushed_supported(
@@ -257,7 +256,7 @@ impl Requester {
             .find_physical_partition_info(table_info.ident.table_id)
             .await
             .with_context(|_| FindTablePartitionRuleSnafu {
-                table_name: full_table_name,
+                table_name: table_name.to_string(),
             })?
             .partitions;
         let requests = partitions
