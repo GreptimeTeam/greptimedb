@@ -41,14 +41,14 @@ use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
 
-/// Default value for max compaction input file num.
-const DEFAULT_MAX_INPUT_FILE_NUM: usize = 32;
+/// Maximum number of logical FileGroups in one compaction input.
+const MAX_INPUT_FILE_GROUPS: usize = 32;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 #[derive(Clone, Debug)]
 pub struct TwcsPicker {
-    /// Minimum file num to trigger a compaction.
+    /// Minimum eligible FileGroup num to trigger a compaction.
     pub trigger_file_num: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
@@ -198,15 +198,15 @@ struct OrderedFileGroup<'a> {
 
 #[derive(Debug)]
 struct CandidateScore {
-    num_files: usize,
+    num_file_groups: usize,
     overlap_participants: usize,
     size: usize,
 }
 
 impl CandidateScore {
     fn is_better_than(&self, other: &Self) -> bool {
-        self.num_files
-            .cmp(&other.num_files)
+        self.num_file_groups
+            .cmp(&other.num_file_groups)
             .then_with(|| self.overlap_participants.cmp(&other.overlap_participants))
             .then_with(|| other.size.cmp(&self.size))
             .is_gt()
@@ -240,39 +240,62 @@ fn pick_count_first(
             .then_with(|| lhs.run_id.cmp(&rhs.run_id))
             .then_with(|| lhs.position_in_run.cmp(&rhs.position_in_run))
     });
+    // A multi-SST FileGroup is a compaction output that already exceeded the output size target
+    // and was split. Recompacting it cannot reduce physical files, so automatic TWCS treats it as
+    // stable. It remains in the original Window for tombstone overlap checks.
+    groups.retain(|group| group.group.num_files() == 1);
 
-    let mut left = 0;
-    let mut num_files = 0;
     let mut best = None;
-    for right in 0..groups.len() {
-        let group_file_num = groups[right].group.num_files();
-        if group_file_num > DEFAULT_MAX_INPUT_FILE_NUM {
-            left = right + 1;
-            num_files = 0;
-            continue;
-        }
+    for left in 0..groups.len() {
+        let mut total_size = 0;
+        let mut largest_group_size = 0;
+        let mut overlap_participants = 0;
+        let right_bound = (left + MAX_INPUT_FILE_GROUPS).min(groups.len());
+        let mut participants: Vec<bool> = Vec::with_capacity(right_bound - left);
+        for right in left..right_bound {
+            let right_group = &groups[right];
+            let group_size = right_group.group.size();
+            total_size += group_size;
+            largest_group_size = largest_group_size.max(group_size);
 
-        num_files += group_file_num;
-        while num_files > DEFAULT_MAX_INPUT_FILE_NUM {
-            num_files -= groups[left].group.num_files();
-            left += 1;
-        }
+            let mut right_participates = false;
+            for (offset, other) in groups[left..right].iter().enumerate() {
+                if right_group.run_id != other.run_id
+                    && right_group.group.overlap_inclusive(other.group)
+                {
+                    if !participants[offset] {
+                        participants[offset] = true;
+                        overlap_participants += 1;
+                    }
+                    right_participates = true;
+                }
+            }
+            participants.push(right_participates);
+            if right_participates {
+                overlap_participants += 1;
+            }
 
-        if num_files < trigger_file_num || right + 1 - left < 2 {
-            continue;
-        }
+            let num_file_groups = right + 1 - left;
+            if num_file_groups < trigger_file_num || num_file_groups < 2 {
+                continue;
+            }
+            // A historical group is only rewritten after peers contribute at least the same
+            // amount of data, so every rewrite moves it into a larger size tier.
+            if largest_group_size > total_size - largest_group_size {
+                continue;
+            }
 
-        let candidate = &groups[left..=right];
-        let score = CandidateScore {
-            num_files,
-            overlap_participants: count_overlap_participants(candidate),
-            size: candidate.iter().map(|group| group.group.size()).sum(),
-        };
-        if best
-            .as_ref()
-            .is_none_or(|(best_score, _, _)| score.is_better_than(best_score))
-        {
-            best = Some((score, left, right));
+            let score = CandidateScore {
+                num_file_groups,
+                overlap_participants,
+                size: total_size,
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _, _)| score.is_better_than(best_score))
+            {
+                best = Some((score, left, right));
+            }
         }
     }
 
@@ -283,27 +306,6 @@ fn pick_count_first(
         .iter()
         .map(|group| group.group.clone())
         .collect()
-}
-
-fn count_overlap_participants(groups: &[OrderedFileGroup<'_>]) -> usize {
-    let mut participants = vec![false; groups.len()];
-    for lhs in 0..groups.len() {
-        for rhs in lhs + 1..groups.len() {
-            if groups[lhs].run_id != groups[rhs].run_id
-                && groups[lhs].group.overlap_inclusive(groups[rhs].group)
-            {
-                participants[lhs] = true;
-                participants[rhs] = true;
-            }
-        }
-    }
-
-    groups
-        .iter()
-        .zip(participants)
-        .filter(|(_, participant)| *participant)
-        .map(|(group, _)| group.group.num_files())
-        .sum()
 }
 
 fn selected_overlaps_unselected(selected: &[FileGroup], window: &Window) -> bool {
@@ -1165,8 +1167,9 @@ mod tests {
         .await;
 
         // Case 3:
-        // A compaction may split output into several files that have overlapping time ranges and same sequence,
-        // we should treat these files as one FileGroup.
+        // A compaction may split output into several files that have overlapping time ranges and
+        // the same sequence. We treat these files as one stable FileGroup and exclude it from
+        // automatic TWCS candidates.
         let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
         CompactionPickerTestCase {
             window_size: 3,
@@ -1178,10 +1181,7 @@ mod tests {
                 new_file_handle_with_sequence(file_ids[4], 11, 2990, 0, 3),
             ]
             .to_vec(),
-            expected_outputs: vec![ExpectedOutput {
-                input_files: vec![0, 1, 4],
-                output_level: 1,
-            }],
+            expected_outputs: vec![],
         }
         .check()
         .await;
@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_count_first_trigger_counts_actual_ssts() {
+    async fn test_count_first_trigger_counts_file_groups() {
         let files = [
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
             new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 1, 10),
@@ -1705,8 +1705,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, output.len());
-        assert_eq!(3, output[0].inputs.len());
+        assert!(output.is_empty());
     }
 
     #[tokio::test]
@@ -1771,7 +1770,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, output.len());
-        assert_eq!(DEFAULT_MAX_INPUT_FILE_NUM, output[0].inputs.len());
+        assert_eq!(MAX_INPUT_FILE_GROUPS, output[0].inputs.len());
+        assert!(!output[0].filter_deleted);
+    }
+
+    #[tokio::test]
+    async fn test_filter_deleted_is_false_when_selected_overlaps_ignored_file_group() {
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 100, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 100, 0, 1, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 10, 0, 2, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 20, 30, 0, 3, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 40, 50, 0, 4, 10),
+            new_file_handle_with_size_and_sequence(FileId::random(), 60, 70, 0, 5, 10),
+        ];
+        let windows = assign_to_windows(files.iter(), 100);
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(100),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(1), windows, Some(0), None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(4, output[0].inputs.len());
         assert!(!output[0].filter_deleted);
     }
 
@@ -1814,29 +1843,12 @@ mod tests {
     }
 
     #[test]
-    fn test_count_first_prefers_overlap_participants_when_file_counts_match() {
-        let first = new_file_group(0, 9, 1, 16, 10);
-        let second = new_file_group(20, 39, 2, 16, 10);
-        let overlapping = new_file_group(30, 49, 3, 16, 10);
-
-        let picked = pick_count_first(
-            vec![
-                SortedRun::from(vec![first, second]),
-                SortedRun::from(vec![overlapping]),
-            ],
-            2,
-        );
-
-        assert_eq!(vec![(20, 39), (30, 49)], picked_ranges(&picked));
-    }
-
-    #[test]
-    fn test_count_first_prefers_smaller_bytes_when_file_counts_match() {
+    fn test_count_first_counts_file_groups_not_physical_ssts() {
         let picked = pick_count_first(
             vec![SortedRun::from(vec![
-                new_file_group(0, 9, 1, 16, 10),
-                new_file_group(20, 29, 2, 16, 10),
-                new_file_group(40, 49, 3, 16, 1),
+                new_file_group(0, 9, 1, 2, 10),
+                new_file_group(20, 29, 2, 1, 10),
+                new_file_group(40, 49, 3, 1, 10),
             ])],
             2,
         );
@@ -1845,12 +1857,12 @@ mod tests {
     }
 
     #[test]
-    fn test_count_first_prefers_earlier_time_on_exact_tie() {
+    fn test_count_first_ignores_multi_sst_groups_between_singletons() {
         let picked = pick_count_first(
             vec![SortedRun::from(vec![
-                new_file_group(0, 9, 1, 16, 10),
-                new_file_group(20, 29, 2, 16, 10),
-                new_file_group(40, 49, 3, 16, 10),
+                new_file_group(0, 9, 1, 1, 10),
+                new_file_group(10, 19, 2, 2, 10),
+                new_file_group(20, 29, 3, 1, 10),
             ])],
             2,
         );
@@ -1859,21 +1871,139 @@ mod tests {
     }
 
     #[test]
-    fn test_count_first_skips_oversized_atomic_file_group() {
+    fn test_count_first_returns_empty_for_only_multi_sst_groups() {
         let picked = pick_count_first(
             vec![SortedRun::from(vec![
-                new_file_group(0, 9, 1, 33, 1),
-                new_file_group(20, 29, 2, 16, 1),
-                new_file_group(40, 49, 3, 16, 1),
+                new_file_group(0, 9, 1, 2, 10),
+                new_file_group(20, 29, 2, 2, 10),
             ])],
             2,
         );
 
-        assert_eq!(
-            DEFAULT_MAX_INPUT_FILE_NUM,
-            picked.iter().map(FileGroup::num_files).sum::<usize>()
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_rejects_dominant_historical_group() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 400),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+            ])],
+            4,
         );
-        assert_eq!(vec![(20, 29), (40, 49)], picked_ranges(&picked));
+
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_accepts_balanced_historical_group() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 400),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+                new_file_group(80, 89, 5, 1, 100),
+            ])],
+            4,
+        );
+
+        assert_eq!(
+            vec![(0, 9), (20, 29), (40, 49), (60, 69), (80, 89)],
+            picked_ranges(&picked)
+        );
+    }
+
+    #[test]
+    fn test_count_first_finds_smaller_balanced_interval_when_larger_one_is_unbalanced() {
+        let picked = pick_count_first(
+            vec![SortedRun::from(vec![
+                new_file_group(0, 9, 1, 1, 1000),
+                new_file_group(20, 29, 2, 1, 100),
+                new_file_group(40, 49, 3, 1, 100),
+                new_file_group(60, 69, 4, 1, 100),
+                new_file_group(80, 89, 5, 1, 100),
+            ])],
+            4,
+        );
+
+        assert_eq!(
+            vec![(20, 29), (40, 49), (60, 69), (80, 89)],
+            picked_ranges(&picked)
+        );
+    }
+
+    #[test]
+    fn test_count_first_prefers_overlap_participants_when_file_group_counts_match() {
+        let first_run = (0..MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                let end = if idx + 1 == MAX_INPUT_FILE_GROUPS {
+                    700
+                } else {
+                    start + 9
+                };
+                new_file_group(start, end, idx as u64 + 1, 1, 10)
+            })
+            .collect::<Vec<_>>();
+        let overlapping = new_file_group(690, 710, 100, 1, 10);
+
+        let picked = pick_count_first(
+            vec![
+                SortedRun::from(first_run),
+                SortedRun::from(vec![overlapping]),
+            ],
+            2,
+        );
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert!(!ranges.contains(&(0, 9)));
+        assert!(ranges.contains(&(690, 710)));
+    }
+
+    #[test]
+    fn test_count_first_prefers_smaller_bytes_when_file_group_counts_match() {
+        let groups = (0..=MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                let size = if idx == 0 {
+                    100
+                } else if idx == MAX_INPUT_FILE_GROUPS {
+                    1
+                } else {
+                    10
+                };
+                new_file_group(start, start + 9, idx as u64 + 1, 1, size)
+            })
+            .collect::<Vec<_>>();
+
+        let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert_eq!(Some(&(20, 29)), ranges.first());
+        assert_eq!(Some(&(640, 649)), ranges.last());
+    }
+
+    #[test]
+    fn test_count_first_prefers_earlier_time_on_exact_tie() {
+        let groups = (0..=MAX_INPUT_FILE_GROUPS)
+            .map(|idx| {
+                let start = idx as i64 * 20;
+                new_file_group(start, start + 9, idx as u64 + 1, 1, 10)
+            })
+            .collect::<Vec<_>>();
+
+        let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+        let ranges = picked_ranges(&picked);
+
+        assert_eq!(MAX_INPUT_FILE_GROUPS, ranges.len());
+        assert_eq!(Some(&(0, 9)), ranges.first());
+        assert_eq!(Some(&(620, 629)), ranges.last());
     }
 
     #[test]
@@ -1881,20 +2011,20 @@ mod tests {
         let picked = pick_count_first(
             vec![
                 SortedRun::from(vec![
-                    new_file_group(0, 9, 1, 8, 1),
-                    new_file_group(20, 29, 2, 8, 1),
-                    new_file_group(40, 49, 3, 8, 1),
+                    new_file_group(0, 9, 1, 1, 1),
+                    new_file_group(20, 29, 2, 1, 1),
+                    new_file_group(40, 49, 3, 1, 1),
                 ]),
                 SortedRun::from(vec![
-                    new_file_group(10, 19, 4, 8, 1),
-                    new_file_group(30, 39, 5, 8, 1),
+                    new_file_group(10, 19, 4, 1, 1),
+                    new_file_group(30, 39, 5, 1, 1),
                 ]),
             ],
             2,
         );
 
         assert_eq!(
-            vec![(0, 9), (10, 19), (20, 29), (30, 39)],
+            vec![(0, 9), (10, 19), (20, 29), (30, 39), (40, 49)],
             picked_ranges(&picked)
         );
     }
