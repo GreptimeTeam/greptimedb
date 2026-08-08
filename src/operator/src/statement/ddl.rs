@@ -397,7 +397,7 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
+        ensure_table_definition_writable(&create_table.schema_name, &create_table.table_name)?;
 
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -1540,7 +1540,7 @@ impl StatementExecutor {
         query_context: &QueryContextRef,
     ) -> Result<Output> {
         // Check if the schema is read-only.
-        ensure_table_writable(&request.schema_name, &request.table_name)?;
+        ensure_table_definition_writable(&request.schema_name, &request.table_name)?;
 
         let table_ref = TableReference::full(
             &request.catalog_name,
@@ -1820,7 +1820,7 @@ impl StatementExecutor {
         expr: AlterTableExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        ensure_table_writable(&expr.schema_name, &expr.table_name)?;
+        ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
 
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
@@ -2310,7 +2310,7 @@ pub fn verify_alter(
         );
         // Renaming INTO a computed graph table's name would let the overlay
         // shadow the renamed physical table, orphaning its data.
-        ensure_table_writable(&table_info.schema_name, new_table_name)?;
+        ensure_table_definition_writable(&table_info.schema_name, new_table_name)?;
     } else if let AlterKind::AddColumns { columns } = alter_kind {
         // If all the columns are marked as add_if_not_exists and they already exist in the table,
         // there is no need to perform the alter.
@@ -2513,11 +2513,7 @@ fn validate_repartition_column_hint(
     Ok(())
 }
 
-/// Rejects DDL against read-only schemas, computed entity-graph tables, and
-/// system-defined tables whose rows are user-written but whose definition is
-/// not (the declared-edge table; the system creates it on first INSERT via
-/// [`StatementExecutor::create_declared_relationships_table`], which enters
-/// below this guard).
+/// Rejects DDL against read-only schemas and computed entity-graph tables.
 fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
         !is_readonly_schema(schema),
@@ -2531,6 +2527,20 @@ fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
             name: table.to_string()
         }
     );
+    Ok(())
+}
+
+/// [`ensure_table_writable`] plus the definition guard for system-defined
+/// tables whose rows are user-written but whose *shape* is not (the
+/// declared-edge table): user CREATE, ALTER and RENAME-into are rejected so the
+/// canonical schema cannot be squatted or mutated, while DROP and TRUNCATE stay
+/// allowed — dropping loses nothing structural, the next INSERT recreates the
+/// table canonically (via
+/// [`StatementExecutor::create_declared_relationships_table`], which enters
+/// below this guard), and DROP is also the recovery path should the canonical
+/// definition ever change across an upgrade.
+fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
+    ensure_table_writable(schema, table)?;
     ensure!(
         !is_ddl_reserved_table(schema, table),
         TableDdlReservedSnafu {

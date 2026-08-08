@@ -357,7 +357,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "The definition of table `{name}` is managed by GreptimeDB; its rows are writable but user DDL is not allowed"
+        "The definition of table `{name}` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)"
     ))]
     TableDdlReserved {
         name: String,

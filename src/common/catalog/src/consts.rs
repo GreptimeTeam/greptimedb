@@ -168,9 +168,11 @@ pub fn is_readonly_table(schema: &str, table: &str) -> bool {
 }
 
 /// Returns true for tables whose *definition* is system-owned while their rows
-/// are user-written: DML is allowed, but user DDL (CREATE/ALTER/DROP/RENAME/
-/// TRUNCATE) must be rejected — the system creates them with a canonical schema
-/// on first write. Currently only the declared-edge table of the entity graph.
+/// are user-written: the system creates them with a canonical schema on first
+/// write, so user CREATE, ALTER and RENAME-into are rejected. DML and
+/// DROP/TRUNCATE stay allowed — dropping loses nothing structural (the next
+/// write recreates the canonical table) and doubles as the cleanup/recovery
+/// path. Currently only the declared-edge table of the entity graph.
 pub fn is_ddl_reserved_table(schema: &str, table: &str) -> bool {
     schema == DEFAULT_PRIVATE_SCHEMA_NAME && table == SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME
 }

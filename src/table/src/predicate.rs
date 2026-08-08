@@ -708,7 +708,7 @@ mod tests {
             )))
         );
 
-        // An unparseable side under AND only widens; the extraction stays safe.
+        // An unparsable side under AND only widens; the extraction stays safe.
         assert_eq!(
             extract(&[col("ts").gt_eq(ts_lit(1000)).and(col("ts").lt(col("t2")))]),
             TimeRangeExtraction::Extracted(TimestampRange::from_start(Timestamp::new_millisecond(
@@ -725,7 +725,7 @@ mod tests {
         assert!(empty.is_empty());
 
         // Shapes that could widen the satisfying set beyond what is extractable
-        // must be refused: OR with an unparseable side, NOT, non-literal bounds.
+        // must be refused: OR with an unparsable side, NOT, non-literal bounds.
         assert_eq!(
             extract(&[col("ts").gt(ts_lit(1000)).or(col("host").eq(lit("a")))]),
             TimeRangeExtraction::Unsupported

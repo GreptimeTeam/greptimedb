@@ -53,8 +53,9 @@ use store_api::mito_engine_options::TTL_KEY;
 /// Whether an existing declared-edge table still matches the canonical
 /// definition ([`build_declared_relationships_expr`]): same columns, in order,
 /// with the same types. The union branch projects the table by name and type,
-/// so a mismatched table (only possible through upgrade skew — user DDL against
-/// it is rejected) must be surfaced, not silently mis-derived.
+/// so a mismatched table (only possible through upgrade skew — user ALTER
+/// against it is rejected) must be surfaced, not silently derived wrong;
+/// dropping the table resets it to the canonical definition.
 pub fn declared_relationships_schema_matches(schema: &datatypes::schema::Schema) -> bool {
     let canonical = build_declared_relationships_expr("greptime");
     if schema.column_schemas().len() != canonical.column_defs.len() {

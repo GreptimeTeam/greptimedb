@@ -349,9 +349,10 @@ impl EntityGraphProviderImpl {
 
     /// The declared-edge branch source, when the physical table exists, the
     /// caller may read it, and its schema still matches the canonical
-    /// definition. A mismatched schema (upgrade skew — user DDL against it is
-    /// rejected) is an explicit error: silently dropping declared edges would
-    /// misrepresent the graph.
+    /// definition. A mismatched schema (upgrade skew — user ALTER against it is
+    /// rejected) is an explicit error rather than a silent skip: dropping
+    /// declared edges would misrepresent the graph, and DROP TABLE resets the
+    /// table to the canonical definition.
     async fn declared_source(
         &self,
         catalog: &str,

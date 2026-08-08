@@ -133,15 +133,12 @@ order by src_id;
 select src_id from greptime_private.semantic_relationships
 where observed_at < '2001-01-02 00:00:00';
 
--- The declared-edge table's definition is system-owned: user DDL is rejected
--- (rows stay writable), and a physical table cannot be renamed into the name.
+-- The declared-edge table's definition is system-owned: user CREATE/ALTER are
+-- rejected and a physical table cannot be renamed into the name, while plain
+-- DML stays allowed.
 create table greptime_private.semantic_relationships_declared (ts timestamp time index);
 
 alter table greptime_private.semantic_relationships_declared add column extra string;
-
-truncate table greptime_private.semantic_relationships_declared;
-
-drop table greptime_private.semantic_relationships_declared;
 
 create table greptime_private.declared_rename_probe (ts timestamp time index);
 
@@ -149,7 +146,18 @@ alter table greptime_private.declared_rename_probe rename semantic_relationships
 
 drop table greptime_private.declared_rename_probe;
 
--- DELETE is plain DML and stays allowed; clean up all declared rows.
 delete from greptime_private.semantic_relationships_declared;
 
 select src_id from greptime_private.semantic_relationships order by src_id;
+
+-- DROP is allowed (nothing structural is lost: the next INSERT recreates the
+-- canonical table) and cleans up after this test.
+drop table greptime_private.semantic_relationships_declared;
+
+insert into greptime_private.semantic_relationships_declared
+  (observed_at, src_type, src_id, rel_type, dst_type, dst_id, provenance, scope, generation_id)
+values (now(), 'service', 'reborn', 'depends_on', 'service', 'db', 'declared', '', '');
+
+select src_id from greptime_private.semantic_relationships order by src_id;
+
+drop table greptime_private.semantic_relationships_declared;

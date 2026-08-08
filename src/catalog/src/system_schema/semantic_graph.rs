@@ -307,7 +307,9 @@ impl SemanticGraphTable {
         match kind {
             GraphTableKind::Entities => provider.scan_entities(&catalog, request, query_ctx).await,
             GraphTableKind::Relationships => {
-                provider.scan_relationships(&catalog, request, query_ctx).await
+                provider
+                    .scan_relationships(&catalog, request, query_ctx)
+                    .await
             }
         }
         .context(InternalSnafu)

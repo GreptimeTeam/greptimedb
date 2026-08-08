@@ -221,23 +221,16 @@ where observed_at < '2001-01-02 00:00:00';
 
 Error: 3001(EngineExecuteQuery), Invalid SQL, error: the observed_at filter has no lower bound; the graph cannot derive over unbounded history — add e.g. observed_at >= '2026-01-01 00:00:00'
 
--- The declared-edge table's definition is system-owned: user DDL is rejected
--- (rows stay writable), and a physical table cannot be renamed into the name.
+-- The declared-edge table's definition is system-owned: user CREATE/ALTER are
+-- rejected and a physical table cannot be renamed into the name, while plain
+-- DML stays allowed.
 create table greptime_private.semantic_relationships_declared (ts timestamp time index);
 
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
 
 alter table greptime_private.semantic_relationships_declared add column extra string;
 
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
-
-truncate table greptime_private.semantic_relationships_declared;
-
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
-
-drop table greptime_private.semantic_relationships_declared;
-
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
 
 create table greptime_private.declared_rename_probe (ts timestamp time index);
 
@@ -245,13 +238,12 @@ Affected Rows: 0
 
 alter table greptime_private.declared_rename_probe rename semantic_relationships_declared;
 
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; its rows are writable but user DDL is not allowed
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
 
 drop table greptime_private.declared_rename_probe;
 
 Affected Rows: 0
 
--- DELETE is plain DML and stays allowed; clean up all declared rows.
 delete from greptime_private.semantic_relationships_declared;
 
 Affected Rows: 4
@@ -260,4 +252,28 @@ select src_id from greptime_private.semantic_relationships order by src_id;
 
 ++
 ++
+
+-- DROP is allowed (nothing structural is lost: the next INSERT recreates the
+-- canonical table) and cleans up after this test.
+drop table greptime_private.semantic_relationships_declared;
+
+Affected Rows: 0
+
+insert into greptime_private.semantic_relationships_declared
+  (observed_at, src_type, src_id, rel_type, dst_type, dst_id, provenance, scope, generation_id)
+values (now(), 'service', 'reborn', 'depends_on', 'service', 'db', 'declared', '', '');
+
+Affected Rows: 1
+
+select src_id from greptime_private.semantic_relationships order by src_id;
+
++--------+
+| src_id |
++--------+
+| reborn |
++--------+
+
+drop table greptime_private.semantic_relationships_declared;
+
+Affected Rows: 0
 
