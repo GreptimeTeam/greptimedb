@@ -38,6 +38,15 @@ use crate::sst::parquet::reader::ReaderMetrics;
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
+/// Maximum number of pruner worker tasks spawned per scan.
+///
+/// Callers pass the total CPU core count, which would spawn one task per core
+/// even for scans touching a handful of files. The worker count only affects
+/// the per-scan task churn and the `file_id_hash % num_workers` dispatch
+/// granularity, so a modest cap is enough while keeping the file -> worker
+/// mapping consistent for the pruner's lifetime.
+const MAX_PRUNE_WORKERS: usize = 16;
+
 /// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
     pruner: Arc<Pruner>,
@@ -305,6 +314,12 @@ impl Pruner {
     }
 
     /// Creates a new pruner with the given options.
+    ///
+    /// The number of workers is bounded by the number of files in the scan and
+    /// [MAX_PRUNE_WORKERS] so high-core machines don't spawn one task per core
+    /// for small scans. When the scan contains no files, no worker task is
+    /// spawned at all (dispatch is unreachable because there is nothing to
+    /// prune).
     pub fn new_with_options(
         stream_ctx: Arc<StreamContext>,
         num_workers: usize,
@@ -315,6 +330,14 @@ impl Pruner {
             enable_predicate_prefilter,
         } = options;
         let num_files = stream_ctx.input.num_files();
+        // Bound the worker pool. The dispatch hash maps every file to a stable
+        // worker (`file_id_hash % num_workers`) for the pruner's lifetime, so
+        // clamping here is safe: concurrent prune requests for the same file
+        // still land on the same worker and benefit from its serialization.
+        // With no files, `min` yields zero workers and no worker task is
+        // spawned at all (dispatch is unreachable because there is nothing to
+        // prune).
+        let num_workers = num_workers.min(num_files).min(MAX_PRUNE_WORKERS);
         let file_entries: Vec<_> = (0..num_files)
             .map(|_| {
                 Mutex::new(FileBuilderEntry {
@@ -525,7 +548,11 @@ impl Pruner {
 
     fn get_worker_idx(&self, file_id: FileId) -> usize {
         let file_id_hash = Uuid::from(file_id).as_u128() as usize;
-        file_id_hash % self.inner.num_workers
+        debug_assert!(
+            self.inner.num_workers > 0,
+            "pruner with no workers received a prune request"
+        );
+        file_id_hash % self.inner.num_workers.max(1)
     }
 
     /// Prunes a file directly without going through a worker.
