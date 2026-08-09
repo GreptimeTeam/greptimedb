@@ -19,8 +19,8 @@ use datafusion::common::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
 
-use super::{Layout, Window, classify, transition, window_from_raw};
 use crate::functions::extract_range_array;
+use crate::functions::rolling::{Layout, Window, classify, transition, window_from_raw};
 use crate::range_array::RangeArray;
 
 pub(crate) fn calc(input: &[ColumnarValue], name: &str) -> Result<ColumnarValue, DataFusionError> {
