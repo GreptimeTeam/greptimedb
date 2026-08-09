@@ -1,0 +1,45 @@
+name: PR Open Limit
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-open-limit:
+    name: Check Open Pull Request Limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: .github/scripts
+        run: npm ci
+
+      - name: Check open pull request limit
+        working-directory: .github/scripts
+        run: node pr-open-limit.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          MAX_OPEN_PRS: ${{ vars.MAX_OPEN_PRS_PER_AUTHOR || 5 }}
