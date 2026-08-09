@@ -15,7 +15,7 @@
 //! Bulk part encoder/decoder.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
@@ -351,6 +351,11 @@ pub struct UnorderedPart {
     max_timestamp: i64,
     /// Maximum sequence number across all parts.
     max_sequence: u64,
+    /// Cached sorted [BulkPart] built by `to_bulk_part`, invalidated on
+    /// `push`/`clear`. Avoids re-running concat+sort on every scan when no
+    /// new parts have arrived. Guarded by a mutex so `to_bulk_part(&self)`
+    /// can lazily fill it while `ranges()` only holds a read lock.
+    sorted_cache: Mutex<Option<BulkPart>>,
     /// Row count threshold for accepting parts (default: 1024).
     threshold: usize,
     /// Row count threshold for compacting (default: 4096).
@@ -373,6 +378,7 @@ impl UnorderedPart {
             min_timestamp: i64::MAX,
             max_timestamp: i64::MIN,
             max_sequence: 0,
+            sorted_cache: Mutex::new(None),
             threshold: 1024,
             compact_threshold: 4096,
         }
@@ -420,6 +426,8 @@ impl UnorderedPart {
         self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
         self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
         self.max_sequence = self.max_sequence.max(part.sequence);
+        // The cached sorted part is stale once new data arrives.
+        *self.sorted_cache.lock().unwrap() = None;
         self.parts.push(part);
     }
 
@@ -470,21 +478,35 @@ impl UnorderedPart {
 
     /// Converts all parts into a single sorted BulkPart.
     /// Returns None if the collection is empty.
+    ///
+    /// The sorted result is cached on the first call and reused until the
+    /// unordered part is mutated ([`Self::push`] / [`Self::clear`]), so
+    /// repeated `ranges()` calls with no intervening writes skip the
+    /// concat+sort work entirely.
     pub fn to_bulk_part(&self) -> Result<Option<BulkPart>> {
+        if let Some(cached) = self.sorted_cache.lock().unwrap().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
         let Some(sorted_batch) = self.concat_and_sort()? else {
             return Ok(None);
         };
 
         let timestamp_index = self.parts[0].timestamp_index;
 
-        Ok(Some(BulkPart {
+        let part = BulkPart {
             batch: sorted_batch,
             max_timestamp: self.max_timestamp,
             min_timestamp: self.min_timestamp,
             sequence: self.max_sequence,
             timestamp_index,
             raw_data: None,
-        }))
+        };
+        // Concurrent scans may race to fill the cache; they all produce the
+        // identical sorted part, so the last write wins.
+        *self.sorted_cache.lock().unwrap() = Some(part.clone());
+
+        Ok(Some(part))
     }
 
     /// Clears all parts from this collection.
@@ -495,6 +517,7 @@ impl UnorderedPart {
         self.min_timestamp = i64::MAX;
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
+        *self.sorted_cache.lock().unwrap() = None;
     }
 }
 
