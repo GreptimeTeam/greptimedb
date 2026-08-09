@@ -134,5 +134,6 @@ file-engine.workspace = true
 mito2.workspace = true
 serde.workspace = true
 similar-asserts.workspace = true
+sql.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true

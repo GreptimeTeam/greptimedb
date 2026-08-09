@@ -163,10 +163,30 @@ fn create_table_sql(table: &Table) -> Result<String> {
     if table.columns.is_empty() {
         return Err("direct-SST table requires columns".into());
     }
+    // The fixture generator bakes index metadata into the SST region metadata
+    // (query_perf_fixture/direct_sst.rs::build_region_metadata): tag columns get
+    // `greptime:inverted_index` and tag/field columns get
+    // `greptime:skipping_index`. The catalog schema must declare the same
+    // indexes, otherwise MergeScan's remote-schema validation fails on the
+    // metadata mismatch for tag/field projections.
     let columns = table
         .columns
         .iter()
-        .map(|column| format!("{} {}", sql_ident(&column.name), column.data_type))
+        .map(|column| {
+            let is_tag = table
+                .primary_key
+                .iter()
+                .any(|primary_key| primary_key == &column.name);
+            let is_timestamp = column.name == time_index;
+            let mut column_sql = format!("{} {}", sql_ident(&column.name), column.data_type);
+            if is_tag || !is_timestamp {
+                column_sql.push_str(" SKIPPING INDEX WITH (granularity='1')");
+            }
+            if is_tag {
+                column_sql.push_str(" INVERTED INDEX");
+            }
+            column_sql
+        })
         .collect::<Vec<_>>()
         .join(",\n  ");
     let primary_key = table
@@ -457,6 +477,10 @@ mod tests {
                     data_type: "STRING".to_string(),
                 },
                 Column {
+                    name: "cpu".to_string(),
+                    data_type: "DOUBLE".to_string(),
+                },
+                Column {
                     name: "ts".to_string(),
                     data_type: "TIMESTAMP(9)".to_string(),
                 },
@@ -469,8 +493,122 @@ mod tests {
         };
         assert_eq!(
             create_table_sql(&table).unwrap(),
-            "CREATE TABLE \"metric\"\"name\" (\n  \"host\" STRING,\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\")\n) ENGINE=mito\nWITH ('append_mode'='true', 'sst_format'='flat');"
+            "CREATE TABLE \"metric\"\"name\" (\n  \"host\" STRING SKIPPING INDEX WITH (granularity='1') INVERTED INDEX,\n  \"cpu\" DOUBLE SKIPPING INDEX WITH (granularity='1'),\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\")\n) ENGINE=mito\nWITH ('append_mode'='true', 'sst_format'='flat');"
         );
+    }
+
+    #[test]
+    fn emitted_direct_sst_table_sql_round_trips_through_parser() {
+        use sql::dialect::GreptimeDbDialect;
+        use sql::parser::{ParseOptions, ParserContext};
+        use sql::statements::statement::Statement;
+
+        let table = Table {
+            database: "public".to_string(),
+            name: "metrics".to_string(),
+            engine: "mito".to_string(),
+            columns: vec![
+                Column {
+                    name: "host".to_string(),
+                    data_type: "STRING".to_string(),
+                },
+                Column {
+                    name: "cpu".to_string(),
+                    data_type: "DOUBLE".to_string(),
+                },
+                Column {
+                    name: "ts".to_string(),
+                    data_type: "TIMESTAMP(9)".to_string(),
+                },
+            ],
+            primary_key: vec!["host".to_string()],
+            time_index: Some("ts".to_string()),
+            append_mode: Some(true),
+            sst_format: Some("flat".to_string()),
+            validate_show_create_engine: true,
+        };
+        let sql_text = create_table_sql(&table).unwrap();
+        let statements = ParserContext::create_with_dialect(
+            &sql_text,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .expect("emitted CREATE TABLE must be parser-valid");
+        let Statement::CreateTable(create) = &statements[0] else {
+            panic!("expected CREATE TABLE statement, got: {statements:?}");
+        };
+        for column in &create.columns {
+            match column.name().value.as_str() {
+                "host" => {
+                    let skipping = column.extensions.skipping_index_options.as_ref();
+                    assert_eq!(
+                        skipping.and_then(|options| options.get("granularity")),
+                        Some("1"),
+                        "tag column must declare granularity='1' skipping index"
+                    );
+                    assert!(
+                        column.extensions.inverted_index_options.is_some(),
+                        "tag column must declare inverted index"
+                    );
+                }
+                "cpu" => {
+                    assert!(
+                        column.extensions.skipping_index_options.is_some(),
+                        "field column must declare skipping index"
+                    );
+                    assert!(
+                        column.extensions.inverted_index_options.is_none(),
+                        "field column must not declare inverted index"
+                    );
+                }
+                "ts" => {
+                    assert!(
+                        column.extensions.skipping_index_options.is_none(),
+                        "timestamp column must not declare skipping index"
+                    );
+                    assert!(
+                        column.extensions.inverted_index_options.is_none(),
+                        "timestamp column must not declare inverted index"
+                    );
+                }
+                other => panic!("unexpected column {other}"),
+            }
+
+            // The catalog ColumnSchema built from the emitted SQL must carry the
+            // same `greptime:inverted_index` / `greptime:skipping_index` metadata
+            // that the fixture bakes into the SST region metadata, otherwise
+            // MergeScan's remote-schema validation fails on tag/field projections.
+            let column_schema =
+                sql::statements::column_to_schema(column, "ts", None).expect("column to schema");
+            match column.name().value.as_str() {
+                "host" => {
+                    assert!(column_schema.is_inverted_indexed());
+                    let skipping = column_schema
+                        .skipping_index_options()
+                        .expect("valid skipping index options")
+                        .expect("tag column has skipping index");
+                    assert_eq!(skipping.granularity, 1);
+                }
+                "cpu" => {
+                    assert!(!column_schema.is_inverted_indexed());
+                    let skipping = column_schema
+                        .skipping_index_options()
+                        .expect("valid skipping index options")
+                        .expect("field column has skipping index");
+                    assert_eq!(skipping.granularity, 1);
+                }
+                "ts" => {
+                    assert!(!column_schema.is_inverted_indexed());
+                    assert!(
+                        column_schema
+                            .skipping_index_options()
+                            .expect("valid skipping index options")
+                            .is_none()
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]

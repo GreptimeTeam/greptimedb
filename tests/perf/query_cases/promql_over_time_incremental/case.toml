@@ -1,0 +1,102 @@
+# PromQL/TQL over_time range-function case targeting the per-window ArrayRef
+# clone() in src/common/macro/src/range_fn.rs (line 208). The cost scales with
+# (series in range) x (output steps): 65536 series x 61 one-minute steps per
+# function. host/instance cardinalities are coprime (128 * 513, lcm 65664) so
+# the 65536 generated series are all distinct (with 128*512 the tag-pair space
+# collapses to 512 distinct primary keys).
+#
+# NOTE: rows_per_sst = series_count (65536) so series_layout=timestamp_major is
+# valid (generator requires rows_per_sst % series_count == 0); this keeps every
+# series present at every scrape timestamp (dense, like the #7913 case).
+
+[case]
+name = "promql_over_time_incremental"
+description = "P8: TQL over_time range functions on a 65k-series dense fixture; per-window range_fn clone dominates"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 1301
+
+
+[[scenario.tables]]
+database = "public"
+name = "promql_over_time_incremental"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "greptime_timestamp"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 128, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 513, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+
+[[scenario.tables.columns]]
+name = "greptime_timestamp"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 256
+rows_per_sst = 65536
+row_group_size = 8192
+series_count = 65536
+start_unix_nanos = 1_704_067_200_000_000_000 # 2024-01-01T00:00:00Z
+step_nanos = 60_000_000_000                 # 1m per timestamp
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "min_over_time"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704070800, '1m') min_over_time(promql_over_time_incremental{host=~'host.*'}[10m])"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "max_over_time"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704070800, '1m') max_over_time(promql_over_time_incremental{host=~'host.*'}[10m])"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "sum_over_time"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704070800, '1m') sum_over_time(promql_over_time_incremental{host=~'host.*'}[10m])"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "avg_over_time"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704070800, '1m') avg_over_time(promql_over_time_incremental{host=~'host.*'}[10m])"
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
