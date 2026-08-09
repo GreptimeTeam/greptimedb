@@ -2391,6 +2391,77 @@ mod tests {
         assert_eq!(3, total_rows);
     }
 
+    #[test]
+    fn test_bulk_memtable_unordered_part_sort_cache() {
+        use datatypes::arrow::array::TimestampMillisecondArray;
+
+        fn collect_ts_values(range: &MemtableRange) -> Vec<i64> {
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
+            let mut values = Vec::new();
+            for batch_result in record_batch_iter {
+                let batch = batch_result.unwrap();
+                let ts_col = batch.column_by_name("ts").expect("ts column");
+                let ts_array = ts_col
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("timestamp array");
+                values.extend(ts_array.iter().flatten());
+            }
+            values
+        }
+
+        let metadata = metadata_for_test();
+        let memtable = BulkMemtable::new(
+            1005,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+        // Small parts (1 row each) go to the unordered part; high compact
+        // threshold prevents auto-compaction from moving them to `parts`.
+        memtable.set_unordered_part_threshold(3);
+        memtable.set_unordered_part_compact_threshold(100);
+
+        // Write order is deliberately not the primary-key order so the test
+        // also exercises the concat+sort (pk ascending: key_a, key_b, key_c).
+        let part_a =
+            create_bulk_part_with_converter("key_a", 1, vec![3000], vec![Some(30.0)], 300).unwrap();
+        let part_b =
+            create_bulk_part_with_converter("key_b", 2, vec![1000], vec![Some(10.0)], 100).unwrap();
+        memtable.write_bulk(part_a).unwrap();
+        memtable.write_bulk(part_b).unwrap();
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let read_ts_values = |memtable: &BulkMemtable| {
+            let ranges = memtable
+                .ranges(
+                    None,
+                    RangesOptions::default().with_predicate(predicate_group.clone()),
+                )
+                .unwrap();
+            assert_eq!(1, ranges.ranges.len());
+            let range = ranges.ranges.get(&0).unwrap();
+            collect_ts_values(range)
+        };
+
+        // No push between the two calls: the second ranges() must return the
+        // same sorted data (served from the cached sorted BulkPart).
+        let first = read_ts_values(&memtable);
+        let second = read_ts_values(&memtable);
+        assert_eq!(first, second);
+        assert_eq!(vec![3000, 1000], first);
+
+        // A new push invalidates the cache: the third ranges() sees the new row.
+        let part_c =
+            create_bulk_part_with_converter("key_c", 3, vec![2000], vec![Some(20.0)], 200).unwrap();
+        memtable.write_bulk(part_c).unwrap();
+        let third = read_ts_values(&memtable);
+        assert_eq!(vec![3000, 1000, 2000], third);
+    }
+
     /// Helper to create a BulkPartWrapper from a BulkPart.
     fn create_bulk_part_wrapper(part: BulkPart) -> BulkPartWrapper {
         BulkPartWrapper {
