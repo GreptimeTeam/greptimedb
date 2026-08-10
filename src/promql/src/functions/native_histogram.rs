@@ -1994,7 +1994,12 @@ fn combined_range_float(
                 }
                 result.append_value(count as f64);
             }
-            _ => unreachable!(),
+            _ => {
+                return Err(DataFusionError::Internal(format!(
+                    "{} does not support combined range evaluation",
+                    function.name()
+                )));
+            }
         }
     }
     Ok(ColumnarValue::Array(Arc::new(result.finish())))
