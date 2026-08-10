@@ -90,6 +90,12 @@ pub(super) struct Column {
     pub(super) name: String,
     #[serde(rename = "type")]
     pub(super) data_type: String,
+    /// Semantic type ("tag", "field", "timestamp") from the case TOML. The
+    /// direct-SST fixture generator bakes index metadata into the region
+    /// manifest based on this semantic, so the CREATE TABLE must declare the
+    /// matching column options (see `create_table_sql` in `direct.rs`).
+    #[serde(default)]
+    pub(super) semantic: Option<String>,
 }
 
 const fn default_show_create_engine() -> bool {
@@ -203,6 +209,13 @@ pub(super) struct Query {
     #[serde(default)]
     pub(super) kind: Option<String>,
     pub(super) query: String,
+    /// Prometheus HTTP range query parameters (`kind = "prom_http"` only).
+    #[serde(default)]
+    pub(super) start: Option<String>,
+    #[serde(default)]
+    pub(super) end: Option<String>,
+    #[serde(default)]
+    pub(super) step: Option<String>,
     #[serde(default)]
     pub(super) warmup: usize,
     #[serde(default = "one")]

@@ -932,7 +932,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(
-            json!({"resultType":"scalar","result":[1.0,"2"]})
+            json!({"resultType":"scalar","result":[1.0,"2.0"]})
         )
         .unwrap()
     );

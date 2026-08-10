@@ -117,10 +117,54 @@ pub(super) fn value_f64(value: Option<&Value>) -> Option<f64> {
 }
 
 pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &str) -> Value {
+    let mut sample = post_form(
+        client,
+        format!("http://127.0.0.1:{port}/v1/sql"),
+        &[("sql", sql), ("db", db), ("format", "json")],
+    )
+    .await;
+    sample
+        .as_object_mut()
+        .expect("HTTP samples are objects")
+        .insert("sql".to_string(), Value::String(sql.to_string()));
+    sample
+}
+
+/// Posts a Prometheus HTTP API range query (`/v1/prometheus/api/v1/query_range`)
+/// and measures the full request-to-body latency. This exercises the Prometheus
+/// JSON response building path (`PrometheusJsonResponse::record_batches_to_data`)
+/// that `/v1/sql` (including `TQL ANALYZE`) does not go through.
+pub(super) async fn http_post_prom_range_query(
+    client: &Client,
+    port: u16,
+    query: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    step: Option<&str>,
+    db: &str,
+) -> Value {
+    let mut sample = post_form(
+        client,
+        format!("http://127.0.0.1:{port}/v1/prometheus/api/v1/query_range"),
+        &[
+            ("query", query),
+            ("start", start.unwrap_or_default()),
+            ("end", end.unwrap_or_default()),
+            ("step", step.unwrap_or_default()),
+            ("db", db),
+        ],
+    )
+    .await;
+    sample
+        .as_object_mut()
+        .expect("HTTP samples are objects")
+        .insert("query".to_string(), Value::String(query.to_string()));
+    sample
+}
+
+async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value {
     let started = Instant::now();
-    let request = client
-        .post(format!("http://127.0.0.1:{port}/v1/sql"))
-        .form(&[("sql", sql), ("db", db), ("format", "json")]);
+    let request = client.post(url).form(form);
     match request.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
@@ -133,7 +177,6 @@ pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &st
                         "status": status,
                         "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
                         "response": body,
-                        "sql": sql,
                     });
                     if status >= 400 {
                         sample
@@ -148,7 +191,6 @@ pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &st
                     "status": status,
                     "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
                     "error": error.to_string(),
-                    "sql": sql,
                 }),
             }
         }
@@ -157,7 +199,6 @@ pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &st
             "status": Value::Null,
             "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
             "error": error.to_string(),
-            "sql": sql,
         }),
     }
 }
