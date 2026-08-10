@@ -120,7 +120,7 @@ jobs:
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check for riscv64
-        run: cargo check --locked --workspace --target riscv64gc-unknown-linux-gnu
+        run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
