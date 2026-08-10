@@ -238,6 +238,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Prepare riscv64 dev-builder image
+        shell: bash
+        env:
+          IMAGE_REGISTRY: ${{ vars.ECR_IMAGE_REGISTRY }}
+          IMAGE_NAMESPACE: ${{ vars.ECR_IMAGE_NAMESPACE }}
+        run: |
+          builder_tag=$(grep '^DEV_BUILDER_IMAGE_TAG ?=' Makefile | awk '{print $3}')
+          builder_image="${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${builder_tag}"
+          if ! docker pull "${builder_image}"; then
+            make dev-builder-riscv64 \
+              IMAGE_REGISTRY="${IMAGE_REGISTRY}" \
+              IMAGE_NAMESPACE="${IMAGE_NAMESPACE}"
+          fi
+
       # Cross-compile greptime for riscv64gc-unknown-linux-gnu on the amd64 runner
       # with the riscv64 cross dev-builder image. Integration tests are skipped
       # because the cross-compiled binary cannot run on the amd64 host.
