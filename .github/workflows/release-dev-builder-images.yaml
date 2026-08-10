@@ -175,6 +175,14 @@ jobs:
             copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION \
             docker://$ECR_IMAGE_REGISTRY/$ECR_IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION
 
+      - name: Push latest dev-builder-riscv64 image
+        shell: bash
+        if: ${{ github.event_name == 'push' }}
+        env:
+          IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+          ECR_IMAGE_REGISTRY: ${{ vars.ECR_IMAGE_REGISTRY }}
+          ECR_IMAGE_NAMESPACE: ${{ vars.ECR_IMAGE_NAMESPACE }}
+        run: |
           docker run -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
             -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
             quay.io/skopeo/stable:latest \

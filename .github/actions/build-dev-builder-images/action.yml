@@ -83,9 +83,11 @@ runs:
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           DEV_BUILDER_RISCV64_IMAGE_TAG=${{ inputs.version }}
         docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:${{ inputs.version }}
-        docker tag ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:${{ inputs.version }} \
-          ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
-        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
+        if [[ "${{ github.event_name }}" == "push" ]]; then
+          docker tag ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:${{ inputs.version }} \
+            ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
+          docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-riscv64:latest
+        fi
 
     - name: Build and push dev-builder-android image # Only build image for amd64 platform.
       shell: bash
