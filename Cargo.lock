@@ -5263,7 +5263,6 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-macro",
- "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
