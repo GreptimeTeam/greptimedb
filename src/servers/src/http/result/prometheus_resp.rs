@@ -70,6 +70,21 @@ fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNative
     })
 }
 
+/// Formats a sample value for the Prometheus HTTP API.
+///
+/// Finite values are formatted with `ryu` (shortest round-trip), which is
+/// significantly faster than `f64::to_string()` and is the hot path when
+/// building large responses. Non-finite values (`NaN`, `+Inf`, `-Inf`) are not
+/// supported by `ryu::Buffer::format_finite`, so they keep the previous
+/// `f64::to_string()` output (`"NaN"`, `"inf"`, `"-inf"`).
+fn format_prometheus_sample_value(value: f64) -> String {
+    if value.is_finite() {
+        ryu::Buffer::new().format_finite(value).to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PrometheusJsonResponse {
     pub status: String,
@@ -307,6 +322,16 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
+        // Query output is clustered by series (the range plan sorts by series
+        // key + timestamp), so consecutive rows usually belong to the same
+        // series. Remember the previous row's tags and the index of its entry
+        // in `buffer`, and reuse the entry directly when the tags are
+        // unchanged. This avoids building and hashing the label vector on
+        // every row; the worst case adds one `Vec` comparison per series
+        // transition before falling back to the map lookup.
+        let mut last_tags: Option<Vec<(&str, &str)>> = None;
+        let mut last_entry_index = None;
+
         let schema = batches.schema();
         for batch in batches.iter() {
             // prepare things...
@@ -380,15 +405,33 @@ impl PrometheusJsonResponse {
                     }
                 }
 
-                let entry = buffer.entry(tags).or_default();
+                let samples = if last_tags.as_ref().is_some_and(|prev| prev == &tags) {
+                    // Same series as the previous row: reuse its entry without
+                    // re-hashing the label vector. Entries are never removed
+                    // from `buffer`, so the captured index stays valid.
+                    let index = last_entry_index
+                        .expect("last entry index is always set together with last tags");
+                    &mut buffer
+                        .get_index_mut(index)
+                        .expect("reused series entry must exist")
+                        .1
+                } else {
+                    // Tags changed: fall back to the map lookup.
+                    let entry = buffer.entry(tags.clone());
+                    let index = entry.index();
+                    last_entry_index = Some(index);
+                    last_tags = Some(tags);
+                    entry.or_default()
+                };
                 if let Some((timestamp_millis, histogram)) = histogram {
-                    entry
+                    samples
                         .histograms
                         .push((timestamp_millis as f64 / 1000.0, histogram));
                 } else if let Some((timestamp_millis, value)) = value {
-                    entry
-                        .values
-                        .push((timestamp_millis as f64 / 1000.0, value.to_string()));
+                    samples.values.push((
+                        timestamp_millis as f64 / 1000.0,
+                        format_prometheus_sample_value(value),
+                    ));
                 }
             }
         }
@@ -604,8 +647,183 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert_eq!(
             series[0].values,
-            vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
+            vec![(1.0, "1.0".to_string()), (2.0, "NaN".to_string())]
         );
+    }
+
+    #[test]
+    fn record_batches_to_data_formats_finite_values_with_ryu() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1_000, 2_000, 3_000, 4_000, 5_000, 6_000,
+                ])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(0.0),
+                    Some(-0.0),
+                    Some(1.25),
+                    Some(1e30),
+                    Some(1e-7),
+                    Some(f64::MAX),
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
+                .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].values,
+            vec![
+                (1.0, "0.0".to_string()),
+                (2.0, "-0.0".to_string()),
+                (3.0, "1.25".to_string()),
+                (4.0, "1e30".to_string()),
+                (5.0, "1e-7".to_string()),
+                (6.0, "1.7976931348623157e308".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_batches_to_data_preserves_infinity_output() {
+        // `ryu::Buffer::format_finite` only supports finite values; NaN and the
+        // infinities must keep the previous `f64::to_string()` output.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1_000, 2_000, 3_000,
+                ])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(f64::INFINITY),
+                    Some(f64::NEG_INFINITY),
+                    Some(f64::NAN),
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
+                .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].values,
+            vec![
+                (1.0, "inf".to_string()),
+                (2.0, "-inf".to_string()),
+                (3.0, "NaN".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_batches_to_data_reuses_entries_for_clustered_series() {
+        // Rows are clustered by series (a, b, a, a, b, c): consecutive rows of
+        // the same series exercise the entry-reuse fast path, while series
+        // transitions fall back to the map lookup. The result must keep the
+        // first-occurrence order and accumulate values per series as before.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1_000, 2_000, 3_000, 4_000, 5_000, 6_000,
+                ])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some("a"),
+                    Some("b"),
+                    Some("a"),
+                    Some("a"),
+                    Some("b"),
+                    Some("c"),
+                ])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(1.0),
+                    Some(2.0),
+                    Some(3.0),
+                    Some(4.0),
+                    Some(5.0),
+                    Some(6.0),
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            batches,
+            Some("metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(series.len(), 3);
+        // Output order is first-occurrence order: a, b, c.
+        assert_eq!(
+            series
+                .iter()
+                .map(|series| series.metric["host"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        // Vector results keep the last sample of each series.
+        assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
+        assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
+        assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
     }
 
     #[test]
