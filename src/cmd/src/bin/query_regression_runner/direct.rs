@@ -126,6 +126,9 @@ fn direct_tables(scenario: Scenario) -> Result<Vec<Table>> {
         Scenario::OtlpTraceLoad { .. } => {
             Err("prepare-direct requires scenario kind direct_readable_sst".into())
         }
+        Scenario::WriteThroughput { .. } => {
+            Err("prepare-direct requires scenario kind direct_readable_sst".into())
+        }
     }
 }
 

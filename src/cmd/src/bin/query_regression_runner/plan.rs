@@ -62,6 +62,9 @@ pub(super) fn normalize_scenario(scenario: Scenario) -> Result<(Vec<Table>, Vec<
         Scenario::OtlpTraceLoad { .. } => {
             Err("measure requires a query scenario, not otlp_trace_load".into())
         }
+        Scenario::WriteThroughput { .. } => {
+            Err("measure requires a query scenario, not write_throughput".into())
+        }
     }
 }
 
@@ -100,6 +103,9 @@ pub(super) fn normalized_remote_write(
         Scenario::OtlpTraceLoad { .. } => {
             Err("remote command requires scenario kind prom_remote_write_then_query".into())
         }
+        Scenario::WriteThroughput { .. } => {
+            Err("remote command requires scenario kind prom_remote_write_then_query".into())
+        }
     }
 }
 
@@ -115,7 +121,9 @@ pub(super) fn normalized_otlp_load(
         .ok_or("fixture plan has no scenario")?;
     match serde_json::from_value(scenario)? {
         Scenario::OtlpTraceLoad { load } => Ok((case_path, load.load)),
-        Scenario::DirectReadableSst { .. } | Scenario::PromRemoteWriteThenQuery { .. } => {
+        Scenario::DirectReadableSst { .. }
+        | Scenario::PromRemoteWriteThenQuery { .. }
+        | Scenario::WriteThroughput { .. } => {
             Err("OTLP command requires scenario kind otlp_trace_load".into())
         }
     }

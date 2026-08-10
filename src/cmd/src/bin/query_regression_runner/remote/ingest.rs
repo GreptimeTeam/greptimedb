@@ -33,7 +33,7 @@ pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Re
     Ok(())
 }
 
-fn frontend_prom_config(prom: &PromStore) -> Result<String> {
+pub(crate) fn frontend_prom_config(prom: &PromStore) -> Result<String> {
     Ok(format!(
         "[prom_store]\nenable = true\nwith_metric_engine = true\npending_rows_flush_interval = {}\nmax_batch_rows = {}\nmax_concurrent_flushes = {}\nworker_channel_capacity = {}\nmax_inflight_requests = {}\n",
         serde_json::to_string(&prom.pending_rows_flush_interval)?,
@@ -132,11 +132,11 @@ async fn prepare_remote_target(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SampleChunk {
-    index: u64,
-    offset: u64,
-    samples_per_series: u64,
-    start_unix_millis: i64,
+pub(crate) struct SampleChunk {
+    pub(crate) index: u64,
+    pub(crate) offset: u64,
+    pub(crate) samples_per_series: u64,
+    pub(crate) start_unix_millis: i64,
 }
 
 async fn ingest_remote_write(
@@ -188,7 +188,7 @@ async fn ingest_remote_write(
     ))
 }
 
-fn sample_chunks(remote: &RemoteWrite) -> Result<Option<Vec<SampleChunk>>> {
+pub(crate) fn sample_chunks(remote: &RemoteWrite) -> Result<Option<Vec<SampleChunk>>> {
     let Some(chunk_samples) = remote.sample_chunk_size else {
         return Ok(None);
     };
@@ -213,7 +213,10 @@ fn sample_chunks(remote: &RemoteWrite) -> Result<Option<Vec<SampleChunk>>> {
     Ok(Some(chunks))
 }
 
-fn scheduled_flushes(chunks: &[SampleChunk], flush_every: u64) -> Vec<(u64, &'static str)> {
+pub(crate) fn scheduled_flushes(
+    chunks: &[SampleChunk],
+    flush_every: u64,
+) -> Vec<(u64, &'static str)> {
     let mut scheduled = chunks
         .iter()
         .filter(|chunk| chunk.index % flush_every == 0)
@@ -279,7 +282,7 @@ fn run_remote_write(
     Ok(result)
 }
 
-fn remote_write_command(
+pub(crate) fn remote_write_command(
     generator: &Path,
     port: u16,
     remote: &RemoteWrite,

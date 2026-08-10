@@ -25,6 +25,7 @@ mod otlp;
 mod plan;
 mod remote;
 mod sql;
+mod write_throughput;
 
 pub(super) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -51,6 +52,9 @@ enum RunnerCommand {
     RunOtlpTarget(RunOtlpTargetArgs),
     /// Combine externally managed OTLP trace-load target results.
     FinalizeOtlp(FinalizeOtlpArgs),
+    /// Run the write_throughput scenario against self-managed base/candidate
+    /// clusters (datanode workload-scheduler env injection included).
+    RunWriteThroughput(RunWriteThroughputArgs),
     /// Copy a direct-SST fixture into an object store destination.
     Materialize(MaterializeArgs),
 }
@@ -172,6 +176,26 @@ struct FinalizeOtlpArgs {
 }
 
 #[derive(Debug, Parser)]
+struct RunWriteThroughputArgs {
+    #[arg(long, value_name = "PATH")]
+    case: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    fixture_generator: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    base_bin: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    candidate_bin: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    work_dir: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    #[arg(long, default_value_t = 120.0)]
+    http_timeout: f64,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Parser)]
 struct MaterializeArgs {
     #[arg(long, value_name = "PATH")]
     fixture_dir: PathBuf,
@@ -199,6 +223,9 @@ async fn run_inner() -> Result<()> {
         RunnerCommand::FinalizeRemote(args) => remote::run_finalize_remote(args).await,
         RunnerCommand::RunOtlpTarget(args) => otlp::run_otlp_target(args).await,
         RunnerCommand::FinalizeOtlp(args) => otlp::run_finalize_otlp(args).await,
+        RunnerCommand::RunWriteThroughput(args) => {
+            write_throughput::run_write_throughput(args).await
+        }
         RunnerCommand::Materialize(args) => materialize::run_materialize(args).await,
     }
 }

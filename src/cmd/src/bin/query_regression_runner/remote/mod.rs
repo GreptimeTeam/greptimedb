@@ -25,7 +25,7 @@ use crate::query_regression_runner::{
     FinalizeRemoteArgs, PrepareRemoteArgs, RenderRemoteConfigArgs, Result,
 };
 
-mod ingest;
+pub(crate) mod ingest;
 mod read_bench;
 mod storage;
 

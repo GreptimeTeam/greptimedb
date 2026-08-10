@@ -32,6 +32,8 @@ pub(super) enum Scenario {
     PromRemoteWriteThenQuery(PromRemoteWriteThenQueryScenario),
     #[serde(rename = "otlp_trace_load")]
     OtlpTraceLoad(OtlpTraceLoadScenario),
+    #[serde(rename = "write_throughput")]
+    WriteThroughput(WriteThroughputScenario),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -76,6 +78,234 @@ pub(super) struct OtlpTraceLoadThresholds {
     pub(super) max_candidate_throughput_regression_pct: f64,
     pub(super) max_candidate_mean_latency_regression_pct: f64,
     pub(super) max_failure_count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteThroughputScenario {
+    pub(super) remote_write: PromRemoteWritePlan,
+    pub(super) write_measure: WriteMeasureConfig,
+    /// Workload-scheduler configuration injected into the datanode via
+    /// environment variables. When absent the runner leaves both targets on
+    /// the datanode default (scheduler disabled). `enable` is not used by the
+    /// runner for derivation: the base target always runs with the scheduler
+    /// disabled and the candidate target always runs with it enabled when this
+    /// section is present.
+    #[serde(default)]
+    pub(super) scheduler: Option<WorkloadSchedulerCaseConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkloadSchedulerCaseConfig {
+    /// Enables policy-controlled query and write task spawning. Mirrors the
+    /// datanode `runtime.experimental_workload_scheduler.enable` option; the
+    /// runner derives the per-target value (base = false, candidate = true)
+    /// and ignores this field for derivation.
+    #[serde(default)]
+    pub(super) enable: bool,
+    /// Maximum polls admitted to Tokio at once. Zero uses four times
+    /// `global_rt_size`, consistent with the runtime default.
+    #[serde(default)]
+    pub(super) max_concurrent_polls: u64,
+    /// Relative share for query polls while writes are also backlogged.
+    #[serde(default = "default_scheduler_query_weight")]
+    pub(super) query_weight: u64,
+    /// Relative share for write polls while queries are also backlogged.
+    #[serde(default = "default_scheduler_write_weight")]
+    pub(super) write_weight: u64,
+}
+
+pub(super) fn default_scheduler_query_weight() -> u64 {
+    2
+}
+pub(super) fn default_scheduler_write_weight() -> u64 {
+    8
+}
+
+impl WorkloadSchedulerCaseConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("query_weight", self.query_weight),
+            ("write_weight", self.write_weight),
+        ] {
+            if value == 0 {
+                return Err(format!("scenario.scheduler.{name} must be positive"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteMeasureConfig {
+    /// Nominal measurement window in wall-clock seconds. `window_seconds` must
+    /// divide it; the runner buckets per-window RPS over the first
+    /// `duration_seconds` of the ingestion timeline.
+    pub(super) duration_seconds: NonZeroU64,
+    /// Per-window RPS bucket size in seconds.
+    pub(super) window_seconds: NonZeroU64,
+    /// Optional target ingest rate in rows/second; 0 = max throughput
+    /// (the generator writes as fast as it can and the achieved rate is
+    /// measured). Pacing is not implemented; this value is validated,
+    /// normalized, and reported for future use.
+    #[serde(default)]
+    pub(super) target_rps: f64,
+    pub(super) thresholds: WriteThroughputThresholds,
+    /// Optional concurrent read+write ("mix") measurement. When present the
+    /// runner runs the remote-write ingestion in a background thread while a
+    /// query loop hammers the same frontend for `duration_seconds`, so query
+    /// and write tasks genuinely contend on the datanode runtime under a dual
+    /// backlog.
+    #[serde(default)]
+    pub(super) mix: Option<MixMeasureConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MixMeasureConfig {
+    /// SQL for the concurrent query loop. Defaults to a `count(*)` over the
+    /// remote-write physical table (`greptime_physical_table`), which scans
+    /// every ingested row and is therefore a real datanode-runtime contender.
+    #[serde(default)]
+    pub(super) query_sql: Option<String>,
+    /// Wall-clock interval between queries per loop thread, in milliseconds.
+    #[serde(default = "default_mix_query_interval_ms")]
+    pub(super) query_interval_ms: NonZeroU64,
+    /// Number of concurrent query-loop threads.
+    #[serde(default = "default_mix_query_parallelism")]
+    pub(super) query_parallelism: NonZeroU64,
+    pub(super) thresholds: MixMeasureThresholds,
+}
+
+pub(super) fn default_mix_query_interval_ms() -> NonZeroU64 {
+    NonZeroU64::new(100).expect("100 is non-zero")
+}
+pub(super) fn default_mix_query_parallelism() -> NonZeroU64 {
+    NonZeroU64::new(1).expect("1 is non-zero")
+}
+
+impl MixMeasureConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if let Some(sql) = &self.query_sql
+            && sql.trim().is_empty()
+        {
+            return Err(
+                "scenario.write_measure.mix.query_sql must be a non-empty SQL string".to_string(),
+            );
+        }
+        self.thresholds.validate()
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MixMeasureThresholds {
+    /// Max fraction of failed query attempts per target, in [0, 1] (0.05 = 5%).
+    pub(super) max_query_failure_rate: f64,
+    /// Max candidate-vs-base query p99 latency regression percent:
+    /// `(candidate_p99_ms - base_p99_ms) / base_p99_ms * 100`.
+    pub(super) max_query_p99_regression_pct: f64,
+}
+
+impl MixMeasureThresholds {
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("max_query_failure_rate", self.max_query_failure_rate),
+            (
+                "max_query_p99_regression_pct",
+                self.max_query_p99_regression_pct,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "scenario.write_measure.mix.thresholds.{name} must be a finite non-negative number"
+                ));
+            }
+        }
+        if self.max_query_failure_rate > 1.0 {
+            return Err(
+                "scenario.write_measure.mix.thresholds.max_query_failure_rate must be <= 1.0 (a rate in [0, 1])"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WriteThroughputThresholds {
+    /// Max fraction of failed write chunks per target, in [0, 1] (0.05 = 5%).
+    pub(super) max_failure_rate: f64,
+    /// Max candidate-vs-base mean RPS regression percent:
+    /// `(base_mean_rps - candidate_mean_rps) / base_mean_rps * 100`.
+    pub(super) max_mean_rps_regression_pct: f64,
+    /// Max candidate-vs-base write-request p99 latency regression percent:
+    /// `(candidate_p99_ms - base_p99_ms) / base_p99_ms * 100`.
+    pub(super) max_p99_latency_regression_pct: f64,
+    /// Optional absolute floor on each target's mean RPS.
+    #[serde(default)]
+    pub(super) min_rps_absolute: Option<f64>,
+}
+
+impl WriteMeasureConfig {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.duration_seconds.get() % self.window_seconds.get() != 0 {
+            return Err(
+                "scenario.write_measure.duration_seconds must be a positive multiple of window_seconds"
+                    .to_string(),
+            );
+        }
+        if !self.target_rps.is_finite() || self.target_rps < 0.0 {
+            return Err(
+                "scenario.write_measure.target_rps must be a finite non-negative number"
+                    .to_string(),
+            );
+        }
+        if let Some(mix) = &self.mix {
+            mix.validate()?;
+        }
+        self.thresholds.validate()
+    }
+}
+
+impl WriteThroughputThresholds {
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("max_failure_rate", self.max_failure_rate),
+            (
+                "max_mean_rps_regression_pct",
+                self.max_mean_rps_regression_pct,
+            ),
+            (
+                "max_p99_latency_regression_pct",
+                self.max_p99_latency_regression_pct,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "scenario.write_measure.thresholds.{name} must be a finite non-negative number"
+                ));
+            }
+        }
+        if self.max_failure_rate > 1.0 {
+            return Err(
+                "scenario.write_measure.thresholds.max_failure_rate must be <= 1.0 (a rate in [0, 1])"
+                    .to_string(),
+            );
+        }
+        if let Some(min_rps) = self.min_rps_absolute
+            && (!min_rps.is_finite() || min_rps < 0.0)
+        {
+            return Err(
+                "scenario.write_measure.thresholds.min_rps_absolute must be a finite non-negative number"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -442,6 +672,7 @@ impl Scenario {
             Scenario::DirectReadableSst(_) => "direct_readable_sst",
             Scenario::PromRemoteWriteThenQuery(_) => "prom_remote_write_then_query",
             Scenario::OtlpTraceLoad(_) => "otlp_trace_load",
+            Scenario::WriteThroughput(_) => "write_throughput",
         }
     }
 
@@ -499,4 +730,418 @@ pub(super) struct LayoutConfig {
     pub(super) step_nanos: i64,
     pub(super) time_range_layout: String,
     pub(super) series_layout: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// Repository root, derived from the cmd crate manifest (`src/cmd`).
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cmd crate lives at src/cmd")
+            .parent()
+            .expect("repo root is the parent of src")
+            .to_path_buf()
+    }
+
+    fn builtin_write_throughput_case() -> PathBuf {
+        repo_root().join("tests/perf/query_cases/write_throughput_scheduler/case.toml")
+    }
+
+    fn builtin_write_read_mixed_case() -> PathBuf {
+        repo_root().join("tests/perf/query_cases/write_read_mixed_scheduler/case.toml")
+    }
+
+    fn parse_case(text: &str) -> Result<CaseFile, toml::de::Error> {
+        toml::from_str(text)
+    }
+
+    fn write_throughput_scenario(text: &str) -> WriteThroughputScenario {
+        let case = parse_case(text).expect("case must parse");
+        match case.scenario {
+            Scenario::WriteThroughput(scenario) => scenario,
+            other => panic!("expected write_throughput scenario, got {:?}", other.kind()),
+        }
+    }
+
+    const MINIMAL_CASE: &str = r#"
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+metric = "write_throughput_test"
+
+[scenario.write_measure]
+duration_seconds = 60
+window_seconds = 5
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05
+max_mean_rps_regression_pct = 10.0
+max_p99_latency_regression_pct = 10.0
+"#;
+
+    const SCHEDULER_CASE: &str = r#"
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+metric = "write_throughput_test"
+
+[scenario.write_measure]
+duration_seconds = 60
+window_seconds = 5
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05
+max_mean_rps_regression_pct = 10.0
+max_p99_latency_regression_pct = 10.0
+
+[scenario.scheduler]
+max_concurrent_polls = 16
+query_weight = 2
+write_weight = 8
+"#;
+
+    const MIXED_CASE: &str = r#"
+[scenario]
+kind = "write_throughput"
+
+[scenario.remote_write]
+metric = "write_read_mixed_test"
+
+[scenario.write_measure]
+duration_seconds = 60
+window_seconds = 5
+
+[scenario.write_measure.thresholds]
+max_failure_rate = 0.05
+max_mean_rps_regression_pct = 10.0
+max_p99_latency_regression_pct = 10.0
+
+[scenario.write_measure.mix]
+query_interval_ms = 100
+query_parallelism = 2
+
+[scenario.write_measure.mix.thresholds]
+max_query_failure_rate = 0.05
+max_query_p99_regression_pct = 10.0
+"#;
+
+    #[test]
+    fn parses_builtin_write_throughput_case() {
+        let text = std::fs::read_to_string(builtin_write_throughput_case())
+            .expect("built-in write_throughput case.toml must exist");
+        let case = parse_case(&text).expect("built-in write_throughput case must parse");
+        assert_eq!(case.scenario.kind(), "write_throughput");
+        let scenario = write_throughput_scenario(&text);
+        assert_eq!(scenario.remote_write.series_count, 2048);
+        assert_eq!(scenario.remote_write.samples_per_series, 3600);
+        assert_eq!(scenario.write_measure.duration_seconds.get(), 60);
+        assert_eq!(scenario.write_measure.window_seconds.get(), 5);
+        assert_eq!(scenario.write_measure.target_rps, 0.0);
+        assert_eq!(scenario.write_measure.thresholds.max_failure_rate, 0.05);
+        assert_eq!(
+            scenario
+                .write_measure
+                .thresholds
+                .max_mean_rps_regression_pct,
+            10.0
+        );
+        assert_eq!(
+            scenario
+                .write_measure
+                .thresholds
+                .max_p99_latency_regression_pct,
+            10.0
+        );
+        let scheduler = scenario
+            .scheduler
+            .expect("built-in case must declare a scheduler section");
+        assert!(!scheduler.enable);
+        assert_eq!(scheduler.max_concurrent_polls, 16);
+        assert_eq!(scheduler.query_weight, 2);
+        assert_eq!(scheduler.write_weight, 8);
+        scheduler
+            .validate()
+            .expect("built-in scheduler must validate");
+        scenario
+            .write_measure
+            .validate()
+            .expect("built-in case must validate");
+    }
+
+    #[test]
+    fn minimal_case_uses_defaults_and_validates() {
+        let scenario = write_throughput_scenario(MINIMAL_CASE);
+        assert_eq!(scenario.remote_write.series_count, 8);
+        assert_eq!(scenario.remote_write.samples_per_series, 30);
+        assert_eq!(scenario.write_measure.target_rps, 0.0);
+        assert!(scenario.scheduler.is_none());
+        assert!(scenario.write_measure.thresholds.min_rps_absolute.is_none());
+        scenario
+            .write_measure
+            .validate()
+            .expect("minimal case must validate");
+    }
+
+    #[test]
+    fn write_throughput_parses_scheduler_section() {
+        let scenario = write_throughput_scenario(SCHEDULER_CASE);
+        let scheduler = scenario
+            .scheduler
+            .expect("scheduler section must parse into Some");
+        assert!(!scheduler.enable);
+        assert_eq!(scheduler.max_concurrent_polls, 16);
+        assert_eq!(scheduler.query_weight, 2);
+        assert_eq!(scheduler.write_weight, 8);
+        scheduler
+            .validate()
+            .expect("scheduler config must validate");
+    }
+
+    #[test]
+    fn write_throughput_rejects_invalid_scheduler_weights() {
+        let zero_query = SCHEDULER_CASE.replace("query_weight = 2", "query_weight = 0");
+        let scenario = write_throughput_scenario(&zero_query);
+        let err = scenario
+            .scheduler
+            .unwrap()
+            .validate()
+            .expect_err("zero query_weight must be rejected");
+        assert!(err.contains("query_weight"), "{err}");
+
+        let zero_write = SCHEDULER_CASE.replace("write_weight = 8", "write_weight = 0");
+        let scenario = write_throughput_scenario(&zero_write);
+        let err = scenario
+            .scheduler
+            .unwrap()
+            .validate()
+            .expect_err("zero write_weight must be rejected");
+        assert!(err.contains("write_weight"), "{err}");
+    }
+
+    #[test]
+    fn write_throughput_rejects_unknown_scheduler_fields() {
+        let unknown = SCHEDULER_CASE.replace(
+            "max_concurrent_polls = 16",
+            "max_concurrent_polls = 16\nbogus_scheduler_field = 1",
+        );
+        let err = parse_case(&unknown).expect_err("unknown scheduler field must be rejected");
+        assert!(err.to_string().contains("bogus_scheduler_field"), "{err}");
+    }
+
+    #[test]
+    fn rejects_bad_types() {
+        // window_seconds must be an integer, not a string.
+        let bad_type = MINIMAL_CASE.replace("window_seconds = 5", "window_seconds = \"five\"");
+        assert!(parse_case(&bad_type).is_err());
+
+        // duration_seconds must be positive; NonZeroU64 rejects zero.
+        let zero_duration = MINIMAL_CASE.replace("duration_seconds = 60", "duration_seconds = 0");
+        assert!(parse_case(&zero_duration).is_err());
+
+        // duration_seconds must be an integer, not a float.
+        let float_duration =
+            MINIMAL_CASE.replace("duration_seconds = 60", "duration_seconds = 60.5");
+        assert!(parse_case(&float_duration).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let unknown = MINIMAL_CASE.replace(
+            "duration_seconds = 60",
+            "duration_seconds = 60\nbogus_field = 1",
+        );
+        let err = parse_case(&unknown).expect_err("unknown field must be rejected");
+        assert!(err.to_string().contains("bogus_field"));
+    }
+
+    #[test]
+    fn rejects_inconsistent_window_and_duration() {
+        let inconsistent = MINIMAL_CASE.replace("window_seconds = 5", "window_seconds = 7");
+        let scenario = write_throughput_scenario(&inconsistent);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("window_seconds must divide duration_seconds");
+        assert!(err.contains("window_seconds"), "{err}");
+    }
+
+    #[test]
+    fn rejects_negative_or_non_finite_thresholds() {
+        let negative_rps = MINIMAL_CASE.replace(
+            "max_mean_rps_regression_pct = 10.0",
+            "max_mean_rps_regression_pct = -1.0",
+        );
+        let scenario = write_throughput_scenario(&negative_rps);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("negative regression limit must be rejected");
+        assert!(err.contains("max_mean_rps_regression_pct"), "{err}");
+
+        // max_failure_rate is a rate in [0, 1].
+        let oversized_rate =
+            MINIMAL_CASE.replace("max_failure_rate = 0.05", "max_failure_rate = 1.5");
+        let scenario = write_throughput_scenario(&oversized_rate);
+        let err = scenario
+            .write_measure
+            .validate()
+            .expect_err("max_failure_rate above 1.0 must be rejected");
+        assert!(err.contains("max_failure_rate"), "{err}");
+    }
+
+    #[test]
+    fn parses_builtin_write_read_mixed_case() {
+        let text = std::fs::read_to_string(builtin_write_read_mixed_case())
+            .expect("built-in write_read_mixed case.toml must exist");
+        let case = parse_case(&text).expect("built-in write_read_mixed case must parse");
+        assert_eq!(case.scenario.kind(), "write_throughput");
+        let scenario = write_throughput_scenario(&text);
+        assert_eq!(scenario.remote_write.series_count, 2048);
+        assert_eq!(scenario.remote_write.samples_per_series, 3600);
+        assert_eq!(scenario.write_measure.duration_seconds.get(), 60);
+        assert_eq!(scenario.write_measure.window_seconds.get(), 5);
+        let mix = scenario
+            .write_measure
+            .mix
+            .as_ref()
+            .expect("built-in mixed case must declare a mix section");
+        assert_eq!(mix.query_interval_ms.get(), 100);
+        assert_eq!(mix.query_parallelism.get(), 2);
+        assert_eq!(mix.thresholds.max_query_failure_rate, 0.05);
+        assert_eq!(mix.thresholds.max_query_p99_regression_pct, 10.0);
+        let scheduler = scenario
+            .scheduler
+            .as_ref()
+            .expect("built-in mixed case must declare a scheduler section");
+        assert_eq!(scheduler.query_weight, 2);
+        assert_eq!(scheduler.write_weight, 8);
+        scenario
+            .write_measure
+            .validate()
+            .expect("built-in mixed case must validate");
+        scheduler
+            .validate()
+            .expect("built-in scheduler must validate");
+    }
+
+    #[test]
+    fn write_throughput_mix_uses_defaults_and_validates() {
+        // Defaults apply only for keys the case does not set explicitly; drop
+        // the explicit query_parallelism to exercise the default.
+        let defaults_case = MIXED_CASE.replace("query_parallelism = 2\n", "");
+        let scenario = write_throughput_scenario(&defaults_case);
+        let mix = scenario
+            .write_measure
+            .mix
+            .as_ref()
+            .expect("mix section must parse into Some");
+        assert!(mix.query_sql.is_none());
+        assert_eq!(mix.query_interval_ms.get(), 100);
+        assert_eq!(mix.query_parallelism.get(), 1);
+        mix.validate().expect("mix config must validate");
+        scenario
+            .write_measure
+            .validate()
+            .expect("write_measure with mix must validate");
+    }
+
+    #[test]
+    fn write_throughput_mix_parses_explicit_values() {
+        let explicit = MIXED_CASE.replace(
+            "query_interval_ms = 100\nquery_parallelism = 2",
+            "query_sql = \"SELECT count(*) FROM greptime_physical_table\"\nquery_interval_ms = 250\nquery_parallelism = 4",
+        );
+        let scenario = write_throughput_scenario(&explicit);
+        let mix = scenario
+            .write_measure
+            .mix
+            .expect("mix section must parse into Some");
+        assert_eq!(
+            mix.query_sql.as_deref(),
+            Some("SELECT count(*) FROM greptime_physical_table")
+        );
+        assert_eq!(mix.query_interval_ms.get(), 250);
+        assert_eq!(mix.query_parallelism.get(), 4);
+        mix.validate().expect("explicit mix config must validate");
+    }
+
+    #[test]
+    fn write_throughput_mix_rejects_zero_interval_or_parallelism() {
+        let zero_interval = MIXED_CASE.replace("query_interval_ms = 100", "query_interval_ms = 0");
+        assert!(
+            parse_case(&zero_interval).is_err(),
+            "zero query_interval_ms must be rejected"
+        );
+
+        let zero_parallelism = MIXED_CASE.replace("query_parallelism = 2", "query_parallelism = 0");
+        assert!(
+            parse_case(&zero_parallelism).is_err(),
+            "zero query_parallelism must be rejected"
+        );
+    }
+
+    #[test]
+    fn write_throughput_mix_rejects_unknown_fields() {
+        let unknown = MIXED_CASE.replace(
+            "query_interval_ms = 100",
+            "query_interval_ms = 100\nbogus_mix_field = 1",
+        );
+        let err = parse_case(&unknown).expect_err("unknown mix field must be rejected");
+        assert!(err.to_string().contains("bogus_mix_field"), "{err}");
+    }
+
+    #[test]
+    fn write_throughput_mix_rejects_empty_query_sql() {
+        let empty_sql = MIXED_CASE.replace(
+            "query_interval_ms = 100",
+            "query_sql = \"   \"\nquery_interval_ms = 100",
+        );
+        let scenario = write_throughput_scenario(&empty_sql);
+        let mix = scenario
+            .write_measure
+            .mix
+            .expect("mix section must parse into Some");
+        let err = mix
+            .validate()
+            .expect_err("blank query_sql must be rejected");
+        assert!(err.contains("query_sql"), "{err}");
+    }
+
+    #[test]
+    fn write_throughput_mix_rejects_invalid_thresholds() {
+        let negative_limit = MIXED_CASE.replace(
+            "max_query_p99_regression_pct = 10.0",
+            "max_query_p99_regression_pct = -1.0",
+        );
+        let scenario = write_throughput_scenario(&negative_limit);
+        let mix = scenario
+            .write_measure
+            .mix
+            .expect("mix section must parse into Some");
+        let err = mix
+            .validate()
+            .expect_err("negative query p99 regression limit must be rejected");
+        assert!(err.contains("max_query_p99_regression_pct"), "{err}");
+
+        let oversized_rate = MIXED_CASE.replace(
+            "max_query_failure_rate = 0.05",
+            "max_query_failure_rate = 1.5",
+        );
+        let scenario = write_throughput_scenario(&oversized_rate);
+        let mix = scenario
+            .write_measure
+            .mix
+            .expect("mix section must parse into Some");
+        let err = mix
+            .validate()
+            .expect_err("query failure rate above 1.0 must be rejected");
+        assert!(err.contains("max_query_failure_rate"), "{err}");
+    }
 }

@@ -58,6 +58,65 @@ pub(super) enum Scenario {
     },
     #[serde(rename = "otlp_trace_load")]
     OtlpTraceLoad { load: OtlpTraceLoad },
+    #[serde(rename = "write_throughput")]
+    WriteThroughput {
+        remote_write: RemoteWrite,
+        write_measure: WriteMeasure,
+        #[serde(default)]
+        scheduler: Option<WorkloadSchedulerConfig>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct WriteMeasure {
+    pub(super) duration_seconds: u64,
+    pub(super) window_seconds: u64,
+    #[serde(default)]
+    pub(super) target_rps: f64,
+    pub(super) thresholds: WriteThroughputThresholds,
+    #[serde(default)]
+    pub(super) mix: Option<MixMeasure>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct WriteThroughputThresholds {
+    pub(super) max_failure_rate: f64,
+    pub(super) max_mean_rps_regression_pct: f64,
+    pub(super) max_p99_latency_regression_pct: f64,
+    #[serde(default)]
+    pub(super) min_rps_absolute: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct MixMeasure {
+    #[serde(default)]
+    pub(super) query_sql: Option<String>,
+    #[serde(default)]
+    pub(super) query_interval_ms: u64,
+    #[serde(default)]
+    pub(super) query_parallelism: u64,
+    pub(super) thresholds: MixMeasureThresholds,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct MixMeasureThresholds {
+    pub(super) max_query_failure_rate: f64,
+    pub(super) max_query_p99_regression_pct: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct WorkloadSchedulerConfig {
+    /// Mirrored from the case for report parity; the runner derives the
+    /// per-target enable flag instead of reading this field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(super) enable: bool,
+    #[serde(default)]
+    pub(super) max_concurrent_polls: u64,
+    #[serde(default)]
+    pub(super) query_weight: u64,
+    #[serde(default)]
+    pub(super) write_weight: u64,
 }
 
 #[derive(Debug, Deserialize)]
