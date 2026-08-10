@@ -25,14 +25,14 @@ use common_catalog::consts::{
 use datafusion::arrow::datatypes::DataType;
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::core as core_fns;
-use datafusion::functions_aggregate::expr_fn::{count, sum};
+use datafusion::functions_aggregate::expr_fn::{bool_or, count, min, sum};
 use datafusion::functions_window::expr_fn::row_number;
-use datafusion_common::Result as DfResult;
-use datafusion_expr::{ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit};
+use datafusion_common::{Result as DfResult, ScalarValue};
+use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
 
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    bin_interval, bin_ms, entity_id_expr, interval, null_json, qcol, union_all,
+    bin_interval, bin_ms, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
 };
 
 /// The projected columns of `semantic_relationships`, in order. Every derived
@@ -179,36 +179,131 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
         ])
 }
 
-/// The `calls` derivation: pair each client span with its child server span on
-/// `trace_id` + `parent_span_id`, project to `service`, union the pairs of all
-/// trace tables, and aggregate RED metrics per 60s window in one pass — an edge
-/// observed across several trace tables yields one row, not per-table
-/// fragments (the plan form of the Tempo servicegraph connector). Column names
-/// are the fixed `greptime_trace_v1` schema, the reason
-/// `table_data_model = greptime_trace_v1` is required. Returns `None` when
-/// there is no trace table.
+/// Span-attribute columns naming an uninstrumented peer, in precedence order,
+/// each with the `connection_type` its match implies. Attribute columns are
+/// dynamic in `greptime_trace_v1` (created on first use), so only columns
+/// present in a table's schema participate.
+const VIRTUAL_DST_CANDIDATES: [(&str, &str); 3] = [
+    ("span_attributes.peer.service", "virtual_node"),
+    ("span_attributes.db.name", "database"),
+    ("span_attributes.server.address", "virtual_node"),
+];
+
+/// Confidence of a virtual-node edge: the peer was named by a client-side
+/// attribute, not witnessed by a server span (the RFC requires `< 1.0`).
+const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
+
+/// The `calls` derivation: union the client spans and the server spans of all
+/// trace tables (each projected to a normalized shape with its own table's
+/// `service` identity), left-join clients to their child server spans on
+/// `trace_id` + `parent_span_id`, and aggregate RED metrics per 60s window —
+/// the plan form of the Tempo servicegraph connector. Unioning spans before
+/// the join pairs a client with a server stored in a *different* trace table
+/// (`x-greptime-trace-table-name` routing); with a single table it degenerates
+/// to the previous self-join. Returns `None` when there is no trace table.
+///
+/// A client with no matching server span is an edge to a **virtual node**
+/// named by [`VIRTUAL_DST_CANDIDATES`], with the client's own status/duration
+/// and `confidence < 1.0`. Real pairs win: when a window's edge key holds any
+/// pair, the edge reports only the pair population (the RFC pins RED metrics
+/// to observed span pairs) and the unmatched clients are suppressed, so one
+/// `(window, edge)` never yields two rows.
 fn calls_branch(
     traces: Vec<CallsSource>,
     window: &GraphQueryWindow,
 ) -> DfResult<Option<DataFrame>> {
-    let mut union_df: Option<DataFrame> = None;
+    let mut clients: Option<DataFrame> = None;
+    let mut servers: Option<DataFrame> = None;
     for trace in traces {
-        union_df = union_all(union_df, calls_pairs(&trace.service, trace.scan, window)?)?;
+        clients = union_all(clients, client_spans(&trace, window)?)?;
+        servers = union_all(servers, server_spans(&trace.service, trace.scan, window)?)?;
     }
-    let Some(pairs) = union_df else {
+    let (Some(clients), Some(servers)) = (clients, servers) else {
         return Ok(None);
     };
 
-    let df = pairs
+    let client = clients.alias("client")?;
+    let server = servers.alias("server")?;
+    let join_conditions = vec![
+        qcol("client", TRACE_ID_COLUMN).eq(qcol("server", TRACE_ID_COLUMN)),
+        qcol("server", PARENT_SPAN_ID_COLUMN).eq(qcol("client", SPAN_ID_COLUMN)),
+        qcol("server", TRACE_TIMESTAMP_COLUMN)
+            .gt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
+        qcol("server", TRACE_TIMESTAMP_COLUMN)
+            .lt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
+    ];
+
+    let observations = client
+        .join_on(server, JoinType::Left, join_conditions)?
+        .select(vec![
+            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
+            qcol("client", "src_id").alias("src_id"),
+            core_fns::coalesce()
+                .call(vec![
+                    qcol("server", "dst_id"),
+                    qcol("client", "virtual_dst"),
+                ])
+                .alias("dst_id"),
+            qcol("server", TRACE_ID_COLUMN)
+                .is_not_null()
+                .alias("paired"),
+            qcol("server", SPAN_STATUS_CODE_COLUMN).alias("server_status"),
+            qcol("server", DURATION_NANO_COLUMN).alias("server_duration_nano"),
+            qcol("client", SPAN_STATUS_CODE_COLUMN).alias("client_status"),
+            qcol("client", DURATION_NANO_COLUMN).alias("client_duration_nano"),
+            qcol("client", "virtual_conn").alias("virtual_conn"),
+        ])?
+        // An unmatched client without a peer-naming attribute observes no edge;
+        // a self-call (on either the paired or the attribute-named identity) is
+        // not an edge between two distinct entities.
+        .filter(
+            ident("dst_id")
+                .is_not_null()
+                .and(ident("src_id").not_eq(ident("dst_id"))),
+        )?;
+
+    let paired = ident("paired");
+    let df = observations
         .aggregate(
             vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
             vec![
-                count(lit(1)).alias("request_count"),
                 count(lit(1))
-                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
+                    .filter(paired.clone())
                     .build()?
-                    .alias("error_count"),
-                sum(ident("duration_nano")).alias("duration_nano_sum"),
+                    .alias("pair_count"),
+                count(lit(1))
+                    .filter(
+                        paired
+                            .clone()
+                            .and(ident("server_status").eq(lit(SPAN_STATUS_ERROR))),
+                    )
+                    .build()?
+                    .alias("pair_errors"),
+                sum(ident("server_duration_nano"))
+                    .filter(paired.clone())
+                    .build()?
+                    .alias("pair_duration_nano"),
+                count(lit(1))
+                    .filter(!paired.clone())
+                    .build()?
+                    .alias("unmatched_count"),
+                count(lit(1))
+                    .filter(
+                        (!paired.clone()).and(ident("client_status").eq(lit(SPAN_STATUS_ERROR))),
+                    )
+                    .build()?
+                    .alias("unmatched_errors"),
+                sum(ident("client_duration_nano"))
+                    .filter(!paired.clone())
+                    .build()?
+                    .alias("unmatched_duration_nano"),
+                bool_or(paired.clone()).alias("has_pair"),
+                // `min` makes a mixed-provenance virtual edge deterministic
+                // (`database` sorts before `virtual_node`).
+                min(ident("virtual_conn"))
+                    .filter(!paired)
+                    .build()?
+                    .alias("virtual_conn"),
             ],
         )?
         .select(vec![
@@ -222,76 +317,139 @@ fn calls_branch(
             ident("dst_id"),
             lit("calls").alias("rel_type"),
             lit("trace").alias("provenance"),
-            lit(1.0_f64).alias("confidence"),
-            ident("request_count"),
-            ident("error_count"),
-            // duration_nano sums in nanoseconds; the contract column is seconds.
-            (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
-                .alias("duration_sum"),
-            ident("request_count").alias("duration_count"),
-            null_json().alias("attributes"),
+            real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias("confidence"),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("request_count"),
+            real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias("error_count"),
+            // duration sums in nanoseconds; the contract column is seconds.
+            (cast(
+                real_wins(
+                    ident("pair_duration_nano"),
+                    ident("unmatched_duration_nano"),
+                )?,
+                DataType::Float64,
+            ) / lit(1e9_f64))
+            .alias("duration_sum"),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("duration_count"),
+            real_wins(null_json(), virtual_attrs_expr()?)?.alias("attributes"),
         ])?;
     Ok(Some(df))
 }
 
-/// One trace table's client/server span pairs, projected to the aggregation
-/// inputs `(observed_at, src_id, dst_id, status_code, duration_nano)`.
-/// Endpoint ids are built from the table's `service` entity declaration, so
-/// edges land on exactly the entity ids the registry emits (a composite
-/// service identity renders the same sorted `k=v` form on both sides).
-fn calls_pairs(
+/// `CASE WHEN has_pair THEN real ELSE virtual END` — the real-wins projection
+/// over the mixed aggregate.
+fn real_wins(real: Expr, r#virtual: Expr) -> DfResult<Expr> {
+    when(ident("has_pair"), real).otherwise(r#virtual)
+}
+
+/// The `attributes` JSON of a virtual edge, from the aggregated
+/// `connection_type`.
+fn virtual_attrs_expr() -> DfResult<Expr> {
+    when(
+        ident("virtual_conn").eq(lit("database")),
+        parse_json_expr(lit(r#"{"connection_type":"database"}"#)),
+    )
+    .otherwise(parse_json_expr(lit(
+        r#"{"connection_type":"virtual_node"}"#,
+    )))
+}
+
+/// The window + span-kind + identity predicate shared by both join sides.
+/// `strict` bounds the scan to the source window; the non-strict side widens
+/// by the join's time-proximity allowance (the join bounds reference the other
+/// side's timestamp and cannot prune this side's scan on their own).
+fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict: bool) -> Expr {
+    let ts = ident(TRACE_TIMESTAMP_COLUMN);
+    let mut predicate = if strict {
+        ts.clone()
+            .gt_eq(window.source_start())
+            .and(ts.lt(window.source_end()))
+    } else {
+        ts.clone()
+            .gt_eq(window.source_start() - interval(CHILD_SPAN_EARLY_NANOS))
+            .and(ts.lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)))
+    };
+    // A NULL identity component identifies nothing, on either endpoint.
+    for id in &service.id_columns {
+        predicate = predicate.and(ident(id).is_not_null());
+    }
+    predicate
+}
+
+/// One trace table's client spans, normalized to
+/// `(timestamp, trace_id, span_id, src_id, status_code, duration_nano,
+/// virtual_dst, virtual_conn)`. `src_id` is built from the table's `service`
+/// declaration, so edges land on exactly the entity ids the registry emits (a
+/// composite identity renders the same sorted `k=v` form); the per-table
+/// projection is what lets tables with different declarations union.
+fn client_spans(source: &CallsSource, window: &GraphQueryWindow) -> DfResult<DataFrame> {
+    // Peer-naming candidates present in this table's schema, normalized so an
+    // empty value falls through to the next candidate.
+    let present: Vec<(Expr, &str)> = {
+        let schema = source.scan.schema();
+        VIRTUAL_DST_CANDIDATES
+            .iter()
+            .filter(|(column, _)| schema.has_column_with_unqualified_name(column))
+            .map(|(column, conn)| {
+                let value =
+                    core_fns::nullif().call(vec![cast(ident(*column), DataType::Utf8), lit("")]);
+                (value, *conn)
+            })
+            .collect()
+    };
+    let null_utf8 = || lit(ScalarValue::Utf8(None));
+    let virtual_dst = if present.is_empty() {
+        null_utf8()
+    } else {
+        core_fns::coalesce().call(present.iter().map(|(value, _)| value.clone()).collect())
+    };
+    let mut virtual_conn = null_utf8();
+    for (value, conn) in present.into_iter().rev() {
+        virtual_conn = when(value.is_not_null(), lit(conn)).otherwise(virtual_conn)?;
+    }
+
+    source
+        .scan
+        .clone()
+        .filter(
+            ident(SPAN_KIND_COLUMN)
+                .eq(lit(SPAN_KIND_CLIENT))
+                .and(span_predicate(&source.service, window, true)),
+        )?
+        .select(vec![
+            ident(TRACE_TIMESTAMP_COLUMN),
+            ident(TRACE_ID_COLUMN),
+            ident(SPAN_ID_COLUMN),
+            // The cast inside entity_id_expr also normalizes tag columns, which
+            // come out of the storage engine dictionary-encoded.
+            entity_id_expr(&source.service.id_columns, &|c| ident(c)).alias("src_id"),
+            ident(SPAN_STATUS_CODE_COLUMN),
+            ident(DURATION_NANO_COLUMN),
+            virtual_dst.alias("virtual_dst"),
+            virtual_conn.alias("virtual_conn"),
+        ])
+}
+
+/// One trace table's server spans, normalized to
+/// `(timestamp, trace_id, parent_span_id, dst_id, status_code, duration_nano)`.
+fn server_spans(
     service: &EntityDeclaration,
     trace: DataFrame,
     window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
-    let mut client_pred = ident(SPAN_KIND_COLUMN)
-        .eq(lit(SPAN_KIND_CLIENT))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.source_start()))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.source_end()));
-    let mut server_pred = ident(SPAN_KIND_COLUMN)
-        .eq(lit(SPAN_KIND_SERVER))
-        // Static bounds implied by the window and the join's time-proximity
-        // conditions below; the join bounds reference client.timestamp and
-        // cannot prune the server-side scan.
-        .and(
-            ident(TRACE_TIMESTAMP_COLUMN)
-                .gt_eq(window.source_start() - interval(CHILD_SPAN_EARLY_NANOS)),
-        )
-        .and(
-            ident(TRACE_TIMESTAMP_COLUMN).lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)),
-        );
-    // A NULL identity component identifies nothing, on either endpoint.
-    for id in &service.id_columns {
-        client_pred = client_pred.and(ident(id).is_not_null());
-        server_pred = server_pred.and(ident(id).is_not_null());
-    }
-
-    let client = trace.clone().filter(client_pred)?.alias("client")?;
-    let server = trace.filter(server_pred)?.alias("server")?;
-
-    let join_conditions = vec![
-        qcol("client", TRACE_ID_COLUMN).eq(qcol("server", TRACE_ID_COLUMN)),
-        qcol("server", PARENT_SPAN_ID_COLUMN).eq(qcol("client", SPAN_ID_COLUMN)),
-        qcol("server", TRACE_TIMESTAMP_COLUMN)
-            .gt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
-        qcol("server", TRACE_TIMESTAMP_COLUMN)
-            .lt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
-    ];
-
-    client
-        .join_on(server, JoinType::Inner, join_conditions)?
+    trace
+        .filter(
+            ident(SPAN_KIND_COLUMN)
+                .eq(lit(SPAN_KIND_SERVER))
+                .and(span_predicate(service, window, false)),
+        )?
         .select(vec![
-            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            // The cast inside entity_id_expr also normalizes tag columns, which
-            // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| qcol("client", c)).alias("src_id"),
-            entity_id_expr(&service.id_columns, &|c| qcol("server", c)).alias("dst_id"),
-            qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
-            qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
-        ])?
-        // Exclude self-calls on the composed identity: an edge needs two
-        // distinct service entities.
-        .filter(ident("src_id").not_eq(ident("dst_id")))
+            ident(TRACE_TIMESTAMP_COLUMN),
+            ident(TRACE_ID_COLUMN),
+            ident(PARENT_SPAN_ID_COLUMN),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("dst_id"),
+            ident(SPAN_STATUS_CODE_COLUMN),
+            ident(DURATION_NANO_COLUMN),
+        ])
 }
 
 #[cfg(test)]
@@ -315,9 +473,29 @@ mod tests {
         GraphQueryWindow::from_observed(0, 10 * 60 * 1000)
     }
 
-    /// A trace-like table in the fixed `greptime_trace_v1` shape (ns timestamps).
-    fn trace_table_ctx() -> SessionContext {
-        let schema = Arc::new(Schema::new(vec![
+    /// One span row of the fixed `greptime_trace_v1` shape:
+    /// `(ts_ms, trace_id, span_id, parent_span_id, span_kind, status_code,
+    /// service_name, duration_nano)`.
+    type Span<'a> = (
+        i64,
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        &'a str,
+        &'a str,
+        u64,
+    );
+
+    /// Registers a trace-v1-shaped table (ns timestamps) plus optional dynamic
+    /// string columns (`extra`), one value per span.
+    fn register_trace_table(
+        ctx: &SessionContext,
+        name: &str,
+        extra: &[(&str, &[Option<&str>])],
+        spans: &[Span<'_>],
+    ) {
+        let mut fields = vec![
             Field::new(
                 TRACE_TIMESTAMP_COLUMN,
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -329,84 +507,94 @@ mod tests {
             Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
             Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
             Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
-            Field::new("service_namespace", DataType::Utf8, false),
             Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
-        ]));
+        ];
+        for (column, _) in extra {
+            fields.push(Field::new(*column, DataType::Utf8, true));
+        }
+        let schema = Arc::new(Schema::new(fields));
         const MS: i64 = 1_000_000;
-        // Two client->server pairs frontend->cart (one errored), one pair
-        // cart->cart (self-call, excluded), one unmatched client span.
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampNanosecondArray::from(vec![
-                    1_000 * MS, // client frontend->cart
-                    1_010 * MS, //   server cart
-                    2_000 * MS, // client frontend->cart (error)
-                    2_010 * MS, //   server cart (error)
-                    3_000 * MS, // client cart->cart (self-call)
-                    3_010 * MS, //   server cart
-                    4_000 * MS, // client with no matching server
-                ])) as ArrayRef,
-                Arc::new(StringArray::from(vec![
-                    "t1", "t1", "t2", "t2", "t3", "t3", "t4",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "c1", "s1", "c2", "s2", "c3", "s3", "c4",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    None,
-                    Some("c1"),
-                    None,
-                    Some("c2"),
-                    None,
-                    Some("c3"),
-                    None,
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_ERROR",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "frontend", "cart", "frontend", "cart", "cart", "cart", "frontend",
-                ])),
-                Arc::new(StringArray::from(vec!["ns1"; 7])),
-                Arc::new(UInt64Array::from(vec![
-                    0,
-                    500_000_000, // 0.5s
-                    0,
-                    1_500_000_000, // 1.5s
-                    0,
-                    100,
-                    0,
-                ])),
-            ],
-        )
-        .unwrap();
-        let ctx = SessionContext::new();
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(TimestampNanosecondArray::from(
+                spans.iter().map(|s| s.0 * MS).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.2).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.3).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.4).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.5).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                spans.iter().map(|s| s.6).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                spans.iter().map(|s| s.7).collect::<Vec<_>>(),
+            )),
+        ];
+        for (_, values) in extra {
+            columns.push(Arc::new(StringArray::from(values.to_vec())));
+        }
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         ctx.register_table(
-            "opentelemetry_traces",
-            Arc::new(MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap()),
-        )
-        .unwrap();
-        ctx.register_table(
-            "opentelemetry_traces_2",
+            name,
             Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
         )
         .unwrap();
+    }
+
+    const UNSET: &str = "STATUS_CODE_UNSET";
+    const ERROR: &str = "STATUS_CODE_ERROR";
+    const CLIENT: &str = "SPAN_KIND_CLIENT";
+    const SERVER: &str = "SPAN_KIND_SERVER";
+
+    /// Two client->server pairs frontend->cart (one errored), one pair
+    /// cart->cart (self-call, excluded), one unmatched client span.
+    const BASE_SPANS: [Span<'static>; 7] = [
+        (1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 0),
+        (
+            1_010,
+            "t1",
+            "s1",
+            Some("c1"),
+            SERVER,
+            UNSET,
+            "cart",
+            500_000_000,
+        ),
+        (2_000, "t2", "c2", None, CLIENT, UNSET, "frontend", 0),
+        (
+            2_010,
+            "t2",
+            "s2",
+            Some("c2"),
+            SERVER,
+            ERROR,
+            "cart",
+            1_500_000_000,
+        ),
+        (3_000, "t3", "c3", None, CLIENT, UNSET, "cart", 0),
+        (3_010, "t3", "s3", Some("c3"), SERVER, UNSET, "cart", 100),
+        (4_000, "t4", "c4", None, CLIENT, UNSET, "frontend", 0),
+    ];
+
+    fn trace_table_ctx() -> SessionContext {
+        let ctx = SessionContext::new();
+        let namespaces = [Some("ns1"); 7];
+        register_trace_table(
+            &ctx,
+            "opentelemetry_traces",
+            &[("service_namespace", &namespaces)],
+            &BASE_SPANS,
+        );
         ctx
     }
 
@@ -483,22 +671,150 @@ mod tests {
         assert!(json_texts(batch, 15)[0].is_none());
     }
 
+    /// RED columns of one output row: `(request_count, error_count,
+    /// duration_sum, duration_count)`.
+    fn red_metrics(batch: &RecordBatch, row: usize) -> (i64, i64, f64, i64) {
+        let i64_at = |column: usize| {
+            batch
+                .column(column)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row)
+        };
+        let duration_sum = batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(row);
+        (i64_at(11), i64_at(12), duration_sum, i64_at(14))
+    }
+
+    fn confidence(batch: &RecordBatch, row: usize) -> f64 {
+        batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(row)
+    }
+
+    fn sources(traces: &[(&str, DataFrame)]) -> Vec<CallsSource> {
+        traces
+            .iter()
+            .map(|(_, scan)| CallsSource {
+                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                scan: scan.clone(),
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn calls_plan_merges_edges_across_trace_tables() {
-        let ctx = trace_table_ctx();
-        let t1 = ctx.table("opentelemetry_traces").await.unwrap();
-        let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
-        let plan = build_relationships_plan_for_test(
-            vec![
-                CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                    scan: t1,
-                },
-                CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                    scan: t2,
-                },
+        let ctx = SessionContext::new();
+        // Distinct traces observing the same frontend->cart edge, one per table.
+        register_trace_table(
+            &ctx,
+            "trace_a",
+            &[],
+            &[
+                (1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 0),
+                (
+                    1_010,
+                    "t1",
+                    "s1",
+                    Some("c1"),
+                    SERVER,
+                    UNSET,
+                    "cart",
+                    500_000_000,
+                ),
             ],
+        );
+        register_trace_table(
+            &ctx,
+            "trace_b",
+            &[],
+            &[
+                (2_000, "t2", "c2", None, CLIENT, UNSET, "frontend", 0),
+                (
+                    2_010,
+                    "t2",
+                    "s2",
+                    Some("c2"),
+                    SERVER,
+                    ERROR,
+                    "cart",
+                    1_500_000_000,
+                ),
+            ],
+        );
+        let a = ctx.table("trace_a").await.unwrap();
+        let b = ctx.table("trace_b").await.unwrap();
+        let plan =
+            build_relationships_plan_for_test(sources(&[("a", a), ("b", b)]), &test_window())
+                .unwrap()
+                .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // One edge row with the RED metrics of both tables' pairs.
+        assert_eq!(total, 1);
+        assert_eq!(red_metrics(&batches[0], 0), (2, 1, 2.0, 2));
+    }
+
+    #[tokio::test]
+    async fn calls_pair_split_across_trace_tables() {
+        let ctx = SessionContext::new();
+        // The client span and its child server span land in different tables
+        // (per-table trace routing): the union-then-join pairing must find it.
+        register_trace_table(
+            &ctx,
+            "trace_a",
+            &[],
+            &[(1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 0)],
+        );
+        register_trace_table(
+            &ctx,
+            "trace_b",
+            &[],
+            &[(
+                1_010,
+                "t1",
+                "s1",
+                Some("c1"),
+                SERVER,
+                UNSET,
+                "cart",
+                500_000_000,
+            )],
+        );
+        let a = ctx.table("trace_a").await.unwrap();
+        let b = ctx.table("trace_b").await.unwrap();
+        let plan =
+            build_relationships_plan_for_test(sources(&[("a", a), ("b", b)]), &test_window())
+                .unwrap()
+                .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        assert_eq!(strings(batch, 5), vec!["frontend"]);
+        assert_eq!(strings(batch, 7), vec!["cart"]);
+        assert_eq!(confidence(batch, 0), 1.0);
+        assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
+    }
+
+    #[tokio::test]
+    async fn empty_trace_table_does_not_change_edges() {
+        let ctx = trace_table_ctx();
+        register_trace_table(&ctx, "trace_empty", &[], &[]);
+        let base = ctx.table("opentelemetry_traces").await.unwrap();
+        let empty = ctx.table("trace_empty").await.unwrap();
+        let plan = build_relationships_plan_for_test(
+            sources(&[("base", base), ("empty", empty)]),
             &test_window(),
         )
         .unwrap()
@@ -506,28 +822,131 @@ mod tests {
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // The same frontend->cart edge from both tables folds into one row with
-        // summed RED metrics.
+        // Same single edge, same RED numbers as the single-table derivation.
+        assert_eq!(total, 1);
+        assert_eq!(red_metrics(&batches[0], 0), (2, 1, 2.0, 2));
+    }
+
+    #[tokio::test]
+    async fn virtual_node_edge_from_unmatched_client() {
+        let ctx = SessionContext::new();
+        register_trace_table(
+            &ctx,
+            "trace_a",
+            &[(
+                "span_attributes.peer.service",
+                &[Some("redis"), None, Some("frontend")],
+            )],
+            &[
+                // Unmatched client naming its peer: a virtual-node edge with
+                // the client's own status and duration.
+                (
+                    1_000,
+                    "t1",
+                    "c1",
+                    None,
+                    CLIENT,
+                    ERROR,
+                    "frontend",
+                    250_000_000,
+                ),
+                // Unmatched client without a peer attribute: no edge.
+                (2_000, "t2", "c2", None, CLIENT, UNSET, "frontend", 0),
+                // Peer attribute naming the client's own service: excluded.
+                (3_000, "t3", "c3", None, CLIENT, UNSET, "frontend", 0),
+            ],
+        );
+        let a = ctx.table("trace_a").await.unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+            .unwrap()
+            .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 1);
         let batch = &batches[0];
-        let request_count = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<Int64Array>()
+        assert_eq!(strings(batch, 5), vec!["frontend"]);
+        assert_eq!(strings(batch, 7), vec!["redis"]);
+        assert_eq!(strings(batch, 8), vec!["calls"]);
+        assert_eq!(strings(batch, 9), vec!["trace"]);
+        assert_eq!(confidence(batch, 0), VIRTUAL_NODE_CONFIDENCE);
+        assert_eq!(red_metrics(batch, 0), (1, 1, 0.25, 1));
+        assert_eq!(
+            json_texts(batch, 15),
+            vec![Some(r#"{"connection_type":"virtual_node"}"#.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_endpoint_fallback_and_connection_type() {
+        let ctx = SessionContext::new();
+        register_trace_table(
+            &ctx,
+            "trace_a",
+            &[
+                // An empty peer.service must fall through to db.name, whose
+                // match maps connection_type to `database`.
+                ("span_attributes.peer.service", &[Some("")]),
+                ("span_attributes.db.name", &[Some("mysql")]),
+            ],
+            &[(1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 100)],
+        );
+        let a = ctx.table("trace_a").await.unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+            .unwrap()
             .unwrap();
-        assert_eq!(request_count.value(0), 4);
-        let error_count = batch
-            .column(12)
-            .as_any()
-            .downcast_ref::<Int64Array>()
+
+        let batches = collect(&ctx, plan).await;
+        let batch = &batches[0];
+        assert_eq!(strings(batch, 7), vec!["mysql"]);
+        assert_eq!(
+            json_texts(batch, 15),
+            vec![Some(r#"{"connection_type":"database"}"#.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn real_pair_suppresses_virtual_edge() {
+        let ctx = SessionContext::new();
+        register_trace_table(
+            &ctx,
+            "trace_a",
+            &[(
+                "span_attributes.peer.service",
+                &[Some("cart"), None, Some("cart")],
+            )],
+            &[
+                // A sampled-out server: the client names the same peer an
+                // actual pair witnesses in the same window.
+                (1_000, "t1", "c1", None, CLIENT, ERROR, "frontend", 999),
+                (
+                    2_010,
+                    "t2",
+                    "s2",
+                    Some("c2"),
+                    SERVER,
+                    UNSET,
+                    "cart",
+                    500_000_000,
+                ),
+                (2_000, "t2", "c2", None, CLIENT, UNSET, "frontend", 0),
+            ],
+        );
+        let a = ctx.table("trace_a").await.unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+            .unwrap()
             .unwrap();
-        assert_eq!(error_count.value(0), 2);
-        let duration_sum = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!((duration_sum.value(0) - 4.0).abs() < 1e-9);
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // One (window, edge) row: the pair population wins; the unmatched
+        // client neither adds a second row nor inflates the pair RED metrics.
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        assert_eq!(strings(batch, 7), vec!["cart"]);
+        assert_eq!(confidence(batch, 0), 1.0);
+        assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
+        assert!(json_texts(batch, 15)[0].is_none());
     }
 
     #[tokio::test]
