@@ -108,6 +108,11 @@ impl AdminFunctionEvent {
             }),
         }
     }
+
+    /// Creates a failed ADMIN function event for a cancelled execution.
+    pub(crate) fn cancelled(input: AdminFunctionEventInput) -> Self {
+        Self::failure(input, &Error::AdminFunctionCancelled)
+    }
 }
 
 impl Event for AdminFunctionEvent {
@@ -166,26 +171,8 @@ fn sql_value_to_json(value: &SqlValue) -> JsonValue {
 }
 
 fn value_to_json(value: &Value) -> JsonValue {
-    match value {
-        Value::Null => JsonValue::Null,
-        Value::Boolean(value) => JsonValue::Bool(*value),
-        Value::UInt8(value) => JsonValue::from(*value),
-        Value::UInt16(value) => JsonValue::from(*value),
-        Value::UInt32(value) => JsonValue::from(*value),
-        Value::UInt64(value) => JsonValue::from(*value),
-        Value::Int8(value) => JsonValue::from(*value),
-        Value::Int16(value) => JsonValue::from(*value),
-        Value::Int32(value) => JsonValue::from(*value),
-        Value::Int64(value) => JsonValue::from(*value),
-        Value::Float32(value) => serde_json::Number::from_f64(value.0 as f64)
-            .map(JsonValue::Number)
-            .unwrap_or_else(|| JsonValue::String(UNSUPPORTED.to_string())),
-        Value::Float64(value) => serde_json::Number::from_f64(value.0)
-            .map(JsonValue::Number)
-            .unwrap_or_else(|| JsonValue::String(UNSUPPORTED.to_string())),
-        Value::String(value) => JsonValue::String(value.as_utf8().to_string()),
-        _ => JsonValue::String(UNSUPPORTED.to_string()),
-    }
+    JsonValue::try_from(value.clone())
+        .unwrap_or_else(|_| JsonValue::String(UNSUPPORTED.to_string()))
 }
 
 #[cfg(test)]
@@ -207,7 +194,7 @@ mod tests {
     use crate::error::Error;
     use crate::statement::admin::AdminFunctionRequest;
     use crate::statement::admin::event::{
-        ADMIN_FUNCTION_EVENT_TYPE, AdminFunctionEvent, AdminFunctionEventInput,
+        ADMIN_FUNCTION_EVENT_TYPE, AdminFunctionEvent, AdminFunctionEventInput, value_to_json,
     };
 
     fn request(sql: &str) -> AdminFunctionRequest {
@@ -335,6 +322,27 @@ mod tests {
                 "version": 1,
                 "arguments": ["greptime.public.demo"],
             })
+        );
+    }
+
+    #[test]
+    fn cancellation_uses_debug_error_format() {
+        let input = AdminFunctionEventInput::from_request(&request("ADMIN flush_table('demo')"));
+        let event = AdminFunctionEvent::cancelled(input);
+
+        assert_admin_columns(
+            &event,
+            "flush_table",
+            "Failed",
+            json!({"error": format!("{:?}", Error::AdminFunctionCancelled)}),
+        );
+    }
+
+    #[test]
+    fn serializes_binary_result() {
+        assert_eq!(
+            value_to_json(&Value::from(vec![1_u8, 2, 3])),
+            json!([1, 2, 3])
         );
     }
 }

@@ -445,6 +445,11 @@ fn test_load_event_types_from_env() {
                 .component
                 .event_recorder
                 .event_types,
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
         ] {
             assert!(event_types.allows("region_migration"));
             assert!(!event_types.allows("other_event"));

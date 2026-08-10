@@ -96,16 +96,51 @@ impl AdminFunctionService for AdminFunctionRecordingService {
                 .event_type_filter()
                 .allows(ADMIN_FUNCTION_EVENT_TYPE)
         });
-        let input = enabled.then(|| AdminFunctionEventInput::from_request(&request));
+        let mut recording = AdminFunctionRecordingGuard::new(
+            enabled.then(|| AdminFunctionEventInput::from_request(&request)),
+            self.recorder.clone(),
+        );
         let result = self.inner.call(request).await;
-        if let (Some(input), Some(recorder)) = (input, self.recorder.upgrade()) {
-            let event = match &result {
-                Ok(response) => AdminFunctionEvent::success(input, &response.immediate_result),
-                Err(error) => AdminFunctionEvent::failure(input, error),
-            };
-            recorder.record(Box::new(event));
-        }
+        recording.record_result(&result);
         result
+    }
+}
+
+/// Records an ADMIN event after completion or when an in-flight call is dropped.
+struct AdminFunctionRecordingGuard {
+    input: Option<AdminFunctionEventInput>,
+    recorder: AdminEventRecorderHandle,
+}
+
+impl AdminFunctionRecordingGuard {
+    fn new(input: Option<AdminFunctionEventInput>, recorder: AdminEventRecorderHandle) -> Self {
+        Self { input, recorder }
+    }
+
+    fn record_result(&mut self, result: &Result<AdminFunctionResponse>) {
+        let Some(input) = self.input.take() else {
+            return;
+        };
+        let Some(recorder) = self.recorder.upgrade() else {
+            return;
+        };
+        let event = match result {
+            Ok(response) => AdminFunctionEvent::success(input, &response.immediate_result),
+            Err(error) => AdminFunctionEvent::failure(input, error),
+        };
+        recorder.record(Box::new(event));
+    }
+}
+
+impl Drop for AdminFunctionRecordingGuard {
+    fn drop(&mut self) {
+        let Some(input) = self.input.take() else {
+            return;
+        };
+        let Some(recorder) = self.recorder.upgrade() else {
+            return;
+        };
+        recorder.record(Box::new(AdminFunctionEvent::cancelled(input)));
     }
 }
 
@@ -114,6 +149,7 @@ mod tests {
     use std::collections::HashSet;
     use std::fmt::{Debug, Formatter};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use common_event_recorder::{
         Event, EventRecorder, EventRecorderRef, EventTypeFilter, EventTypeFilterRef,
@@ -124,6 +160,7 @@ mod tests {
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
+    use tokio::sync::Notify;
 
     use crate::error::Result;
     use crate::statement::admin::layer::{AdminEventRecorderHandle, AdminFunctionRecordingLayer};
@@ -178,6 +215,18 @@ mod tests {
                 trace.lock().unwrap().push("core");
             }
             Ok(response())
+        }
+    }
+
+    struct PendingService {
+        started: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl AdminFunctionService for PendingService {
+        async fn call(&self, _request: AdminFunctionRequest) -> Result<AdminFunctionResponse> {
+            self.started.notify_one();
+            std::future::pending().await
         }
     }
 
@@ -271,6 +320,64 @@ mod tests {
         drop(recorder);
         assert!(handle.upgrade().is_none());
         future.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recording_does_not_retain_recorder_while_pending() {
+        let recorder = Arc::new(TestRecorder::new(EventTypeFilter::All));
+        let recorder_ref: EventRecorderRef = recorder.clone();
+        let handle = AdminEventRecorderHandle::default();
+        handle.install(&recorder_ref);
+        let started = Arc::new(Notify::new());
+        let service =
+            AdminFunctionRecordingLayer::new(handle.clone()).layer(Arc::new(PendingService {
+                started: started.clone(),
+            }));
+
+        let task = tokio::spawn(async move { service.call(request()).await });
+        started.notified().await;
+        drop(recorder_ref);
+        drop(recorder);
+
+        assert!(handle.upgrade().is_none());
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_call_records_failure() {
+        let recorder = Arc::new(TestRecorder::new(EventTypeFilter::All));
+        let recorder_ref: EventRecorderRef = recorder.clone();
+        let handle = AdminEventRecorderHandle::default();
+        handle.install(&recorder_ref);
+        let started = Arc::new(Notify::new());
+        let service = AdminFunctionRecordingLayer::new(handle).layer(Arc::new(PendingService {
+            started: started.clone(),
+        }));
+
+        let task = tokio::spawn(async move { service.call(request()).await });
+        started.notified().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(recorder.events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn timing_out_pending_call_records_failure() {
+        let recorder = Arc::new(TestRecorder::new(EventTypeFilter::All));
+        let recorder_ref: EventRecorderRef = recorder.clone();
+        let handle = AdminEventRecorderHandle::default();
+        handle.install(&recorder_ref);
+        let service = AdminFunctionRecordingLayer::new(handle).layer(Arc::new(PendingService {
+            started: Arc::new(Notify::new()),
+        }));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), service.call(request()))
+                .await
+                .is_err()
+        );
+        assert_eq!(recorder.events.lock().unwrap().len(), 1);
     }
 
     fn recording_service(handle: AdminEventRecorderHandle) -> AdminFunctionServiceRef {

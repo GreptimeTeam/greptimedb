@@ -183,7 +183,7 @@ impl CoreAdminFunctionService {
             (&result_columnar).try_into().context(CastSnafu)?;
 
         let result_vector: VectorRef = result_columnar.try_into_vector(1).context(CastSnafu)?;
-        let immediate_result = result_vector.get(0);
+        let immediate_result = immediate_result(&result_vector)?;
 
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
@@ -202,6 +202,14 @@ impl CoreAdminFunctionService {
             immediate_result,
         })
     }
+}
+
+fn immediate_result(result_vector: &VectorRef) -> Result<Value> {
+    ensure!(
+        !result_vector.is_empty(),
+        error::EmptyAdminFunctionResultSnafu
+    );
+    Ok(result_vector.get(0))
 }
 
 #[async_trait::async_trait]
@@ -382,5 +390,25 @@ fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
             msg: format!("unsupported sql value: {value}"),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::vectors::{Int32Vector, VectorRef};
+
+    use crate::error::Error;
+    use crate::statement::admin::immediate_result;
+
+    #[test]
+    fn rejects_empty_admin_function_result() {
+        let result_vector: VectorRef = Arc::new(Int32Vector::from(vec![]));
+
+        assert!(matches!(
+            immediate_result(&result_vector),
+            Err(Error::EmptyAdminFunctionResult)
+        ));
     }
 }
