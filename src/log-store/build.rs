@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Generates Rust protobuf bindings for `proto/logstore.proto`.
+//!
+//! Uses a supported compiler from `PROTOC` or `PATH` when available, and falls
+//! back to a prebuilt vendored compiler.
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use protoc_rust::{Codegen, Customize};
 
+/// Returns whether `protoc` runs and meets GreptimeDB's minimum supported version.
 fn usable_protoc(protoc: &Path) -> bool {
     let Ok(output) = Command::new(protoc).arg("--version").output() else {
         return false;
@@ -38,10 +44,14 @@ fn usable_protoc(protoc: &Path) -> bool {
             components.next().and_then(|part| part.parse::<u32>().ok()),
             components.next().and_then(|part| part.parse::<u32>().ok()),
         ),
-        (Some(major), Some(minor)) if (major, minor) >= (3, 1)
+        (Some(major), Some(minor)) if (major, minor) >= (3, 15)
     )
 }
 
+/// Selects a compiler from `PROTOC`, `PATH`, or the vendored fallback, in that order.
+///
+/// An invalid explicit `PROTOC` is rejected so configuration errors are not
+/// silently masked.
 fn protoc_path() -> PathBuf {
     if let Some(protoc) = env::var_os("PROTOC") {
         let protoc = PathBuf::from(protoc);
