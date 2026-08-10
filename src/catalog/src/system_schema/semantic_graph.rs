@@ -59,22 +59,17 @@ use crate::system_schema::{SystemSchemaProviderInner, SystemTable, SystemTableRe
 
 pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 
-/// Produces the rows of the computed entity-graph tables
-/// (`semantic_entities` / `semantic_relationships`) at read time.
+/// Produces the rows of the computed entity-graph tables at read time.
 ///
-/// The computed tables are thin forwarders to this provider, which is
-/// implemented above the query engine (in the frontend): it enumerates the entity
-/// declarations from `table_semantics`, builds the typed derivation plans, and
-/// executes them. It is injected into the catalog manager *after* construction —
-/// the provider needs the engine, which needs the catalog manager — so this late
-/// binding breaks the `catalog -> query` dependency cycle. Keeping derivation out
-/// of `catalog` also respects the crate layering (the plan builders live in
-/// `operator`). See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
-/// The derivation contract requires running as the caller (RFC "The contract"):
-/// `query_ctx` is the outer query's context, captured when the computed table is
-/// resolved. The provider must derive only from source tables that context may
-/// read, and execute under it so the derivation inherits the caller's
-/// permissions, cancellation and deadline. `None` (context-less internal
+/// Implemented above the query engine (in the frontend) and injected into the
+/// catalog manager *after* construction — the provider needs the engine, which
+/// needs the catalog manager — so this late binding breaks the
+/// `catalog -> query` dependency cycle.
+///
+/// `query_ctx` is the outer query's context, captured when the computed table
+/// is resolved: the derivation must read only sources that context may read
+/// and execute under it, inheriting the caller's permissions, cancellation and
+/// deadline (the RFC's derivation contract). `None` (context-less internal
 /// resolution) keeps the provider's default behaviour.
 #[async_trait::async_trait]
 pub trait EntityGraphProvider: Send + Sync {

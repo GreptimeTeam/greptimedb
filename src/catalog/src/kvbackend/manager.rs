@@ -685,8 +685,7 @@ impl SystemCatalog {
         {
             // Constructed on demand (the provider is a name + a weak ref); the
             // system catalog is consulted before physical resolution, so the
-            // computed tables shadow same-named physical tables by design. The
-            // caller's context rides along so the derivation runs as the caller.
+            // computed tables shadow same-named physical tables by design.
             SemanticGraphTableProvider::new(
                 catalog.to_string(),
                 self.catalog_manager.clone(),

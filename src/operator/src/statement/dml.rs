@@ -43,9 +43,8 @@ impl StatementExecutor {
         }
     }
 
-    /// A DDL-reserved table (the declared-edge table of the entity graph) is
-    /// defined by the system, not the user: its first INSERT creates it here
-    /// with the canonical schema.
+    /// A DDL-reserved table is defined by the system, not the user: its first
+    /// INSERT creates it here with the canonical schema.
     async fn create_ddl_reserved_target_on_demand(
         &self,
         insert: &Insert,
