@@ -30,18 +30,18 @@ use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, NativeHistogramAbsentOverTime,
-    NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg,
-    NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
-    NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDivScalar,
-    NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta,
-    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
-    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
-    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
-    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
-    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
-    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
-    StdvarOverTime, SumOverTime, quantile_udaf,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
+    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
+    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
+    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
+    NativeHistogramToString, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round,
+    StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -195,6 +195,8 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramIRate::scalar_udf(),
             NativeHistogramIncrease::scalar_udf(),
             NativeHistogramLastOverTime::scalar_udf(),
+            MixedRange::float_udf(None),
+            MixedRange::histogram_udf(None),
             NativeHistogramMulScalar::scalar_udf(),
             NativeHistogramNeg::scalar_udf(),
             NativeHistogramNotEq::scalar_udf(),
@@ -240,10 +242,14 @@ mod tests {
     use common_query::native_histogram::native_histogram_value_type;
     use datafusion::catalog::TableProvider;
     use datafusion::datasource::MemTable;
+    use datafusion::logical_expr::Extension;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, col, lit};
-    use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit,
+    };
     use datatypes::data_type::DataType;
+    use promql::extension_plan::RangeManipulate;
     use session::context::QueryContext;
 
     use super::*;
@@ -374,5 +380,82 @@ mod tests {
         assert!(decoded.contains("prom_native_histogram_count"));
         assert!(decoded.contains("prom_native_histogram_drop_bool"));
         assert!(decoded.contains("prom_native_histogram_drop_float"));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("float", ArrowDataType::Float64, true),
+            Field::new(
+                "histogram",
+                native_histogram_value_type().as_arrow_type(),
+                true,
+            ),
+        ]));
+        let input = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let input = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RangeManipulate::new(
+                    0,
+                    1000,
+                    1000,
+                    1000,
+                    "timestamp".to_string(),
+                    vec!["float".to_string(), "histogram".to_string()],
+                    input,
+                )
+                .unwrap(),
+            ),
+        });
+        let plan = LogicalPlanBuilder::from(input)
+            .project(vec![
+                Expr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(MixedRange::float_udf(None)),
+                    args: vec![
+                        lit("last_over_time"),
+                        col("timestamp_range"),
+                        col("float"),
+                        col("histogram"),
+                    ],
+                })
+                .alias("mixed_float"),
+                Expr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(MixedRange::histogram_udf(None)),
+                    args: vec![
+                        lit("last_over_time"),
+                        col("timestamp_range"),
+                        col("float"),
+                        col("histogram"),
+                    ],
+                })
+                .alias("mixed_histogram"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let decoded = plan_decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(decoded.contains("prom_mixed_range_float"));
+        assert!(decoded.contains("prom_mixed_range_histogram"));
     }
 }
