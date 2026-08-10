@@ -1,0 +1,36 @@
+src/meta-srv/src/region/lease_keeper.rs
+  b93e345fdc2c0142 701-794
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "22b82f878853ddd00324391c7e211cb824f16f9d",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 188,
+      "overriden_lines": 0
+    },
+    "b93e345fdc2c0142": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26bb01a35ffeftI2tzva9pjI56",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 95,
+      "total_deletions": 0,
+      "accepted_lines": 95,
+      "overriden_lines": 0
+    }
+  }
+}

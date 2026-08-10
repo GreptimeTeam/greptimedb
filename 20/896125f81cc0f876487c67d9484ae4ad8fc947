@@ -1,0 +1,56 @@
+src/mito2/src/region/opener.rs
+  f1bfc1bf415ea1ad 20
+src/mito2/src/engine/set_role_state_test.rs
+  36153f7efba44e98 246,253,266,285,334-360,363-376,383-385,394-398,416-417,419-420,422-424,430,441-443,445-456,463-464,472,474,476-477,407-409,411-415,418,421,426-427,431-432,468
+  f1bfc1bf415ea1ad 465,22-24,377-382,386-393,399-406,429,433-440,444,457-462,466-467,469-471,473,475
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  f1bfc1bf415ea1ad 336
+src/mito2/src/engine.rs
+  36153f7efba44e98 1117-1119
+src/mito2/src/worker/handle_enter_staging.rs
+  f1bfc1bf415ea1ad 45,282,284
+src/store-api/src/region_engine.rs
+  36153f7efba44e98 70,213-217,229,237
+src/mito2/src/region.rs
+  36153f7efba44e98 331-341,1091,1093,1096,1165-1169,1758-1759
+  f1bfc1bf415ea1ad 895-896,402-403,827,845-846,860-861,881-885,893,897-913,915-918,920-932,1126-1130,1134,1139
+src/datanode/src/region_server.rs
+  36153f7efba44e98 363
+src/mito2/src/worker/handle_apply_staging.rs
+  f1bfc1bf415ea1ad 78
+src/mito2/src/engine/staging_test.rs
+  f1bfc1bf415ea1ad 550
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "20896125f81cc0f876487c67d9484ae4ad8fc947",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 130,
+      "overriden_lines": 0
+    },
+    "f1bfc1bf415ea1ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e81583dffes9EBl85vuBOy6u",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 175,
+      "total_deletions": 92,
+      "accepted_lines": 112,
+      "overriden_lines": 0
+    }
+  }
+}

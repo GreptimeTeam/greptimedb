@@ -1,0 +1,69 @@
+src/common/runtime/src/runtime_default.rs
+  2900e819df744736 20,42-49
+src/mito2/src/compaction.rs
+  c053f08d7a809167 190,203,205-217,260-262,269,292,313,344-348,354,377,379-385,447,452-453,458,531,562,594,596,610,646,649-651,654-660,662-663,665-666,670,672-674,677-679,798-799,816,820-826,829-831,834-835,839-844,847,851,854,858-859,880,1514,1516-1564,1749,1774,1776-1777,1779,1783,1785,1789-1790,1802,1805,1808,1820,1823,1833,1847,1864,1867,1874,1894,2061,2101,2177,2228,2270
+  fa296ac97777ca7b 652-653,668-669,845-846,848-850,852-853
+  2900e819df744736 881-886,1875,1899
+src/mito2/src/compaction/task.rs
+  fa296ac97777ca7b 19,26,191,246,297-301,305,325
+  c053f08d7a809167 46-47,254,293-294
+  2900e819df744736 247,249-252,296,302-304,306-324,336
+src/mito2/src/worker/handle_enter_staging.rs
+  c053f08d7a809167 22,102
+  2900e819df744736 103-115,117-119
+src/mito2/src/worker/handle_compaction.rs
+  c053f08d7a809167 134,136
+src/common/runtime/src/global.rs
+  2900e819df744736 23,196-203
+src/mito2/src/compaction/compactor.rs
+  2900e819df744736 15,431-449,451-456,458-461,465-473,505-508,600-639,645-649,652-656
+  fa296ac97777ca7b 450,457,462-464,504,640-644,650-651
+src/common/runtime/src/lib.rs
+  2900e819df744736 26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "0ec982e2e072b3c26730d033e3d702f86d6e669d",
+  "prompts": {
+    "2900e819df744736": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e74a5d5ffeVYFkG6JdeV3a9M",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 316,
+      "total_deletions": 111,
+      "accepted_lines": 173,
+      "overriden_lines": 0
+    },
+    "c053f08d7a809167": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28edf769fffe86C9OMUfgAUXWq",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 367,
+      "total_deletions": 557,
+      "accepted_lines": 233,
+      "overriden_lines": 3
+    },
+    "fa296ac97777ca7b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28e022eaeffeytKq92ZwEaSRy5",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 124,
+      "total_deletions": 164,
+      "accepted_lines": 38,
+      "overriden_lines": 0
+    }
+  }
+}

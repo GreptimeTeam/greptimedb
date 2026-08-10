@@ -1,0 +1,31 @@
+src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
+  766f83437f082beb 300
+src/meta-srv/src/region/lease_keeper.rs
+  766f83437f082beb 379,384-388,488,690
+src/common/meta/src/region_keeper.rs
+  766f83437f082beb 153-160
+src/meta-srv/src/handler/region_lease_handler.rs
+  766f83437f082beb 284
+src/meta-srv/src/procedure/region_migration/update_metadata/upgrade_candidate_region.rs
+  766f83437f082beb 234,471
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "b6bb7ef5ab473496cf692d73769b98cba449c6c1",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 65,
+      "total_deletions": 22,
+      "accepted_lines": 208,
+      "overriden_lines": 0
+    }
+  }
+}

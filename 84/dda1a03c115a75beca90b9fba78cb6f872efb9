@@ -1,0 +1,31 @@
+src/store-api/src/region_engine.rs
+  36153f7efba44e98 70,213-217,229,237,246-247
+src/datanode/src/region_server.rs
+  36153f7efba44e98 363
+src/mito2/src/engine.rs
+  36153f7efba44e98 1117-1119
+src/mito2/src/region.rs
+  36153f7efba44e98 336-346,1055,1057,1060,1092,1114-1118,1708-1709
+src/mito2/src/engine/set_role_state_test.rs
+  36153f7efba44e98 244,251,264,283,332-358,361-391,395-422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "84dda1a03c115a75beca90b9fba78cb6f872efb9",
+  "prompts": {
+    "36153f7efba44e98": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_292fc2caeffeCcI5PZCmCzXp3A",
+        "model": "github-copilot/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 670,
+      "total_deletions": 79,
+      "accepted_lines": 603,
+      "overriden_lines": 5
+    }
+  }
+}

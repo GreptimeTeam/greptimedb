@@ -1,0 +1,37 @@
+src/mito2/src/sst/parquet/read_columns.rs
+  529f9f74d95ff60d 1-316
+src/mito2/src/compaction.rs
+  529f9f74d95ff60d 606
+src/index/src/inverted_index/search/index_apply/predicates_apply.rs
+  529f9f74d95ff60d 97,99-103
+src/mito2/src/compaction/compactor.rs
+  529f9f74d95ff60d 304-320,322-323,325,443,445,490-508,513-516,524-529,539-547,550-559,561-578,587,670,677-679,681-685,697-770,791,808-951
+.github/scripts/check-version.sh
+  529f9f74d95ff60d 33-36,38-91,93-95,98-100
+src/cmd/src/cli.rs
+  529f9f74d95ff60d 105-107,112,118-151,156,163-170,177,200
+src/mito2/src/sst/parquet/reader.rs
+  529f9f74d95ff60d 82,410-414
+src/mito2/src/sst/parquet.rs
+  529f9f74d95ff60d 34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "370b06c9255a0f4f4f70a6a2309c6a08ded6bfc7",
+  "prompts": {
+    "529f9f74d95ff60d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_279e7252bffeQkJfvLe0MbiD6j",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 828,
+      "total_deletions": 83,
+      "accepted_lines": 771,
+      "overriden_lines": 0
+    }
+  }
+}

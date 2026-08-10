@@ -1,0 +1,36 @@
+src/common/meta/src/rpc/router.rs
+  cd18af3a85d37a1a 610-620,784-840
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "401ac6996fdd219bf2375abdc8e3f26db1b779b7",
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 188,
+      "overriden_lines": 0
+    },
+    "cd18af3a85d37a1a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26f928a85ffe4utQPKc1c41i3n",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 71,
+      "total_deletions": 1,
+      "accepted_lines": 70,
+      "overriden_lines": 0
+    }
+  }
+}

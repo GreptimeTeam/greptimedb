@@ -1,0 +1,23 @@
+src/meta-srv/src/procedure/repartition.rs
+  4f1906de513a33c5 1280-1307,1390-1403
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "47c4601e7e15728e0f2749565369abb458bfe098",
+  "prompts": {
+    "4f1906de513a33c5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_27425f8e9ffeTwGd8XEUqPxQnV",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 42,
+      "total_deletions": 0,
+      "accepted_lines": 745,
+      "overriden_lines": 0
+    }
+  }
+}

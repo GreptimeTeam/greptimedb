@@ -1,0 +1,29 @@
+src/meta-srv/src/procedure/repartition/plan.rs
+  90d36a67e630bdd3 65
+src/meta-srv/src/procedure/repartition/utils.rs
+  90d36a67e630bdd3 136-138
+src/meta-srv/src/procedure/repartition/group.rs
+  90d36a67e630bdd3 204
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  90d36a67e630bdd3 264,266,296-298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "d70cfb818434283861144a8cf662e8b7c11251b5",
+  "prompts": {
+    "90d36a67e630bdd3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26f15e863ffe6Nbhq4iKD6MY7q",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 27,
+      "total_deletions": 28,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    }
+  }
+}

@@ -1,0 +1,25 @@
+src/mito2/src/engine/compaction_test.rs
+  84c55db6f07e5b8c 21-22,716-792
+src/mito2/src/request.rs
+  84c55db6f07e5b8c 1172-1173,1178,1242-1254
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "ec4f2f53e7795107e74dc78a40eddc22aabd92b3",
+  "prompts": {
+    "84c55db6f07e5b8c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_2755eaf32ffeyHyY9xsPX8hQrk",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 110,
+      "total_deletions": 11,
+      "accepted_lines": 97,
+      "overriden_lines": 0
+    }
+  }
+}

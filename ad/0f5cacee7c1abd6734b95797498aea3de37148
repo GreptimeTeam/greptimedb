@@ -1,0 +1,35 @@
+src/meta-srv/src/procedure/repartition.rs
+  4f1906de513a33c5 62,66-68,82-85,88-91,517-533,547-549,558-601,618-622,624-630,633,658,880,909,913-922,924-932,935-941,972-973,1039-1048,1159-1168,1188-1194,1227-1405,1435-1444
+src/meta-srv/src/procedure/repartition/group.rs
+  4f1906de513a33c5 44,203-204,245-247,613
+src/meta-srv/src/procedure/repartition/utils.rs
+  4f1906de513a33c5 25-26,123-183,188-189,191,194,197-199,223-241,243-244,247-261,367-493
+src/meta-srv/src/procedure/repartition/allocate_region.rs
+  4f1906de513a33c5 24,29,107-108,262-267,272-278,282,286-288,293-330,413-414,463-476,493-495,520-522,555-557,582-584,604-606
+src/meta-srv/src/procedure/repartition/group/update_metadata.rs
+  4f1906de513a33c5 36
+src/meta-srv/src/procedure/repartition/deallocate_region.rs
+  4f1906de513a33c5 270
+src/meta-srv/src/procedure/repartition/plan.rs
+  4f1906de513a33c5 17,50,65-67,145,165,193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "ad0f5cacee7c1abd6734b95797498aea3de37148",
+  "prompts": {
+    "4f1906de513a33c5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_27425f8e9ffeTwGd8XEUqPxQnV",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "messages": [],
+      "total_additions": 1830,
+      "total_deletions": 959,
+      "accepted_lines": 1403,
+      "overriden_lines": 2
+    }
+  }
+}
