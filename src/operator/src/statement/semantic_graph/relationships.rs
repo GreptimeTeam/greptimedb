@@ -13,9 +13,10 @@
 // limitations under the License.
 
 //! The `semantic_relationships` derivation: the plan builders for every edge
-//! branch (trace-derived `calls`, the declared-edge union) behind the computed
-//! table. Shared expression helpers and the entity registry live in the parent
-//! module.
+//! branch behind the computed table — trace-derived service `calls` (with
+//! virtual-node edges for unmatched clients), agent `calls` from span
+//! structure, same-row co-declared edges, and the declared-edge union. Shared
+//! expression helpers and the entity registry live in the parent module.
 
 use common_catalog::consts::{
     DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
@@ -98,10 +99,10 @@ pub struct RelationshipSources {
     pub declared: Option<DeclaredSource>,
 }
 
-/// Builds the `semantic_relationships` plan: the trace-derived `calls` branch,
-/// the same-row co-declared branch, and the declared-edge branch unioned and
-/// re-projected to the 16-column contract. Returns `None` when no source can
-/// contribute edges, so the computed table streams empty.
+/// Builds the `semantic_relationships` plan: the service-calls, agent-calls,
+/// co-declared, and declared-edge branches unioned and re-projected to the
+/// 16-column contract. Returns `None` when no source can contribute edges, so
+/// the computed table streams empty.
 pub fn build_relationships_plan(
     sources: RelationshipSources,
     window: &GraphQueryWindow,
