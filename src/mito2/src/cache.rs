@@ -50,6 +50,7 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
+use uuid::Uuid;
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -1794,10 +1795,16 @@ impl PageRangeLookup {
 type PageFragmentRangeIndex = BTreeMap<(u64, u64), PageFragmentKey>;
 type PageFragmentIndex = HashMap<PageFragmentGroupKey, PageFragmentRangeIndex>;
 
+/// Number of lock shards for the page-range fragment index. The index is
+/// sharded by (file id, row group) so page fetches of different row groups take
+/// different locks instead of contending on a single global `RwLock`. Matches
+/// moka's default internal shard count for the `Cache` itself.
+const PAGE_INDEX_SHARD_COUNT: usize = 64;
+
 /// Byte-fragment cache for Parquet row-group reads.
 pub struct PageRangeCache {
     cache: Cache<PageFragmentKey, Bytes>,
-    index: RwLock<PageFragmentIndex>,
+    index: Vec<RwLock<PageFragmentIndex>>,
 }
 
 impl PageRangeCache {
@@ -1826,9 +1833,24 @@ impl PageRangeCache {
 
             PageRangeCache {
                 cache,
-                index: RwLock::new(HashMap::new()),
+                index: (0..PAGE_INDEX_SHARD_COUNT)
+                    .map(|_| RwLock::new(HashMap::new()))
+                    .collect(),
             }
         })
+    }
+
+    /// Returns the lock shard owning `group_key`.
+    ///
+    /// Inserts, lookups and evictions for one (file id, row group) always
+    /// resolve to the same shard, keeping the per-group fragment index
+    /// consistent while different row groups take different locks.
+    fn index_shard(&self, group_key: PageFragmentGroupKey) -> &RwLock<PageFragmentIndex> {
+        let file_hash = Uuid::from(group_key.file_id).as_u128() as u64;
+        // Golden-ratio constant spreads consecutive row-group indices across
+        // shards while random file ids already provide high-entropy low bits.
+        let hash = file_hash ^ (group_key.row_group_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        &self.index[hash as usize % self.index.len()]
     }
 
     fn lookup(
@@ -1931,9 +1953,10 @@ impl PageRangeCache {
             let size = page_cache_weight(&key, &bytes);
             CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
             self.cache.insert(key, bytes);
-            let mut index = self.index.write().unwrap();
+            let group_key = key.group_key();
+            let mut index = self.index_shard(group_key).write().unwrap();
             index
-                .entry(key.group_key())
+                .entry(group_key)
                 .or_default()
                 .insert((key.start, key.end), key);
         }
@@ -1949,7 +1972,7 @@ impl PageRangeCache {
             file_id,
             row_group_idx,
         };
-        let index = self.index.read().unwrap();
+        let index = self.index_shard(group_key).read().unwrap();
         index
             .get(&group_key)
             .map(|ranges| {
@@ -1965,7 +1988,7 @@ impl PageRangeCache {
 
     fn remove_uncached_index_entry(&self, key: PageFragmentKey) {
         let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
+        let mut index = self.index_shard(group_key).write().unwrap();
         if self.cache.contains_key(&key) {
             return;
         }
@@ -1975,7 +1998,7 @@ impl PageRangeCache {
 
     fn remove_index_entry(&self, key: PageFragmentKey) {
         let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
+        let mut index = self.index_shard(group_key).write().unwrap();
         Self::remove_index_entry_locked(&mut index, group_key, key);
     }
 
@@ -2597,6 +2620,123 @@ mod tests {
         let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
         assert!(!lookup.is_fully_cached());
         assert_eq!(vec![0..10], lookup.missing_ranges);
+    }
+
+    /// Micro-benchmark for the page-range cache index lock (LC7).
+    ///
+    /// Hammers `insert_ranges`/`lookup` from `THREADS` concurrent threads and
+    /// prints throughput (ops/sec) for two scenarios:
+    /// - distinct row-group keys per thread (the contention scenario: different
+    ///   row groups' page fetches should not contend on the index lock)
+    /// - the same row-group key for every thread (control: always contends)
+    ///
+    /// Run with `--no-capture` to see the numbers:
+    /// `cargo nextest run -p mito2 -E 'test(test_page_range_cache_lock_contention)' --no-capture`
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_page_range_cache_lock_contention() {
+        use std::hint::black_box;
+        use std::sync::Barrier;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const THREADS: usize = 8;
+        const FRAGMENT_SIZE: usize = 64;
+        const ROUNDS: usize = 3;
+        const MEASURE: Duration = Duration::from_millis(300);
+        const WARMUP: Duration = Duration::from_millis(150);
+
+        fn run_round(
+            cache: &Arc<CacheManager>,
+            threads: usize,
+            distinct_groups: bool,
+            duration: Duration,
+        ) -> u64 {
+            let file_id = FileId::random();
+            let barrier = Arc::new(Barrier::new(threads));
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    let cache = Arc::clone(cache);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        // Distinct row groups per thread in the contention scenario.
+                        let row_group_idx = if distinct_groups { t * 17 + 1 } else { 0 };
+                        let range = 0..FRAGMENT_SIZE as u64;
+                        let page = Bytes::from(vec![7u8; FRAGMENT_SIZE]);
+                        barrier.wait();
+                        let start = Instant::now();
+                        let mut ops = 0u64;
+                        while start.elapsed() < duration {
+                            cache.put_page_ranges(
+                                file_id,
+                                row_group_idx,
+                                std::slice::from_ref(&range),
+                                std::slice::from_ref(&page),
+                            );
+                            let lookup = cache.get_page_ranges(
+                                file_id,
+                                row_group_idx,
+                                std::slice::from_ref(&range),
+                            );
+                            black_box(lookup);
+                            ops += 2;
+                        }
+                        ops
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).sum()
+        }
+
+        let cache = Arc::new(CacheManager::builder().page_cache_size(1 << 30).build());
+
+        run_round(&cache, THREADS, true, WARMUP);
+
+        let mut distinct_rounds = Vec::with_capacity(ROUNDS);
+        let mut same_rounds = Vec::with_capacity(ROUNDS);
+        let mut single_rounds = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let distinct = run_round(&cache, THREADS, true, MEASURE);
+            let same = run_round(&cache, THREADS, false, MEASURE);
+            let single = run_round(&cache, 1, true, MEASURE);
+            distinct_rounds.push(distinct as f64 / MEASURE.as_secs_f64());
+            same_rounds.push(same as f64 / MEASURE.as_secs_f64());
+            single_rounds.push(single as f64 / MEASURE.as_secs_f64());
+        }
+
+        let summarize = |rounds: &[f64]| {
+            let mut sorted = rounds.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (
+                sorted[0],
+                sorted[sorted.len() / 2],
+                sorted[sorted.len() - 1],
+            )
+        };
+        let (d_min, d_med, d_max) = summarize(&distinct_rounds);
+        let (s_min, s_med, s_max) = summarize(&same_rounds);
+        let (u_min, u_med, u_max) = summarize(&single_rounds);
+
+        println!(
+            "[page_range_cache_lock] distinct-row-group ops/sec: min={d_min:.0} med={d_med:.0} max={d_max:.0}"
+        );
+        println!(
+            "[page_range_cache_lock] same-row-group    ops/sec: min={s_min:.0} med={s_med:.0} max={s_max:.0}"
+        );
+        println!(
+            "[page_range_cache_lock] single-threaded   ops/sec: min={u_min:.0} med={u_med:.0} max={u_max:.0}"
+        );
+        println!(
+            "[page_range_cache_lock] distinct/same throughput ratio: {:.2}x",
+            d_med / s_med
+        );
+        // Single-threaded overhead of the sharded lookup must stay negligible:
+        // sharding only adds an index fold before taking a lock. The floor is a
+        // sanity check against a catastrophic regression, not a perf gate.
+        assert!(
+            u_med >= 100_000.0,
+            "single-threaded throughput collapsed: {u_med:.0} ops/sec"
+        );
     }
 
     #[test]
