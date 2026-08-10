@@ -129,25 +129,13 @@ fn is_json_field(field: &Field) -> bool {
 /// name, same data type, and same nullability.
 ///
 /// Arrow `Field` metadata is auxiliary information (indexing, encoding,
-/// compression hints, ...) and does not participate in the comparison.
-///
-/// JSON columns are the only exception: their JSON identity keys
-/// (`greptime:type`, `ARROW:extension:metadata`) are semantic, so a JSON
-/// column is never semantically equal to a non-JSON column of the same
-/// physical type and two JSON columns must agree on those keys. The
-/// wire/decoded physical-type difference of JSON columns is exempted
+/// compression hints, ...) and does not participate in the comparison. This
+/// applies to every field, JSON columns included: JSON identity keys
+/// (`greptime:type`, `ARROW:extension:metadata`) are never compared here.
+/// The wire/decoded physical-type difference of JSON columns is exempted
 /// separately by [`json_fields_compatible`].
 fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
-    is_json_field(expected_field) == is_json_field(actual_field)
-        && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
-            == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
-        && expected_field
-            .metadata()
-            .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
-            == actual_field
-                .metadata()
-                .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
-        && expected_field.name() == actual_field.name()
+    expected_field.name() == actual_field.name()
         && expected_field.data_type() == actual_field.data_type()
         && expected_field.is_nullable() == actual_field.is_nullable()
 }
@@ -2726,9 +2714,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_json_vs_plain_binary_field() {
-        // A JSON column must not be accepted as compatible with a plain Binary
-        // column lacking the JSON extension metadata.
+    fn merge_scan_remote_schema_identity_ignores_json_extension_metadata_when_physical_type_matches()
+     {
+        // Field metadata (including the JSON extension identity) is not part
+        // of the semantic field identity: a JSON column in its binary wire
+        // form and a plain Binary column share the same name, physical type,
+        // and nullability, so they validate as equal.
         let expected = ArrowSchema::new(vec![
             Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
                 true,
@@ -2736,7 +2727,22 @@ mod tests {
             )),
         ]);
         let actual = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
-        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+
+        // The JSON compatibility exemption is scoped to JSON columns only: a
+        // pair of non-JSON fields with different physical types is still
+        // rejected even though one side is Binary.
+        let plain_binary = ArrowSchema::new(vec![Field::new("v", TestArrowDataType::Binary, true)]);
+        let plain_struct = ArrowSchema::new(vec![Field::new(
+            "v",
+            TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(Field::new(
+                "a",
+                TestArrowDataType::Utf8View,
+                true,
+            ))])),
+            true,
+        )]);
+        assert!(validate_remote_schema(&plain_binary, &plain_struct, "test").is_err());
     }
 
     #[test]
