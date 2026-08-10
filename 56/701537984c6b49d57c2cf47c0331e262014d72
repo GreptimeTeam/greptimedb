@@ -1,0 +1,80 @@
+config/standalone.example.toml
+  s_0d6f1ea5682a2e::t_9a91f06df883a3 925
+tests-integration/tests/admin_function_event.rs
+  s_0d6f1ea5682a2e::t_a24d8a6900111d 73-75,77,88-90,92
+  s_0d6f1ea5682a2e::t_aa6f38f90ae57c 97
+  s_0d6f1ea5682a2e::t_b002eb05dd36d9 25,69-72,78-79,84-87,93-94,99-100,111
+  s_dc87d83a9296b9::t_25897c0111593a 1-24,26-68,80-83,95-96,98,105-106,108-110,112-119
+  s_0d6f1ea5682a2e::t_8755a322b2675b 76,91,103
+  s_0d6f1ea5682a2e::t_5584c5d77179d9 101-102,104,107
+Cargo.lock
+  s_0d6f1ea5682a2e::t_a0b75d8d8a58da 9894
+src/operator/src/statement/admin/event.rs
+  s_0d6f1ea5682a2e::t_5584c5d77179d9 193-194,196-199,225-232,237-239,245-249,251,255,278-280,282-283,300-302,304-305,326-328,330-331
+  s_dc87d83a9296b9::t_7ac470214cd1ed 1-16,19-20,25-40,43-62,64-74,78-84,90-96,138,252,337-340
+  s_0d6f1ea5682a2e::t_55f57289353559 41-42,261,281,303,329
+  s_0d6f1ea5682a2e::t_952ab2889cbd52 17-18,21-24,75-77,85-89,100-104,120-137
+  s_0d6f1ea5682a2e::t_5e76b3f316ba0a 63,97-99,105-119,140-192,195,200-224,254,256-260,262-277,284-299,306-325,332-336
+  s_0d6f1ea5682a2e::t_2cbe4504bc2920 233-236,240-244,250
+  s_dc87d83a9296b9::t_2f84857fa161fe 139,253
+src/operator/src/statement/admin/layer.rs
+  s_8b303b46a38c84::t_be120c6debdde2 1-303
+src/operator/src/statement/admin.rs
+  s_dc87d83a9296b9::t_47d9cde3d581ad 15-17,34-37,48-90,186,200-235
+src/frontend/src/instance/builder.rs
+  s_0d6f1ea5682a2e::t_74dc07b44dcc33 25,42-43,324-327,342,349
+tests-integration/tests/main.rs
+  s_0d6f1ea5682a2e::t_e19aed90987ebe 17
+src/operator/Cargo.toml
+  s_3f02b45448515f::t_a7e3da0a82a790 36
+config/config.md
+  s_0d6f1ea5682a2e::t_792f9e2c82095b 237,375
+src/common/event-recorder/src/event_table.rs
+  s_0d6f1ea5682a2e::t_952ab2889cbd52 147-165
+  s_0d6f1ea5682a2e::t_4f79c335d6b989 412-444
+  s_0d6f1ea5682a2e::t_9ff75ca3ea7954 411
+config/frontend.example.toml
+  s_0d6f1ea5682a2e::t_0ec4cd23dae81f 408-411
+src/operator/src/statement.rs
+  s_3f02b45448515f::t_09c7d0f28e40d3 84-88,147,189,202,211-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "56701537984c6b49d57c2cf47c0331e262014d72",
+  "prompts": {},
+  "sessions": {
+    "s_0d6f1ea5682a2e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb02-a4f1-7522-93fb-ae8dd2c3f7a4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    },
+    "s_3f02b45448515f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb04-12f9-7d33-93fd-394a212a696d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_8b303b46a38c84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea61-c84d-7091-8f30-ff6275e94ed9",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_dc87d83a9296b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea5d-1e7c-7e41-bc20-c2bc7c90599f",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
