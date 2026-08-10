@@ -192,6 +192,12 @@ impl AlterTableProcedure {
                 // DDL manager can submit another procedure with locks for the current route.
                 return Ok(Status::done_with_output(RegionRouteChanged));
             }
+            ensure!(
+                !find_leaders(&physical_table_route.region_routes).is_empty(),
+                NoLeaderSnafu {
+                    table_id: physical_table_id
+                }
+            );
             self.data.region_distribution =
                 Some(region_distribution(&physical_table_route.region_routes));
         }
@@ -258,9 +264,8 @@ impl AlterTableProcedure {
                 MultipleResults::PartialRetryable(error) => Err(error),
                 MultipleResults::PartialNonRetryable(error)
                 | MultipleResults::AllNonRetryable(error) => {
-                    // The metadata already enables skip-WAL. Keep retrying until every
-                    // replica applies the runtime option instead of leaving the table in
-                    // a permanently inconsistent state.
+                    // The metadata already enables skip-WAL. Retry the idempotent request
+                    // so later attempts can update the remaining replicas.
                     Err(BoxedError::new(error)).context(RetryLaterSnafu {
                         clean_poisons: true,
                     })
