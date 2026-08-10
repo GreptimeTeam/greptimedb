@@ -35,10 +35,14 @@ pub enum TraceCoerceError {
 // models move from unsigned to signed integers while existing unsigned tables
 // keep accepting new signed ingest without an `ALTER TABLE`: an existing
 // UInt64/UInt32 column coerces an incoming Int64/Int32 request into the
-// existing type. Lossless for the non-negative values these built-in fields
-// always carry (counts, durations, flags):
-// - Int64 to UInt64  (e.g. trace `duration_nano`)
-// - Int32 to UInt32  (e.g. log `trace_flags`)
+// existing type:
+// - Int64 to UInt64  (e.g. trace `duration_nano`): checked, so negative
+//   values are rejected rather than silently wrapping. Counts and durations
+//   are non-negative by construction; a negative request is a malformed
+//   value (e.g. a span whose end precedes its start).
+// - Int32 to UInt32  (e.g. log `trace_flags`): bit-preserving, because
+//   `trace_flags` is a bit field whose high bits may legitimately be set
+//   (e.g. the W3C sampled flag); bit patterns must round-trip exactly.
 pub fn is_supported_trace_coercion(
     request_type: ColumnDataType,
     target_type: ColumnDataType,
@@ -99,11 +103,15 @@ pub fn coerce_non_null_value(
         (ColumnDataType::String, ColumnDataType::Boolean, ValueData::StringValue(s)) => {
             s.parse::<bool>().ok().map(ValueData::BoolValue)
         }
-        // Lossless signed -> unsigned casts for built-in fields moving to
-        // signed types (durations, counts, flags are always non-negative).
+        // Checked signed -> unsigned cast for built-in fields moving to signed
+        // types (durations, counts are always non-negative). Negative values
+        // are rejected instead of wrapping so the coercion stays lossless.
         (ColumnDataType::Int64, ColumnDataType::Uint64, ValueData::I64Value(n)) => {
-            Some(ValueData::U64Value(*n as u64))
+            u64::try_from(*n).ok().map(ValueData::U64Value)
         }
+        // Bit-preserving cast for the `trace_flags` bit field: high bits may
+        // legitimately be set, and the bit pattern must survive the round-trip
+        // into an existing UInt32 column unchanged.
         (ColumnDataType::Int32, ColumnDataType::Uint32, ValueData::I32Value(n)) => {
             Some(ValueData::U32Value(*n as u32))
         }
@@ -269,6 +277,20 @@ mod tests {
             ColumnDataType::Int64,
         );
         assert_eq!(result, Ok(Some(ValueData::U64Value(123))));
+    }
+
+    #[test]
+    fn test_coerce_negative_int64_to_uint64_rejected() {
+        // Negative values must not wrap into the unsigned column: the
+        // signed -> unsigned coercion is only lossless for non-negative
+        // inputs, so anything else is rejected instead of silently wrapping
+        // to a huge number.
+        let result = coerce_value_data(
+            &Some(ValueData::I64Value(-1)),
+            ColumnDataType::Uint64,
+            ColumnDataType::Int64,
+        );
+        assert_eq!(result, Err(TraceCoerceError::Unsupported));
     }
 
     #[test]

@@ -110,9 +110,9 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         ),
         make_column_data(
             DURATION_NANO_COLUMN,
-            ColumnDataType::Uint64,
-            Some(ValueData::U64Value(
-                span.end_in_nanosecond - span.start_in_nanosecond,
+            ColumnDataType::Int64,
+            Some(ValueData::I64Value(
+                (span.end_in_nanosecond - span.start_in_nanosecond) as i64,
             )),
         ),
         make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id)),
