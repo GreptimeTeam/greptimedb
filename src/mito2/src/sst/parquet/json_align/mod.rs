@@ -15,10 +15,8 @@
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::stream::BoxStream;
 
-mod schema;
 mod stream;
 
-pub(crate) use schema::align_schema_by_nested_paths;
 pub(crate) use stream::NestedSchemaAligner;
 
 use crate::error::Result;

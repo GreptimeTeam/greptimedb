@@ -56,7 +56,6 @@ use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
 };
-use crate::sst::parquet::json_align::align_schema_by_nested_paths;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -294,7 +293,7 @@ impl FlatReadFormat {
         }
     }
 
-    /// Gets the projected output schema produced by parquet reading.
+    /// Gets the projected output schema expected by the scan.
     pub(crate) fn output_arrow_schema(&self) -> Result<SchemaRef> {
         let read_columns = self.parquet_read_columns();
         let projection = read_columns.root_indices();
@@ -302,11 +301,6 @@ impl FlatReadFormat {
             .arrow_schema()
             .project(projection)
             .context(ComputeArrowSnafu)?;
-        if read_columns.has_nested() {
-            debug_assert_eq!(schema.fields().len(), read_columns.columns().len());
-            let nested_paths = read_columns.columns().iter().map(|x| x.nested_paths());
-            align_schema_by_nested_paths(&mut schema, nested_paths);
-        }
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
         for (column_id, target_type) in self.format_projection().json_target_types.iter() {
             let Some(index) = self

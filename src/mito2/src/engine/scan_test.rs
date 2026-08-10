@@ -203,8 +203,9 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
 "#;
     assert_eq!(batches.pretty_print()?, expected.trim());
 
-    // JSON type hints are derived from the whole query plan and may include
-    // columns from other table scans. Unknown hints must not fail this scan.
+    // JSON type hints are derived from the whole query plan, so they may include
+    // columns unrelated to this scan. Mito2 should ignore hints for unknown
+    // columns (`other_json`) and non-JSON2 columns (`tag_0`) instead of failing.
     let request = ScanRequest {
         projection: Some(vec![0]),
         json_type_hint: HashMap::from([
