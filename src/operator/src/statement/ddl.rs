@@ -1016,6 +1016,9 @@ impl StatementExecutor {
         expr: CreateViewExpr,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        // A view could otherwise squat a reserved name and block the canonical
+        // table's first-write creation.
+        ensure_table_definition_writable(&expr.schema_name, &expr.view_name)?;
         ensure! {
             !(expr.create_if_not_exists & expr.or_replace),
             InvalidSqlSnafu {
