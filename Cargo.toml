@@ -68,6 +68,7 @@ members = [
     "src/sql",
     "src/store-api",
     "src/table",
+    "src/tools/gtdb-log-loader",
     "tests-fuzz",
     "tests-integration",
     "tests/runner",

@@ -6068,6 +6068,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gtdb-log-loader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api",
+ "clap",
+ "client",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
