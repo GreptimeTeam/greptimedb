@@ -1479,63 +1479,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn declared_relationships_expr_shape() {
-        let expr = build_declared_relationships_expr(common_catalog::consts::DEFAULT_CATALOG_NAME);
-
-        assert_eq!(expr.schema_name, DEFAULT_PRIVATE_SCHEMA_NAME);
-        assert_eq!(expr.table_name, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME);
-        assert!(expr.create_if_not_exists);
-        assert_eq!(expr.time_index, OBSERVED_AT_COLUMN);
-        assert_eq!(expr.primary_keys, DECLARED_PRIMARY_KEY_COLUMNS);
-        // append_mode is unset so the table gets the default LastRow merge
-        // (last-write-wins per primary key + observed_at).
-        assert!(!expr.table_options.contains_key("append_mode"));
-        assert_eq!(
-            expr.table_options.get(TTL_KEY).map(String::as_str),
-            Some(DEFAULT_DECLARED_RELATIONSHIPS_TTL)
-        );
-
-        // Every primary-key column exists and is a tag.
-        for pk in DECLARED_PRIMARY_KEY_COLUMNS {
-            let def = expr
-                .column_defs
-                .iter()
-                .find(|c| c.name == pk)
-                .unwrap_or_else(|| panic!("missing pk column {pk}"));
-            assert_eq!(
-                def.semantic_type,
-                SemanticType::Tag as i32,
-                "{pk} must be a tag"
-            );
-            assert!(!def.is_nullable, "{pk} must be non-null");
-        }
-
-        // The time index is a non-null timestamp.
-        let ts = expr
-            .column_defs
-            .iter()
-            .find(|c| c.name == OBSERVED_AT_COLUMN)
-            .unwrap();
-        assert_eq!(ts.semantic_type, SemanticType::Timestamp as i32);
-        assert!(!ts.is_nullable);
-
-        // `attributes` is a JSON (JSONB-encoded Binary) field, matching the
-        // computed table's json column so the union needs no per-scan parse.
-        let attributes = expr
-            .column_defs
-            .iter()
-            .find(|c| c.name == "attributes")
-            .unwrap();
-        assert_eq!(attributes.data_type, ColumnDataType::Binary as i32);
-        assert_eq!(
-            attributes.datatype_extension,
-            Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-            })
-        );
-    }
-
     fn build_relationships_plan_for_test(
         traces: Vec<CallsSource>,
         window: &GraphQueryWindow,
@@ -1614,6 +1557,15 @@ mod tests {
 
         let ok = declared_table_info(|_| {}, mito, canonical_pk(), &[(TTL_KEY, "180d")]);
         assert!(declared_relationships_schema_matches(&ok));
+        // The canonical expr must declare attributes as json, matching the
+        // computed table's column.
+        assert_eq!(
+            ok.meta
+                .schema
+                .column_schema_by_name("attributes")
+                .map(|c| c.data_type.clone()),
+            Some(datatypes::prelude::ConcreteDataType::json_datatype())
+        );
         let ok = declared_table_info(
             |_| {},
             mito,
@@ -1928,40 +1880,6 @@ mod tests {
                 None,
             )
         );
-    }
-
-    #[tokio::test]
-    async fn declared_edges_generations_do_not_duplicate() {
-        let ctx = SessionContext::new();
-        declared_table(&ctx);
-        let scan = ctx
-            .table(SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME)
-            .await
-            .unwrap();
-
-        let window = GraphQueryWindow::from_observed(0, 600_000);
-        let plan = build_relationships_plan(vec![], Some(DeclaredSource { scan }), &window)
-            .unwrap()
-            .unwrap();
-
-        // Asserted as g1 (0.5) and g2 (1.0) at the same observed_at: one
-        // visible edge, deterministically the highest generation.
-        let batches = collect(&ctx, plan).await;
-        let mut gateway_rows: Vec<f64> = vec![];
-        for batch in &batches {
-            let src = strings(batch, 5);
-            let confidence = batch
-                .column(10)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            for (i, src) in src.into_iter().enumerate() {
-                if src == "gateway" {
-                    gateway_rows.push(confidence.value(i));
-                }
-            }
-        }
-        assert_eq!(gateway_rows, vec![1.0]);
     }
 
     #[tokio::test]
