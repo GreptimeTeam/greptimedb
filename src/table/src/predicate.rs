@@ -23,6 +23,7 @@ use datafusion::common::ScalarValue;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion_common::ToDFSchema;
 use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
@@ -251,10 +252,17 @@ pub fn extract_time_range_strict(
         {
             continue;
         }
-        // `Some` from the lenient extractor always over-approximates the
-        // expression's satisfying set (an `AND` side it cannot parse is dropped,
-        // which only widens; `OR` yields `Some` only when both sides parse), so
-        // intersecting extracted conjuncts stays an over-approximation.
+        // Disjunctive shapes (`OR`, `IN`) collapse disjoint ranges into their
+        // convex hull, which is not exactly representable as one contiguous
+        // range; callers deriving synthetic timestamps from the bounds would
+        // emit points inside the gaps.
+        if contains_disjunction_over_column(expr, ts_col_name) {
+            return TimeRangeExtraction::Unsupported;
+        }
+        // `Some` from the lenient extractor over-approximates the expression's
+        // satisfying set (an `AND` side it cannot parse is dropped, which only
+        // widens), so intersecting extracted conjuncts stays an
+        // over-approximation.
         match extract_time_range_from_expr(ts_col_name, ts_col_unit, expr) {
             Some(extracted) => {
                 range = Some(match range {
@@ -269,6 +277,22 @@ pub fn extract_time_range_strict(
         Some(range) => TimeRangeExtraction::Extracted(range),
         None => TimeRangeExtraction::Absent,
     }
+}
+
+fn contains_disjunction_over_column(expr: &Expr, ts_col_name: &str) -> bool {
+    let is_disjunction = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::BinaryExpr(BinaryExpr {
+                op: Operator::Or,
+                ..
+            }) | Expr::InList(_)
+        ) && expr
+            .column_refs()
+            .iter()
+            .any(|column| column.name == ts_col_name)
+    };
+    expr.exists(|expr| Ok(is_disjunction(expr))).unwrap_or(true)
 }
 
 /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.

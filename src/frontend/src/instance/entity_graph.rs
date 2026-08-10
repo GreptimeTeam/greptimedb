@@ -324,12 +324,15 @@ impl EntityGraphProviderImpl {
     /// predicate without a lower bound or in a shape that cannot be safely
     /// extracted is an error asking for an explicit range — never a silent
     /// fallback into incomplete results.
-    fn query_window(request: &ScanRequest) -> Result<GraphQueryWindow, BoxedError> {
+    /// `Ok(None)` = the window cannot match anything (e.g. a lower bound in
+    /// the future with the implicit "up to now" upper bound): the scan streams
+    /// empty instead of deriving.
+    fn query_window(request: &ScanRequest) -> Result<Option<GraphQueryWindow>, BoxedError> {
         let invalid =
             |err_msg: String| Err(BoxedError::new(error::InvalidSqlSnafu { err_msg }.build()));
         match extract_time_range_strict(OBSERVED_AT_COLUMN, TimeUnit::Millisecond, &request.filters)
         {
-            TimeRangeExtraction::Absent => Ok(GraphQueryWindow::default_last_hour()),
+            TimeRangeExtraction::Absent => Ok(Some(GraphQueryWindow::default_last_hour())),
             TimeRangeExtraction::Extracted(range) => {
                 let Some(start) = range.start() else {
                     return invalid(format!(
@@ -342,7 +345,10 @@ impl EntityGraphProviderImpl {
                     .end()
                     .map(|ts| ts.value())
                     .unwrap_or_else(common_time::util::current_time_millis);
-                Ok(GraphQueryWindow::from_observed(start.value(), end_ms))
+                if start.value() >= end_ms {
+                    return Ok(None);
+                }
+                Ok(Some(GraphQueryWindow::from_observed(start.value(), end_ms)))
             }
             TimeRangeExtraction::Unsupported => invalid(format!(
                 "cannot derive the graph window from the {OBSERVED_AT_COLUMN} filter; use plain \
@@ -456,7 +462,9 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(source.table)?,
             });
         }
-        let window = Self::query_window(&request)?;
+        let Some(window) = Self::query_window(&request)? else {
+            return Ok(None);
+        };
         let Some(plan) = build_registry_plan(plans, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
@@ -481,7 +489,9 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
             });
         }
         let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;
-        let window = Self::query_window(&request)?;
+        let Some(window) = Self::query_window(&request)? else {
+            return Ok(None);
+        };
         let Some(plan) = build_relationships_plan(scans, declared, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
@@ -554,6 +564,30 @@ mod tests {
             .meta(meta)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn future_lower_only_window_matches_nothing() {
+        let future_ms = common_time::util::current_time_millis() + 86_400_000;
+        let request = ScanRequest {
+            filters: vec![
+                datafusion_expr::col(OBSERVED_AT_COLUMN).gt_eq(datafusion_expr::lit(
+                    datafusion::common::ScalarValue::TimestampMillisecond(Some(future_ms), None),
+                )),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            EntityGraphProviderImpl::query_window(&request)
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(
+            EntityGraphProviderImpl::query_window(&ScanRequest::default())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

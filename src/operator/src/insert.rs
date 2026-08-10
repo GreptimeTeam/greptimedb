@@ -648,6 +648,9 @@ impl Inserter {
                         .create_declared_relationships_table(catalog, ctx.clone())
                         .await?;
                     let table_info = table.table_info();
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
                     table_infos.insert(table_info.table_id(), table_info);
                 }
                 None => {
