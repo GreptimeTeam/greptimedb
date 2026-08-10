@@ -686,8 +686,12 @@ impl SystemCatalog {
             // Constructed on demand (the provider is a name + a weak ref); the
             // system catalog is consulted before physical resolution, so the
             // computed tables shadow same-named physical tables by design.
-            SemanticGraphTableProvider::new(catalog.to_string(), self.catalog_manager.clone())
-                .table(table_name)
+            SemanticGraphTableProvider::new(
+                catalog.to_string(),
+                self.catalog_manager.clone(),
+                query_ctx.cloned().map(Arc::new),
+            )
+            .table(table_name)
         } else {
             None
         }
