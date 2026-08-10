@@ -68,9 +68,11 @@ const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
 const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
 /// A trace table's scan paired with the `service` declaration it derives
-/// `calls` edges for — a unit of `build_relationships_plan`.
+/// `calls` edges for — a unit of `build_relationships_plan`. A table that
+/// also declares an `agent` entity feeds the agent-calls derivation.
 pub struct CallsSource {
     pub service: EntityDeclaration,
+    pub agent: Option<EntityDeclaration>,
     pub scan: DataFrame,
 }
 
@@ -104,7 +106,10 @@ pub fn build_relationships_plan(
     sources: RelationshipSources,
     window: &GraphQueryWindow,
 ) -> DfResult<Option<LogicalPlan>> {
-    let mut union_df = calls_branch(sources.traces, window)?;
+    let mut union_df = calls_branch(&sources.traces, window)?;
+    if let Some(agent_calls) = agent_calls_branch(&sources.traces, window)? {
+        union_df = union_all(union_df, agent_calls)?;
+    }
     if let Some(co_declared) = co_declared_branch(sources.co_declared, window)? {
         union_df = union_all(union_df, co_declared)?;
     }
@@ -329,15 +334,15 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// pair, the edge reports only the pair population (the RFC pins RED metrics
 /// to observed span pairs) and the unmatched clients are suppressed, so one
 /// `(window, edge)` never yields two rows.
-fn calls_branch(
-    traces: Vec<CallsSource>,
-    window: &GraphQueryWindow,
-) -> DfResult<Option<DataFrame>> {
+fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<Option<DataFrame>> {
     let mut clients: Option<DataFrame> = None;
     let mut servers: Option<DataFrame> = None;
     for trace in traces {
-        clients = union_all(clients, client_spans(&trace, window)?)?;
-        servers = union_all(servers, server_spans(&trace.service, trace.scan, window)?)?;
+        clients = union_all(clients, client_spans(trace, window)?)?;
+        servers = union_all(
+            servers,
+            server_spans(&trace.service, trace.scan.clone(), window)?,
+        )?;
     }
     let (Some(clients), Some(servers)) = (clients, servers) else {
         return Ok(None);
@@ -573,6 +578,108 @@ fn server_spans(
         ])
 }
 
+/// The `parent_agent calls agent` derivation over trace tables declaring an
+/// `agent` entity: pair each span with its child span (no span-kind filter —
+/// agent spans are typically INTERNAL) across all agent-declaring tables, keep
+/// pairs whose agent identities differ, and aggregate RED metrics per 60s
+/// window. Anchored like the service derivation on the caller: the parent side
+/// is bounded to the source window and stamps `observed_at`, the child side
+/// widens by the time-proximity allowance and supplies status/duration.
+fn agent_calls_branch(
+    traces: &[CallsSource],
+    window: &GraphQueryWindow,
+) -> DfResult<Option<DataFrame>> {
+    let mut parents: Option<DataFrame> = None;
+    let mut children: Option<DataFrame> = None;
+    for trace in traces {
+        let Some(agent) = &trace.agent else {
+            continue;
+        };
+        let parent = trace
+            .scan
+            .clone()
+            .filter(span_predicate(agent, window, true))?
+            .select(vec![
+                ident(TRACE_TIMESTAMP_COLUMN),
+                ident(TRACE_ID_COLUMN),
+                ident(SPAN_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("src_id"),
+            ])?;
+        let child = trace
+            .scan
+            .clone()
+            .filter(span_predicate(agent, window, false))?
+            .select(vec![
+                ident(TRACE_TIMESTAMP_COLUMN),
+                ident(TRACE_ID_COLUMN),
+                ident(PARENT_SPAN_ID_COLUMN),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("dst_id"),
+                ident(SPAN_STATUS_CODE_COLUMN),
+                ident(DURATION_NANO_COLUMN),
+            ])?;
+        parents = union_all(parents, parent)?;
+        children = union_all(children, child)?;
+    }
+    let (Some(parents), Some(children)) = (parents, children) else {
+        return Ok(None);
+    };
+
+    let parent = parents.alias("parent")?;
+    let child = children.alias("child")?;
+    let join_conditions = vec![
+        qcol("parent", TRACE_ID_COLUMN).eq(qcol("child", TRACE_ID_COLUMN)),
+        qcol("child", PARENT_SPAN_ID_COLUMN).eq(qcol("parent", SPAN_ID_COLUMN)),
+        qcol("child", TRACE_TIMESTAMP_COLUMN)
+            .gt_eq(qcol("parent", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
+        qcol("child", TRACE_TIMESTAMP_COLUMN)
+            .lt_eq(qcol("parent", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
+    ];
+
+    let df = parent
+        .join_on(child, JoinType::Inner, join_conditions)?
+        .select(vec![
+            bin_ms(qcol("parent", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
+            qcol("parent", "src_id").alias("src_id"),
+            qcol("child", "dst_id").alias("dst_id"),
+            qcol("child", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
+            qcol("child", DURATION_NANO_COLUMN).alias("duration_nano"),
+        ])?
+        // A sub-span of the same agent is internal structure, not a call
+        // between two agents.
+        .filter(ident("src_id").not_eq(ident("dst_id")))?
+        .aggregate(
+            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
+            vec![
+                count(lit(1)).alias("request_count"),
+                count(lit(1))
+                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
+                    .build()?
+                    .alias("error_count"),
+                sum(ident("duration_nano")).alias("duration_nano_sum"),
+            ],
+        )?
+        .select(vec![
+            ident("observed_at"),
+            ident("observed_at").alias("window_start"),
+            (ident("observed_at") + bin_interval()).alias("window_end"),
+            (ident("observed_at") + bin_interval()).alias("fresh_until"),
+            lit("agent").alias("src_type"),
+            ident("src_id"),
+            lit("agent").alias("dst_type"),
+            ident("dst_id"),
+            lit("calls").alias("rel_type"),
+            lit("trace").alias("provenance"),
+            lit(1.0_f64).alias("confidence"),
+            ident("request_count"),
+            ident("error_count"),
+            (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
+                .alias("duration_sum"),
+            ident("request_count").alias("duration_count"),
+            null_json().alias("attributes"),
+        ])?;
+    Ok(Some(df))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -738,6 +845,7 @@ mod tests {
         let plan = build_relationships_plan_for_test(
             vec![CallsSource {
                 service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                agent: None,
                 scan: trace,
             }],
             &test_window(),
@@ -821,11 +929,12 @@ mod tests {
             .value(row)
     }
 
-    fn sources(traces: &[(&str, DataFrame)]) -> Vec<CallsSource> {
-        traces
+    fn sources(scans: &[DataFrame]) -> Vec<CallsSource> {
+        scans
             .iter()
-            .map(|(_, scan)| CallsSource {
+            .map(|scan| CallsSource {
                 service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                agent: None,
                 scan: scan.clone(),
             })
             .collect()
@@ -873,10 +982,9 @@ mod tests {
         );
         let a = ctx.table("trace_a").await.unwrap();
         let b = ctx.table("trace_b").await.unwrap();
-        let plan =
-            build_relationships_plan_for_test(sources(&[("a", a), ("b", b)]), &test_window())
-                .unwrap()
-                .unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[a, b]), &test_window())
+            .unwrap()
+            .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -913,10 +1021,9 @@ mod tests {
         );
         let a = ctx.table("trace_a").await.unwrap();
         let b = ctx.table("trace_b").await.unwrap();
-        let plan =
-            build_relationships_plan_for_test(sources(&[("a", a), ("b", b)]), &test_window())
-                .unwrap()
-                .unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[a, b]), &test_window())
+            .unwrap()
+            .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -934,12 +1041,9 @@ mod tests {
         register_trace_table(&ctx, "trace_empty", &[], &[]);
         let base = ctx.table("opentelemetry_traces").await.unwrap();
         let empty = ctx.table("trace_empty").await.unwrap();
-        let plan = build_relationships_plan_for_test(
-            sources(&[("base", base), ("empty", empty)]),
-            &test_window(),
-        )
-        .unwrap()
-        .unwrap();
+        let plan = build_relationships_plan_for_test(sources(&[base, empty]), &test_window())
+            .unwrap()
+            .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -978,7 +1082,7 @@ mod tests {
             ],
         );
         let a = ctx.table("trace_a").await.unwrap();
-        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+        let plan = build_relationships_plan_for_test(sources(&[a]), &test_window())
             .unwrap()
             .unwrap();
 
@@ -1013,7 +1117,7 @@ mod tests {
             &[(1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 100)],
         );
         let a = ctx.table("trace_a").await.unwrap();
-        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+        let plan = build_relationships_plan_for_test(sources(&[a]), &test_window())
             .unwrap()
             .unwrap();
 
@@ -1024,6 +1128,130 @@ mod tests {
             json_texts(batch, 15),
             vec![Some(r#"{"connection_type":"database"}"#.to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_calls_from_parent_child_spans() {
+        let ctx = SessionContext::new();
+        const INTERNAL: &str = "SPAN_KIND_INTERNAL";
+        register_trace_table(
+            &ctx,
+            "agent_traces",
+            &[(
+                "agent_id",
+                &[
+                    Some("orchestrator"),
+                    Some("researcher"),
+                    Some("researcher"),
+                    Some("researcher"),
+                ],
+            )],
+            &[
+                // orchestrator delegates to researcher twice (one errored);
+                // the researcher's own sub-span is same-agent structure.
+                (1_000, "t1", "p1", None, INTERNAL, UNSET, "app", 0),
+                (
+                    1_010,
+                    "t1",
+                    "a1",
+                    Some("p1"),
+                    INTERNAL,
+                    ERROR,
+                    "app",
+                    2_000_000_000,
+                ),
+                (
+                    2_000,
+                    "t1",
+                    "a2",
+                    Some("p1"),
+                    INTERNAL,
+                    UNSET,
+                    "app",
+                    1_000_000_000,
+                ),
+                (1_020, "t1", "a3", Some("a1"), INTERNAL, UNSET, "app", 100),
+            ],
+        );
+        let scan = ctx.table("agent_traces").await.unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![CallsSource {
+                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    agent: Some(co_decl("agent", &["agent_id"])),
+                    scan,
+                }],
+                co_declared: vec![],
+                declared: None,
+            },
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // INTERNAL spans feed no service-calls pairs; the same-agent child
+        // (a3 under a1) is excluded. One agent edge remains.
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        assert_eq!(strings(batch, 4), vec!["agent"]);
+        assert_eq!(strings(batch, 5), vec!["orchestrator"]);
+        assert_eq!(strings(batch, 6), vec!["agent"]);
+        assert_eq!(strings(batch, 7), vec!["researcher"]);
+        assert_eq!(strings(batch, 8), vec!["calls"]);
+        assert_eq!(strings(batch, 9), vec!["trace"]);
+        assert_eq!(confidence(batch, 0), 1.0);
+        assert_eq!(red_metrics(batch, 0), (2, 1, 3.0, 2));
+    }
+
+    #[tokio::test]
+    async fn agent_calls_anchor_on_the_parent_span() {
+        let ctx = SessionContext::new();
+        const INTERNAL: &str = "SPAN_KIND_INTERNAL";
+        // The parent is inside the queried window; the child starts after its
+        // end but within the proximity allowance and must still pair.
+        register_trace_table(
+            &ctx,
+            "agent_traces",
+            &[("agent_id", &[Some("orchestrator"), Some("researcher")])],
+            &[
+                (599_000, "t1", "p1", None, INTERNAL, UNSET, "app", 0),
+                (
+                    601_000,
+                    "t1",
+                    "a1",
+                    Some("p1"),
+                    INTERNAL,
+                    UNSET,
+                    "app",
+                    500_000_000,
+                ),
+            ],
+        );
+        let scan = ctx.table("agent_traces").await.unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![CallsSource {
+                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    agent: Some(co_decl("agent", &["agent_id"])),
+                    scan,
+                }],
+                co_declared: vec![],
+                declared: None,
+            },
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        // observed_at is the parent's bin.
+        assert_eq!(ts_values(batch, 0), vec![540_000]);
+        assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
     }
 
     /// A metric-like declaring table: ms timestamps, one row with a NULL
@@ -1250,7 +1478,7 @@ mod tests {
             ],
         );
         let a = ctx.table("trace_a").await.unwrap();
-        let plan = build_relationships_plan_for_test(sources(&[("a", a)]), &test_window())
+        let plan = build_relationships_plan_for_test(sources(&[a]), &test_window())
             .unwrap()
             .unwrap();
 
@@ -1273,6 +1501,7 @@ mod tests {
         let plan = build_relationships_plan_for_test(
             vec![CallsSource {
                 service: trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
+                agent: None,
                 scan: trace,
             }],
             &test_window(),
@@ -1639,6 +1868,7 @@ mod tests {
             RelationshipSources {
                 traces: vec![CallsSource {
                     service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    agent: None,
                     scan: trace,
                 }],
                 co_declared: vec![],
