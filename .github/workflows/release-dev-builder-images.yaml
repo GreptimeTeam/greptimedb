@@ -24,6 +24,11 @@ on:
         description: Release dev-builder-android image
         required: false
         default: false
+      release_dev_builder_riscv64_image:
+        type: boolean
+        description: Release dev-builder-riscv64 image
+        required: false
+        default: false
       update_dev_builder_image_tag:
         type: boolean
         description: Update the DEV_BUILDER_IMAGE_TAG in Makefile and create a PR
@@ -36,7 +41,7 @@ jobs:
     # The jobs are triggered by the following events:
     # 1. Manually triggered workflow_dispatch event
     # 2. Push event when the PR that modifies the `rust-toolchain.toml` or `docker/dev-builder/**` is merged to main
-    if: ${{ github.event_name == 'push' || inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }}
+    if: ${{ github.event_name == 'push' || inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image || inputs.release_dev_builder_riscv64_image }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set-version.outputs.version }}
@@ -68,6 +73,7 @@ jobs:
           build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image || github.event_name == 'push' }}
           build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image || github.event_name == 'push' }}
           build-dev-builder-android: ${{ inputs.release_dev_builder_android_image || github.event_name == 'push' }}
+          build-dev-builder-riscv64: ${{ inputs.release_dev_builder_riscv64_image || github.event_name == 'push' }}
 
   release-dev-builder-images-ecr:
     name: Release dev builder images to AWS ECR
@@ -154,6 +160,27 @@ jobs:
             copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-android:latest \
             docker://$ECR_IMAGE_REGISTRY/$ECR_IMAGE_NAMESPACE/dev-builder-android:latest
 
+      - name: Push dev-builder-riscv64 image
+        shell: bash
+        if: ${{ inputs.release_dev_builder_riscv64_image || github.event_name == 'push' }}
+        env:
+          IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
+          IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+          ECR_IMAGE_REGISTRY: ${{ vars.ECR_IMAGE_REGISTRY }}
+          ECR_IMAGE_NAMESPACE: ${{ vars.ECR_IMAGE_NAMESPACE }}
+        run: |
+          docker run -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
+            -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            quay.io/skopeo/stable:latest \
+            copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION \
+            docker://$ECR_IMAGE_REGISTRY/$ECR_IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION
+
+          docker run -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
+            -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            quay.io/skopeo/stable:latest \
+            copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-riscv64:latest \
+            docker://$ECR_IMAGE_REGISTRY/$ECR_IMAGE_NAMESPACE/dev-builder-riscv64:latest
+
   release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
     name: Release dev builder images to CN region
     runs-on: ubuntu-latest
@@ -209,6 +236,19 @@ jobs:
             quay.io/skopeo/stable:latest \
             copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION \
             docker://$ACR_IMAGE_REGISTRY/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION
+      - name: Push dev-builder-riscv64 image
+        shell: bash
+        if: ${{ inputs.release_dev_builder_riscv64_image || github.event_name == 'push' }}
+        env:
+          IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
+          IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+          ACR_IMAGE_REGISTRY: ${{ vars.ACR_IMAGE_REGISTRY }}
+        run: |
+          docker run -v "${DOCKER_CONFIG:-$HOME/.docker}:/root/.docker:ro" \
+            -e "REGISTRY_AUTH_FILE=/root/.docker/config.json" \
+            quay.io/skopeo/stable:latest \
+            copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION \
+            docker://$ACR_IMAGE_REGISTRY/$IMAGE_NAMESPACE/dev-builder-riscv64:$IMAGE_VERSION
   
   update-dev-builder-image-tag:
     name: Update dev-builder image tag
