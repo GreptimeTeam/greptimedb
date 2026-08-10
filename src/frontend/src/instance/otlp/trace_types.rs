@@ -319,6 +319,24 @@ mod tests {
     }
 
     #[test]
+    fn test_choose_trace_reconcile_decision_existing_uint64_keeps_uint64() {
+        // Backward-compat for the unsigned -> signed transition: an existing
+        // table whose `duration_nano` is still UInt64 must keep that type (no
+        // ALTER) when new signed (Int64) ingest arrives, coercing the value in
+        // place. This is the no-ALTER guarantee for the trace path; it relies on
+        // the Int64 -> UInt64 coercion arm added in Phase 0.
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "duration_nano",
+                &[ColumnDataType::Int64],
+                Some(ColumnDataType::Uint64)
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseExisting(ColumnDataType::Uint64))
+        );
+    }
+
+    #[test]
     fn test_choose_trace_reconcile_decision_existing_int64_widens_to_float64() {
         assert_eq!(
             choose_trace_reconcile_decision(
@@ -492,6 +510,42 @@ mod tests {
         assert_eq!(
             rows.rows[0].values[0].value_data,
             Some(ValueData::I64Value(503))
+        );
+    }
+
+    #[test]
+    fn test_prepare_trace_column_rewrites_coerces_int64_into_existing_uint64() {
+        // Existing-table backward-compat for the trace path: new signed ingest
+        // arrives as Int64, but the existing `duration_nano` column is UInt64, so
+        // the rewrite coerces the value into the existing type in place (no
+        // ALTER). Mirrors what happens for a table created before the
+        // unsigned -> signed flip.
+        let mut rows = Rows {
+            schema: vec![ColumnSchema {
+                datatype: ColumnDataType::Int64 as i32,
+                ..Default::default()
+            }],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::I64Value(42)),
+                }],
+            }],
+        };
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Uint64,
+            column_name: "duration_nano".to_string(),
+        }];
+
+        let prepared =
+            prepare_trace_column_rewrites(&rows.rows, pending_rewrites, "trace_type_atomicity")
+                .unwrap();
+
+        prepared.apply(&mut rows);
+        assert_eq!(rows.schema[0].datatype, ColumnDataType::Uint64 as i32);
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::U64Value(42))
         );
     }
 

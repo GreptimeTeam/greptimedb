@@ -79,7 +79,7 @@ impl FixedTraceColumnIndexes {
         Ok(Self {
             timestamp,
             timestamp_end: field("timestamp_end", ColumnDataType::TimestampNanosecond)?,
-            duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Uint64)?,
+            duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Int64)?,
             parent_span_id: field(PARENT_SPAN_ID_COLUMN, ColumnDataType::String)?,
             trace_id: field(TRACE_ID_COLUMN, ColumnDataType::String)?,
             span_id: field(SPAN_ID_COLUMN, ColumnDataType::String)?,
@@ -367,8 +367,8 @@ fn write_span_to_row_inner(
         ),
         (
             fixed_columns.duration_nano,
-            Some(ValueData::U64Value(
-                span.end_in_nanosecond - span.start_in_nanosecond,
+            Some(ValueData::I64Value(
+                (span.end_in_nanosecond - span.start_in_nanosecond) as i64,
             )),
         ),
         (
@@ -695,7 +695,7 @@ mod tests {
                 "timestamp_end",
                 Some(ValueData::TimestampNanosecondValue(2)),
             ),
-            (DURATION_NANO_COLUMN, Some(ValueData::U64Value(1))),
+            (DURATION_NANO_COLUMN, Some(ValueData::I64Value(1))),
             (PARENT_SPAN_ID_COLUMN, None),
             (
                 TRACE_ID_COLUMN,

@@ -563,6 +563,34 @@ fn test_trace_request_schema_isolates_non_candidate_batch() {
 }
 
 #[test]
+fn test_trace_request_schema_keeps_signed_request_into_existing_unsigned_column() {
+    // Regression for the unsigned -> signed transition: an existing
+    // `duration_nano` UInt64 column must NOT exclude a new signed (Int64)
+    // batch as "logically incompatible". The batch must reach the
+    // reconciliation path, which coerces Int64 -> UInt64 in place (no ALTER).
+    // Excluding it up front made ingestion error after the flip.
+    let column_name = "duration_nano";
+    let int64_schema = field_schema(column_name, ColumnDataType::Int64);
+    let existing_uint64_schema =
+        DatatypesSchemaBuilder::try_from_columns(vec![DatatypesColumnSchema::new(
+            column_name,
+            ConcreteDataType::uint64_datatype(),
+            true,
+        )])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut request_schema = TraceRequestSchema::default();
+    request_schema.observe_trace_column(0, &int64_schema, Some(ColumnDataType::Int64));
+
+    assert_eq!(
+        request_schema.incompatible_schema_observations(Some(&existing_uint64_schema)),
+        HashMap::new()
+    );
+}
+
+#[test]
 fn test_trace_request_schema_isolates_non_candidate_new_column_batch() {
     let column_name = "span_attributes.payload";
     for datatypes in [

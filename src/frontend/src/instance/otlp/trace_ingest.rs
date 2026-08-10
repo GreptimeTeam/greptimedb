@@ -30,7 +30,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
-use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
+use servers::otlp::coerce::{coerce_value_data, is_supported_trace_coercion, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
 use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
@@ -1892,10 +1892,23 @@ fn trace_logical_types_incompatible(
     right_datatype: ColumnDataType,
     right_concrete_type: &ConcreteDataType,
 ) -> bool {
-    left_concrete_type != right_concrete_type
-        && (left_datatype == right_datatype
-            || !is_trace_reconcile_candidate_type(left_datatype)
-            || !is_trace_reconcile_candidate_type(right_datatype))
+    if left_concrete_type == right_concrete_type {
+        return false;
+    }
+    // A supported coercion in either direction means the two types can be
+    // reconciled, so they are not logically incompatible. This lets a signed
+    // request reach the coercion path instead of being excluded up front when
+    // the existing column is unsigned (e.g. trace `duration_nano` written as
+    // Int64 into an existing UInt64 column during the unsigned -> signed
+    // transition).
+    if is_supported_trace_coercion(left_datatype, right_datatype)
+        || is_supported_trace_coercion(right_datatype, left_datatype)
+    {
+        return false;
+    }
+    left_datatype == right_datatype
+        || !is_trace_reconcile_candidate_type(left_datatype)
+        || !is_trace_reconcile_candidate_type(right_datatype)
 }
 
 fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {

@@ -256,7 +256,7 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
         ),
         (
             "trace_flags",
-            ColumnDataType::Uint32,
+            ColumnDataType::Int32,
             SemanticType::Field,
             None,
             None,
@@ -439,7 +439,7 @@ fn build_otlp_build_in_row(
             value_data: Some(ValueData::BinaryValue(log_attr.to_vec())),
         },
         GreptimeValue {
-            value_data: Some(ValueData::U32Value(log.flags)),
+            value_data: Some(ValueData::I32Value(log.flags as i32)),
         },
         GreptimeValue {
             value_data: parse_ctx.scope_name.clone().map(ValueData::StringValue),
@@ -550,9 +550,9 @@ fn decide_column_schema_and_convert_value(
             .fail(),
             JsonbNumber::UInt64(u) => Ok(Some((
                 GreptimeValue {
-                    value_data: Some(ValueData::U64Value(u)),
+                    value_data: Some(ValueData::I64Value(u as i64)),
                 },
-                ColumnDataType::Uint64,
+                ColumnDataType::Int64,
                 SemanticType::Tag,
                 None,
             ))),
@@ -634,7 +634,9 @@ fn jsonb_value_to_log_value_data(
                 key: column_name,
             }
             .fail(),
-            JsonbNumber::UInt64(u) => Ok(Some((ValueData::U64Value(u), ColumnDataType::Uint64))),
+            JsonbNumber::UInt64(u) => {
+                Ok(Some((ValueData::I64Value(u as i64), ColumnDataType::Int64)))
+            }
         },
         JsonbValue::Bool(b) => Ok(Some((ValueData::BoolValue(b), ColumnDataType::Boolean))),
         JsonbValue::Array(_) | JsonbValue::Object(_) => UnsupportedJsonDataTypeForTagSnafu {
@@ -1096,12 +1098,20 @@ mod tests {
     }
 
     fn request_with_log_attrs(attrs: Vec<KeyValue>) -> ExportLogsServiceRequest {
+        request_with_log_attrs_and_flags(attrs, 0)
+    }
+
+    fn request_with_log_attrs_and_flags(
+        attrs: Vec<KeyValue>,
+        flags: u32,
+    ) -> ExportLogsServiceRequest {
         ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![LogRecord {
                         time_unix_nano: 1_234_000_000,
                         trace_id: vec![1; 16],
+                        flags,
                         attributes: attrs,
                         ..Default::default()
                     }],
@@ -1146,6 +1156,101 @@ mod tests {
         assert_eq!(
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Tag as i32
+        );
+    }
+
+    #[test]
+    fn test_fresh_table_trace_flags_is_int32() {
+        // Phase 1 of the unsigned -> signed transition: a fresh log table now
+        // creates `trace_flags` as Int32. Existing tables keep UInt32 (covered
+        // by the coercion test above); new tables start signed.
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", None).unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Int32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::I32Value(0))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_keeps_type_and_coerces_int32_request() {
+        // An existing UInt32 `trace_flags` column keeps its type when new
+        // signed (Int32) ingest arrives, without an `ALTER`.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_flags", ConcreteDataType::uint32_datatype()),
+            ],
+            &[],
+        );
+
+        let rows = parse_with_select(request_with_log_attrs(vec![]), "", Some(&existing)).unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(0))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_preserves_nonzero_flags_value() {
+        // A non-zero trace_flags bit pattern (e.g. the W3C sampled flag as sent
+        // by common encoders) round-trips exactly through the Int32 -> UInt32
+        // coercion into an existing unsigned column. Guards that the cast is
+        // bit-preserving for realistic values, not just the default 0.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_flags", ConcreteDataType::uint32_datatype()),
+            ],
+            &[],
+        );
+
+        let rows = parse_with_select(
+            request_with_log_attrs_and_flags(vec![], 256),
+            "",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(256))
+        );
+    }
+
+    #[test]
+    fn test_existing_uint32_trace_flags_preserves_high_bit_flags_value() {
+        // The full u32 range round-trips: a value with the sign bit set proves
+        // the Int32 -> UInt32 coercion is bit-exact (`as i32` then `as u32`
+        // preserve the pattern), so no flags value is corrupted on the
+        // unsigned -> signed transition.
+        let existing = existing_schema(
+            vec![
+                time_column(ConcreteDataType::timestamp_nanosecond_datatype()),
+                column("trace_flags", ConcreteDataType::uint32_datatype()),
+            ],
+            &[],
+        );
+
+        let rows = parse_with_select(
+            request_with_log_attrs_and_flags(vec![], 0x8000_0000),
+            "",
+            Some(&existing),
+        )
+        .unwrap();
+        let idx = column_index(&rows, "trace_flags");
+
+        assert_eq!(rows.schema[idx].datatype, ColumnDataType::Uint32 as i32);
+        assert_eq!(
+            rows.rows[0].values[idx].value_data,
+            Some(ValueData::U32Value(0x8000_0000))
         );
     }
 
