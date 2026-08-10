@@ -31,6 +31,7 @@ use auth::{
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
@@ -176,9 +177,17 @@ impl GrpcQueryHandler for Instance {
 
                     match expr {
                         DdlExpr::CreateTable(mut expr) => {
+                            // Direct gRPC DDL bypasses the SQL parser, so validate the
+                            // request here (e.g. the time index must be a timestamp).
+                            operator::expr_helper::validate_create_expr(&expr)?;
                             let _ = self
                                 .statement_executor
-                                .create_table_inner(&mut expr, None, ctx.clone())
+                                .create_table_inner(
+                                    &mut expr,
+                                    None,
+                                    ctx.clone(),
+                                    TriggerReason::Manual,
+                                )
                                 .await?;
                             Output::new_with_affected_rows(0)
                         }
@@ -191,7 +200,7 @@ impl GrpcQueryHandler for Instance {
                         }
                         DdlExpr::AlterTable(expr) => {
                             self.statement_executor
-                                .alter_table_inner(expr, ctx.clone())
+                                .alter_table_inner(expr, ctx.clone(), TriggerReason::Manual)
                                 .await?
                         }
                         DdlExpr::CreateDatabase(expr) => {
@@ -244,8 +253,16 @@ impl GrpcQueryHandler for Instance {
 
                             Output::new_with_affected_rows(0)
                         }
-                        DdlExpr::DropView(_) => {
-                            todo!("implemented in the following PR")
+                        DdlExpr::DropView(expr) => {
+                            self.statement_executor
+                                .drop_view(
+                                    expr.catalog_name,
+                                    expr.schema_name,
+                                    expr.view_name,
+                                    expr.drop_if_exists,
+                                    ctx.clone(),
+                                )
+                                .await?
                         }
                         DdlExpr::CommentOn(expr) => {
                             self.statement_executor

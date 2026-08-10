@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
@@ -60,7 +60,7 @@ impl Json2Aligner {
             .fields()
             .iter()
             .enumerate()
-            .filter(|&(_idx, field)| is_structured_json_field(field))
+            .filter(|&(_idx, field)| is_json2_extension_type(field))
             .map(|(idx, field)| {
                 let json_type =
                     JsonNativeType::try_from(field.data_type()).context(DataTypeMismatchSnafu)?;
@@ -169,8 +169,8 @@ fn assert_columns_match_except_json2(base_schema: &Schema, schema: &Schema) {
         "input schemas for Json2Aligner must have the same column count"
     );
     for (idx, (base_field, field)) in base_schema.fields().iter().zip(schema.fields()).enumerate() {
-        let base_is_json2 = is_structured_json_field(base_field);
-        let is_json2 = is_structured_json_field(field);
+        let base_is_json2 = is_json2_extension_type(base_field);
+        let is_json2 = is_json2_extension_type(field);
         debug_assert_eq!(
             base_is_json2, is_json2,
             "column {idx} must be JSON2 in all input schemas or none"
@@ -192,7 +192,7 @@ mod tests {
         Array, ArrayRef, AsArray, Int64Array, StringViewArray, StructArray, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
     use serde_json::json;
 
     use super::*;
@@ -234,8 +234,7 @@ mod tests {
     #[test]
     fn test_try_new_ignores_legacy_jsonb_extension_field() {
         let legacy_jsonb_field = Arc::new(
-            Field::new("data", DataType::Binary, true)
-                .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default()))),
+            Field::new("data", DataType::Binary, true).with_extension_type(JsonExtensionType),
         );
         let schema = Arc::new(Schema::new(vec![
             Arc::new(Field::new("ts", DataType::Int64, false)),
@@ -266,7 +265,7 @@ mod tests {
         assert_eq!(&DataType::Int64, fields[0].data_type());
         assert_eq!("name", fields[1].name());
         assert_eq!(&DataType::Utf8View, fields[1].data_type());
-        assert!(is_structured_json_field(&aligner.schema().fields()[1]));
+        assert!(is_json2_extension_type(&aligner.schema().fields()[1]));
     }
 
     #[test]
@@ -427,7 +426,7 @@ mod tests {
     fn json_field(name: &str, fields: Fields) -> Arc<Field> {
         Arc::new(
             Field::new(name, DataType::Struct(fields), true)
-                .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default()))),
+                .with_extension_type(Json2ExtensionType::default()),
         )
     }
 

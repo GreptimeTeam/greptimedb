@@ -29,6 +29,7 @@ use common_meta::key::DroppedTableName;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
+use common_meta::rpc::ddl::EventContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::PurgeDroppedTableTask;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
@@ -67,6 +68,7 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        event_context: EventContext,
     ) -> Result<GcReport>;
 
     #[cfg(feature = "enterprise")]
@@ -254,12 +256,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        event_context: EventContext,
     ) -> Result<GcReport> {
         self.gc_regions_inner(
             region_ids,
             full_file_listing,
             timeout,
             region_routes_override,
+            event_context,
         )
         .await
     }
@@ -306,6 +310,7 @@ impl DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        event_context: EventContext,
     ) -> Result<GcReport> {
         debug!(
             "Sending GC instruction for {} regions (full_file_listing: {})",
@@ -321,6 +326,7 @@ impl DefaultGcSchedulerCtx {
             full_file_listing,
             timeout,
             region_routes_override,
+            event_context,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 

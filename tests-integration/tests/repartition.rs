@@ -19,6 +19,7 @@ use std::time::Duration;
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::root_source;
 use common_meta::key::table_name::TableNameKey;
+use common_meta::rpc::ddl::EventContext;
 use common_procedure::{ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
@@ -816,6 +817,7 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
         false,                   // full_file_listing
         Duration::from_secs(10), // timeout
         Default::default(),
+        EventContext::default(),
     );
 
     // Submit the procedure to the procedure manager

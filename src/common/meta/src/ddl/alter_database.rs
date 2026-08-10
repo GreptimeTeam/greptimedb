@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure, Status,
 };
 use common_telemetry::tracing::info;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ use crate::key::DeserializedValueWithBytes;
 use crate::key::schema_name::{SchemaName, SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::rpc::ddl::UnsetDatabaseOption::{self};
-use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, SetDatabaseOption};
+use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, EventContext, SetDatabaseOption};
 
 pub struct AlterDatabaseProcedure {
     pub context: DdlContext,
@@ -73,10 +73,14 @@ fn build_new_schema_value(
 impl AlterDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterDatabase";
 
-    pub fn new(task: AlterDatabaseTask, context: DdlContext) -> Result<Self> {
+    pub fn new(
+        task: AlterDatabaseTask,
+        event_context: EventContext,
+        context: DdlContext,
+    ) -> Result<Self> {
         Ok(Self {
             context,
-            data: AlterDatabaseData::new(task)?,
+            data: AlterDatabaseData::new(task, event_context)?,
         })
     }
 
@@ -176,7 +180,10 @@ impl Procedure for AlterDatabaseProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(ALTER_DATABASE_EVENT_TYPE) {
             return None;
         }
@@ -186,6 +193,7 @@ impl Procedure for AlterDatabaseProcedure {
                 self.data.catalog(),
                 self.data.schema(),
                 &self.data.kind,
+                self.data.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::alter_lifecycle()
@@ -209,16 +217,19 @@ pub struct AlterDatabaseData {
     catalog_name: String,
     schema_name: String,
     schema_value: Option<DeserializedValueWithBytes<SchemaNameValue>>,
+    #[serde(default)]
+    event_context: EventContext,
 }
 
 impl AlterDatabaseData {
-    pub fn new(task: AlterDatabaseTask) -> Result<Self> {
+    pub fn new(task: AlterDatabaseTask, event_context: EventContext) -> Result<Self> {
         Ok(Self {
             state: AlterDatabaseState::Prepare,
             kind: AlterDatabaseKind::try_from(task.alter_expr.kind.unwrap())?,
             catalog_name: task.alter_expr.catalog_name,
             schema_name: task.alter_expr.schema_name,
             schema_value: None,
+            event_context,
         })
     }
 

@@ -23,6 +23,7 @@ pub mod ddl;
 mod describe;
 mod dml;
 mod kill;
+pub mod semantic_graph;
 mod set;
 mod show;
 mod tql;
@@ -259,6 +260,7 @@ impl StatementExecutor {
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+            Statement::ShowFlowStatus(stmt) => self.show_flow_status(stmt, query_ctx).await,
 
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(stmt) => self.show_triggers(stmt, query_ctx).await,

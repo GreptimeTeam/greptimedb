@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReader,
@@ -57,7 +57,7 @@ impl MemtableRowGroupReaderBuilder {
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field)
+            .any(is_json2_extension_type)
         {
             arrow_reader_options =
                 arrow_reader_options.with_schema(context.read_format().arrow_schema().clone());

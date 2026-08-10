@@ -17,7 +17,7 @@ use std::str::FromStr;
 use arrow_schema::extension::ExtensionType;
 use common_time::Timestamp;
 use common_time::timezone::Timezone;
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, parse_legacy_json2_settings};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::{JsonFormat, parse_string_to_jsonb, parse_string_to_vector_type_value};
@@ -307,13 +307,20 @@ pub(crate) fn parse_string_to_value(
                 Ok(Value::Binary(v.into()))
             }
             JsonFormat::Json2(_) => {
-                let extension_type: Option<JsonExtensionType> =
-                    column_schema.extension_type().context(DatatypeSnafu)?;
-                let json_settings = extension_type
-                    .and_then(|x| x.metadata().json_settings.clone())
-                    .unwrap_or_default();
                 let v = serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
-                json_settings.encode(v).context(DatatypeSnafu)
+
+                if let Some(extension) = column_schema
+                    .extension_type::<Json2ExtensionType>()
+                    .context(DatatypeSnafu)?
+                {
+                    extension.metadata().json_settings().encode(v)
+                } else {
+                    parse_legacy_json2_settings(column_schema.metadata())
+                        .context(DatatypeSnafu)?
+                        .unwrap_or_default()
+                        .encode(v)
+                }
+                .context(DatatypeSnafu)
             }
         },
         ConcreteDataType::Vector(d) => {

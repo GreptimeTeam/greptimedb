@@ -31,7 +31,7 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
@@ -85,7 +85,7 @@ use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
-    CachedPrimaryKeyFilter, PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
+    PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
     SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
@@ -183,6 +183,8 @@ pub struct ParquetReaderBuilder {
     compaction: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
+    /// Whether to run the reduced-column predicate prefilter pass.
+    enable_predicate_prefilter: bool,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
@@ -217,6 +219,7 @@ impl ParquetReaderBuilder {
             expected_metadata: None,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
+            enable_predicate_prefilter: true,
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
@@ -315,6 +318,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
         self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets whether to run the reduced-column predicate prefilter pass.
+    #[must_use]
+    pub(crate) fn enable_predicate_prefilter(mut self, enable: bool) -> Self {
+        self.enable_predicate_prefilter = enable;
         self
     }
 
@@ -497,6 +507,7 @@ impl ParquetReaderBuilder {
             self.predicate.as_ref(),
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
+            self.enable_predicate_prefilter,
             &read_format,
             &codec,
         );
@@ -541,7 +552,7 @@ impl ParquetReaderBuilder {
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field)
+            .any(is_json2_extension_type)
         {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
@@ -1838,13 +1849,6 @@ impl RowGroupReaderBuilder {
         self.prefilter_builder.is_some()
     }
 
-    /// Builds the encoded-primary-key filter selected by the reader filter plan.
-    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
-        self.prefilter_builder
-            .as_ref()
-            .and_then(PrefilterContextBuilder::build_primary_key_filter)
-    }
-
     /// Builds a parquet record batch stream to read the row group at `row_group_idx`.
     ///
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
@@ -1855,9 +1859,9 @@ impl RowGroupReaderBuilder {
     /// Predicates that cannot be lowered to prefilter columns (column not projected,
     /// expression not supported, etc.) are silently skipped. Correctness rests on the
     /// DataFusion `FilterExec` above this reader, which always re-applies the original
-    /// predicate. Tag and timestamp predicates that flow through [`SimpleFilterEvaluator`]
-    /// are an exception — the engine enforces them precisely, so the prefilter pass is the
-    /// only place they execute. See [`build_reader_filter_plan`] for the bucketing rules.
+    /// predicate. With predicate prefiltering enabled, tag and timestamp predicates that
+    /// flow through [`SimpleFilterEvaluator`] are enforced precisely in this pass. See
+    /// [`build_reader_filter_plan`] for the bucketing rules and disabled mode.
     ///
     /// When the prefilter result selects no rows, the second read still issues but
     /// parquet-rs short-circuits before any column-chunk IO: the row-group state machine
@@ -1907,7 +1911,6 @@ impl RowGroupReaderBuilder {
     ///
     /// The series reader uses this after computing its own primary-key-only row
     /// selection.
-    #[allow(dead_code)]
     pub(crate) async fn build_without_prefilter(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
@@ -2443,7 +2446,7 @@ mod tests {
     use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
     use datatypes::arrow::datatypes::{Fields, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
@@ -2520,7 +2523,7 @@ mod tests {
         let b_field = Arc::new(Field::new("b", DataType::Utf8, true));
         let json_fields = Fields::from(vec![a_field, b_field]);
         let json_field = Field::new("j", DataType::Struct(json_fields.clone()), true)
-            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+            .with_extension_type(Json2ExtensionType::default());
         let schema = Arc::new(Schema::new(vec![json_field]));
 
         let a_array = Arc::new(StructArray::new(

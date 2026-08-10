@@ -13,11 +13,16 @@
 // limitations under the License.
 
 use std::any::Any;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
-use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
+use arrow_schema::{
+    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef, SortOptions,
+};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
@@ -41,7 +46,10 @@ use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
+    is_legacy_json2_extension_type,
+};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -79,6 +87,127 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
     remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions())
         .map_err(|err| DataFusionError::External(Box::new(err)))
+}
+
+fn remote_schema_mismatch(message: impl Into<String>) -> DataFusionError {
+    DataFusionError::ArrowError(Box::new(ArrowError::SchemaError(message.into())), None)
+}
+
+fn record_merge_scan_schema_error() {
+    MERGE_SCAN_ERRORS_TOTAL.inc();
+
+    #[cfg(test)]
+    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    // Prometheus counters are process-global and tests run concurrently. This
+    // companion counter is incremented at the exact production increment site
+    // and is scoped to the polling test thread, making delta assertions stable.
+    static TEST_MERGE_SCAN_SCHEMA_ERRORS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn merge_scan_schema_error_count_for_test() -> u64 {
+    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
+}
+
+/// Returns true when two fields are semantically equivalent JSON columns.
+///
+/// A JSON column is carried on the wire in its binary-encoded form (e.g.
+/// `Binary` + `ARROW:extension:name=greptime.json` / `greptime:type=Json`) and,
+/// after decoding on the remote side, in a concretized structured form (e.g.
+/// `Struct(...)` / `List(...)` carrying the same extension metadata). Both forms
+/// describe the same column, so the raw arrow data type must not be compared
+/// directly. The JSON extension identity (`greptime:type`) and the JSON2
+/// settings (`ARROW:extension:metadata`, e.g. type hints) are the semantic
+/// parts of the field and must match.
+fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    let is_json = |field: &Field| {
+        is_any_json_extension_type(field)
+            || field
+                .metadata()
+                .get(datatypes::schema::TYPE_KEY)
+                .map(String::as_ref)
+                == Some("Json")
+    };
+
+    is_json(expected_field)
+        && is_json(actual_field)
+        && expected_field.name() == actual_field.name()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+        // Both must carry the same JSON marker.
+        && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
+            == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
+        // JSON2 settings (type hints etc.) must match.
+        && expected_field
+            .metadata()
+            .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+            == actual_field
+                .metadata()
+                .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+}
+
+/// Validates the remote schema before positional column handling.
+///
+/// A timestamp timezone difference is the only intentional exception. It is
+/// accepted by directly comparing the same timestamp unit, distinct timezones,
+/// and equal name, nullability, and field metadata. Top-level Arrow schema
+/// metadata is non-semantic at this boundary. JSON columns are additionally
+/// compared semantically (see [`json_fields_compatible`]) because their wire
+/// and decoded representations use different physical arrow types.
+fn validate_remote_schema(
+    expected: &ArrowSchema,
+    actual: &ArrowSchema,
+    source: &str,
+) -> Result<()> {
+    if expected.fields().len() != actual.fields().len() {
+        return Err(remote_schema_mismatch(format!(
+            "MergeScan {source} schema field count mismatch: expected {}, actual {}",
+            expected.fields().len(),
+            actual.fields().len()
+        )));
+    }
+
+    for (index, (expected_field, actual_field)) in expected
+        .fields()
+        .iter()
+        .zip(actual.fields().iter())
+        .enumerate()
+    {
+        if expected_field == actual_field {
+            continue;
+        }
+
+        // JSON columns are equivalent in their binary wire form and their
+        // decoded structured form; compare them semantically instead of
+        // comparing the raw arrow data type.
+        if json_fields_compatible(expected_field, actual_field) {
+            continue;
+        }
+
+        // Intentionally mirrors Arrow Field equality properties, except timezone.
+        let timezone_only_difference = matches!(
+            (expected_field.data_type(), actual_field.data_type()),
+            (
+                ArrowDataType::Timestamp(expected_unit, expected_timezone),
+                ArrowDataType::Timestamp(actual_unit, actual_timezone),
+            ) if expected_unit == actual_unit
+                && expected_timezone != actual_timezone
+                && expected_field.name() == actual_field.name()
+                && expected_field.is_nullable() == actual_field.is_nullable()
+                && expected_field.metadata() == actual_field.metadata()
+        );
+        if !timezone_only_difference {
+            return Err(remote_schema_mismatch(format!(
+                "MergeScan {source} schema field mismatch at position {index}: expected {:?}, actual {:?}",
+                expected_field, actual_field
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn acquire_remote_dyn_filter_registry_lease(
@@ -485,11 +614,18 @@ impl MergeScanExec {
                     MERGE_SCAN_ERRORS_TOTAL.inc();
                     DataFusionError::External(Box::new(e))
                 })?;
-                let do_get_cost = select_target_cost + do_get_start.elapsed();
 
                 if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
                     subscriber_rollback.disarm();
                 }
+                let mut advertised_schema = stream.schema().arrow_schema().clone();
+                validate_remote_schema(
+                    arrow_schema.as_ref(),
+                    advertised_schema.as_ref(),
+                    "advertised remote stream",
+                )
+                .inspect_err(|_| record_merge_scan_schema_error())?;
+                let do_get_cost = select_target_cost + do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
                     remote_dyn_filter_registry_lease.as_ref()
@@ -533,10 +669,18 @@ impl MergeScanExec {
                     poll_duration += poll_elapsed;
 
                     let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    let batch = patch_batch_timezone(
-                        arrow_schema.clone(),
-                        batch.into_df_record_batch().columns().to_vec(),
-                    )?;
+                    let df_batch = batch.into_df_record_batch();
+                    if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
+                        validate_remote_schema(
+                            arrow_schema.as_ref(),
+                            df_batch.schema_ref().as_ref(),
+                            "remote record batch",
+                        )
+                        .inspect_err(|_| record_merge_scan_schema_error())?;
+                        advertised_schema = df_batch.schema_ref().clone();
+                    }
+                    let batch =
+                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
                     metric.record_output_batch_rows(batch.num_rows());
                     if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
@@ -772,11 +916,18 @@ fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
     let schema = schema.clone();
     let mut new_fields = Vec::with_capacity(schema.fields().len());
     for field in schema.fields().iter() {
-        let new_field = if is_json_extension_type(field)
+        let new_field = if is_json2_extension_type(field)
             && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
         {
+            let is_legacy_json2 = is_legacy_json2_extension_type(field);
             let mut new_field = field.as_ref().clone();
             new_field.set_data_type(DataType::Binary);
+            if is_legacy_json2 {
+                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
+                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
+                // identity.
+                new_field = new_field.with_extension_type(Json2ExtensionType::default());
+            }
             Arc::new(new_field)
         } else {
             field.clone()
@@ -1144,17 +1295,26 @@ impl MergeScanMetric {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap as StdHashMap};
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
 
+    use arrow::array::{Int64Array, TimestampMillisecondArray};
+    use arrow_schema::extension::{
+        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+    };
+    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
     use common_meta::peer::Peer;
     use common_query::request::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterRegs,
     };
-    use common_recordbatch::EmptyRecordBatchStream;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
+    use common_recordbatch::{
+        DfRecordBatch, EmptyRecordBatchStream, RecordBatch, RecordBatchStream,
+    };
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -1164,6 +1324,11 @@ mod tests {
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
+    use datatypes::extension::json::JsonExtensionType;
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
+    use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
@@ -1187,6 +1352,31 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn test_amend_legacy_json2_field_preserves_json2_identity() {
+        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
+            StdHashMap::from([
+                (
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                ),
+                (
+                    EXTENSION_TYPE_METADATA_KEY.to_string(),
+                    serde_json::json!({
+                        "json_structure_settings": { "Structured": null }
+                    })
+                    .to_string(),
+                ),
+            ]),
+        );
+
+        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
+        let field = schema.field(0);
+        assert_eq!(&DataType::Binary, field.data_type());
+        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
+        assert!(is_json2_extension_type(field));
     }
 
     fn merge_scan_exec_with_sorted_input(
@@ -1214,7 +1404,7 @@ mod tests {
             regions,
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             target_partition,
             AliasMapping::new(),
@@ -1297,17 +1487,23 @@ mod tests {
         ))
     }
 
-    fn empty_record_batch_stream() -> common_recordbatch::SendableRecordBatchStream {
+    fn empty_record_batch_stream(
+        request: &common_query::request::QueryRequest,
+    ) -> common_recordbatch::SendableRecordBatchStream {
+        let arrow_schema = request.plan.schema().as_arrow().clone();
         Box::pin(EmptyRecordBatchStream::new(Arc::new(
-            datatypes::schema::Schema::new(Vec::new()),
+            datatypes::schema::Schema::try_from(Arc::new(arrow_schema)).unwrap(),
         )))
     }
 
-    fn pending_record_batch_stream() -> common_recordbatch::SendableRecordBatchStream {
+    fn pending_record_batch_stream(
+        request: &common_query::request::QueryRequest,
+    ) -> common_recordbatch::SendableRecordBatchStream {
         let stream = futures_util::stream::pending::<
             datafusion_common::Result<datafusion::arrow::record_batch::RecordBatch>,
         >();
-        let stream = RecordBatchStreamAdapter::new(Arc::new(ArrowSchema::empty()), stream);
+        let arrow_schema = request.plan.schema().as_arrow().clone();
+        let stream = RecordBatchStreamAdapter::new(Arc::new(arrow_schema), stream);
         Box::pin(
             common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(stream))
                 .unwrap(),
@@ -1685,7 +1881,85 @@ mod tests {
         assert_eq!(registry_manager.registry_count(), 0);
     }
 
-    struct TestRegionQueryHandler;
+    #[derive(Clone)]
+    struct TestRegionResponse {
+        advertised_schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+    }
+
+    #[derive(Default)]
+    struct TestRegionQueryHandler {
+        responses: HashMap<RegionId, TestRegionResponse>,
+    }
+
+    impl TestRegionQueryHandler {
+        fn new(responses: impl IntoIterator<Item = (RegionId, RecordBatch)>) -> Self {
+            let responses = responses
+                .into_iter()
+                .map(|(region_id, batch)| {
+                    (
+                        region_id,
+                        TestRegionResponse {
+                            advertised_schema: batch.schema.clone(),
+                            batches: vec![batch],
+                        },
+                    )
+                })
+                .collect();
+            Self { responses }
+        }
+
+        fn with_responses(
+            responses: impl IntoIterator<Item = (RegionId, Arc<Schema>, Vec<RecordBatch>)>,
+        ) -> Self {
+            let responses = responses
+                .into_iter()
+                .map(|(region_id, advertised_schema, batches)| {
+                    (
+                        region_id,
+                        TestRegionResponse {
+                            advertised_schema,
+                            batches,
+                        },
+                    )
+                })
+                .collect();
+            Self { responses }
+        }
+    }
+
+    struct TestRecordBatchStream {
+        schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+        index: usize,
+    }
+
+    impl Stream for TestRecordBatchStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(batch) = self.batches.get(self.index).cloned() {
+                self.index += 1;
+                Poll::Ready(Some(Ok(batch)))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    impl RecordBatchStream for TestRecordBatchStream {
+        fn schema(&self) -> Arc<Schema> {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
+        }
+    }
 
     #[derive(Default)]
     struct FailingRegionQueryHandler {
@@ -1913,11 +2187,11 @@ mod tests {
         async fn do_get(
             &self,
             target: &crate::region_query::RegionQueryTarget,
-            _request: common_query::request::QueryRequest,
+            request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             self.do_get_targets.lock().unwrap().push(target.peer().id);
             self.do_get_entered.notify_one();
-            Ok(pending_record_batch_stream())
+            Ok(pending_record_batch_stream(&request))
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -1996,6 +2270,7 @@ mod tests {
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             let registrations = request
                 .header
+                .clone()
                 .and_then(|header| header.query_context)
                 .and_then(|query_context| {
                     query_context
@@ -2006,7 +2281,7 @@ mod tests {
                 .map(|serialized| InitialDynFilterRegs::from_extension_value(&serialized).unwrap())
                 .unwrap();
             *self.registrations.lock().unwrap() = Some(registrations);
-            Ok(empty_record_batch_stream())
+            Ok(empty_record_batch_stream(&request))
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -2035,15 +2310,23 @@ mod tests {
             _read_preference: ReadPreference,
             _region_id: RegionId,
         ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
-            unimplemented!("test only")
+            Ok(test_target(1))
         }
 
         async fn do_get(
             &self,
             _target: &crate::region_query::RegionQueryTarget,
-            _request: common_query::request::QueryRequest,
+            request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
-            unimplemented!("test only")
+            let response = self
+                .responses
+                .get(&request.region_id)
+                .expect("test handler needs a response for every requested region");
+            Ok(Box::pin(TestRecordBatchStream {
+                schema: response.advertised_schema.clone(),
+                batches: response.batches.clone(),
+                index: 0,
+            }))
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -2063,6 +2346,605 @@ mod tests {
         ) -> crate::error::Result<()> {
             unimplemented!("test only")
         }
+    }
+
+    fn int64_schema(columns: &[&str]) -> Arc<Schema> {
+        Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|name| ColumnSchema::new(*name, ConcreteDataType::int64_datatype(), false))
+                .collect(),
+        ))
+    }
+
+    fn record_batch(schema: Arc<Schema>, columns: Vec<VectorRef>) -> RecordBatch {
+        RecordBatch::new(schema, columns).expect("test record batch must match its schema")
+    }
+
+    fn expected_int64_schema() -> ArrowSchema {
+        int64_schema(&["a", "b"]).arrow_schema().as_ref().clone()
+    }
+
+    fn merge_scan_exec(
+        responses: Vec<(RegionId, RecordBatch)>,
+        expected_schema: ArrowSchema,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let regions = responses.iter().map(|(region_id, _)| *region_id).collect();
+        merge_scan_exec_with_handler(
+            regions,
+            expected_schema,
+            Arc::new(TestRegionQueryHandler::new(responses)),
+            target_partition,
+        )
+    }
+
+    fn merge_scan_exec_with_handler(
+        regions: Vec<RegionId>,
+        expected_schema: ArrowSchema,
+        handler: Arc<TestRegionQueryHandler>,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
+        MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &expected_schema,
+            handler,
+            QueryContext::arc(),
+            target_partition,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    async fn collect_merge_scan(
+        exec: MergeScanExec,
+    ) -> datafusion_common::Result<Vec<DfRecordBatch>> {
+        exec.execute(0, Arc::new(TaskContext::default()))?
+            .try_collect()
+            .await
+    }
+
+    fn assert_int64_batch(batch: &DfRecordBatch, values: (i64, i64)) {
+        assert_eq!(batch.schema().as_ref(), &expected_int64_schema());
+        let a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let b = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!((a.value(0), b.value(0)), values);
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_canonical_single_region() {
+        let batch = record_batch(
+            int64_schema(&["a", "b"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let batches = collect_merge_scan(merge_scan_exec(
+            vec![(RegionId::new(1024, 1), batch)],
+            expected_int64_schema(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_int64_batch(&batches[0], (11, 12));
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_canonical_two_regions() {
+        let batch = || {
+            record_batch(
+                int64_schema(&["a", "b"]),
+                vec![
+                    Arc::new(Int64Vector::from_slice([11])) as _,
+                    Arc::new(Int64Vector::from_slice([12])) as _,
+                ],
+            )
+        };
+        let batches = collect_merge_scan(merge_scan_exec(
+            vec![
+                (RegionId::new(1024, 1), batch()),
+                (RegionId::new(1024, 2), batch()),
+            ],
+            expected_int64_schema(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            assert_int64_batch(batch, (11, 12));
+        }
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_swapped_columns_never_relabels_positionally() {
+        let batch = record_batch(
+            int64_schema(&["b", "a"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([2002])) as _,
+                Arc::new(Int64Vector::from_slice([1002])) as _,
+            ],
+        );
+        assert!(
+            collect_merge_scan(merge_scan_exec(
+                vec![(RegionId::new(1024, 1), batch)],
+                expected_int64_schema(),
+                1,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_allows_timestamp_timezone_only_patch() {
+        let remote_arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        )]));
+        let remote_schema = Arc::new(Schema::try_from(remote_arrow_schema).unwrap());
+        let timestamp_array: Arc<dyn arrow::array::Array> =
+            Arc::new(TimestampMillisecondArray::from(vec![1002]).with_timezone("UTC"));
+        let timestamp = TimestampMillisecondVector::try_from_arrow_array(timestamp_array).unwrap();
+        let batch = record_batch(remote_schema, vec![Arc::new(timestamp) as _]);
+        let expected_schema = ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("Asia/Shanghai".into())),
+            false,
+        )]);
+        let batches = collect_merge_scan(merge_scan_exec(
+            vec![(RegionId::new(1024, 1), batch)],
+            expected_schema.clone(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches[0].schema().as_ref(), &expected_schema);
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_rejects_incompatible_type() {
+        let batch = record_batch(
+            Arc::new(Schema::new(vec![
+                ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new("b", ConcreteDataType::int64_datatype(), false),
+            ])),
+            vec![
+                Arc::new(StringVector::from_slice(&["not-an-int"])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        assert!(
+            collect_merge_scan(merge_scan_exec(
+                vec![(RegionId::new(1024, 1), batch)],
+                expected_int64_schema(),
+                1,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_rejects_too_few_columns() {
+        let batch = record_batch(
+            int64_schema(&["a"]),
+            vec![Arc::new(Int64Vector::from_slice([11])) as _],
+        );
+        assert!(
+            collect_merge_scan(merge_scan_exec(
+                vec![(RegionId::new(1024, 1), batch)],
+                expected_int64_schema(),
+                1,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_rejects_too_many_columns() {
+        let batch = record_batch(
+            int64_schema(&["a", "b", "extra"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+                Arc::new(Int64Vector::from_slice([13])) as _,
+            ],
+        );
+        assert!(
+            collect_merge_scan(merge_scan_exec(
+                vec![(RegionId::new(1024, 1), batch)],
+                expected_int64_schema(),
+                1,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_allows_top_level_metadata_mismatch() {
+        let fields = expected_int64_schema().fields().clone();
+        let expected = ArrowSchema::new_with_metadata(
+            fields.clone(),
+            StdHashMap::from([("greptime:version".to_string(), "1".to_string())]),
+        );
+        let actual = ArrowSchema::new_with_metadata(
+            fields,
+            StdHashMap::from([("greptime:version".to_string(), "0".to_string())]),
+        );
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    /// Builds the metadata of a JSON column field. `wire_form` mirrors the
+    /// binary-encoded representation (adds `ARROW:extension:name`), while the
+    /// decoded structured form only carries the semantic keys.
+    fn json_field_metadata(wire_form: bool, json_settings: &str) -> StdHashMap<String, String> {
+        let mut metadata = StdHashMap::from([
+            (datatypes::schema::TYPE_KEY.to_string(), "Json".to_string()),
+            (
+                arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY.to_string(),
+                json_settings.to_string(),
+            ),
+        ]);
+        if wire_form {
+            metadata.insert(
+                arrow_schema::extension::EXTENSION_TYPE_NAME_KEY.to_string(),
+                "greptime.json".to_string(),
+            );
+        }
+        metadata
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_json_wire_binary_vs_decoded_struct() {
+        // The merge-scan (expected) side carries a JSON2 column in its binary
+        // wire form (Binary + `ARROW:extension:name`); the remote decoded
+        // stream carries the concretized structured form (Struct + the same
+        // semantic extension metadata, without the arrow extension name). This
+        // mirrors the failing `json2_limit` case: the two representations must
+        // validate as equal.
+        let json_settings = r#"{"json_settings":{"type_hints":[]}}"#;
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(json_field_metadata(true, json_settings)),
+        ]);
+        let actual =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(false, json_settings)),
+            ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_json_decoded_struct_vs_wire_binary() {
+        // The reverse direction: expected side is the decoded structured form
+        // while the actual remote stream advertises the binary wire form.
+        let json_settings = r#"{"json_settings":{"type_hints":[]}}"#;
+        let expected =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(false, json_settings)),
+            ]);
+        let actual = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(json_field_metadata(true, json_settings)),
+        ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_json_fields_with_different_json_settings() {
+        // JSON2 settings (type hints) are semantic: two JSON columns with
+        // different settings describe different logical structures and must be
+        // rejected.
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
+                true,
+                r#"{"json_settings":{"type_hints":[["a",{"JsonType":"Int64"}]]}}"#,
+            )),
+        ]);
+        let actual =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(
+                    false,
+                    r#"{"json_settings":{"type_hints":[["a",{"JsonType":"String"}]]}}"#,
+                )),
+            ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_json_vs_plain_binary_field() {
+        // A JSON column must not be accepted as compatible with a plain Binary
+        // column lacking the JSON extension metadata.
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
+                true,
+                r#"{"json_settings":{"type_hints":[]}}"#,
+            )),
+        ]);
+        let actual = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_field_metadata_and_nullability_mismatch() {
+        let expected = expected_int64_schema();
+        let metadata_mismatch = ArrowSchema::new_with_metadata(
+            vec![
+                expected
+                    .field(0)
+                    .as_ref()
+                    .clone()
+                    .with_metadata(StdHashMap::from([(
+                        "remote".to_string(),
+                        "different".to_string(),
+                    )])),
+                expected.field(1).as_ref().clone(),
+            ],
+            expected.metadata().clone(),
+        );
+        let nullability_mismatch = ArrowSchema::new_with_metadata(
+            vec![
+                expected.field(0).as_ref().clone().with_nullable(true),
+                expected.field(1).as_ref().clone(),
+            ],
+            expected.metadata().clone(),
+        );
+        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_err());
+        assert!(validate_remote_schema(&expected, &nullability_mismatch, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_rejects_timestamp_timezone_plus_field_mismatches() {
+        let expected = ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("Asia/Shanghai".into())),
+            false,
+        )]);
+        let different_unit = ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+            false,
+        )]);
+        let different_name = ArrowSchema::new(vec![Field::new(
+            "other",
+            TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        )]);
+        let nullability = ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            true,
+        )]);
+        let metadata = ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                TestArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            )
+            .with_metadata(StdHashMap::from([(
+                "remote".to_string(),
+                "different".to_string(),
+            )])),
+        ]);
+        for actual in [&different_unit, &different_name, &nullability, &metadata] {
+            assert!(validate_remote_schema(&expected, actual, "test").is_err());
+        }
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_returns_arrow_schema_error() {
+        let expected = expected_int64_schema();
+        let actual = ArrowSchema::new(vec![Field::new("other", TestArrowDataType::Int64, false)]);
+        match validate_remote_schema(&expected, &actual, "test").unwrap_err() {
+            DataFusionError::ArrowError(error, None) => match error.as_ref() {
+                ArrowError::SchemaError(message) => {
+                    assert!(message.contains("field count mismatch"))
+                }
+                error => panic!("expected ArrowError::SchemaError, got {error:?}"),
+            },
+            error => panic!("expected DataFusionError::ArrowError(_, None), got {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_incompatible_empty_advertised_schema() {
+        let region_id = RegionId::new(1024, 1);
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                int64_schema(&["a"]),
+                vec![],
+            )])),
+            1,
+        );
+        let errors_before = merge_scan_schema_error_count_for_test();
+        assert!(collect_merge_scan(exec).await.is_err());
+        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_allows_top_level_metadata_version_mismatch() {
+        let fields = expected_int64_schema().fields().clone();
+        let expected = ArrowSchema::new_with_metadata(
+            fields.clone(),
+            StdHashMap::from([("greptime:version".to_string(), "1".to_string())]),
+        );
+        let remote_schema = Arc::new(
+            Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                fields,
+                StdHashMap::from([("greptime:version".to_string(), "0".to_string())]),
+            )))
+            .unwrap(),
+        );
+        let batch = record_batch(
+            remote_schema.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let batches = collect_merge_scan(merge_scan_exec_with_handler(
+            vec![RegionId::new(1024, 1)],
+            expected.clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                RegionId::new(1024, 1),
+                remote_schema,
+                vec![batch],
+            )])),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches[0].schema().as_ref(), &expected);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_advertised_schema_inner_batch_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let advertised_schema = int64_schema(&["a", "b"]);
+        let inner_batch = record_batch(
+            int64_schema(&["b", "a"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([12])) as _,
+                Arc::new(Int64Vector::from_slice([11])) as _,
+            ],
+        )
+        .into_df_record_batch();
+        let inner_schema = inner_batch.schema_ref().clone();
+        let batch = RecordBatch::from_df_record_batch(advertised_schema.clone(), inner_batch);
+        assert!(Arc::ptr_eq(
+            advertised_schema.arrow_schema(),
+            batch.schema.arrow_schema()
+        ));
+        assert!(!Arc::ptr_eq(
+            advertised_schema.arrow_schema(),
+            &inner_schema
+        ));
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                advertised_schema,
+                vec![batch],
+            )])),
+            1,
+        );
+        let errors_before = merge_scan_schema_error_count_for_test();
+        assert!(collect_merge_scan(exec).await.is_err());
+        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_unchecked_inner_extra_column() {
+        let region_id = RegionId::new(1024, 1);
+        let advertised_schema = int64_schema(&["a", "b"]);
+        let inner_batch = record_batch(
+            int64_schema(&["a", "b", "extra"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+                Arc::new(Int64Vector::from_slice([13])) as _,
+            ],
+        )
+        .into_df_record_batch();
+        assert!(!Arc::ptr_eq(
+            advertised_schema.arrow_schema(),
+            inner_batch.schema_ref()
+        ));
+        let batch = RecordBatch::from_df_record_batch(advertised_schema.clone(), inner_batch);
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                advertised_schema,
+                vec![batch],
+            )])),
+            1,
+        );
+        assert!(collect_merge_scan(exec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_validates_structurally_equal_distinct_batch_schema()
+    {
+        let region_id = RegionId::new(1024, 1);
+        let advertised_schema = int64_schema(&["a", "b"]);
+        let inner_schema = Arc::new(
+            Schema::try_from(Arc::new(advertised_schema.arrow_schema().as_ref().clone())).unwrap(),
+        );
+        let inner_batch = record_batch(
+            inner_schema,
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        )
+        .into_df_record_batch();
+        assert_eq!(advertised_schema.arrow_schema(), inner_batch.schema_ref());
+        assert!(!Arc::ptr_eq(
+            advertised_schema.arrow_schema(),
+            inner_batch.schema_ref()
+        ));
+        let batch = RecordBatch::from_df_record_batch(advertised_schema.clone(), inner_batch);
+        let batches = collect_merge_scan(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                advertised_schema,
+                vec![batch],
+            )])),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_int64_batch(&batches[0], (11, 12));
     }
 
     #[test]
@@ -2090,7 +2972,7 @@ mod tests {
 
         let session_state = SessionStateBuilder::new().build();
 
-        let handler = Arc::new(TestRegionQueryHandler);
+        let handler = Arc::new(TestRegionQueryHandler::default());
         let target_partition = 2;
 
         let exec = MergeScanExec::new(
@@ -2146,7 +3028,7 @@ mod tests {
         let regions = vec![RegionId::new(1024, 1)];
         let query_ctx = QueryContext::arc();
         let session_state = SessionStateBuilder::new().build();
-        let handler = Arc::new(TestRegionQueryHandler);
+        let handler = Arc::new(TestRegionQueryHandler::default());
         let exec = MergeScanExec::new(
             &session_state,
             table,
@@ -2259,7 +3141,7 @@ mod tests {
             vec![region_id],
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
             AliasMapping::new(),
@@ -2328,7 +3210,7 @@ mod tests {
             vec![logical_region_id],
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
             AliasMapping::new(),

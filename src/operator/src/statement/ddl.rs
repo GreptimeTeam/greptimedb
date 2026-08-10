@@ -31,7 +31,9 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_base::regex_pattern::NAME_PATTERN_REG;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema, is_readonly_table,
+};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 #[cfg(feature = "enterprise")]
@@ -53,7 +55,7 @@ use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
     CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
-    SubmitDdlTaskResponse,
+    SubmitDdlTaskResponse, TriggerReason,
 };
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -96,8 +98,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
+    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -106,17 +108,20 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidEntitySemanticOptionSnafu, InvalidPartitionRuleSnafu,
+    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
+    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
+use crate::utils::{
+    to_meta_query_context_with_origin_frontend_and_trigger_reason,
+    to_meta_query_context_with_trigger_reason,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -300,7 +305,7 @@ impl StatementExecutor {
             }
         }
 
-        self.create_table_inner(create_expr, stmt.partitions, ctx)
+        self.create_table_inner(create_expr, stmt.partitions, ctx, TriggerReason::Manual)
             .await
     }
 
@@ -357,7 +362,8 @@ impl StatementExecutor {
         );
 
         let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
-        self.create_table_inner(create_expr, partitions, ctx).await
+        self.create_table_inner(create_expr, partitions, ctx, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -369,7 +375,8 @@ impl StatementExecutor {
         let create_expr =
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;
-        self.create_table_inner(create_expr, None, ctx).await
+        self.create_table_inner(create_expr, None, ctx, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -378,13 +385,9 @@ impl StatementExecutor {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
-        ensure!(
-            !is_readonly_schema(&create_table.schema_name),
-            SchemaReadOnlySnafu {
-                name: create_table.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
 
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -398,16 +401,20 @@ impl StatementExecutor {
                     .await?;
             }
             // Create logical tables
-            self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
-                .await?
-                .into_iter()
-                .next()
-                .context(error::UnexpectedSnafu {
-                    violated: "expected to create logical tables",
-                })
+            self.create_logical_tables(
+                std::slice::from_ref(create_table),
+                query_ctx,
+                trigger_reason,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected to create logical tables",
+            })
         } else {
             // Create other normal table
-            self.create_non_logic_table(create_table, partitions, query_ctx)
+            self.create_non_logic_table(create_table, partitions, query_ctx, trigger_reason)
                 .await
         }
     }
@@ -418,6 +425,7 @@ impl StatementExecutor {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
 
@@ -486,6 +494,7 @@ impl StatementExecutor {
                 partitions,
                 table_info.clone(),
                 query_ctx,
+                trigger_reason,
             )
             .await?;
 
@@ -513,6 +522,7 @@ impl StatementExecutor {
         &self,
         create_table_exprs: &[CreateTableExpr],
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Vec<TableRef>> {
         let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
         ensure!(
@@ -543,7 +553,7 @@ impl StatementExecutor {
             .collect::<Vec<_>>();
 
         let resp = self
-            .create_logical_tables_procedure(tables_data, query_context.clone())
+            .create_logical_tables_procedure(tables_data, query_context.clone(), trigger_reason)
             .await?;
 
         let table_ids = resp.table_ids;
@@ -706,7 +716,7 @@ impl StatementExecutor {
         .context(error::InvalidExprSnafu)?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_trigger(task),
         );
 
@@ -770,7 +780,7 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_flow(task),
         );
 
@@ -1083,7 +1093,7 @@ impl StatementExecutor {
         };
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(ctx),
+            to_meta_query_context_with_trigger_reason(ctx, TriggerReason::Manual),
             DdlTask::new_create_view(expr, view_info.clone()),
         );
 
@@ -1169,7 +1179,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_flow(expr),
         );
 
@@ -1204,7 +1214,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_trigger(expr),
         );
 
@@ -1216,7 +1226,7 @@ impl StatementExecutor {
 
     /// Drop a view
     #[tracing::instrument(skip_all)]
-    pub(crate) async fn drop_view(
+    pub async fn drop_view(
         &self,
         catalog: String,
         schema: String,
@@ -1285,7 +1295,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_view(expr),
         );
 
@@ -1300,6 +1310,7 @@ impl StatementExecutor {
         &self,
         alter_table_exprs: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Output> {
         let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
         ensure!(
@@ -1345,7 +1356,8 @@ impl StatementExecutor {
         // Submit procedure for each physical table
         let mut handles = Vec::with_capacity(groups.len());
         for (_physical_table_id, exprs) in groups {
-            let fut = self.alter_logical_tables_procedure(exprs, query_context.clone());
+            let fut =
+                self.alter_logical_tables_procedure(exprs, query_context.clone(), trigger_reason);
             handles.push(fut);
         }
         let _results = futures::future::try_join_all(handles).await?;
@@ -1374,12 +1386,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
-            ensure!(
-                !is_readonly_schema(&table_name.schema_name),
-                SchemaReadOnlySnafu {
-                    name: table_name.schema_name.clone()
-                }
-            );
+            ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
             if let Some(table) = self
                 .catalog_manager
@@ -1485,12 +1492,7 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_schema(&table_name.schema_name),
-            SchemaReadOnlySnafu {
-                name: table_name.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
         let table = self
             .catalog_manager
@@ -1527,7 +1529,8 @@ impl StatementExecutor {
         }
 
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
-        self.alter_table_inner(expr, query_context).await
+        self.alter_table_inner(expr, query_context, TriggerReason::Manual)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -1537,12 +1540,7 @@ impl StatementExecutor {
         query_context: &QueryContextRef,
     ) -> Result<Output> {
         // Check if the schema is read-only.
-        ensure!(
-            !is_readonly_schema(&request.schema_name),
-            SchemaReadOnlySnafu {
-                name: request.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&request.schema_name, &request.table_name)?;
 
         let table_ref = TableReference::full(
             &request.catalog_name,
@@ -1765,8 +1763,10 @@ impl StatementExecutor {
             source: Some(source),
             ..Default::default()
         };
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context.clone(), TriggerReason::Manual);
         let mut req = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context.clone()),
+            meta_query_context,
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
@@ -1821,13 +1821,9 @@ impl StatementExecutor {
         &self,
         expr: AlterTableExpr,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_schema(&expr.schema_name),
-            SchemaReadOnlySnafu {
-                name: expr.schema_name.clone()
-            }
-        );
+        ensure_table_writable(&expr.schema_name, &expr.table_name)?;
 
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
@@ -1875,12 +1871,12 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
+
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
-                DdlTask::new_alter_table(expr),
-            );
+            let req = SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_alter_table(expr));
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1891,7 +1887,7 @@ impl StatementExecutor {
         } else {
             // This is logical table
             let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
+                meta_query_context,
                 DdlTask::new_alter_logical_tables(vec![expr]),
             );
 
@@ -2005,6 +2001,7 @@ impl StatementExecutor {
         partitions: Vec<PartitionExpr>,
         table_info: TableInfo,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions
             .into_iter()
@@ -2012,7 +2009,11 @@ impl StatementExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
+            to_meta_query_context_with_origin_frontend_and_trigger_reason(
+                query_context,
+                &self.origin_frontend_addr,
+                trigger_reason,
+            ),
             DdlTask::new_create_table(create_table, partitions, table_info),
         );
 
@@ -2026,9 +2027,14 @@ impl StatementExecutor {
         &self,
         tables_data: Vec<(CreateTableExpr, TableInfo)>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend(query_context, &self.origin_frontend_addr),
+            to_meta_query_context_with_origin_frontend_and_trigger_reason(
+                query_context,
+                &self.origin_frontend_addr,
+                trigger_reason,
+            ),
             DdlTask::new_create_logical_tables(tables_data),
         );
 
@@ -2042,9 +2048,12 @@ impl StatementExecutor {
         &self,
         tables_data: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
+        trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            meta_query_context,
             DdlTask::new_alter_logical_tables(tables_data),
         );
 
@@ -2062,7 +2071,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2086,7 +2095,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         );
 
@@ -2102,7 +2111,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_alter_database(alter_expr),
         );
 
@@ -2119,8 +2128,10 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let meta_query_context =
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            meta_query_context,
             DdlTask::new_truncate_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2212,7 +2223,7 @@ impl StatementExecutor {
         creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
             DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
         );
 
@@ -2315,6 +2326,9 @@ pub fn verify_alter(
                 violated: format!("Invalid table name: {}", new_table_name)
             }
         );
+        // Renaming INTO a computed graph table's name would let the overlay
+        // shadow the renamed physical table, orphaning its data.
+        ensure_table_writable(&table_info.schema_name, new_table_name)?;
     } else if let AlterKind::AddColumns { columns } = alter_kind {
         // If all the columns are marked as add_if_not_exists and they already exist in the table,
         // there is no need to perform the alter.
@@ -2363,7 +2377,7 @@ pub fn create_table_info(
     }
 
     let next_column_id = column_schemas.len() as u32;
-    let schema = Arc::new(Schema::new(column_schemas));
+    let schema = Arc::new(Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?);
 
     let primary_key_indices = create_table
         .primary_keys
@@ -2396,6 +2410,12 @@ pub fn create_table_info(
         &column_name_to_index_map,
         &partition_key_indices,
         &create_table.time_index,
+    )?;
+
+    validate_entity_semantic_options(
+        &table_options,
+        &column_name_to_index_map,
+        &primary_key_indices,
     )?;
 
     let meta = TableMeta {
@@ -2508,6 +2528,54 @@ fn validate_repartition_column_hint(
         .extra_options
         .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
 
+    Ok(())
+}
+
+/// Rejects DDL against read-only schemas and computed entity-graph tables.
+fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
+    ensure!(
+        !is_readonly_schema(schema),
+        SchemaReadOnlySnafu {
+            name: schema.to_string()
+        }
+    );
+    ensure!(
+        !is_readonly_table(schema, table),
+        TableReadOnlySnafu {
+            name: table.to_string()
+        }
+    );
+    Ok(())
+}
+
+/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
+/// against the table schema: every named column must exist, and `id` columns must
+/// additionally be tag (primary-key) columns so entity identity stays indexable
+/// and joinable. See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+fn validate_entity_semantic_options(
+    table_options: &TableOptions,
+    column_name_to_index_map: &HashMap<String, usize>,
+    primary_key_indices: &[usize],
+) -> Result<()> {
+    for (key, value) in &table_options.extra_options {
+        let Some((_, role)) = parse_entity_option_key(key) else {
+            continue;
+        };
+        let is_id_role = role == EntityRole::Id;
+        for col in &parse_entity_columns(value) {
+            let idx = column_name_to_index_map
+                .get(col)
+                .context(ColumnNotFoundSnafu { msg: col })?;
+            ensure!(
+                !is_id_role || primary_key_indices.contains(idx),
+                InvalidEntitySemanticOptionSnafu {
+                    reason: format!(
+                        "entity id column `{col}` (option `{key}`) must be a tag/primary-key column"
+                    ),
+                }
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2732,12 +2800,7 @@ async fn execute_undrop_table(
     table_name: TableName,
     query_context: QueryContextRef,
 ) -> Result<Output> {
-    ensure!(
-        !is_readonly_schema(&table_name.schema_name),
-        SchemaReadOnlySnafu {
-            name: table_name.schema_name.clone()
-        }
-    );
+    ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
     let dropped = table_metadata_manager
         .get_dropped_table(&table_name)
@@ -2747,8 +2810,10 @@ async fn execute_undrop_table(
             table_name: table_name.to_string(),
         })?;
 
+    let meta_query_context =
+        to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
     let request = SubmitDdlTaskRequest::new(
-        to_meta_query_context(query_context),
+        meta_query_context,
         DdlTask::new_undrop_table(dropped.table_id),
     );
     procedure_executor
@@ -2800,7 +2865,9 @@ mod test {
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
     #[cfg(feature = "enterprise")]
-    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::ddl::{
+        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
+    };
     #[cfg(feature = "enterprise")]
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -2946,6 +3013,13 @@ mod test {
         let requests = procedure.requests.lock().unwrap();
         assert!(matches!(&requests[0].task, DdlTask::UndropTable(task) if task.table_id == 42));
         assert_eq!(
+            requests[0]
+                .query_context
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY),
+            Some(&TriggerReason::Manual.as_ref().to_string())
+        );
+        assert_eq!(
             cache.invalidations.lock().unwrap()[0],
             vec![CacheIdent::TableId(42), CacheIdent::TableName(name)]
         );
@@ -3029,6 +3103,58 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
+
+    #[test]
+    fn test_validate_entity_semantic_options() {
+        let col_map = HashMap::from([
+            ("service_name".to_string(), 0usize),
+            ("host_id".to_string(), 1usize),
+            ("value".to_string(), 2usize),
+        ]);
+        // service_name (0) and host_id (1) are tags; value (2) is a field.
+        let pk = vec![0usize, 1usize];
+        let opts = |pairs: &[(&str, &str)]| TableOptions {
+            extra_options: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+
+        // id on a tag column, composite id on tags, and descriptive on a field
+        // column are all accepted.
+        for pairs in [
+            &[("greptime.semantic.entity.service.id", "service_name")][..],
+            &[(
+                "greptime.semantic.entity.process.id",
+                "service_name,host_id",
+            )][..],
+            &[("greptime.semantic.entity.service.descriptive", "value")][..],
+        ] {
+            assert!(validate_entity_semantic_options(&opts(pairs), &col_map, &pk).is_ok());
+        }
+
+        // id pointing at a field column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "value")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            error::Error::InvalidEntitySemanticOption { .. }
+        ));
+
+        // id pointing at a missing column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "nope")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
     }
 
     #[test]
@@ -3359,6 +3485,38 @@ WITH ('repartition.column.hint' = ' host ')",
                 .extra_options
                 .get(REPARTITION_COLUMN_HINT_KEY),
             Some(&"host".to_string())
+        );
+    }
+
+    #[test]
+    fn test_create_table_info_rejects_non_timestamp_time_index() {
+        let expr = CreateTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "demo".to_string(),
+            desc: String::new(),
+            column_defs: vec![api::v1::ColumnDef {
+                name: "host".to_string(),
+                data_type: api::v1::ColumnDataType::String as i32,
+                is_nullable: true,
+                default_constraint: vec![],
+                semantic_type: 0,
+                comment: String::new(),
+                datatype_extension: None,
+                options: None,
+            }],
+            time_index: "host".to_string(),
+            primary_keys: vec![],
+            create_if_not_exists: false,
+            table_options: HashMap::new(),
+            table_id: None,
+            engine: "mito".to_string(),
+        };
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert_eq!(
+            common_error::ext::ErrorExt::status_code(&err),
+            common_error::status_code::StatusCode::InvalidArguments
         );
     }
 

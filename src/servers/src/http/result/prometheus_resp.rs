@@ -30,6 +30,7 @@ use common_query::native_histogram::{
 use common_query::prometheus::{format_prometheus_float, is_prometheus_stale_nan};
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
+use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::ConcreteDataType;
 use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
@@ -281,7 +282,7 @@ impl PrometheusJsonResponse {
             // prepare things...
             let tag_columns = tag_column_indices
                 .iter()
-                .map(|i| batch.column(*i).as_string::<i32>())
+                .map(|i| batch.column(*i))
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
@@ -344,9 +345,8 @@ impl PrometheusJsonResponse {
                     tags.push((METRIC_NAME, metric_name.as_str()));
                 }
                 for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    // TODO(ruihang): add test for NULL tag
-                    if tag_column.is_valid(row_index) {
-                        tags.push((tag_name, tag_column.value(row_index)));
+                    if let Some(tag_value) = string_array_value_at_index(tag_column, row_index) {
+                        tags.push((tag_name, tag_value));
                     }
                 }
 

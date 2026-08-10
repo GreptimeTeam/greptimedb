@@ -486,7 +486,8 @@ impl ColumnSchema {
         }
     }
 
-    pub fn with_extension_type<E>(&mut self, extension_type: &E) -> Result<()>
+    /// Sets the Arrow extension type metadata for this column.
+    pub fn with_extension_type<E>(&mut self, extension_type: &E)
     where
         E: ExtensionType,
     {
@@ -496,9 +497,10 @@ impl ColumnSchema {
         if let Some(extension_metadata) = extension_type.serialize_metadata() {
             self.metadata
                 .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), extension_metadata);
+        } else {
+            // Replacing an extension must not retain metadata owned by the previous type.
+            self.metadata.remove(EXTENSION_TYPE_METADATA_KEY);
         }
-
-        Ok(())
     }
 
     pub fn is_indexed(&self) -> bool {
@@ -1230,6 +1232,7 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
+    use crate::extension::json::{Json2ExtensionType, JsonExtensionType};
     use crate::types::{StructField, StructType};
     use crate::value::Value;
     use crate::vectors::Int32Vector;
@@ -1244,6 +1247,31 @@ mod tests {
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_with_extension_type_replaces_metadata() {
+        let mut schema = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
+
+        schema.with_extension_type(&Json2ExtensionType::default());
+        assert_eq!(
+            Some(Json2ExtensionType::NAME),
+            schema
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str)
+        );
+        assert!(schema.metadata().contains_key(EXTENSION_TYPE_METADATA_KEY));
+
+        schema.with_extension_type(&JsonExtensionType);
+        assert_eq!(
+            Some(JsonExtensionType::NAME),
+            schema
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str)
+        );
+        assert!(!schema.metadata().contains_key(EXTENSION_TYPE_METADATA_KEY));
     }
 
     #[test]

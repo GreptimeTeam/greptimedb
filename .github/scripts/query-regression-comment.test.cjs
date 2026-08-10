@@ -187,11 +187,11 @@ test('sorts the base and candidate query union and aggregates scoped thresholds'
   assert.equal(rows[0].threshold, 'base measurement missing');
   assert.equal(
     rows[1].threshold,
-    'candidate measurement missing; p95 [target=base]: warn, absolute [target=candidate, encoding=plain]: pass'
+    'candidate measurement missing; p95 [target=base]: warn; absolute [target=candidate, encoding=plain]: pass'
   );
 });
 
-test('preserves unscoped and unmatched thresholds in a synthetic N/A row', () => {
+test('keeps unscoped and unmatched thresholds in a case-thresholds detail row', () => {
   const rows = collectReportRows(report('thresholds', {
     base: [{ name: 'measured', latency_ms_median: 10 }],
     candidate: [{ name: 'measured', latency_ms_median: 11 }],
@@ -214,9 +214,10 @@ test('preserves unscoped and unmatched thresholds in a synthetic N/A row', () =>
   assert.equal(rows[0].query, 'measured');
   assert.equal(rows[0].threshold, 'query limit [target=base]: passed');
   assert.equal(rows[1].query, 'N/A');
+  assert.equal(rows[1].kind, 'case-thresholds');
   assert.equal(
     rows[1].threshold,
-    'case/storage threshold: min_files [target=base]: passed, min_files [target=candidate]: failed, encoding limit [target=candidate, encoding=plain]: failed; unmatched query not-measured: orphaned limit [target=base, encoding=json]: failed (reason: measurement unavailable)'
+    'min_files [target=base]: passed; min_files [target=candidate]: failed; encoding limit [target=candidate, encoding=plain]: failed; unmatched query not-measured: orphaned limit [target=base, encoding=json]: failed (reason: measurement unavailable)'
   );
 });
 
@@ -239,10 +240,48 @@ test('keeps unscoped thresholds out of undefined and null query rows', () => {
   assert.equal(byQuery.get('undefined').threshold, 'N/A');
   assert.equal(byQuery.get('null').threshold, 'N/A');
   assert.equal(rows.filter(row => row.query === 'N/A').length, 1);
+  assert.equal(byQuery.get('N/A').kind, 'case-thresholds');
   assert.equal(
     byQuery.get('N/A').threshold,
-    'case/storage threshold: min_files [target=base]: passed, min_files [target=candidate]: failed'
+    'min_files [target=base]: passed; min_files [target=candidate]: failed'
   );
+});
+
+test('renders case/storage thresholds in a collapsible details block below the table', () => {
+  const rows = [
+    ...collectReportRows(report('first', {
+      base: [{ name: 'q1', latency_ms_median: 10 }],
+      candidate: [{ name: 'q1', latency_ms_median: 11 }],
+    }, [
+      { query: 'q1', threshold: 'query limit', target: 'base', status: 'passed' },
+      { threshold: 'min_files', target: 'base', status: 'passed' },
+      { threshold: 'min_files', target: 'candidate', status: 'failed' },
+    ]), '/reports/first/query-regression-report.json'),
+    ...collectReportRows({
+      case: { name: 'broken' },
+      status: 'failed',
+      error: 'connection refused',
+    }, '/reports/broken/query-regression-report.json'),
+  ];
+
+  const rendered = renderSummaryTable(rows);
+  const detailsIndex = rendered.indexOf('<details>');
+  const table = rendered.slice(0, detailsIndex);
+  const details = rendered.slice(detailsIndex);
+
+  // Query rows and abnormal N/A rows stay in the main table.
+  assert.match(table, /\| first \| q1 \| ✅ ok \|/);
+  assert.match(table, /\| broken \| N\/A \| ❌ failed \|/);
+  // Storage thresholds are not main-table rows.
+  assert.doesNotMatch(table, /^\| first \| N\/A \|/m);
+  assert.doesNotMatch(table, /min_files/);
+  // Status column is plain text without code-span backticks.
+  assert.doesNotMatch(table, /`/);
+  // Details block keeps its tags unescaped and its items '; '-separated.
+  assert.ok(details.startsWith('<details><summary>Case / storage thresholds</summary>'));
+  assert.ok(details.includes('- first: min_files \\[target=base\\]: passed; min_files \\[target=candidate\\]: failed'));
+  assert.ok(details.endsWith('</details>'));
+  assert.ok(!rendered.includes('&lt;details&gt;'));
 });
 
 test('escapes Markdown table content, including bare carriage returns', () => {

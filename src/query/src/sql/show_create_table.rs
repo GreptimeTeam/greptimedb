@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use arrow_schema::extension::ExtensionType;
 use common_meta::SchemaOptions;
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, parse_legacy_json2_settings};
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
@@ -39,7 +39,8 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -66,13 +67,15 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
-
     for (k, v) in table_opts
         .extra_options
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
         options.insert(k.clone(), v.clone());
+    }
+    if table_opts.skip_wal {
+        options.insert(SKIP_WAL_KEY.to_string(), true.to_string());
     }
     options
 }
@@ -211,12 +214,12 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         data_type = DataType::Custom(ObjectName::from(vec![Ident::new("JSON2")]), vec![]);
     }
 
-    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
-        let settings = json_extension
-            .metadata()
-            .json_settings
-            .clone()
-            .unwrap_or_default();
+    let settings = if let Some(extension) = column_schema.extension_type::<Json2ExtensionType>()? {
+        Some(extension.metadata().json_settings().clone())
+    } else {
+        parse_legacy_json2_settings(column_schema.metadata())?
+    };
+    if let Some(settings) = settings {
         extensions.set_json_settings(settings).context(SqlSnafu)?;
     }
 
@@ -321,6 +324,7 @@ mod tests {
     use std::time::Duration;
 
     use common_time::timestamp::TimeUnit;
+    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{
         FulltextOptions, Schema, SchemaRef, SkippingIndexOptions, VectorIndexOptions,
@@ -373,6 +377,7 @@ mod tests {
 
         let mut options = table::requests::TableOptions {
             ttl: Some(Duration::from_secs(30).into()),
+            skip_wal: true,
             ..Default::default()
         };
 
@@ -424,20 +429,37 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
 ENGINE=mito
 WITH(
   'compaction.type' = 'twcs',
+  skip_wal = 'true',
   ttl = '30s'
 )"#,
             sql
+        );
+
+        let mut table_meta = info.meta.clone();
+        table_meta.options.skip_wal = false;
+        table_meta
+            .options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), false.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)
+        );
+
+        let mut schema_options = SchemaOptions::default();
+        schema_options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, Some(schema_options)).get(SKIP_WAL_KEY)
         );
     }
 
     #[test]
     fn test_show_create_legacy_json_with_json_extension() {
         let mut json_column = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
-        json_column
-            .with_extension_type(&JsonExtensionType::new(Arc::new(
-                datatypes::extension::json::JsonMetadata::default(),
-            )))
-            .unwrap();
+        json_column.with_extension_type(&JsonExtensionType);
 
         let table_schema = SchemaRef::new(Schema::new(vec![
             json_column,

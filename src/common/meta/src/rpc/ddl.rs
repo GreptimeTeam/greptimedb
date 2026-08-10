@@ -44,11 +44,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
+use common_session::channel_protocol;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{OptionExt, ResultExt};
+use strum::{AsRefStr, EnumString};
 use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
@@ -66,7 +68,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
-
+/// Reserved query-context extension key for the trigger reason supplied by frontend.
+pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -1666,6 +1669,86 @@ pub struct QueryContext {
 }
 
 impl QueryContext {
+    /// Returns the protocol name represented by the wire channel value.
+    pub fn channel_protocol(&self) -> Option<&'static str> {
+        channel_protocol(self.channel)
+    }
+}
+
+/// The stable context recorded for a procedure event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventContext {
+    pub reason: TriggerReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+impl EventContext {
+    /// Creates an event context with no additional extensions.
+    pub fn new(reason: TriggerReason) -> Self {
+        Self {
+            reason,
+            protocol: None,
+            extensions: Default::default(),
+        }
+    }
+
+    /// Adds the protocol that originated the operation.
+    pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
+        self.protocol = Some(protocol.into());
+        self
+    }
+
+    /// Builds an event context from frontend query context metadata.
+    pub fn from_query_context(query_context: &QueryContext) -> Self {
+        let reason = query_context
+            .extensions
+            .get(TRIGGER_REASON_EXTENSION_KEY)
+            .map(|reason| TriggerReason::from_extension(reason))
+            .unwrap_or_default();
+        let context = Self::new(reason);
+        if let Some(protocol) = query_context.channel_protocol() {
+            context.with_protocol(protocol)
+        } else {
+            context
+        }
+    }
+}
+
+impl Default for EventContext {
+    fn default() -> Self {
+        Self::new(TriggerReason::default())
+    }
+}
+
+/// The stable classification of a procedure trigger.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, AsRefStr, EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum TriggerReason {
+    Manual,
+    AutoCreate,
+    AutoAlter,
+    AutoRepartition,
+    AutoRebalance,
+    RegionFailover,
+    ScheduledGc,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl TriggerReason {
+    pub fn from_extension(value: &str) -> Self {
+        value.parse().unwrap_or_default()
+    }
+}
+
+impl QueryContext {
     /// Get the current catalog
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
@@ -2236,5 +2319,51 @@ mod tests {
         assert_eq!(pb_roundtrip.extensions, pb.extensions);
         assert_eq!(pb_roundtrip.channel, pb.channel);
         assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_trigger_reason_deserializes_unknown_value() {
+        let reason: TriggerReason = serde_json::from_str("\"future_reason\"").unwrap();
+        assert_eq!(TriggerReason::Unknown, reason);
+    }
+
+    #[test]
+    fn test_event_context_serialization() {
+        let context = EventContext::new(TriggerReason::Manual).with_protocol("mysql");
+
+        assert_eq!(
+            serde_json::json!({
+                "reason": "manual",
+                "protocol": "mysql",
+            }),
+            serde_json::to_value(context).unwrap()
+        );
+
+        assert_eq!(
+            serde_json::json!({ "reason": "manual" }),
+            serde_json::to_value(EventContext::new(TriggerReason::Manual)).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_event_context_from_query_context_preserves_extensions() {
+        let mut query_context = QueryContext::default();
+        query_context.extensions.insert(
+            TRIGGER_REASON_EXTENSION_KEY.to_string(),
+            TriggerReason::AutoCreate.as_ref().to_string(),
+        );
+        query_context.channel = 4;
+
+        let event_context = EventContext::from_query_context(&query_context);
+
+        assert_eq!(event_context.reason, TriggerReason::AutoCreate);
+        assert_eq!(event_context.protocol.as_deref(), Some("prometheus"));
+        assert_eq!(
+            query_context
+                .extensions
+                .get(TRIGGER_REASON_EXTENSION_KEY)
+                .map(String::as_str),
+            Some("auto_create")
+        );
     }
 }

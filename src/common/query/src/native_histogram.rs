@@ -306,17 +306,6 @@ impl NativeHistogram {
     /// Returns `None` when the layouts are invalid or cannot be reconciled.
     pub fn add(&self, other: &Self) -> Option<Self> {
         let reset_hint = add_reset_hint(self.reset_hint, other.reset_hint);
-        if self.is_empty_payload() {
-            let mut result = other.clone();
-            result.reset_hint = reset_hint;
-            return result.compact();
-        }
-        if other.is_empty_payload() {
-            let mut result = self.clone();
-            result.reset_hint = reset_hint;
-            return result.compact();
-        }
-
         let (left, right) = self.reconcile(other)?;
         left.combine_exact(&right, reset_hint, |left, right| left + right)?
             .compact()
@@ -326,13 +315,6 @@ impl NativeHistogram {
     ///
     /// Returns `None` when the layouts are invalid or cannot be reconciled.
     pub fn sub(&self, other: &Self) -> Option<Self> {
-        if self.is_empty_payload() {
-            return other.clone().negated().compact();
-        }
-        if other.is_empty_payload() {
-            return self.clone().into_gauge().compact();
-        }
-
         let (left, right) = self.reconcile(other)?;
         left.combine_exact(&right, CounterResetHint::Gauge, |left, right| left - right)?
             .compact()
@@ -372,7 +354,7 @@ impl NativeHistogram {
 
     /// Compares PromQL-visible payload values by their exact bit patterns.
     ///
-    /// Reset hints, start timestamps, and sparse zero placement are ignored.
+    /// Reset hints and start timestamps are ignored.
     pub fn promql_eq(&self, other: &Self) -> bool {
         self.schema == other.schema
             && self.zero_threshold == other.zero_threshold
@@ -380,13 +362,13 @@ impl NativeHistogram {
             && self.count.to_bits() == other.count.to_bits()
             && self.zero_count.to_bits() == other.zero_count.to_bits()
             && self.sum.to_bits() == other.sum.to_bits()
-            && side_counts_equal(
+            && side_layout_equal(
                 &self.positive_spans,
                 &self.positive_buckets,
                 &other.positive_spans,
                 &other.positive_buckets,
             )
-            && side_counts_equal(
+            && side_layout_equal(
                 &self.negative_spans,
                 &self.negative_buckets,
                 &other.negative_spans,
@@ -792,17 +774,11 @@ impl NativeHistogram {
     }
 
     fn bucket_midpoint(&self, bucket: &Bucket) -> f64 {
-        if bucket.lower == f64::NEG_INFINITY && bucket.upper == f64::INFINITY {
-            return 0.0;
-        }
-        if bucket.lower == f64::NEG_INFINITY {
-            return bucket.upper;
-        }
-        if bucket.upper == f64::INFINITY {
-            return bucket.lower;
-        }
-        if self.uses_custom_buckets() || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
+        if self.uses_custom_buckets() {
             return (bucket.lower + bucket.upper) / 2.0;
+        }
+        if bucket.lower <= 0.0 && bucket.upper >= 0.0 {
+            return 0.0;
         }
         if bucket.upper < 0.0 {
             -((bucket.lower.abs() * bucket.upper.abs()).sqrt())
@@ -845,14 +821,6 @@ impl NativeHistogram {
             (false, false) => reconcile_exponential(self, other),
             _ => None,
         }
-    }
-
-    fn is_empty_payload(&self) -> bool {
-        self.count == 0.0
-            && self.zero_count == 0.0
-            && self.sum == 0.0
-            && self.positive_buckets.iter().all(|count| *count == 0.0)
-            && self.negative_buckets.iter().all(|count| *count == 0.0)
     }
 }
 
@@ -1011,7 +979,10 @@ fn side_bucket_indices(spans: &[Span]) -> Option<Vec<i32>> {
     let mut indices = Vec::new();
     let mut current_index = 0i32;
     let mut first = true;
-    for span in spans {
+    for (span_index, span) in spans.iter().enumerate() {
+        if span_index > 0 && span.offset < 0 {
+            return None;
+        }
         if first {
             current_index = span.offset;
             first = false;
@@ -1024,6 +995,12 @@ fn side_bucket_indices(spans: &[Span]) -> Option<Vec<i32>> {
         }
     }
     Some(indices)
+}
+
+fn span_bucket_len(spans: &[Span]) -> Option<usize> {
+    spans
+        .iter()
+        .try_fold(0usize, |sum, span| sum.checked_add(span.length as usize))
 }
 
 fn spans_from_indices_counts(values: Vec<(i32, f64)>) -> Option<(Vec<Span>, Vec<f64>)> {
@@ -1069,27 +1046,28 @@ fn side_counts(spans: &[Span], buckets: &[f64]) -> Option<BTreeMap<i32, f64>> {
     Some(values)
 }
 
-fn side_counts_equal(
+fn side_layout_equal(
     left_spans: &[Span],
     left_buckets: &[f64],
     right_spans: &[Span],
     right_buckets: &[f64],
 ) -> bool {
-    match (
-        side_counts(left_spans, left_buckets),
-        side_counts(right_spans, right_buckets),
-    ) {
-        (Some(left), Some(right)) => {
-            left.len() == right.len()
-                && left.iter().all(|(idx, count)| {
-                    right
-                        .get(idx)
-                        .is_some_and(|other| count.to_bits() == other.to_bits())
-                })
-        }
-        (None, None) => true,
-        _ => false,
+    if span_bucket_len(left_spans) != Some(left_buckets.len())
+        || span_bucket_len(right_spans) != Some(right_buckets.len())
+    {
+        return false;
     }
+    let Some(left_indices) = side_bucket_indices(left_spans) else {
+        return false;
+    };
+    let Some(right_indices) = side_bucket_indices(right_spans) else {
+        return false;
+    };
+    left_indices == right_indices
+        && left_buckets
+            .iter()
+            .zip(right_buckets)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
 fn merge_side(
@@ -1194,6 +1172,19 @@ fn ceil_div(value: i32, divisor: i32) -> i32 {
     value.div_euclid(divisor) + i32::from(value.rem_euclid(divisor) != 0)
 }
 
+/// Returns the index of the exponential bucket containing positive infinity.
+pub fn exponential_overflow_bucket_index(schema: i32) -> Option<i32> {
+    if !(MIN_EXPONENTIAL_SCHEMA..=MAX_EXPONENTIAL_SCHEMA).contains(&schema) {
+        return None;
+    }
+    let last_finite = if schema >= 0 {
+        1024_i64.checked_shl(schema as u32)?
+    } else {
+        1024_i64.checked_shr((-schema) as u32)?
+    };
+    i32::try_from(last_finite.checked_add(1)?).ok()
+}
+
 fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
     if schema == CUSTOM_BUCKETS_SCHEMA {
         return match idx {
@@ -1206,23 +1197,25 @@ fn get_bound(idx: i32, schema: i32, custom_values: &[f64]) -> Option<f64> {
         };
     }
 
-    if !(MIN_EXPONENTIAL_SCHEMA..=MAX_EXPONENTIAL_SCHEMA).contains(&schema) {
+    let overflow_index = exponential_overflow_bucket_index(schema)?;
+    if idx > overflow_index {
         return None;
     }
+    if idx == overflow_index {
+        return Some(f64::INFINITY);
+    }
+    if idx == overflow_index - 1 {
+        return Some(f64::MAX);
+    }
     if schema < 0 {
-        let exponent = idx.checked_shl((-schema) as u32)?;
-        return Some(if exponent == f64::MAX_EXP {
-            f64::MAX
-        } else {
-            2.0_f64.powi(exponent)
-        });
+        let exponent = i64::from(idx).checked_shl((-schema) as u32)?;
+        let Ok(exponent) = i32::try_from(exponent) else {
+            return Some(0.0);
+        };
+        return Some(2.0_f64.powi(exponent));
     }
     let exponent = idx as f64 / (1u32 << schema) as f64;
-    Some(if exponent == f64::MAX_EXP as f64 {
-        f64::MAX
-    } else {
-        2.0_f64.powf(exponent)
-    })
+    Some(2.0_f64.powf(exponent))
 }
 
 /// Returns the Arrow type for a complete native histogram value.
@@ -1336,12 +1329,9 @@ fn read_spans(offsets: Vec<i32>, lengths: Vec<u32>, name: &str) -> DfResult<Vec<
 }
 
 fn check_span_bucket_count(spans: &[Span], buckets: usize, name: &str) -> DfResult<()> {
-    let span_len = spans
-        .iter()
-        .try_fold(0usize, |sum, span| sum.checked_add(span.length as usize))
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!("native histogram {name} spans overflow"))
-        })?;
+    let span_len = span_bucket_len(spans).ok_or_else(|| {
+        DataFusionError::Execution(format!("native histogram {name} spans overflow"))
+    })?;
     if span_len != buckets {
         return Err(DataFusionError::Execution(format!(
             "native histogram {name} spans describe {span_len} buckets, found {buckets}"
@@ -1719,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn add_combines_reset_hints_for_empty_payloads() {
+    fn add_combines_reset_hints_for_compatible_empty_payloads() {
         let mut empty = histogram(Vec::new(), Vec::new());
         empty.reset_hint = CounterResetHint::Gauge;
         let mut populated = histogram(
@@ -1739,6 +1729,45 @@ mod tests {
             populated.add(&empty).unwrap().reset_hint,
             CounterResetHint::Gauge
         );
+    }
+
+    #[test]
+    fn empty_arithmetic_rejects_incompatible_schemas() {
+        let exponential = histogram(Vec::new(), Vec::new());
+        let mut custom = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![2.0],
+        );
+        custom.schema = CUSTOM_BUCKETS_SCHEMA;
+        custom.custom_values = vec![1.0];
+
+        assert!(exponential.add(&custom).is_none());
+        assert!(custom.add(&exponential).is_none());
+        assert!(exponential.sub(&custom).is_none());
+        assert!(custom.sub(&exponential).is_none());
+    }
+
+    #[test]
+    fn empty_custom_histogram_still_reconciles_bounds() {
+        let mut empty = histogram(Vec::new(), Vec::new());
+        empty.schema = CUSTOM_BUCKETS_SCHEMA;
+        empty.custom_values = vec![1.0];
+        let mut populated = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![2.0],
+        );
+        populated.schema = CUSTOM_BUCKETS_SCHEMA;
+        populated.custom_values = vec![2.0];
+
+        let result = empty.add(&populated).unwrap();
+        assert!(result.custom_values.is_empty());
+        assert_eq!(result.positive_buckets, vec![2.0]);
     }
 
     #[test]
@@ -1805,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn promql_eq_ignores_reset_hint_start_timestamp_and_sparse_zeros() {
+    fn promql_eq_ignores_metadata_but_compares_sparse_layout() {
         let mut left = histogram(
             vec![Span {
                 offset: 0,
@@ -1826,6 +1855,27 @@ mod tests {
         right.reset_hint = CounterResetHint::NotCounterReset;
         right.start_timestamp = Some(2000);
 
+        assert!(!left.promql_eq(&right));
+
+        right.positive_spans = vec![
+            Span {
+                offset: 0,
+                length: 0,
+            },
+            Span {
+                offset: 0,
+                length: 1,
+            },
+            Span {
+                offset: 42,
+                length: 0,
+            },
+        ];
+        left.positive_spans = vec![Span {
+            offset: 0,
+            length: 1,
+        }];
+        left.positive_buckets = vec![1.0];
         assert!(left.promql_eq(&right));
     }
 
@@ -1875,7 +1925,33 @@ mod tests {
             }],
             vec![1.0],
         );
-        assert!(undecodable.promql_eq(&undecodable.clone()));
+        assert!(!undecodable.promql_eq(&undecodable.clone()));
+
+        let mut mismatched = histogram(
+            vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            vec![1.0],
+        );
+        mismatched.count = 1.0;
+        mismatched.sum = 1.0;
+        assert!(!mismatched.promql_eq(&mismatched.clone()));
+
+        let invalid_offset = histogram(
+            vec![
+                Span {
+                    offset: 0,
+                    length: 1,
+                },
+                Span {
+                    offset: -1,
+                    length: 1,
+                },
+            ],
+            vec![1.0, 1.0],
+        );
+        assert!(!invalid_offset.promql_eq(&invalid_offset.clone()));
     }
 
     #[test]
@@ -1944,11 +2020,51 @@ mod tests {
     }
 
     #[test]
-    fn terminal_exponential_bucket_uses_max_finite_bound() {
-        for (schema, index) in [(-1, 512), (0, 1024), (2, 4096)] {
-            assert_eq!(get_bound(index, schema, &[]), Some(f64::MAX));
-            assert_eq!(get_bound(index + 1, schema, &[]), Some(f64::INFINITY));
+    fn exponential_bucket_bounds_stop_after_overflow_bucket() {
+        for schema in [-4, 0, 8] {
+            let overflow = exponential_overflow_bucket_index(schema).unwrap();
+            assert_eq!(get_bound(overflow - 1, schema, &[]), Some(f64::MAX));
+            assert_eq!(get_bound(overflow, schema, &[]), Some(f64::INFINITY));
+            assert_eq!(get_bound(overflow + 1, schema, &[]), None);
         }
+        assert_eq!(exponential_overflow_bucket_index(-5), None);
+        assert_eq!(exponential_overflow_bucket_index(9), None);
+        assert_eq!(get_bound(i32::MIN, -4, &[]), Some(0.0));
+    }
+
+    #[test]
+    fn custom_bucket_midpoints_preserve_infinite_bounds() {
+        let mut histogram = histogram(Vec::new(), Vec::new());
+        histogram.schema = CUSTOM_BUCKETS_SCHEMA;
+
+        assert_eq!(
+            histogram.bucket_midpoint(&Bucket {
+                lower: f64::NEG_INFINITY,
+                upper: -1.0,
+                count: 1.0,
+                boundary_rule: BoundaryRule::OpenLeft,
+            }),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(
+            histogram.bucket_midpoint(&Bucket {
+                lower: 1.0,
+                upper: f64::INFINITY,
+                count: 1.0,
+                boundary_rule: BoundaryRule::OpenLeft,
+            }),
+            f64::INFINITY
+        );
+        assert!(
+            histogram
+                .bucket_midpoint(&Bucket {
+                    lower: f64::NEG_INFINITY,
+                    upper: f64::INFINITY,
+                    count: 1.0,
+                    boundary_rule: BoundaryRule::OpenLeft,
+                })
+                .is_nan()
+        );
     }
 
     #[test]
@@ -1989,7 +2105,25 @@ mod tests {
     }
 
     #[test]
-    fn subtraction_treats_empty_left_as_zero() {
+    fn subtraction_treats_compatible_empty_left_as_zero() {
+        let left = histogram(vec![], vec![]);
+        let right = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![2.0],
+        );
+
+        let result = left.sub(&right).unwrap();
+        assert_eq!(result.reset_hint, CounterResetHint::Gauge);
+        assert_eq!(result.count, -2.0);
+        assert_eq!(result.sum, -2.0);
+        assert_eq!(result.positive_buckets, vec![-2.0]);
+    }
+
+    #[test]
+    fn subtraction_rejects_incompatible_empty_left() {
         let left = histogram(vec![], vec![]);
         let mut right = histogram(
             vec![Span {
@@ -2001,13 +2135,7 @@ mod tests {
         right.schema = CUSTOM_BUCKETS_SCHEMA;
         right.custom_values = vec![1.0];
 
-        let result = left.sub(&right).unwrap();
-
-        assert_eq!(result.schema, CUSTOM_BUCKETS_SCHEMA);
-        assert_eq!(result.reset_hint, CounterResetHint::Gauge);
-        assert_eq!(result.count, -2.0);
-        assert_eq!(result.sum, -2.0);
-        assert_eq!(result.positive_buckets, vec![-2.0]);
+        assert!(left.sub(&right).is_none());
     }
 }
 

@@ -24,6 +24,7 @@ use api::v1::{
 use client::Output;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::warn;
 use datatypes::prelude::ConcreteDataType;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -31,16 +32,16 @@ use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
-use servers::otlp::trace::TraceAuxData;
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
+use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
 use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
-    SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_TRACE_CONVENTIONS,
-    SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE, SOURCE_OPENTELEMETRY,
-    TABLE_DATA_MODEL_TRACE_V1,
+    SEMANTIC_ENTITY_SERVICE_ID, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
+    SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
 };
 
 use crate::instance::Instance;
@@ -842,6 +843,9 @@ impl Instance {
             let mut c = (*ctx).clone();
             c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_TRACE);
             c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY);
+            // `service_name` is a tag column in both trace models, so the main span
+            // table declares the logical `service` entity (Layer 1 auto-stamp).
+            c.set_extension(SEMANTIC_ENTITY_SERVICE_ID, SERVICE_NAME_COLUMN);
             if is_trace_v1_model {
                 c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
                 c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
@@ -1678,7 +1682,7 @@ impl Instance {
 
         if let Err(err) = self
             .statement_executor
-            .alter_table_inner(alter_expr, ctx.clone())
+            .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
             .await
         {
             let table = self

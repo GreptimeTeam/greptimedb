@@ -39,6 +39,7 @@ use crate::ddl::test_util::{
 };
 use crate::error::{Error, Result};
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
+use crate::rpc::ddl::EventContext;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -96,7 +97,12 @@ async fn test_on_prepare_physical_table_not_found() {
     let ddl_context = new_ddl_context(node_manager);
     let tasks = vec![test_create_logical_table_task("foo")];
     let physical_table_id = 1024u32;
-    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        tasks,
+        physical_table_id,
+        EventContext::default(),
+        ddl_context,
+    );
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableRouteNotFound { .. });
 }
@@ -126,7 +132,12 @@ async fn test_on_prepare() {
     // The create logical table procedure.
     let tasks = vec![test_create_logical_table_task("foo")];
     let physical_table_id = table_id;
-    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        tasks,
+        physical_table_id,
+        EventContext::default(),
+        ddl_context,
+    );
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -172,8 +183,12 @@ async fn test_on_prepare_logical_table_exists_err() {
         .unwrap();
     // The create logical table procedure.
     let physical_table_id = table_id;
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task],
+        physical_table_id,
+        EventContext::default(),
+        ddl_context,
+    );
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -216,8 +231,12 @@ async fn test_on_prepare_with_create_if_table_exists() {
     let physical_table_id = table_id;
     // Sets `create_if_not_exists`
     task.create_table.create_if_not_exists = true;
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task],
+        physical_table_id,
+        EventContext::default(),
+        ddl_context,
+    );
     let status = procedure.on_prepare().await.unwrap();
     let output = status.downcast_output_ref::<Vec<u32>>().unwrap();
     assert_eq!(*output, vec![8192]);
@@ -264,6 +283,7 @@ async fn test_on_prepare_part_logical_tables_exist() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, non_exist_task],
         physical_table_id,
+        EventContext::default(),
         ddl_context,
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -311,6 +331,7 @@ async fn test_on_create_metadata() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, yet_another_task],
         physical_table_id,
+        EventContext::default(),
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -404,6 +425,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, non_exist_task],
         physical_table_id,
+        EventContext::default(),
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -476,6 +498,7 @@ async fn test_on_create_metadata_err() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task.clone(), yet_another_task],
         physical_table_id,
+        EventContext::default(),
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
@@ -536,6 +559,7 @@ async fn test_on_submit_create_request() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, yet_another_task],
         physical_table_id,
+        EventContext::default(),
         ddl_context,
     );
     procedure.on_prepare().await.unwrap();

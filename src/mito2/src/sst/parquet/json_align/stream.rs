@@ -20,7 +20,7 @@ use datafusion_common::format::DEFAULT_CAST_OPTIONS;
 use datatypes::arrow::array::{ArrayRef, new_null_array};
 use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::vectors::json::array::JsonArray;
 use futures::Stream;
 use snafu::{ResultExt, ensure};
@@ -173,7 +173,7 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
         return Ok(array.clone());
     }
 
-    if is_structured_json_field(field) {
+    if is_json2_extension_type(field) {
         return JsonArray::from(array)
             .project_to(field.data_type())
             .context(DataTypeMismatchSnafu);
@@ -194,7 +194,7 @@ mod tests {
         Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::types::parse_string_to_jsonb;
     use futures::{StreamExt, stream};
 
@@ -388,7 +388,7 @@ mod tests {
             ))])),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))]);
+        .with_extension_type(Json2ExtensionType::default())]);
         let mut aligner =
             NestedSchemaAligner::new(stream::iter([Ok(input)]), vec![true], output_schema.clone())
                 .unwrap();
@@ -477,7 +477,7 @@ mod tests {
             ))])),
             true,
         )
-        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))]);
+        .with_extension_type(Json2ExtensionType::default())]);
         let mut aligner =
             NestedSchemaAligner::new(stream::iter([Ok(input)]), vec![true], output_schema.clone())
                 .unwrap();

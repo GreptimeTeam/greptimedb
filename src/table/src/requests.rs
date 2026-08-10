@@ -59,6 +59,19 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
+/// Returns true if the table stores spans in the `greptime_trace_v1` data model
+/// (fixed span columns), the shape the Jaeger query path and the entity-graph
+/// derivation rely on.
+pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
+    table_info
+        .meta
+        .options
+        .extra_options
+        .get(TABLE_DATA_MODEL)
+        .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
+        .unwrap_or(false)
+}
+
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
@@ -227,7 +240,7 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
-        if self.skip_wal {
+        if self.skip_wal && !self.extra_options.contains_key(SKIP_WAL_KEY) {
             key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
@@ -241,7 +254,7 @@ impl fmt::Display for TableOptions {
 
 impl From<&TableOptions> for HashMap<String, String> {
     fn from(opts: &TableOptions) -> Self {
-        let mut res = HashMap::with_capacity(2 + opts.extra_options.len());
+        let mut res = HashMap::with_capacity(3 + opts.extra_options.len());
         if let Some(write_buffer_size) = opts.write_buffer_size {
             let _ = res.insert(
                 WRITE_BUFFER_SIZE_KEY.to_string(),
@@ -251,11 +264,10 @@ impl From<&TableOptions> for HashMap<String, String> {
         if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
-        res.extend(
-            opts.extra_options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        if opts.skip_wal {
+            let _ = res.insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        }
+        res.extend(opts.extra_options.clone());
         res
     }
 }
@@ -557,6 +569,20 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), true.to_string())]),
+            skip_wal: true,
+        };
+        let serialized_map = HashMap::from(&options);
+        assert_eq!(
+            Some("true"),
+            serialized_map.get(SKIP_WAL_KEY).map(String::as_str)
+        );
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
+        assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            write_buffer_size: None,
             ttl: Default::default(),
             extra_options: HashMap::new(),
             skip_wal: false,
@@ -570,6 +596,15 @@ mod tests {
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
             skip_wal: false,
+        };
+        let serialized_map = HashMap::from(&options);
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
+        assert_eq!(options, serialized);
+
+        let options = TableOptions {
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), false.to_string())]),
+            skip_wal: false,
+            ..Default::default()
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
@@ -612,5 +647,13 @@ mod tests {
             "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=true",
             options.to_string()
         );
+
+        let options = TableOptions {
+            write_buffer_size: None,
+            ttl: None,
+            extra_options: HashMap::from([(SKIP_WAL_KEY.to_string(), "false".to_string())]),
+            skip_wal: false,
+        };
+        assert_eq!("skip_wal=false", options.to_string());
     }
 }

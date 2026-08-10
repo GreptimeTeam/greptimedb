@@ -256,6 +256,21 @@ impl Display for ShowFlows {
     }
 }
 
+/// SQL structure for `SHOW FLOW STATUS`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowFlowStatus {
+    pub kind: ShowKind,
+}
+
+impl Display for ShowFlowStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW FLOW STATUS")?;
+        format_kind!(self, f);
+
+        Ok(())
+    }
+}
+
 /// SQL structure for `SHOW CREATE VIEW`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateView {

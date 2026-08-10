@@ -199,6 +199,11 @@ impl RegionWriteCtx {
         &self.version
     }
 
+    /// Returns whether writes in this context should skip WAL.
+    pub(crate) fn skip_wal(&self) -> bool {
+        self.provider == Provider::Noop || self.version.options.skip_wal
+    }
+
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.

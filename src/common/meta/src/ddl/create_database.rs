@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
-    Status,
+    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    ProcedureId, Status,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
@@ -34,7 +34,7 @@ use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, UserCacheIdent};
 use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::rpc::ddl::CreatorGrantIntent;
+use crate::rpc::ddl::{CreatorGrantIntent, EventContext};
 
 /// Describes the creator-access result of an atomic create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,7 @@ impl CreateDatabaseProcedure {
         create_if_not_exists: bool,
         options: HashMap<String, String>,
         creator: Option<CreatorGrantIntent>,
+        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -104,6 +105,7 @@ impl CreateDatabaseProcedure {
                 create_if_not_exists,
                 options,
                 creator,
+                event_context,
             },
         }
     }
@@ -278,7 +280,10 @@ impl Procedure for CreateDatabaseProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(
+        &self,
+        ctx: &EventRuntimeContext<'_>,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(CREATE_DATABASE_EVENT_TYPE) {
             return None;
         }
@@ -289,6 +294,7 @@ impl Procedure for CreateDatabaseProcedure {
                 &self.data.schema,
                 self.data.create_if_not_exists,
                 &self.data.options,
+                self.data.event_context.clone(),
             )
         } else {
             DatabaseDdlEvent::create_lifecycle()
@@ -321,6 +327,8 @@ pub struct CreateDatabaseData {
     /// Authenticated creator whose access is ensured, absent for legacy schema-only requests.
     #[serde(default)]
     pub creator: Option<CreatorGrantIntent>,
+    #[serde(default)]
+    pub event_context: EventContext,
 }
 
 #[cfg(test)]
@@ -415,6 +423,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
+            EventContext::default(),
             context,
         );
         (procedure, committer)
@@ -574,6 +583,7 @@ mod tests {
             false,
             HashMap::new(),
             None,
+            EventContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;
@@ -609,6 +619,7 @@ mod tests {
                 username: "alice".to_string(),
                 created_at_ns: 1,
             }),
+            EventContext::default(),
             context,
         );
         procedure.data.state = CreateDatabaseState::CreateMetadata;

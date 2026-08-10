@@ -34,7 +34,7 @@ use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
@@ -431,7 +431,7 @@ impl ScanRegion {
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field);
+            .any(is_json2_extension_type);
         let read_cols = if has_structured_json {
             self.read_columns_with_json_type_hint(&read_col_ids)
         } else {
@@ -1269,7 +1269,7 @@ impl ScanInput {
             return Ok(FileRangeBuilder::default());
         }
 
-        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+        self.prune_file_after_manifest_check(file, pre_filter_mode, true, predicate, reader_metrics)
             .await
     }
 
@@ -1284,6 +1284,7 @@ impl ScanInput {
         &self,
         file: &FileHandle,
         pre_filter_mode: PreFilterMode,
+        enable_predicate_prefilter: bool,
         predicate: Option<Predicate>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
@@ -1320,6 +1321,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
+            .enable_predicate_prefilter(enable_predicate_prefilter)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;

@@ -356,6 +356,7 @@ mod tests {
     use common_meta::key::topic_name::TopicNameKey;
     use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
     use common_meta::peer::Peer;
+    use common_meta::rpc::ddl::{EventContext, TriggerReason};
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::wal_provider::RegionWalOptions;
     use common_wal::options::KafkaWalOptions;
@@ -363,7 +364,6 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
@@ -377,7 +377,7 @@ mod tests {
             Peer::empty(2),
             vec![RegionId::new(1024, 1)],
             Duration::from_millis(1000),
-            RegionMigrationTriggerReason::Manual,
+            EventContext::new(TriggerReason::Manual),
         )
     }
 

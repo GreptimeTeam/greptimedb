@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType as ArrowDataType, FieldRef};
 use datatypes::arrow::datatypes::Schema;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::is_json2_extension_type;
 use store_api::storage::NestedPath;
 
 /// Aligns nested struct fields according to the requested nested paths.
@@ -25,7 +25,7 @@ use store_api::storage::NestedPath;
 /// For each root field:
 /// - An empty path list keeps the whole field unchanged.
 /// - Non-JSON root fields ignore nested paths and keep the whole field unchanged.
-/// - Structured JSON root fields are rebuilt from `nested_paths`.
+/// - JSON2 root fields are rebuilt from `nested_paths`.
 /// - Existing schema fields are preserved only when they are the requested leaf.
 /// - Requested paths missing from the schema are synthesized with JSONB (`Binary`)
 ///   leaves.
@@ -42,7 +42,7 @@ where
         .into_iter()
         .zip(nested_paths)
         .map(|(field, paths)| {
-            if !paths.is_empty() && is_structured_json_field(field) {
+            if !paths.is_empty() && is_json2_extension_type(field) {
                 let child_paths = paths
                     .iter()
                     .map(|path| {
@@ -131,7 +131,7 @@ fn new_jsonb_field(name: &str) -> FieldRef {
 #[cfg(test)]
 mod tests {
     use arrow_schema::Field;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
 
     use super::*;
 
@@ -152,7 +152,7 @@ mod tests {
                     ArrowDataType::Struct(fields.into_iter().collect()),
                     true,
                 )
-                .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default()))),
+                .with_extension_type(Json2ExtensionType::default()),
             )
         }
 

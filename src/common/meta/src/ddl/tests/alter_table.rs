@@ -24,11 +24,11 @@ use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
     DropColumns, SemanticType, SetTableOptions,
 };
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
-use common_procedure::{ProcedureId, Status};
+use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -38,25 +38,28 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
-use table::requests::TTL_KEY;
+use table::requests::{SKIP_WAL_KEY, TTL_KEY};
 use tokio::sync::mpsc::{self};
 
-use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged};
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{
     AllFailureDatanodeHandler, DatanodeWatcher, PartialSuccessDatanodeHandler,
     RequestOutdatedErrorDatanodeHandler,
 };
-use crate::ddl::test_util::{assert_column_name, assert_column_name_and_id};
+use crate::ddl::test_util::{
+    assert_column_name, assert_column_name_and_id, create_logical_table, create_physical_table,
+};
 use crate::error::{Error, Result};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::lock_key::RegionLock;
 use crate::node_manager::NodeManagerRef;
 use crate::peer::Peer;
 use crate::poison_key::table_poison_key;
-use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::ddl::{AlterTableTask, EventContext};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
@@ -118,7 +121,8 @@ async fn test_on_prepare_table_exists_err() {
         .unwrap();
 
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(1024, task, EventContext::default(), ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableAlreadyExists);
 }
@@ -128,7 +132,8 @@ async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(1024, task, EventContext::default(), ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
@@ -242,8 +247,13 @@ async fn test_on_submit_alter_request() {
     let alter_table_task = test_alter_table_task(table_name);
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        EventContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -296,8 +306,13 @@ async fn test_on_submit_alter_request_without_sync_request() {
     let alter_table_task = test_alter_table_task(table_name);
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        EventContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -354,7 +369,13 @@ async fn test_on_submit_alter_request_with_outdated_request() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        EventContext::default(),
+        ddl_context,
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     let err = procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -383,7 +404,9 @@ async fn test_on_update_metadata_rename() {
         .unwrap();
 
     let task = test_rename_alter_table_task(table_name, new_table_name);
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, task, EventContext::default(), ddl_context.clone())
+            .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.on_update_metadata().await.unwrap();
 
@@ -463,7 +486,9 @@ async fn test_on_update_metadata_add_columns() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, task, EventContext::default(), ddl_context.clone())
+            .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -560,7 +585,9 @@ async fn test_on_update_table_options() {
     };
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
-    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, task, EventContext::default(), ddl_context.clone())
+            .unwrap();
     procedure.on_prepare().await.unwrap();
     procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
@@ -592,6 +619,326 @@ async fn test_on_update_table_options() {
         region_info.region_options,
         HashMap::from(&table_info.meta.options)
     );
+}
+
+#[tokio::test]
+async fn test_skip_wal_rejects_mixed_table_options() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        AlterTableTask {
+            alter_table: AlterTableExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                kind: Some(Kind::SetTableOptions(SetTableOptions {
+                    table_options: vec![
+                        api::v1::Option {
+                            key: SKIP_WAL_KEY.to_string(),
+                            value: "true".to_string(),
+                        },
+                        api::v1::Option {
+                            key: TTL_KEY.to_string(),
+                            value: "1d".to_string(),
+                        },
+                    ],
+                })),
+            },
+        },
+        EventContext::default(),
+        ddl_context,
+    )
+    .unwrap();
+
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(error, Error::Unsupported { .. });
+}
+
+#[tokio::test]
+async fn test_skip_wal_rejects_logical_table() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let physical_table_id = create_physical_table(&ddl_context, "physical").await;
+    let logical_table_id =
+        create_logical_table(ddl_context.clone(), physical_table_id, "logical").await;
+    let task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "logical".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+
+    let mut procedure = AlterTableProcedure::new(
+        logical_table_id,
+        task,
+        EventContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(error, Error::Unsupported { .. });
+
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(logical_table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
+async fn test_skip_wal_rejects_file_engine_table() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "file_table";
+    let table_id = 1024;
+    let mut create_task = test_create_table_task(table_name, table_id);
+    create_task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_task.table_info,
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+
+    let mut procedure =
+        AlterTableProcedure::new(table_id, task, EventContext::default(), ddl_context.clone())
+            .unwrap();
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(error, Error::Unsupported { .. });
+
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[test]
+fn test_skip_wal_holds_region_locks() {
+    let table_id = 1024;
+    let region_ids = vec![RegionId::new(table_id, 2), RegionId::new(table_id, 1)];
+    let task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "foo".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        task,
+        EventContext::default(),
+        region_ids.clone(),
+        context.clone(),
+    )
+    .unwrap();
+
+    let lock_key = procedure.lock_key();
+    for region_id in &region_ids {
+        assert!(
+            lock_key
+                .keys_to_lock()
+                .any(|key| key == &RegionLock::Write(*region_id).into())
+        );
+    }
+
+    let recovered = AlterTableProcedure::from_json(&procedure.dump().unwrap(), context).unwrap();
+    assert_eq!(lock_key, recovered.lock_key());
+}
+
+#[tokio::test]
+async fn test_skip_wal_detects_region_route_change() {
+    let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+    let stale_region_locks = vec![RegionId::new(table_id, 4)];
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        EventContext::default(),
+        stale_region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+
+    let status = procedure.on_prepare().await.unwrap();
+    assert!(status.downcast_output_ref::<RegionRouteChanged>().is_some());
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(!table_info.meta.options.skip_wal);
+}
+
+#[tokio::test]
+async fn test_skip_wal_updates_metadata_before_all_replicas() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
+                    key: SKIP_WAL_KEY.to_string(),
+                    value: "true".to_string(),
+                }],
+            })),
+        },
+    };
+
+    let region_locks = prepare_table_route(table_id)
+        .region_routes()
+        .unwrap()
+        .iter()
+        .map(|route| route.region.id)
+        .collect();
+    let mut procedure = AlterTableProcedure::new_with_region_locks(
+        table_id,
+        alter_task,
+        EventContext::default(),
+        region_locks,
+        ddl_context.clone(),
+    )
+    .unwrap();
+    procedure.on_prepare().await.unwrap();
+    let persisted: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    assert_eq!("UpdateMetadata", persisted["state"]);
+    assert!(persisted.get("alter_regions_after_metadata").is_none());
+
+    procedure.on_update_metadata().await.unwrap();
+    // A crash can happen after the metadata transaction commits but before
+    // the procedure state is persisted. Replaying this step must be safe.
+    procedure.on_update_metadata().await.unwrap();
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert!(table_info.meta.options.skip_wal);
+    let persisted: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    assert_eq!("SubmitAlterRegionRequests", persisted["state"]);
+
+    let provider = Arc::new(MockContextProvider::default());
+    procedure
+        .submit_alter_region_requests(ProcedureId::random(), provider.as_ref())
+        .await
+        .unwrap();
+    let mut requests = Vec::new();
+    while let Ok(request) = rx.try_recv() {
+        requests.push(request);
+    }
+    requests.sort_unstable_by_key(|(peer, _)| peer.id);
+    assert_eq!(5, requests.len());
+    let expected = [
+        (1, RegionId::new(table_id, 1)),
+        (2, RegionId::new(table_id, 2)),
+        (3, RegionId::new(table_id, 3)),
+        (4, RegionId::new(table_id, 2)),
+        (5, RegionId::new(table_id, 1)),
+    ];
+    for ((peer, request), (peer_id, region_id)) in requests.into_iter().zip(expected) {
+        assert_alter_request(peer, request, peer_id, region_id);
+    }
 }
 
 async fn prepare_alter_table_procedure(
@@ -626,8 +973,13 @@ async fn prepare_alter_table_procedure(
         },
     };
     let procedure_id = ProcedureId::random();
-    let mut procedure =
-        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(
+        table_id,
+        alter_table_task,
+        EventContext::default(),
+        ddl_context.clone(),
+    )
+    .unwrap();
     procedure.on_prepare().await.unwrap();
     (procedure, procedure_id)
 }

@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_query::native_histogram::{NativeHistogram, Span, UNKNOWN_COUNTER_RESET_HINT};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use datafusion::arrow::array::Float64Array;
@@ -28,6 +29,26 @@ use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow_array::StringArray;
 
 pub(crate) const TIME_INDEX_COLUMN: &str = "timestamp";
+
+pub(crate) fn native_histogram(sum: f64) -> NativeHistogram {
+    NativeHistogram {
+        schema: 0,
+        zero_threshold: 0.0,
+        sum,
+        reset_hint: UNKNOWN_COUNTER_RESET_HINT,
+        start_timestamp: None,
+        custom_values: Vec::new(),
+        positive_spans: vec![Span {
+            offset: 0,
+            length: 1,
+        }],
+        negative_spans: Vec::new(),
+        count: 1.0,
+        zero_count: 0.0,
+        positive_buckets: vec![1.0],
+        negative_buckets: Vec::new(),
+    }
+}
 
 pub(crate) fn prepare_test_data() -> DataSourceExec {
     let schema = Arc::new(Schema::new(vec![
