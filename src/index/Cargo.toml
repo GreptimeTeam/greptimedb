@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
-vector_index = ["dep:usearch"]
+vector_index = ["dep:nalgebra", "dep:usearch"]
 
 [dependencies]
 async-trait.workspace = true
@@ -29,7 +29,7 @@ itertools.workspace = true
 jieba-rs = "0.10"
 lazy_static.workspace = true
 mockall.workspace = true
-nalgebra.workspace = true
+nalgebra = { workspace = true, optional = true }
 pin-project.workspace = true
 prost.workspace = true
 puffin.workspace = true
