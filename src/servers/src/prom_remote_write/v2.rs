@@ -194,6 +194,10 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
 /// explicit metric type upgrades the table's metadata quality to `declared`,
 /// `UNSPECIFIED` series keep the request-level `inferred` stamp, and units are
 /// canonicalised from OpenMetrics words to UCUM. Help text is not persisted.
+///
+/// Every non-zero symbol reference is validated up front, independent of what
+/// ends up persisted: the spec requires all references to point into the
+/// symbol table.
 fn record_series_metadata(
     index: &mut SemanticIndexes,
     symbols: &[String],
@@ -203,6 +207,19 @@ fn record_series_metadata(
 ) -> Result<()> {
     let Some(series_metadata) = &series.metadata else {
         return Ok(());
+    };
+    // Symbol 0 is the mandatory empty string: no help / no unit.
+    if series_metadata.help_ref != 0 {
+        symbol_ref(symbols, series_metadata.help_ref, "metadata help")?;
+    }
+    let unit = if series_metadata.unit_ref != 0 {
+        Some(symbol_ref(
+            symbols,
+            series_metadata.unit_ref,
+            "metadata unit",
+        )?)
+    } else {
+        None
     };
     let Some(metric_type) = metric_type_value(series_metadata.r#type) else {
         return Ok(());
@@ -215,12 +232,8 @@ fn record_series_metadata(
         SEMANTIC_METRIC_METADATA_QUALITY,
         METADATA_QUALITY_DECLARED,
     );
-    // Symbol 0 is the mandatory empty string: no unit.
-    if series_metadata.unit_ref != 0 {
-        let unit = symbol_ref(symbols, series_metadata.unit_ref, "metadata unit")?;
-        if let Some(ucum) = openmetrics_unit_to_ucum(unit.trim()) {
-            index.record_scalar(table_name, SEMANTIC_METRIC_UNIT, ucum);
-        }
+    if let Some(ucum) = unit.and_then(|unit| openmetrics_unit_to_ucum(unit.trim())) {
+        index.record_scalar(table_name, SEMANTIC_METRIC_UNIT, ucum);
     }
     Ok(())
 }
@@ -2062,13 +2075,34 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_out_of_range_unit_ref_is_rejected() {
+    fn test_metadata_out_of_range_refs_are_rejected() {
         let mut request = metadata_request(vec![(
             vec![(METRIC_NAME_LABEL, "broken_total")],
             metadata::MetricType::Counter as i32,
             None,
         )]);
         request.timeseries[0].metadata.as_mut().unwrap().unit_ref = 999;
+        let err = into_write_requests(request).err().unwrap();
+        assert!(err.to_string().contains("out of range"), "{err}");
+
+        // unit_ref must be validated even when the type is UNSPECIFIED
+        // (which persists nothing).
+        let mut request = metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "broken_total")],
+            metadata::MetricType::Unspecified as i32,
+            None,
+        )]);
+        request.timeseries[0].metadata.as_mut().unwrap().unit_ref = 999;
+        let err = into_write_requests(request).err().unwrap();
+        assert!(err.to_string().contains("out of range"), "{err}");
+
+        // help_ref is validated although help is never persisted.
+        let mut request = metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "broken_total")],
+            metadata::MetricType::Counter as i32,
+            None,
+        )]);
+        request.timeseries[0].metadata.as_mut().unwrap().help_ref = 999;
         let err = into_write_requests(request).err().unwrap();
         assert!(err.to_string().contains("out of range"), "{err}");
     }
