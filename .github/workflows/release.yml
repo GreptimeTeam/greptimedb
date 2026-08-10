@@ -52,7 +52,7 @@ on:
         default: true
       build_linux_artifacts:
         type: boolean
-        description: Build linux artifacts (both amd64 and arm64)
+        description: Build linux artifacts (amd64, arm64, and riscv64)
         required: false
         default: false
       build_macos_artifacts:
