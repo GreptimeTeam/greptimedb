@@ -9,6 +9,9 @@ IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
 DEV_BUILDER_IMAGE_TAG ?= 2026-03-21-9c9d9e9e-20260331090344
+DEV_BUILDER_RISCV64_IMAGE_TAG ?= latest
+DEV_BUILDER_RISCV64_BASE_IMAGE ?= ubuntu:22.04
+RISCV64_TARGET ?= riscv64gc-unknown-linux-gnu
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -98,6 +101,20 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 	RELEASE=${RELEASE} \
 	CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}"
 
+.PHONY: build-riscv64-bin
+build-riscv64-bin: ## Build greptime binary for riscv64 (linux-gnu) by the riscv64 cross dev-builder image.
+	docker run --network=host \
+	${ASSEMBLED_EXTRA_BUILD_ENV} \
+	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${DEV_BUILDER_RISCV64_IMAGE_TAG} \
+	make build \
+	CARGO_PROFILE=${CARGO_PROFILE} \
+	FEATURES=${FEATURES} \
+	TARGET_DIR=${TARGET_DIR} \
+	TARGET=${RISCV64_TARGET} \
+	RELEASE=${RELEASE} \
+	CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}"
+
 .PHONY: build-android-bin
 build-android-bin: ## Build greptime binary for android.
 	docker run --network=host \
@@ -157,6 +174,14 @@ dev-builder: multi-platform-buildx ## Build dev-builder image.
 	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
 	-f docker/dev-builder/${BASE_IMAGE}/Dockerfile \
 	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
+
+.PHONY: dev-builder-riscv64
+dev-builder-riscv64: ## Build the riscv64 cross dev-builder image.
+	docker build --network=host \
+	--build-arg="BASE_IMAGE=${DEV_BUILDER_RISCV64_BASE_IMAGE}" \
+	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
+	-f docker/dev-builder/riscv64/Dockerfile \
+	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${DEV_BUILDER_RISCV64_IMAGE_TAG} .
 
 .PHONY: multi-platform-buildx
 multi-platform-buildx: ## Create buildx multi-platform builder.

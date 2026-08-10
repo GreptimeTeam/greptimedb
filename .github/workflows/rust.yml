@@ -96,6 +96,32 @@ jobs:
       - name: Check unused dependencies
         run: make check-udeps
 
+  check-riscv64:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check riscv64 build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install riscv64 cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Add riscv64 target
+        run: rustup target add riscv64gc-unknown-linux-gnu
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-riscv64"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo check for riscv64
+        run: cargo check --locked --workspace --target riscv64gc-unknown-linux-gnu
+
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check for conflict
