@@ -101,7 +101,7 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
     );
     assert_eq!(
         histogram_field_value(rows, 0, COUNT_U64_FIELD),
-        Some(ValueData::U64Value(24))
+        Some(ValueData::I64Value(24))
     );
     assert_eq!(
         list_i32_values(histogram_field_value(rows, 0, POSITIVE_SPAN_OFFSETS_FIELD)),

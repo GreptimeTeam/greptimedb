@@ -282,6 +282,8 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
     validate_native_histogram(histogram, uses_float_counts)?;
 
     let mut items = Vec::with_capacity(NATIVE_HISTOGRAM_FIELD_NAMES.len());
+    let positive_span_lengths = i32_span_lengths("positive", &histogram.positive_spans)?;
+    let negative_span_lengths = i32_span_lengths("negative", &histogram.negative_spans)?;
     items.extend([
         pb_value(ValueData::I32Value(histogram.schema)),
         pb_value(ValueData::F64Value(histogram.zero_threshold)),
@@ -292,9 +294,9 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
         )),
         f64_list_value(histogram.custom_values.iter().copied()),
         i32_list_value(histogram.positive_spans.iter().map(|span| span.offset)),
-        u32_list_value(histogram.positive_spans.iter().map(|span| span.length)),
+        i32_list_value(positive_span_lengths.iter().copied()),
         i32_list_value(histogram.negative_spans.iter().map(|span| span.offset)),
-        u32_list_value(histogram.negative_spans.iter().map(|span| span.length)),
+        i32_list_value(negative_span_lengths.iter().copied()),
     ]);
 
     if uses_float_counts {
@@ -329,9 +331,23 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
         let positive_buckets = bucket_counts_from_deltas(&histogram.positive_deltas)?;
         let negative_buckets = bucket_counts_from_deltas(&histogram.negative_deltas)?;
         validate_integer_native_histogram_counts(histogram, &positive_buckets, &negative_buckets)?;
+        let count = i64::try_from(count)
+            .ok()
+            .context(error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "remote write v2 native histogram integer count {count} overflows i64"
+                ),
+            })?;
+        let zero_count = i64::try_from(zero_count).ok().context(
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "remote write v2 native histogram integer zero_count {zero_count} overflows i64"
+                ),
+            },
+        )?;
         items.extend([
-            pb_value(ValueData::U64Value(count)),
-            pb_value(ValueData::U64Value(zero_count)),
+            pb_value(ValueData::I64Value(count)),
+            pb_value(ValueData::I64Value(zero_count)),
             i64_list_value(positive_buckets.iter().copied()),
             i64_list_value(negative_buckets.iter().copied()),
             null_pb_value(),
@@ -690,8 +706,20 @@ fn i32_list_value(values: impl IntoIterator<Item = i32>) -> Value {
     list_value(values.into_iter().map(ValueData::I32Value))
 }
 
-fn u32_list_value(values: impl IntoIterator<Item = u32>) -> Value {
-    list_value(values.into_iter().map(ValueData::U32Value))
+fn i32_span_lengths(name: &str, spans: &[BucketSpan]) -> Result<Vec<i32>> {
+    spans
+        .iter()
+        .map(|span| {
+            i32::try_from(span.length)
+                .ok()
+                .context(error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 native histogram {name} span length {} overflows i32",
+                        span.length
+                    ),
+                })
+        })
+        .collect()
 }
 
 fn i64_list_value(values: impl IntoIterator<Item = i64>) -> Value {
@@ -1620,7 +1648,7 @@ mod tests {
         );
         assert_eq!(
             histogram_field_value(&rows, 0, COUNT_U64_FIELD),
-            Some(ValueData::U64Value(0))
+            Some(ValueData::I64Value(0))
         );
         assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
     }
@@ -1737,7 +1765,7 @@ mod tests {
 
         assert_eq!(
             histogram_field_value(&rows, 0, COUNT_U64_FIELD),
-            Some(ValueData::U64Value(0))
+            Some(ValueData::I64Value(0))
         );
         assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
         assert!(matches!(
