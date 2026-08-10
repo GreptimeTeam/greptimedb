@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod build_index_table;
+mod discard_unflushed_data;
 mod flush_compact_region;
 mod flush_compact_table;
 mod gc;
@@ -34,6 +35,7 @@ use reconcile_database::ReconcileDatabaseFunction;
 use reconcile_table::ReconcileTableFunction;
 
 use crate::admin::build_index_table::BuildIndexFunction;
+use crate::admin::discard_unflushed_data::DiscardUnflushedDataFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -58,8 +60,8 @@ impl AdminFunction {
     }
 
     /// Register functions that must only be resolved by an ADMIN statement.
-    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub fn register_admin_only(registry: &FunctionRegistry) {
+        registry.register(DiscardUnflushedDataFunction::factory());
         #[cfg(feature = "enterprise")]
         registry.register(PurgeTableFunction::factory());
     }
