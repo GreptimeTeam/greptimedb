@@ -1623,7 +1623,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.0.7",
  "rustix-linux-procfs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "winx",
 ]
 
@@ -1715,7 +1715,7 @@ dependencies = [
 [[package]]
 name = "catio"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/catio.git?rev=257ba56#257ba5666570c90dd295dc9d3659e934da3699e0"
+source = "git+https://github.com/GreptimeTeam/catio.git?rev=efdc0a4#efdc0a48e1b5df2bc06af7283c09265036bd3eac"
 dependencies = [
  "tokio",
 ]
@@ -13877,7 +13877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
