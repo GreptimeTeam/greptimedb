@@ -34,8 +34,10 @@ use auth::{
 use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
-    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
+    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, DURATION_NANO_COLUMN,
+    INFORMATION_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, PG_CATALOG_NAME,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_STATUS_CODE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -47,9 +49,9 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, DeclaredSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    RegistrySource, build_registry_plan, build_relationships_plan,
-    declared_relationships_schema_matches,
+    CallsSource, CoDeclaredSource, DeclaredSource, EntityDeclaration, GraphQueryWindow,
+    OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources, build_registry_plan,
+    build_relationships_plan, declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -73,7 +75,40 @@ pub struct EntityGraphProviderImpl {
 
 struct EntitySource {
     declarations: Vec<EntityDeclaration>,
+    is_trace: bool,
     table: TableRef,
+}
+
+struct TraceSource {
+    service: EntityDeclaration,
+    agent: Option<EntityDeclaration>,
+    table: TableRef,
+}
+
+/// Whether a trace-model table still carries the fixed `greptime_trace_v1`
+/// columns (with their ingest types) the calls/agent derivations reference.
+/// `table_data_model` is only an option: a stale or hand-made table missing
+/// them would otherwise fail plan building and poison every relationships
+/// scan.
+fn trace_v1_schema_matches(table_info: &TableInfo) -> bool {
+    use datatypes::prelude::ConcreteDataType;
+    let schema = &table_info.meta.schema;
+    let column_type = |name: &str| {
+        schema
+            .column_schema_by_name(name)
+            .map(|column| column.data_type.clone())
+    };
+    column_type(TRACE_TIMESTAMP_COLUMN) == Some(ConcreteDataType::timestamp_nanosecond_datatype())
+        && [
+            TRACE_ID_COLUMN,
+            SPAN_ID_COLUMN,
+            PARENT_SPAN_ID_COLUMN,
+            SPAN_KIND_COLUMN,
+            SPAN_STATUS_CODE_COLUMN,
+        ]
+        .iter()
+        .all(|column| column_type(column) == Some(ConcreteDataType::string_datatype()))
+        && column_type(DURATION_NANO_COLUMN) == Some(ConcreteDataType::uint64_datatype())
 }
 
 impl EntityGraphProviderImpl {
@@ -222,7 +257,7 @@ impl EntityGraphProviderImpl {
         &self,
         catalog: &str,
         query_ctx: Option<&QueryContext>,
-    ) -> Result<(Vec<EntitySource>, Vec<(EntityDeclaration, TableRef)>), BoxedError> {
+    ) -> Result<(Vec<EntitySource>, Vec<TraceSource>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
@@ -267,7 +302,20 @@ impl EntityGraphProviderImpl {
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info);
-                let is_trace = is_trace_v1_table(&table_info);
+                let is_trace = match is_trace_v1_table(&table_info) {
+                    true if trace_v1_schema_matches(&table_info) => true,
+                    true => {
+                        // Schema drift never poisons a scan: derive around the
+                        // malformed table instead of failing plan building.
+                        warn!(
+                            "Trace table `{}` does not match the fixed trace-v1 schema; \
+                             skipping calls derivation",
+                            table_info.name
+                        );
+                        false
+                    }
+                    false => false,
+                };
                 // Authorize only tables that would contribute rows.
                 if per_table_auth
                     && (is_trace || !table_declarations.is_empty())
@@ -288,15 +336,18 @@ impl EntityGraphProviderImpl {
                     continue;
                 }
                 if is_trace {
-                    // TODO(entity-graph): validate the complete fixed trace-v1
-                    // schema before adding the table to calls derivation, and
-                    // skip malformed/stale tables instead of letting one poison
-                    // the whole relationship scan.
                     match table_declarations
                         .iter()
                         .find(|d| d.entity_type == "service")
                     {
-                        Some(service) => traces.push((service.clone(), table.clone())),
+                        Some(service) => traces.push(TraceSource {
+                            service: service.clone(),
+                            agent: table_declarations
+                                .iter()
+                                .find(|d| d.entity_type == "agent")
+                                .cloned(),
+                            table: table.clone(),
+                        }),
                         // No usable service identity: the table cannot
                         // contribute calls edges (see declarations_for).
                         None => warn!(
@@ -308,6 +359,7 @@ impl EntityGraphProviderImpl {
                 if !table_declarations.is_empty() {
                     declarations.push(EntitySource {
                         declarations: table_declarations,
+                        is_trace,
                         table,
                     });
                 }
@@ -480,21 +532,37 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         request: ScanRequest,
         query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (_, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
-        let mut scans = Vec::with_capacity(traces.len());
-        for (service, trace) in traces {
-            scans.push(CallsSource {
-                service,
-                scan: self.read_table(trace)?,
+        let (sources, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
+        let mut calls = Vec::with_capacity(traces.len());
+        for trace in traces {
+            calls.push(CallsSource {
+                service: trace.service,
+                agent: trace.agent,
+                scan: self.read_table(trace.table)?,
+            });
+        }
+        let mut co_declared = Vec::with_capacity(sources.len());
+        for source in sources {
+            co_declared.push(CoDeclaredSource {
+                declarations: source.declarations,
+                is_trace: source.is_trace,
+                scan: self.read_table(source.table)?,
             });
         }
         let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;
         let Some(window) = Self::query_window(&request)? else {
             return Ok(None);
         };
-        let Some(plan) = build_relationships_plan(scans, declared, &window)
-            .context(error::DataFusionSnafu)
-            .map_err(BoxedError::new)?
+        let Some(plan) = build_relationships_plan(
+            RelationshipSources {
+                traces: calls,
+                co_declared,
+                declared,
+            },
+            &window,
+        )
+        .context(error::DataFusionSnafu)
+        .map_err(BoxedError::new)?
         else {
             return Ok(None);
         };
@@ -529,6 +597,10 @@ mod tests {
                 .iter()
                 .map(|c| ColumnSchema::new(*c, ConcreteDataType::string_datatype(), true)),
         );
+        assemble_table_info(column_schemas, extra)
+    }
+
+    fn assemble_table_info(column_schemas: Vec<ColumnSchema>, extra: &[(&str, &str)]) -> TableInfo {
         let schema = Arc::new(
             SchemaBuilder::try_from_columns(column_schemas)
                 .unwrap()
@@ -611,6 +683,63 @@ mod tests {
             ],
         );
         assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+    }
+
+    /// The canonical fixed trace-v1 columns, with an injection point for the
+    /// aspects `trace_v1_schema_matches` must reject.
+    fn trace_v1_info(mutate: impl FnOnce(&mut Vec<ColumnSchema>)) -> TableInfo {
+        let string =
+            |name: &str| ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
+        let mut columns = vec![
+            ColumnSchema::new(
+                TRACE_TIMESTAMP_COLUMN,
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            string(TRACE_ID_COLUMN),
+            string(SPAN_ID_COLUMN),
+            string(PARENT_SPAN_ID_COLUMN),
+            string(SPAN_KIND_COLUMN),
+            string(SPAN_STATUS_CODE_COLUMN),
+            ColumnSchema::new(
+                DURATION_NANO_COLUMN,
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
+        ];
+        mutate(&mut columns);
+        assemble_table_info(columns, &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)])
+    }
+
+    #[test]
+    fn malformed_trace_v1_schema_is_rejected() {
+        assert!(trace_v1_schema_matches(&trace_v1_info(|_| {})));
+
+        let missing_duration = trace_v1_info(|columns| {
+            columns.retain(|c| c.name != DURATION_NANO_COLUMN);
+        });
+        assert!(!trace_v1_schema_matches(&missing_duration));
+
+        let wrong_kind_type = trace_v1_info(|columns| {
+            columns
+                .iter_mut()
+                .find(|c| c.name == SPAN_KIND_COLUMN)
+                .unwrap()
+                .data_type = ConcreteDataType::int64_datatype();
+        });
+        assert!(!trace_v1_schema_matches(&wrong_kind_type));
+
+        // A millisecond time index is not the trace-v1 ingest schema.
+        let ms_timestamp = trace_v1_info(|columns| {
+            columns[0] = ColumnSchema::new(
+                TRACE_TIMESTAMP_COLUMN,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true);
+        });
+        assert!(!trace_v1_schema_matches(&ms_timestamp));
     }
 
     #[test]
