@@ -90,7 +90,7 @@ async fn test_table_ddl_procedure_events() {
         "create_table",
         &auto_create_procedure_id,
         "auto_create",
-        "prometheus",
+        Some("prometheus"),
     )
     .await;
 
@@ -102,7 +102,7 @@ async fn test_table_ddl_procedure_events() {
         "create_table",
         &auto_influx_create_procedure_id,
         "auto_create",
-        "influx",
+        Some("influx"),
     )
     .await;
 
@@ -151,7 +151,7 @@ async fn test_table_ddl_procedure_events() {
         "create_table",
         &grpc_create_procedure_id,
         "manual",
-        "grpc",
+        Some("grpc"),
     )
     .await;
     GrpcQueryHandler::do_query(
@@ -190,7 +190,7 @@ async fn test_table_ddl_procedure_events() {
         "alter_table",
         &grpc_alter_procedure_id,
         "manual",
-        "grpc",
+        Some("grpc"),
     )
     .await;
 
@@ -215,7 +215,7 @@ async fn test_table_ddl_procedure_events() {
         "create_table",
         &create_table_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
     assert_named_submitted_event(
@@ -263,7 +263,7 @@ async fn test_table_ddl_procedure_events() {
         "alter_table",
         &alter_table_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
     assert_named_submitted_event(
@@ -307,7 +307,7 @@ async fn test_table_ddl_procedure_events() {
         "truncate_table",
         &truncate_table_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
     assert_named_submitted_event(
@@ -348,7 +348,7 @@ async fn test_table_ddl_procedure_events() {
         "drop_table",
         &drop_table_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
     assert_named_submitted_event(
@@ -389,7 +389,7 @@ async fn test_table_ddl_procedure_events() {
             "undrop_table",
             &undrop_table_procedure_id,
             "manual",
-            "unknown",
+            None,
         )
         .await;
         assert_id_submitted_event(
@@ -429,7 +429,7 @@ async fn test_table_ddl_procedure_events() {
             "purge_dropped_table",
             &purge_table_procedure_id,
             "manual",
-            "unknown",
+            None,
         )
         .await;
         assert_id_submitted_event(
@@ -483,7 +483,7 @@ async fn test_table_ddl_procedure_events() {
         "create_logical_tables",
         &create_logical_tables_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
 
@@ -536,7 +536,7 @@ async fn test_table_ddl_procedure_events() {
         "alter_logical_tables",
         &alter_logical_tables_procedure_id,
         "manual",
-        "httpsql",
+        Some("httpsql"),
     )
     .await;
     assert_named_submitted_event(
@@ -629,7 +629,7 @@ async fn assert_event_context(
     event_type: &str,
     procedure_id: &str,
     reason: &str,
-    protocol: &str,
+    protocol: Option<&str>,
 ) {
     let event_filter = format!(
         "FROM {EVENTS_TABLE} WHERE {} = '{event_type}' AND {} = '{procedure_id}' AND json_get_string({}, 'type') = 'Submitted'",
@@ -649,7 +649,10 @@ async fn assert_event_context(
         "event_context",
     )
     .await;
-    let expected = format!(r#"{{"protocol":"{protocol}","reason":"{reason}"}}"#);
+    let expected = match protocol {
+        Some(protocol) => format!(r#"{{"protocol":"{protocol}","reason":"{reason}"}}"#),
+        None => format!(r#"{{"reason":"{reason}"}}"#),
+    };
     assert_eq!(expected, actual);
 }
 
