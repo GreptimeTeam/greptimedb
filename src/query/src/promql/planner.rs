@@ -3264,10 +3264,10 @@ impl PromPlanner {
         }
 
         if func.name == "predict_linear" {
-            other_input_exprs[0] = DfExpr::Cast(Cast {
-                expr: Box::new(other_input_exprs[0].clone()),
-                data_type: ArrowDataType::Int64,
-            });
+            other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                Box::new(other_input_exprs[0].clone()),
+                ArrowDataType::Int64,
+            ));
         }
 
         let mut args = Vec::with_capacity(other_input_exprs.len() + 6);
@@ -6177,11 +6177,8 @@ impl PromPlanner {
                     if data_type == &ArrowDataType::Float64 {
                         expr.alias(output_col)
                     } else {
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(expr),
-                            data_type: ArrowDataType::Float64,
-                        })
-                        .alias(output_col)
+                        DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
+                            .alias(output_col)
                     }
                 } else {
                     DfExpr::Literal(ScalarValue::Float64(None), None).alias(output_col)

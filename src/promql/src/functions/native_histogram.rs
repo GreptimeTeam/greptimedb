@@ -1478,10 +1478,6 @@ impl Hash for MixedRangeUdf {
 }
 
 impl ScalarUDFImpl for MixedRangeUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.output.name()
     }

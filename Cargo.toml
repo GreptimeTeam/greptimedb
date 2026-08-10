@@ -363,7 +363,7 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b751bbd37d94f782e902251ac0ff655cea5deb83" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b751bbd37d94f782e902251ac0ff655cea5deb83" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b751bbd37d94f782e902251ac0ff655cea5deb83" }
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }                        
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 [profile.release]
 debug = 1
