@@ -64,16 +64,17 @@ use promql::extension_plan::{
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
     IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAdd, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
-    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
-    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
-    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
-    StdvarOverTime, SumOverTime, quantile_udaf,
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAvg,
+    NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
+    NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDivScalar,
+    NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta,
+    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
+    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
+    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, PredictLinear,
+    PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime,
+    SumOverTime, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
