@@ -43,6 +43,7 @@ src/common/procedure-test/src/lib.rs
 src/common/meta/src/rpc/ddl.rs
   s_3f02b45448515f::t_90b9c25ca22bbf 1678,1680-1684,1686-1689,2299
   s_3f02b45448515f::t_38713f9b7a9a5d 47,1679,1685,2274,2286
+  s_3f02b45448515f::t_b6d9289eec7405 48,1671-1674
 src/common/meta/src/ddl/create_database.rs
   s_3f02b45448515f::t_4e4942ec64cdbb 22-23,281
   s_3f02b45448515f::t_520ddbcf69aa86 37
