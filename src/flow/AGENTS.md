@@ -8,15 +8,19 @@ Repo-wide rules that apply here: [`.agents/architecture-invariants.md`](../../.a
 ## What this crate does
 
 Flownode is the stream-processing engine behind continuous aggregation /
-materialized views. It runs in two modes:
+materialized views. It has two execution paths:
 
-- **Batching mode** (the default and the actively developed path): splits data
+- **Batching mode** (the actively developed path): splits data
   into time windows and periodically runs aggregation SQL through the frontend,
   writing results back to a sink table.
-- **Streaming mode** (the older dataflow engine): an incremental DFIR/dataflow
+- **Streaming mode** (the legacy dataflow path): an incremental DFIR/dataflow
   compute graph that processes row-level diffs.
 
-A flow without an explicit `flow_type` is created as **batching**.
+Users cannot select a mode directly: `flow_type` is a reserved internal option.
+`StatementExecutor::determine_flow_type` in `src/operator/src/statement/ddl.rs`
+owns current mode selection. `FlowDualEngine` defaults missing internal
+`flow_type` metadata to batching for compatibility. Read those paths before
+changing routing rules.
 
 ## Module map
 
@@ -64,7 +68,9 @@ Flow metadata lives in `common-meta`, not here:
   `compute/render.rs` (streaming) and ensure batching SQL handles it.
 - **Persisted flow metadata**: keep `FlowInfoValue` backward compatible
   (`serde(default)` / `serde(alias)`).
-- A change to one engine often needs the mirror change in the other.
+- **Shared routing, metadata, or sink contracts**: check both engines. An
+  engine-specific implementation change does not automatically need a mirror
+  change in the other path.
 
 ## Testing
 
@@ -76,9 +82,8 @@ Helpers in `src/flow/src/test_utils.rs` (test context, test query engine).
 
 ## Gotchas
 
-- Batching vs streaming differ a lot in latency, debuggability, and code path —
-  confirm which mode a flow uses before reasoning about it. Batching is the
-  default and the primary target.
+- Batching vs streaming differ in latency, state, and execution. Confirm the
+  selected mode before reasoning about a flow.
 - Streaming workers are `!Send`; cross-thread interaction goes through
   `WorkerHandle`, not the worker directly.
 - Internal flow timestamps (`repr::Timestamp`, ms) are not necessarily the
