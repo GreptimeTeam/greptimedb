@@ -320,6 +320,7 @@ mod tests {
                 compaction_override: false,
                 storage: None,
                 append_mode: false,
+                skip_wal: false,
                 wal_options: Default::default(),
                 index_options: Default::default(),
                 memtable: None,

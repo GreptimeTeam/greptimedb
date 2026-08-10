@@ -30,3 +30,33 @@ ADMIN flush_table('system_metrics');
 SELECT * FROM system_metrics;
 
 DROP TABLE system_metrics;
+
+CREATE TABLE alter_skip_wal (
+    host STRING,
+    val DOUBLE,
+    ts TIMESTAMP,
+    PRIMARY KEY(host),
+    TIME INDEX(ts)
+);
+
+INSERT INTO alter_skip_wal VALUES ('host1', 1, 1000);
+
+ALTER TABLE alter_skip_wal SET 'skip_wal' = 'true';
+
+SHOW CREATE TABLE alter_skip_wal;
+
+ALTER TABLE alter_skip_wal SET 'skip_wal' = 'false';
+
+ALTER TABLE alter_skip_wal UNSET 'skip_wal';
+
+INSERT INTO alter_skip_wal VALUES ('host2', 2, 2000);
+
+SELECT * FROM alter_skip_wal ORDER BY ts;
+
+-- The post-ALTER row can be lost because restart does not flush skip-WAL memtables.
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE alter_skip_wal;
+
+SELECT * FROM alter_skip_wal ORDER BY ts;
+
+DROP TABLE alter_skip_wal;

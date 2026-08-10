@@ -215,12 +215,11 @@ pub fn create_to_expr(
             .context(ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(
+    let mut table_options = HashMap::from(
         &TableOptions::try_from_iter(create.options.to_str_map())
             .context(UnrecognizedTableOptionSnafu)?,
     );
 
-    let mut table_options = table_options;
     if table_options.contains_key(COMPACTION_TYPE) {
         table_options.insert(COMPACTION_OVERRIDE.to_string(), "true".to_string());
     }
@@ -1494,6 +1493,23 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!(
             "1.0MiB",
             expr.table_options.get("write_buffer_size").unwrap()
+        );
+
+        let sql = "CREATE TABLE monitor (ts TIMESTAMP TIME INDEX) WITH(skip_wal='false');";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
+        assert_eq!(
+            Some("false"),
+            expr.table_options
+                .get(store_api::mito_engine_options::SKIP_WAL_KEY)
+                .map(String::as_str)
         );
     }
 
