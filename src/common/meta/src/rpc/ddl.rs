@@ -42,9 +42,9 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
+use common_base::protocol::Channel;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-use common_session::channel_protocol;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -1668,13 +1668,6 @@ pub struct QueryContext {
     pub sst_min_sequences: HashMap<u64, u64>,
 }
 
-impl QueryContext {
-    /// Returns the protocol name represented by the wire channel value.
-    pub fn channel_protocol(&self) -> Option<&'static str> {
-        channel_protocol(self.channel)
-    }
-}
-
 /// The stable context recorded for a procedure event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventContext {
@@ -1708,11 +1701,12 @@ impl EventContext {
             .get(TRIGGER_REASON_EXTENSION_KEY)
             .map(|reason| TriggerReason::from_extension(reason))
             .unwrap_or_default();
+        let channel = Channel::from(u32::from(query_context.channel));
         let context = Self::new(reason);
-        if let Some(protocol) = query_context.channel_protocol() {
-            context.with_protocol(protocol)
-        } else {
+        if channel == Channel::Unknown {
             context
+        } else {
+            context.with_protocol(channel.as_ref())
         }
     }
 }

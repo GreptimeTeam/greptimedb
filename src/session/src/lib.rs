@@ -34,7 +34,7 @@ use common_time::timezone::get_timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 
-use crate::context::{Channel, ConnInfo, QueryContextRef};
+use crate::context::{Channel, ConnInfo, QueryContextRef, dialect_for_channel};
 
 /// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
 const MAX_WARNINGS: usize = 64;
@@ -102,7 +102,7 @@ impl Session {
             // string here
             .current_catalog(self.catalog.read().unwrap().clone())
             .mutable_session_data(self.mutable_inner.clone())
-            .sql_dialect(self.conn_info.channel.dialect())
+            .sql_dialect(dialect_for_channel(self.conn_info.channel))
             .configuration_parameter(self.configuration_variables.clone())
             .channel(self.conn_info.channel)
             .process_id(self.process_id)
