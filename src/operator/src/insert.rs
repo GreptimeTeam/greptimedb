@@ -578,15 +578,25 @@ impl Inserter {
         if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
-                let table = self
-                    .get_table(catalog, &schema, &req.table_name)
-                    .await?
-                    .context(InvalidInsertRequestSnafu {
-                        reason: format!(
-                            "Table `{}` does not exist, and {}",
-                            req.table_name, disabled_reason
-                        ),
-                    })?;
+                let table = match self.get_table(catalog, &schema, &req.table_name).await? {
+                    Some(table) => table,
+                    // System-defined table: created canonically by the system,
+                    // so the auto-create config/hint does not apply.
+                    None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                        statement_executor
+                            .create_declared_relationships_table(catalog, ctx.clone())
+                            .await?
+                    }
+                    None => {
+                        return InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Table `{}` does not exist, and {}",
+                                req.table_name, disabled_reason
+                            ),
+                        }
+                        .fail();
+                    }
+                };
                 let table_info = table.table_info();
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
@@ -629,6 +639,16 @@ impl Inserter {
                     } else {
                         table_infos.insert(table_info.table_id(), table.table_info());
                     }
+                }
+                // A DDL-reserved table's definition never derives from the
+                // write request; the system creates it canonically, below the
+                // user-DDL guard that rejects the generic create path.
+                None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                    let table = statement_executor
+                        .create_declared_relationships_table(catalog, ctx.clone())
+                        .await?;
+                    let table_info = table.table_info();
+                    table_infos.insert(table_info.table_id(), table_info);
                 }
                 None => {
                     let create_expr =
@@ -911,18 +931,7 @@ impl Inserter {
         create_type: &AutoCreateTableType,
         ctx: &QueryContextRef,
     ) -> Result<CreateTableExpr> {
-        // A DDL-reserved table is defined by the system: never derive its
-        // schema from the write request (a first gRPC write could otherwise
-        // squat the reserved name with an arbitrary shape).
         let schema = ctx.current_schema();
-        if is_ddl_reserved_table(&schema, &req.table_name) {
-            return Ok(
-                crate::statement::semantic_graph::build_declared_relationships_expr(
-                    ctx.current_catalog(),
-                ),
-            );
-        }
-
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
         apply_per_table_semantic_options(&mut table_options, ctx, &req.table_name);
@@ -974,8 +983,8 @@ impl Inserter {
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
 
-        // A DDL-reserved table's schema is system-owned: never auto-alter it to
-        // fit a write. A request with unknown columns fails instead.
+        // Never auto-alter a system-defined table to fit a write; a request
+        // with unknown columns fails instead.
         if is_ddl_reserved_table(&schema_name, &table_name) {
             return Ok(None);
         }

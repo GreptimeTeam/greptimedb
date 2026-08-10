@@ -380,11 +380,9 @@ impl StatementExecutor {
             .await
     }
 
-    /// Creates the declared-edge table of the entity graph with its canonical
-    /// schema. Deliberately enters below the user-DDL guard
-    /// ([`ensure_table_definition_writable`]): the table's definition is
-    /// system-owned, users only write rows to it. `create_if_not_exists` makes
-    /// concurrent first inserts race safely.
+    /// Creates the declared-edge table with its canonical schema, entering
+    /// below the user-DDL guard ([`ensure_table_definition_writable`]).
+    /// `create_if_not_exists` makes concurrent first inserts race safely.
     pub async fn create_declared_relationships_table(
         &self,
         catalog: &str,
@@ -2565,14 +2563,10 @@ fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
 }
 
 /// [`ensure_table_writable`] plus the definition guard for system-defined
-/// tables whose rows are user-written but whose *shape* is not (the
-/// declared-edge table): user CREATE, ALTER and RENAME-into are rejected so the
-/// canonical schema cannot be squatted or mutated, while DROP and TRUNCATE stay
-/// allowed — dropping loses nothing structural, the next INSERT recreates the
-/// table canonically (via
-/// [`StatementExecutor::create_declared_relationships_table`], which enters
-/// below this guard), and DROP is also the recovery path should the canonical
-/// definition ever change across an upgrade.
+/// tables: user CREATE, ALTER and RENAME-into are rejected so the canonical
+/// schema cannot be squatted or mutated. DROP and TRUNCATE stay allowed — the
+/// next INSERT recreates the table canonically, which is also the recovery
+/// path if the canonical definition changes across an upgrade.
 fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     ensure_table_writable(schema, table)?;
     ensure!(
@@ -2836,7 +2830,9 @@ async fn execute_undrop_table(
     table_name: TableName,
     query_context: QueryContextRef,
 ) -> Result<Output> {
-    ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
+    // Undropping restores a table definition and could resurrect a
+    // pre-canonical shape of a DDL-reserved table; rejected like CREATE.
+    ensure_table_definition_writable(&table_name.schema_name, &table_name.table_name)?;
 
     let dropped = table_metadata_manager
         .get_dropped_table(&table_name)

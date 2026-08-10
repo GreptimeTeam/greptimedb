@@ -89,10 +89,9 @@ impl EntityGraphProviderImpl {
         }
     }
 
-    /// Checks whether the caller may read derivation sources named by `targets`.
-    /// `Ok(false)` = denied — the source is silently excluded, per the derivation
-    /// contract ("a source the caller cannot read never appears"). Errors other
-    /// than a permission denial abort the scan.
+    /// Whether the caller may read the derivation sources named by `targets`.
+    /// `Ok(false)` = denied: the source is silently excluded, per the
+    /// derivation contract. Errors other than a denial abort the scan.
     fn authorize_sources(
         &self,
         query_ctx: Option<&QueryContext>,
@@ -348,11 +347,9 @@ impl EntityGraphProviderImpl {
     }
 
     /// The declared-edge branch source, when the physical table exists, the
-    /// caller may read it, and its schema still matches the canonical
-    /// definition. A mismatched schema (upgrade skew — user ALTER against it is
-    /// rejected) is an explicit error rather than a silent skip: dropping
-    /// declared edges would misrepresent the graph, and DROP TABLE resets the
-    /// table to the canonical definition.
+    /// caller may read it, and it still matches the canonical definition. A
+    /// mismatch (upgrade skew) is an explicit error, not a silent skip:
+    /// dropping declared edges would misrepresent the graph.
     async fn declared_source(
         &self,
         catalog: &str,
@@ -384,7 +381,7 @@ impl EntityGraphProviderImpl {
             return Ok(None);
         }
         let table_info = table.table_info();
-        if !declared_relationships_schema_matches(&table_info.meta.schema) {
+        if !declared_relationships_schema_matches(&table_info) {
             return Err(BoxedError::new(
                 error::InvalidSqlSnafu {
                     err_msg: format!(
@@ -400,10 +397,9 @@ impl EntityGraphProviderImpl {
         }))
     }
 
-    /// Executes a derivation plan and returns its live result stream. The plan
-    /// runs under the caller's context so the derivation inherits the caller's
-    /// permissions, cancellation and deadline; context-less internal scans get
-    /// a minimal default.
+    /// Executes a derivation plan under the caller's context (inheriting its
+    /// permissions, cancellation and deadline); context-less internal scans
+    /// get a minimal default.
     async fn execute_plan(
         &self,
         catalog: &str,
