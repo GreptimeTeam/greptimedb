@@ -144,6 +144,25 @@ pub const LATEST_OFFSET_COLUMN: EventTableColumn =
 pub const GC_REPORT_COLUMN: EventTableColumn =
     EventTableColumn::json_binary("gc_report", ColumnDataType::Binary, SemanticType::Field);
 
+/// The canonical ADMIN function name field.
+pub const ADMIN_FUNCTION_NAME_COLUMN: EventTableColumn = EventTableColumn::new(
+    "admin_function_name",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical ADMIN function execution status field.
+pub const ADMIN_FUNCTION_STATUS_COLUMN: EventTableColumn = EventTableColumn::new(
+    "admin_function_status",
+    ColumnDataType::String,
+    SemanticType::Field,
+);
+/// The canonical ADMIN function output field.
+pub const ADMIN_FUNCTION_OUTPUT_COLUMN: EventTableColumn = EventTableColumn::json_binary(
+    "admin_function_output",
+    ColumnDataType::Binary,
+    SemanticType::Field,
+);
+
 /// The canonical table name field for table DDL events.
 pub const TABLE_NAME_COLUMN: EventTableColumn =
     EventTableColumn::new("table_name", ColumnDataType::String, SemanticType::Field);
@@ -386,6 +405,40 @@ mod tests {
                 semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             })
+        );
+    }
+
+    #[test]
+    fn admin_function_schema_preserves_names_types_semantics_extensions_and_order() {
+        assert_eq!(
+            column_schemas([
+                &ADMIN_FUNCTION_NAME_COLUMN,
+                &ADMIN_FUNCTION_STATUS_COLUMN,
+                &ADMIN_FUNCTION_OUTPUT_COLUMN,
+            ]),
+            vec![
+                ColumnSchema {
+                    column_name: "admin_function_name".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "admin_function_status".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "admin_function_output".to_string(),
+                    datatype: ColumnDataType::Binary.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                    }),
+                    ..Default::default()
+                },
+            ]
         );
     }
 

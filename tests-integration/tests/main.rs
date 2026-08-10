@@ -14,6 +14,7 @@
 
 #![recursion_limit = "256"]
 
+mod admin_function_event;
 mod database_ddl_event;
 mod event_recorder_test_util;
 #[macro_use]

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod event;
+mod layer;
+
 use std::sync::Arc;
 
 use common_function::function::FunctionContext;
@@ -28,6 +31,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+pub use layer::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer,
+};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
@@ -38,14 +45,49 @@ use crate::statement::StatementExecutor;
 
 const DUMMY_COLUMN: &str = "<dummy>";
 
-impl StatementExecutor {
-    /// Execute the [`Admin`] statement and returns the output.
-    #[tracing::instrument(skip_all)]
-    pub(super) async fn execute_admin_command(
-        &self,
-        stmt: Admin,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+/// A request to execute one ADMIN function statement.
+#[derive(Clone)]
+pub struct AdminFunctionRequest {
+    /// The parsed ADMIN statement to execute.
+    pub statement: Admin,
+    /// The query context of the request.
+    pub query_ctx: QueryContextRef,
+}
+
+/// The client output and immediate typed result of one ADMIN function execution.
+pub struct AdminFunctionResponse {
+    /// The output returned to the client.
+    pub output: Output,
+    /// The typed immediate result exposed to outer layers.
+    pub immediate_result: Value,
+}
+
+/// Executes an ADMIN function request.
+#[async_trait::async_trait]
+pub trait AdminFunctionService: Send + Sync {
+    /// Executes an ADMIN function request.
+    async fn call(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse>;
+}
+
+/// A shared ADMIN function service.
+pub type AdminFunctionServiceRef = Arc<dyn AdminFunctionService>;
+
+#[derive(Clone)]
+struct CoreAdminFunctionService {
+    query_engine: query::QueryEngineRef,
+}
+
+impl CoreAdminFunctionService {
+    fn new(query_engine: query::QueryEngineRef) -> Self {
+        Self { query_engine }
+    }
+
+    async fn execute(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse> {
+        let AdminFunctionRequest {
+            statement: stmt,
+            query_ctx,
+        } = request;
+
         let Admin::Func(func) = &stmt;
         // the function name should be in lower case.
         let func_name = func.name.to_string().to_lowercase();
@@ -141,6 +183,7 @@ impl StatementExecutor {
             (&result_columnar).try_into().context(CastSnafu)?;
 
         let result_vector: VectorRef = result_columnar.try_into_vector(1).context(CastSnafu)?;
+        let immediate_result = result_vector.get(0);
 
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
@@ -154,7 +197,42 @@ impl StatementExecutor {
         let batches =
             RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
 
-        Ok(Output::new_with_record_batches(batches))
+        Ok(AdminFunctionResponse {
+            output: Output::new_with_record_batches(batches),
+            immediate_result,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AdminFunctionService for CoreAdminFunctionService {
+    async fn call(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse> {
+        self.execute(request).await
+    }
+}
+
+/// Creates the core ADMIN function service.
+pub(crate) fn new_admin_function_service(
+    query_engine: query::QueryEngineRef,
+) -> AdminFunctionServiceRef {
+    Arc::new(CoreAdminFunctionService::new(query_engine))
+}
+
+impl StatementExecutor {
+    /// Executes the [`Admin`] statement and returns the output.
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn execute_admin_command(
+        &self,
+        stmt: Admin,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.admin_function_service
+            .call(AdminFunctionRequest {
+                statement: stmt,
+                query_ctx,
+            })
+            .await
+            .map(|response| response.output)
     }
 }
 
