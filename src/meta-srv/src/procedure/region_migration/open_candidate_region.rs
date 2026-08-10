@@ -71,7 +71,7 @@ impl OpenCandidateRegion {
         let region_ids = ctx.persistent_ctx.region_ids.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
-        let reason = match ctx.persistent_ctx.trigger_reason {
+        let reason = match ctx.trigger_reason() {
             RegionMigrationTriggerReason::Failover => OpenRegionReason::RegionFailover,
             _ => OpenRegionReason::RegionMigration,
         };
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_open_region_instruction_reason() {
         let state = OpenCandidateRegion;
-        let mut persistent_context = new_persistent_context();
+        let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
         let region_id = persistent_context.region_ids[0];
         let env = TestingEnv::new();
@@ -325,8 +325,11 @@ mod tests {
             open_regions[0].requirements
         );
 
-        persistent_context.trigger_reason = RegionMigrationTriggerReason::Failover;
         let mut ctx = env.context_factory().new_context(persistent_context);
+        let event_context = common_meta::rpc::ddl::PersistentEventContext::new(
+            common_meta::rpc::ddl::TriggerReason::RegionFailover,
+        );
+        ctx.set_event_context(Some(&event_context));
         let instruction = state.build_open_region_instruction(&mut ctx).await.unwrap();
         let open_regions = instruction.into_open_regions().unwrap();
         assert_eq!(

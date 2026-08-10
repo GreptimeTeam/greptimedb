@@ -17,14 +17,13 @@ use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row};
-use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    EVENT_CONTEXT_COLUMN, REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN,
-    REGION_MIGRATION_DST_PEER_ADDR_COLUMN, REGION_MIGRATION_SRC_NODE_ID_COLUMN,
-    REGION_MIGRATION_SRC_PEER_ADDR_COLUMN, REGION_MIGRATION_TRIGGER_REASON_COLUMN,
-    REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas, nullable_json,
+    REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
+    REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
 };
+use common_event_recorder::{Event, TriggerReason};
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -50,7 +49,6 @@ pub(crate) struct RegionMigrationEvent {
     dst_peer_addr: String,
     // The timeout of the region migration.
     timeout: Duration,
-    event_context: Option<common_meta::rpc::ddl::EventContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,16 +58,15 @@ struct Payload {
 }
 
 impl RegionMigrationEvent {
-    pub fn from_persistent_ctx(ctx: &PersistentContext, include_event_context: bool) -> Self {
+    pub fn from_persistent_ctx(ctx: &PersistentContext, trigger_reason: TriggerReason) -> Self {
         Self {
             region_ids: ctx.region_ids.clone(),
-            trigger_reason: ctx.trigger_reason,
+            trigger_reason: RegionMigrationTriggerReason::from_trigger_reason(trigger_reason),
             src_node_id: ctx.from_peer.id,
             src_peer_addr: ctx.from_peer.addr.clone(),
             dst_node_id: ctx.to_peer.id,
             dst_peer_addr: ctx.to_peer.addr.clone(),
             timeout: ctx.timeout,
-            event_context: include_event_context.then(|| ctx.event_context.clone()),
         }
     }
 }
@@ -89,7 +86,6 @@ impl Event for RegionMigrationEvent {
             &REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
             &REGION_MIGRATION_DST_NODE_ID_COLUMN,
             &REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
-            &EVENT_CONTEXT_COLUMN,
         ])
     }
 
@@ -106,12 +102,6 @@ impl Event for RegionMigrationEvent {
                     ValueData::StringValue(self.src_peer_addr.clone()).into(),
                     ValueData::U64Value(self.dst_node_id).into(),
                     ValueData::StringValue(self.dst_peer_addr.clone()).into(),
-                    self.event_context
-                        .as_ref()
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .context(SerializeEventSnafu)
-                        .map(|value| nullable_json(value.as_ref()))?,
                 ],
             });
         }

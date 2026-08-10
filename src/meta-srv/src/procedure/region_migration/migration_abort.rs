@@ -49,7 +49,7 @@ impl State for RegionMigrationAbort {
             ctx.persistent_ctx.region_ids,
             ctx.persistent_ctx.from_peer,
             ctx.persistent_ctx.to_peer,
-            ctx.persistent_ctx.trigger_reason,
+            ctx.trigger_reason(),
             ctx.volatile_ctx.metrics,
         );
         error::MigrationAbortSnafu {

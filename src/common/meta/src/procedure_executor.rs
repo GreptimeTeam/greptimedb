@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+use common_event_recorder::PersistentEventContext;
 use common_procedure::{ProcedureId, ProcedureManagerRef};
 use common_telemetry::tracing_context::W3cTrace;
 use snafu::{OptionExt, ResultExt};
@@ -30,9 +31,11 @@ use crate::rpc::procedure::{
 };
 
 /// The context of procedure executor.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
+    pub actor: Option<String>,
+    pub event_context: Option<PersistentEventContext>,
 }
 
 /// The procedure executor that accepts ddl, region migration task etc.

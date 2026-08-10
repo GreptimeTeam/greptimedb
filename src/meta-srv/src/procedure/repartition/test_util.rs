@@ -24,7 +24,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::EventContext;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::test_util::new_ddl_context_with_kv_backend;
@@ -103,6 +102,7 @@ impl TestingEnv {
         ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
         }
     }
 
@@ -225,7 +225,6 @@ pub fn new_parent_context(
         TableName::new("test_catalog", "test_schema", "test_table"),
         table_id,
         None,
-        EventContext::default(),
     );
 
     ParentContext::new(
@@ -266,6 +265,7 @@ pub fn procedure_context_with_receivers(
             receivers,
             inner: MockContextProvider::default(),
         }),
+        event_context: None,
     }
 }
 

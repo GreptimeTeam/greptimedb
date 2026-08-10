@@ -34,8 +34,8 @@ use crate::procedure::{Output, StringKey};
 use crate::rwlock::OwnedKeyRwLockGuard;
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{
-    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventRuntimeContext, EventTrigger,
-    Procedure, ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
+    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventContext, EventTrigger, Procedure,
+    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
 };
 
 /// A guard to cleanup procedure state.
@@ -227,6 +227,7 @@ impl Runner {
         let ctx = Context {
             procedure_id: self.meta.id,
             provider: self.manager_ctx.clone(),
+            event_context: self.meta.context.event_context.clone(),
         };
 
         self.rolling_back = false;
@@ -508,6 +509,7 @@ impl Runner {
             procedure_id,
             procedure_state,
             Some(self.meta.id),
+            self.meta.context.clone(),
             procedure.lock_key(),
             procedure.poison_keys(),
             procedure.type_name(),
@@ -662,12 +664,13 @@ impl Runner {
         let data = self.procedure.dump()?;
 
         self.store
-            .store_procedure(
+            .store_procedure_with_context(
                 self.meta.id,
                 self.step,
                 type_name,
                 data,
                 self.meta.parent_id,
+                self.meta.context.clone(),
             )
             .await
             .map_err(|e| {
@@ -708,6 +711,7 @@ impl Runner {
             parent_id: self.meta.parent_id,
             step: self.step,
             error: Some(error),
+            context: self.meta.context.clone(),
         };
         self.store
             .rollback_procedure(self.meta.id, message)
@@ -776,15 +780,22 @@ impl Runner {
     pub(crate) fn build_event(&self, trigger: EventTrigger) -> Option<ProcedureEvent> {
         let recorder = self.event_recorder.as_ref()?;
         let state = self.meta.state();
-        let context = EventRuntimeContext {
+        let context = EventContext {
             procedure_id: self.meta.id,
             lifecycle_state: &state,
             trigger: trigger.clone(),
             event_type_filter: recorder.event_type_filter(),
+            event_context: self.meta.context.event_context.as_ref(),
         };
-        self.procedure
-            .event(&context)
-            .map(|event| ProcedureEvent::new(self.meta.id, event, state, trigger))
+        self.procedure.event(&context).map(|event| {
+            ProcedureEvent::new_with_context(
+                self.meta.id,
+                event,
+                state,
+                trigger,
+                self.meta.context.clone(),
+            )
+        })
     }
 
     /// Builds and dispatches an event from the live procedure. Delivery is best effort and is
@@ -876,6 +887,7 @@ mod tests {
         Context {
             procedure_id,
             provider,
+            event_context: None,
         }
     }
 
@@ -914,6 +926,7 @@ mod tests {
         Context {
             procedure_id,
             provider: Arc::new(MockProvider),
+            event_context: None,
         }
     }
 
@@ -1100,6 +1113,7 @@ mod tests {
         ProcedureWithId {
             id: procedure_id,
             procedure: Box::new(child),
+            context: Default::default(),
         }
     }
 
@@ -1480,6 +1494,7 @@ mod tests {
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
+                            context: Default::default(),
                         }],
                         persist: true,
                     })
@@ -1672,6 +1687,7 @@ mod tests {
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
+                            context: Default::default(),
                         }],
                         persist: true,
                     })
@@ -2192,6 +2208,7 @@ mod tests {
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),
+                        context: Default::default(),
                     }],
                     persist: false,
                 })
@@ -2248,6 +2265,7 @@ mod tests {
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),
+                        context: Default::default(),
                     }],
                     persist: false,
                 })

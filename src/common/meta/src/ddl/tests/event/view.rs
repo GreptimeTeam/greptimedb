@@ -19,16 +19,16 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
-    VIEW_NAME_COLUMN,
+    VIEW_NAME_COLUMN, jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventRuntimeContext, EventTrigger, Output, Procedure, ProcedureEvent,
+    ChildSubmissionOutcome, EventContext, EventTrigger, Output, Procedure, ProcedureEvent,
     ProcedureId, ProcedureState, RetryPhase,
 };
 
-use super::test_util::{assert_event_filter, default_event_context_value, procedure_trigger_value};
+use super::test_util::assert_event_filter;
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::event::view::{
@@ -36,7 +36,6 @@ use crate::ddl::event::view::{
 };
 use crate::ddl::tests::create_view::test_create_view_task;
 use crate::ddl::tests::drop_view::new_drop_view_task;
-use crate::rpc::ddl::EventContext;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 #[test]
@@ -44,7 +43,7 @@ fn test_view_submitted_event_contracts() {
     let mut task = test_create_view_task("v_metrics");
     task.create_view.or_replace = true;
     task.create_view.create_if_not_exists = true;
-    let create = CreateViewProcedure::new(task, EventContext::default(), test_context());
+    let create = CreateViewProcedure::new(task, test_context());
     let event = event_for(&create, EventTrigger::Submitted);
 
     assert_view_event_contract(
@@ -72,11 +71,7 @@ fn test_view_submitted_event_contracts() {
         assert!(!payload.contains(omitted));
     }
 
-    let drop = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, true),
-        EventContext::default(),
-        test_context(),
-    );
+    let drop = DropViewProcedure::new(new_drop_view_task("view_name", 42, true), test_context());
     let event = event_for(&drop, EventTrigger::Submitted);
 
     assert_view_event_contract(
@@ -140,16 +135,8 @@ fn test_view_lifecycle_event_contracts() {
 
 #[test]
 fn test_view_procedures_preserve_lifecycle_locators() {
-    let create = CreateViewProcedure::new(
-        test_create_view_task("view_name"),
-        EventContext::default(),
-        test_context(),
-    );
-    let drop = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, false),
-        EventContext::default(),
-        test_context(),
-    );
+    let create = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
+    let drop = DropViewProcedure::new(new_drop_view_task("view_name", 42, false), test_context());
     let triggers = [
         EventTrigger::Recovered,
         EventTrigger::ChildSubmitted {
@@ -199,11 +186,7 @@ fn test_view_procedures_preserve_lifecycle_locators() {
 
 #[test]
 fn test_create_view_succeeded_output_mapping() {
-    let procedure = CreateViewProcedure::new(
-        test_create_view_task("view_name"),
-        EventContext::default(),
-        test_context(),
-    );
+    let procedure = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
     let state = ProcedureState::Done {
         output: Some(Arc::new(84_u32)),
     };
@@ -240,21 +223,14 @@ fn test_create_view_succeeded_output_mapping() {
 
 #[test]
 fn test_create_view_event_filter() {
-    let procedure = CreateViewProcedure::new(
-        test_create_view_task("view_name"),
-        EventContext::default(),
-        test_context(),
-    );
+    let procedure = CreateViewProcedure::new(test_create_view_task("view_name"), test_context());
     assert_event_filter(&procedure, CREATE_VIEW_EVENT_TYPE);
 }
 
 #[test]
 fn test_drop_view_event_filter() {
-    let procedure = DropViewProcedure::new(
-        new_drop_view_task("view_name", 42, false),
-        EventContext::default(),
-        test_context(),
-    );
+    let procedure =
+        DropViewProcedure::new(new_drop_view_task("view_name", 42, false), test_context());
     assert_event_filter(&procedure, DROP_VIEW_EVENT_TYPE);
 }
 
@@ -273,7 +249,6 @@ fn test_view_event_procedure_envelope_contract() {
                 referenced_table_count: 1,
                 column_count: 1,
             },
-            EventContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
@@ -344,17 +319,11 @@ fn view_schema() -> Vec<ColumnSchema> {
         SCHEMA_NAME_COLUMN.column_schema(),
         VIEW_NAME_COLUMN.column_schema(),
         VIEW_ID_COLUMN.column_schema(),
-        EVENT_CONTEXT_COLUMN.column_schema(),
     ]
 }
 
 fn assert_view_event_contract(event: &dyn Event, event_type: &str, locator: ViewEventLocator<'_>) {
-    let mut values = locator.values();
-    values.push(if event.json_payload().unwrap().is_null() {
-        Value { value_data: None }
-    } else {
-        default_event_context_value()
-    });
+    let values = locator.values();
     assert_event_contract(event, event_type, &view_schema(), &[Row { values }]);
 }
 
@@ -372,19 +341,16 @@ fn assert_procedure_event_contract(
         PROCEDURE_TRIGGER_COLUMN.column_schema(),
     ];
     schema.extend(view_schema());
+    schema.push(EVENT_CONTEXT_COLUMN.column_schema());
 
     let mut values = vec![
         ValueData::StringValue(event.procedure_id.to_string()).into(),
         ValueData::StringValue(state.to_string()).into(),
         ValueData::StringValue(String::new()).into(),
-        procedure_trigger_value(trigger),
+        jsonb_value(&serde_json::json!({"type": trigger})),
     ];
     values.extend(locator.values());
-    values.push(if trigger == "Submitted" {
-        default_event_context_value()
-    } else {
-        Value { value_data: None }
-    });
+    values.push(Value { value_data: None });
 
     assert_event_contract(event, event_type, &schema, &[Row { values }]);
 }
@@ -403,11 +369,12 @@ fn event_for_state(
     lifecycle_state: &ProcedureState,
 ) -> Box<dyn Event> {
     procedure
-        .event(&EventRuntimeContext {
+        .event(&EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
             event_type_filter: Arc::new(EventTypeFilter::All),
+            event_context: None,
         })
         .unwrap()
 }

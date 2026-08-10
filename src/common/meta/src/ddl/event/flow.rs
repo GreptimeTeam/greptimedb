@@ -19,13 +19,11 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, column_schemas,
-    nullable_json, nullable_string, nullable_value,
+    CATALOG_NAME_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, column_schemas, nullable_string,
+    nullable_value,
 };
 use serde::Serialize;
 use snafu::ResultExt;
-
-use crate::rpc::ddl::EventContext;
 
 pub(crate) const CREATE_FLOW_EVENT_TYPE: &str = "create_flow";
 pub(crate) const DROP_FLOW_EVENT_TYPE: &str = "drop_flow";
@@ -71,15 +69,14 @@ pub(crate) struct FlowDdlEvent {
     flow_name: Option<String>,
     flow_id: Option<u32>,
     payload: Option<FlowDdlPayload>,
-    event_context: Option<EventContext>,
 }
 
 impl FlowDdlEvent {
+    /// Builds the bounded event emitted when creating a Flow is submitted.
     pub(crate) fn create_submitted(
         catalog_name: &str,
         flow_name: &str,
         intent: CreateFlowEventIntent,
-        event_context: EventContext,
     ) -> Self {
         Self {
             event_type: CREATE_FLOW_EVENT_TYPE,
@@ -93,16 +90,15 @@ impl FlowDdlEvent {
                 expire_after: intent.expire_after,
                 eval_interval_secs: intent.eval_interval_secs,
             })),
-            event_context: Some(event_context),
         }
     }
 
+    /// Builds the bounded event emitted when dropping a Flow is submitted.
     pub(crate) fn drop_submitted(
         catalog_name: &str,
         flow_name: &str,
         flow_id: u32,
         drop_if_exists: bool,
-        event_context: EventContext,
     ) -> Self {
         Self {
             event_type: DROP_FLOW_EVENT_TYPE,
@@ -113,7 +109,6 @@ impl FlowDdlEvent {
                 version: PAYLOAD_VERSION,
                 drop_if_exists,
             })),
-            event_context: Some(event_context),
         }
     }
 
@@ -149,7 +144,6 @@ impl FlowDdlEvent {
             flow_name: Some(flow_name.to_string()),
             flow_id: None,
             payload: None,
-            event_context: None,
         }
     }
 }
@@ -167,27 +161,15 @@ impl Event for FlowDdlEvent {
     }
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
-        column_schemas([
-            &CATALOG_NAME_COLUMN,
-            &FLOW_NAME_COLUMN,
-            &FLOW_ID_COLUMN,
-            &EVENT_CONTEXT_COLUMN,
-        ])
+        column_schemas([&CATALOG_NAME_COLUMN, &FLOW_NAME_COLUMN, &FLOW_ID_COLUMN])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
-        let event_context = self
-            .event_context
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .context(SerializeEventSnafu)?;
         Ok(vec![Row {
             values: vec![
                 nullable_string(self.catalog_name.as_deref()),
                 nullable_string(self.flow_name.as_deref()),
                 nullable_value(self.flow_id.map(ValueData::U32Value)),
-                nullable_json(event_context.as_ref()),
             ],
         }])
     }

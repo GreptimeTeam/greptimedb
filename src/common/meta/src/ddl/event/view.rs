@@ -19,13 +19,11 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
-    VIEW_NAME_COLUMN, column_schemas, nullable_json, nullable_string, nullable_value,
+    CATALOG_NAME_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN, VIEW_NAME_COLUMN, column_schemas,
+    nullable_string, nullable_value,
 };
 use serde::Serialize;
 use snafu::ResultExt;
-
-use crate::rpc::ddl::EventContext;
 
 pub(crate) const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
 pub(crate) const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
@@ -64,7 +62,6 @@ pub(crate) struct ViewDdlEvent {
     view_name: Option<String>,
     view_id: Option<u32>,
     payload: Option<ViewDdlPayload>,
-    event_context: Option<EventContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,12 +72,12 @@ enum ViewDdlPayload {
 }
 
 impl ViewDdlEvent {
+    /// Builds the bounded event emitted when creating a View is submitted.
     pub(crate) fn create_submitted(
         catalog_name: &str,
         schema_name: &str,
         view_name: &str,
         intent: CreateViewEventIntent,
-        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             CREATE_VIEW_EVENT_TYPE,
@@ -95,17 +92,16 @@ impl ViewDdlEvent {
                 referenced_table_count: intent.referenced_table_count,
                 column_count: intent.column_count,
             }),
-            event_context,
         )
     }
 
+    /// Builds the bounded event emitted when dropping a View is submitted.
     pub(crate) fn drop_submitted(
         catalog_name: &str,
         schema_name: &str,
         view_name: &str,
         view_id: u32,
         drop_if_exists: bool,
-        event_context: EventContext,
     ) -> Self {
         Self::submitted(
             DROP_VIEW_EVENT_TYPE,
@@ -117,7 +113,6 @@ impl ViewDdlEvent {
                 version: PAYLOAD_VERSION,
                 drop_if_exists,
             }),
-            event_context,
         )
     }
 
@@ -162,7 +157,6 @@ impl ViewDdlEvent {
         view_name: &str,
         view_id: Option<u32>,
         payload: ViewDdlPayload,
-        event_context: EventContext,
     ) -> Self {
         Self {
             event_type,
@@ -171,7 +165,6 @@ impl ViewDdlEvent {
             view_name: Some(view_name.to_string()),
             view_id,
             payload: Some(payload),
-            event_context: Some(event_context),
         }
     }
 
@@ -188,7 +181,6 @@ impl ViewDdlEvent {
             view_name: Some(view_name.to_string()),
             view_id: None,
             payload: None,
-            event_context: None,
         }
     }
 
@@ -206,7 +198,6 @@ impl ViewDdlEvent {
             view_name: Some(view_name.to_string()),
             view_id: Some(view_id),
             payload: None,
-            event_context: None,
         }
     }
 }
@@ -229,24 +220,16 @@ impl Event for ViewDdlEvent {
             &SCHEMA_NAME_COLUMN,
             &VIEW_NAME_COLUMN,
             &VIEW_ID_COLUMN,
-            &EVENT_CONTEXT_COLUMN,
         ])
     }
 
     fn extra_rows(&self) -> Result<Vec<Row>> {
-        let event_context = self
-            .event_context
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .context(SerializeEventSnafu)?;
         Ok(vec![Row {
             values: vec![
                 nullable_string(self.catalog_name.as_deref()),
                 nullable_string(self.schema_name.as_deref()),
                 nullable_string(self.view_name.as_deref()),
                 nullable_value(self.view_id.map(ValueData::U32Value)),
-                nullable_json(event_context.as_ref()),
             ],
         }])
     }

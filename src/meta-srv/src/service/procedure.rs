@@ -107,6 +107,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .submit_ddl_task(
                 &ExecutorContext {
                     tracing_context: Some(header.tracing_context),
+                    ..Default::default()
                 },
                 SubmitDdlTaskRequest {
                     query_context,
