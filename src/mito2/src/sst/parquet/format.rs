@@ -27,7 +27,7 @@
 //! We stores fields in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
 
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -38,7 +38,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::DataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
@@ -53,7 +53,7 @@ use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::ReadColumns;
+use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
@@ -588,7 +588,7 @@ pub(crate) struct FormatProjection {
     /// It doesn't contain time index column if it is not present in the projection.
     pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
     /// JSON2 target types keyed by column id.
-    pub(crate) json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
+    pub(crate) json_target_types: JsonTargetTypes,
 }
 
 impl FormatProjection {
@@ -694,7 +694,7 @@ impl FormatProjection {
 
 fn json_target_nested_paths(
     metadata: &RegionMetadataRef,
-    json_target_types: &BTreeMap<ColumnId, ConcreteDataType>,
+    json_target_types: &JsonTargetTypes,
     column_id: ColumnId,
 ) -> Vec<NestedPath> {
     let Some(target_type) = json_target_types.get(&column_id) else {

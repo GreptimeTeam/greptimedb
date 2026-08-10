@@ -308,7 +308,7 @@ impl FlatReadFormat {
             align_schema_by_nested_paths(&mut schema, nested_paths);
         }
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
-        for (column_id, target_type) in &self.format_projection().json_target_types {
+        for (column_id, target_type) in self.format_projection().json_target_types.iter() {
             let Some(index) = self
                 .format_projection()
                 .column_id_to_projected_index

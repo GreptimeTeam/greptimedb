@@ -14,9 +14,12 @@
 
 use std::collections::BTreeMap;
 use std::mem;
+use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
 use store_api::storage::ColumnId;
+
+pub(crate) type JsonTargetTypes = Arc<BTreeMap<ColumnId, ConcreteDataType>>;
 
 /// Logical columns to read from a region.
 ///
@@ -26,7 +29,7 @@ use store_api::storage::ColumnId;
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
     pub cols: Vec<ReadColumn>,
-    json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
+    json_target_types: JsonTargetTypes,
 }
 
 impl ReadColumns {
@@ -37,7 +40,7 @@ impl ReadColumns {
         let cols = column_ids.into_iter().map(ReadColumn::new).collect();
         ReadColumns {
             cols,
-            json_target_types: BTreeMap::new(),
+            json_target_types: Arc::default(),
         }
     }
 
@@ -48,7 +51,7 @@ impl ReadColumns {
         let cols = column_ids.into_iter().map(ReadColumn::new).collect();
         ReadColumns {
             cols,
-            json_target_types,
+            json_target_types: Arc::new(json_target_types),
         }
     }
 
@@ -68,7 +71,7 @@ impl ReadColumns {
         &self.cols
     }
 
-    pub fn json_target_types(&self) -> &BTreeMap<ColumnId, ConcreteDataType> {
+    pub fn json_target_types(&self) -> &JsonTargetTypes {
         &self.json_target_types
     }
 
