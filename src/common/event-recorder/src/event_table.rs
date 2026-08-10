@@ -88,6 +88,9 @@ pub const TIMESTAMP_COLUMN: EventTableColumn = EventTableColumn::new(
     ColumnDataType::TimestampNanosecond,
     SemanticType::Timestamp,
 );
+/// The effective database user that initiated an event.
+pub const ACTOR_COLUMN: EventTableColumn =
+    EventTableColumn::new("actor", ColumnDataType::String, SemanticType::Field);
 /// The canonical procedure identifier envelope column.
 pub const PROCEDURE_ID_COLUMN: EventTableColumn =
     EventTableColumn::new("procedure_id", ColumnDataType::String, SemanticType::Field);
@@ -412,11 +415,18 @@ mod tests {
     fn admin_function_schema_preserves_names_types_semantics_extensions_and_order() {
         assert_eq!(
             column_schemas([
+                &ACTOR_COLUMN,
                 &ADMIN_FUNCTION_NAME_COLUMN,
                 &ADMIN_FUNCTION_STATUS_COLUMN,
                 &ADMIN_FUNCTION_OUTPUT_COLUMN,
             ]),
             vec![
+                ColumnSchema {
+                    column_name: "actor".to_string(),
+                    datatype: ColumnDataType::String.into(),
+                    semantic_type: SemanticType::Field.into(),
+                    ..Default::default()
+                },
                 ColumnSchema {
                     column_name: "admin_function_name".to_string(),
                     datatype: ColumnDataType::String.into(),

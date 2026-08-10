@@ -19,8 +19,8 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::Result as EventResult;
 use common_event_recorder::event_table::{
-    ADMIN_FUNCTION_NAME_COLUMN, ADMIN_FUNCTION_OUTPUT_COLUMN, ADMIN_FUNCTION_STATUS_COLUMN,
-    column_schemas, jsonb_value,
+    ACTOR_COLUMN, ADMIN_FUNCTION_NAME_COLUMN, ADMIN_FUNCTION_OUTPUT_COLUMN,
+    ADMIN_FUNCTION_STATUS_COLUMN, column_schemas, jsonb_value,
 };
 use datatypes::value::Value;
 use serde_json::{Value as JsonValue, json};
@@ -45,6 +45,7 @@ const UNSUPPORTED: &str = "<unsupported>";
 /// The ADMIN function input captured before execution.
 #[derive(Debug, Clone)]
 pub(crate) struct AdminFunctionEventInput {
+    actor: String,
     function: String,
     arguments: Vec<JsonValue>,
 }
@@ -63,6 +64,7 @@ impl AdminFunctionEventInput {
         };
 
         Self {
+            actor: request.query_ctx.current_user().username().to_string(),
             function: function_name,
             arguments,
         }
@@ -72,6 +74,7 @@ impl AdminFunctionEventInput {
 /// An event describing the outcome of an ADMIN function execution.
 #[derive(Debug)]
 pub(crate) struct AdminFunctionEvent {
+    actor: String,
     function_name: String,
     status: &'static str,
     output: JsonValue,
@@ -82,6 +85,7 @@ impl AdminFunctionEvent {
     /// Creates a successful ADMIN function event.
     pub(crate) fn success(input: AdminFunctionEventInput, result: &Value) -> Self {
         Self {
+            actor: input.actor,
             function_name: input.function,
             status: SUCCEEDED_STATUS,
             output: json!({
@@ -97,6 +101,7 @@ impl AdminFunctionEvent {
     /// Creates a failed ADMIN function event with the debug representation of the error.
     pub(crate) fn failure(input: AdminFunctionEventInput, error: &Error) -> Self {
         Self {
+            actor: input.actor,
             function_name: input.function,
             status: FAILED_STATUS,
             output: json!({
@@ -126,6 +131,7 @@ impl Event for AdminFunctionEvent {
 
     fn extra_schema(&self) -> Vec<ColumnSchema> {
         column_schemas([
+            &ACTOR_COLUMN,
             &ADMIN_FUNCTION_NAME_COLUMN,
             &ADMIN_FUNCTION_STATUS_COLUMN,
             &ADMIN_FUNCTION_OUTPUT_COLUMN,
@@ -135,6 +141,7 @@ impl Event for AdminFunctionEvent {
     fn extra_rows(&self) -> EventResult<Vec<Row>> {
         Ok(vec![Row {
             values: vec![
+                ValueData::StringValue(self.actor.clone()).into(),
                 ValueData::StringValue(self.function_name.clone()).into(),
                 ValueData::StringValue(self.status.to_string()).into(),
                 jsonb_value(&self.output),
@@ -181,8 +188,8 @@ mod tests {
     use api::v1::value::ValueData;
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
-        ADMIN_FUNCTION_NAME_COLUMN, ADMIN_FUNCTION_OUTPUT_COLUMN, ADMIN_FUNCTION_STATUS_COLUMN,
-        column_schemas, jsonb_value,
+        ACTOR_COLUMN, ADMIN_FUNCTION_NAME_COLUMN, ADMIN_FUNCTION_OUTPUT_COLUMN,
+        ADMIN_FUNCTION_STATUS_COLUMN, column_schemas, jsonb_value,
     };
     use datatypes::value::Value;
     use serde_json::json;
@@ -221,6 +228,7 @@ mod tests {
         assert_eq!(
             event.extra_schema(),
             column_schemas([
+                &ACTOR_COLUMN,
                 &ADMIN_FUNCTION_NAME_COLUMN,
                 &ADMIN_FUNCTION_STATUS_COLUMN,
                 &ADMIN_FUNCTION_OUTPUT_COLUMN,
@@ -230,6 +238,7 @@ mod tests {
             event.extra_rows().unwrap(),
             vec![Row {
                 values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
                     ValueData::StringValue(function_name.to_string()).into(),
                     ValueData::StringValue(status.to_string()).into(),
                     jsonb_value(&output),
