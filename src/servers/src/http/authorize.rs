@@ -80,7 +80,36 @@ pub async fn inner_auth<B>(
         return Ok(req);
     };
 
-    // 3. get username and pwd
+    // 3. bearer token auth (JWT / OAuth2). When an `Authorization: Bearer
+    //    <token>` header is present, authenticate via
+    //    [`UserProvider::auth_bearer_token`]; otherwise fall through to the
+    //    username/password path (Basic / influxdb / splunk) below.
+    if let Some(token) = extract_bearer_token(&req) {
+        match user_provider
+            .auth_bearer_token(token, &catalog, &schema)
+            .await
+        {
+            Ok(userinfo) => {
+                query_ctx.set_current_user(userinfo);
+                let _ = req.extensions_mut().insert(query_ctx);
+                return Ok(req);
+            }
+            Err(e) => {
+                warn!(e; "bearer token authentication failed");
+                crate::metrics::METRIC_AUTH_FAILURE
+                    .with_label_values(&[e.status_code().as_ref()])
+                    .inc();
+                // Splunk HEC clients expect `{"text":"Invalid token","code":4}`
+                // (FORBIDDEN), not the generic 401 `ErrorResponse`.
+                if is_splunk_request(&req) {
+                    return Err(splunk_hec_err(StatusCode::FORBIDDEN, 4));
+                }
+                return Err(err_response(e));
+            }
+        }
+    }
+
+    // 4. get username and pwd
     let (username, password) = match extract_username_and_password(&req) {
         Ok((username, password)) => (username, password),
         Err(e) => {
@@ -100,7 +129,7 @@ pub async fn inner_auth<B>(
         }
     };
 
-    // 4. auth
+    // 5. auth
     match user_provider
         .auth(
             auth::Identity::UserId(&username, None),
@@ -306,6 +335,29 @@ impl From<AuthScheme> for api::v1::auth_header::AuthScheme {
 }
 
 type Credential<'a> = &'a str;
+
+/// Extracts an opaque bearer token from an `Authorization: Bearer <token>`
+/// header (the standard or `x-greptime-auth` header).
+///
+/// Returns `None` for any other scheme (`Basic`, influxdb `Token`, splunk
+/// `Splunk`, …) so the caller can fall through to the username/password path.
+fn extract_bearer_token<B>(req: &Request<B>) -> Option<&str> {
+    let header = req
+        .headers()
+        .get(AUTHORIZATION_HEADER)
+        .or_else(|| req.headers().get(http::header::AUTHORIZATION))?;
+    let value = header.to_str().ok()?;
+    // HTTP authentication schemes are case-insensitive (RFC 9110 §11.1), so
+    // match the scheme with `eq_ignore_ascii_case` — but never lowercase the
+    // *token* itself, which is opaque and case-sensitive. Returns a borrow
+    // into the request's headers, so there is no allocation.
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim_start();
+    (!token.is_empty()).then_some(token)
+}
 
 fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
@@ -609,5 +661,175 @@ mod tests {
             extract_influxdb_user_from_query("p=4&u=123"),
             (Some("123"), Some("4"))
         );
+    }
+
+    #[test]
+    fn test_extract_bearer_token() {
+        let bearer = |scheme: &str, val: &str| {
+            mock_http_request(Some(&format!("{scheme} {val}")), None).unwrap()
+        };
+
+        // Standard bearer scheme, on either header.
+        assert_eq!(
+            extract_bearer_token(&bearer("Bearer", "abc.def.ghi")),
+            Some("abc.def.ghi")
+        );
+        assert_eq!(extract_bearer_token(&bearer("bearer", "tok")), Some("tok"));
+        // HTTP schemes are case-insensitive (RFC 9110 §11.1); the token
+        // itself is opaque and must NOT be lowercased.
+        assert_eq!(
+            extract_bearer_token(&bearer("BEARER", "ABC.DEF.GHI")),
+            Some("ABC.DEF.GHI")
+        );
+        assert_eq!(extract_bearer_token(&bearer("BeArEr", "tok")), Some("tok"));
+        let mut req = mock_http_request(Some("Bearer xyz"), None).unwrap();
+        req.headers_mut().insert(
+            AUTHORIZATION_HEADER,
+            "Bearer from-x-greptime".parse().unwrap(),
+        );
+        assert_eq!(extract_bearer_token(&req), Some("from-x-greptime"));
+
+        // Non-bearer schemes are ignored so the caller falls through to Basic.
+        assert_eq!(extract_bearer_token(&bearer("Basic", "dXNlcjpwYXNz")), None);
+        assert_eq!(extract_bearer_token(&bearer("Token", "u:p")), None);
+        assert_eq!(extract_bearer_token(&bearer("Splunk", "u:p")), None);
+
+        // No header, empty token.
+        assert_eq!(
+            extract_bearer_token(&mock_http_request(None, None).unwrap()),
+            None
+        );
+        assert_eq!(extract_bearer_token(&bearer("Bearer", "")), None);
+    }
+
+    /// A `UserProvider` that resolves exactly one bearer token to a known user
+    /// and rejects everything else (including password auth).
+    struct TokenUserProvider {
+        token: String,
+        user: auth::UserInfoRef,
+    }
+
+    #[async_trait::async_trait]
+    impl auth::UserProvider for TokenUserProvider {
+        fn name(&self) -> &str {
+            "token-test"
+        }
+
+        async fn authenticate(
+            &self,
+            _: auth::Identity<'_>,
+            _: auth::Password<'_>,
+        ) -> auth::error::Result<auth::UserInfoRef> {
+            unreachable!("password auth should not be reached for a bearer request")
+        }
+
+        async fn authorize(
+            &self,
+            _: &str,
+            _: &str,
+            _: &auth::UserInfoRef,
+        ) -> auth::error::Result<()> {
+            Ok(())
+        }
+
+        async fn auth_bearer_token(
+            &self,
+            token: &str,
+            _: &str,
+            _: &str,
+        ) -> auth::error::Result<auth::UserInfoRef> {
+            if token == self.token {
+                Ok(self.user.clone())
+            } else {
+                auth::error::UnsupportedAuthMethodSnafu {
+                    method: "bearer token",
+                }
+                .fail()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bearer_token_dispatches_to_auth_bearer_token() {
+        let provider = TokenUserProvider {
+            token: "good-token".to_string(),
+            user: auth::userinfo_by_name(Some("alice".into())),
+        };
+        let req = mock_http_request(Some("Bearer good-token"), None).unwrap();
+
+        let req = inner_auth::<()>(
+            Some(std::sync::Arc::new(provider) as auth::UserProviderRef),
+            req,
+        )
+        .await
+        .expect("valid bearer token authenticates");
+
+        let user = req
+            .extensions()
+            .get::<session::context::QueryContext>()
+            .expect("query context is populated")
+            .current_user();
+        assert_eq!(user.username(), "alice");
+    }
+
+    #[tokio::test]
+    async fn test_bearer_token_failure_rejects() {
+        let provider = TokenUserProvider {
+            token: "good-token".to_string(),
+            user: auth::userinfo_by_name(Some("alice".into())),
+        };
+        let req = mock_http_request(Some("Bearer bad-token"), None).unwrap();
+
+        let result = inner_auth::<()>(
+            Some(std::sync::Arc::new(provider) as auth::UserProviderRef),
+            req,
+        )
+        .await;
+        assert!(result.is_err(), "an invalid bearer token is rejected");
+    }
+
+    #[tokio::test]
+    async fn test_default_provider_rejects_bearer() {
+        // A password-only provider uses the default `auth_bearer_token`, which rejects.
+        let provider =
+            auth::user_provider_from_option("static_user_provider:cmd:alice=s3cret").unwrap();
+        let req = mock_http_request(Some("Bearer some-jwt"), None).unwrap();
+        let result = inner_auth::<()>(Some(provider), req).await;
+        assert!(
+            result.is_err(),
+            "password-only providers reject bearer tokens"
+        );
+    }
+
+    /// A bearer-token failure on a Splunk HEC request must keep the HEC
+    /// contract — `{"text":"Invalid token","code":4}` with FORBIDDEN —
+    /// instead of falling through to the generic 401 `ErrorResponse`.
+    /// Regression for the bearer/splunk routing gap.
+    #[tokio::test]
+    async fn test_bearer_failure_on_splunk_keeps_hec_contract() {
+        let provider = TokenUserProvider {
+            token: "good-token".to_string(),
+            user: auth::userinfo_by_name(Some("alice".into())),
+        };
+        let req = mock_http_request(
+            Some("Bearer bad-token"),
+            Some("http://127.0.0.1/v1/splunk/services/collector/event"),
+        )
+        .unwrap();
+
+        let resp = inner_auth::<()>(
+            Some(std::sync::Arc::new(provider) as auth::UserProviderRef),
+            req,
+        )
+        .await
+        .expect_err("an invalid bearer token is rejected");
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], 4);
+        assert_eq!(payload["text"], "Invalid token");
     }
 }
