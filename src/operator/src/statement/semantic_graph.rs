@@ -143,6 +143,19 @@ pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
     "generation_id",
 ];
 
+/// The externally visible edge identity: the primary key minus `scope` and
+/// `generation_id`, which the computed table does not expose. Revision ranking
+/// uses this identity, or assertions differing only in those two columns would
+/// surface as indistinguishable duplicate rows.
+const DECLARED_EDGE_IDENTITY_COLUMNS: [&str; 6] = [
+    "src_type",
+    "src_id",
+    "rel_type",
+    "dst_type",
+    "dst_id",
+    "provenance",
+];
+
 fn column(
     name: &str,
     data_type: ColumnDataType,
@@ -718,12 +731,18 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
 
     let revision = row_number()
         .partition_by(
-            DECLARED_PRIMARY_KEY_COLUMNS
+            DECLARED_EDGE_IDENTITY_COLUMNS
                 .iter()
                 .map(|c| ident(*c))
                 .collect(),
         )
-        .order_by(vec![ident(OBSERVED_AT_COLUMN).sort(false, false)])
+        // generation_id/scope break observed_at ties deterministically (rows
+        // differing only in them are not merged by the storage dedup).
+        .order_by(vec![
+            ident(OBSERVED_AT_COLUMN).sort(false, false),
+            ident("generation_id").sort(false, false),
+            ident("scope").sort(false, false),
+        ])
         .build()?
         .alias(DECLARED_REVISION_COLUMN);
 
@@ -1660,7 +1679,8 @@ mod tests {
     /// - api->cache: expired at 100s;
     /// - agent-1->search: open-ended `provenance = 'agent'` with JSON attributes;
     /// - webapp->auth: two revisions, the newer declared at 900s;
-    /// - batch->queue: declared at 100s but only valid from 700s.
+    /// - batch->queue: declared at 100s but only valid from 700s;
+    /// - gateway->redis: asserted twice at the same instant as generations g1/g2.
     fn declared_table(ctx: &SessionContext) {
         let ts_field = |name: &str| {
             Field::new(
@@ -1694,12 +1714,12 @@ mod tests {
         let attrs = jsonb::parse_value(br#"{"connection_type":"virtual_node"}"#)
             .unwrap()
             .to_vec();
-        let no_ts = || Arc::new(TimestampMillisecondArray::from(vec![None::<i64>; 7])) as ArrayRef;
+        let no_ts = || Arc::new(TimestampMillisecondArray::from(vec![None::<i64>; 9])) as ArrayRef;
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(TimestampMillisecondArray::from(vec![
-                    100_000, 200_000, 50_000, 90_000, 100_000, 900_000, 100_000,
+                    100_000, 200_000, 50_000, 90_000, 100_000, 900_000, 100_000, 100_000, 100_000,
                 ])) as ArrayRef,
                 no_ts(), // window_start
                 no_ts(), // window_end
@@ -1712,6 +1732,8 @@ mod tests {
                     None,
                     None,
                     Some(700_000),
+                    None,
+                    None,
                 ])),
                 Arc::new(TimestampMillisecondArray::from(vec![
                     None,
@@ -1721,12 +1743,16 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 ])),
                 Arc::new(StringArray::from(vec![
                     "service", "service", "service", "agent", "service", "service", "service",
+                    "service", "service",
                 ])),
                 Arc::new(StringArray::from(vec![
                     "frontend", "frontend", "api", "agent-1", "webapp", "webapp", "batch",
+                    "gateway", "gateway",
                 ])),
                 Arc::new(StringArray::from(vec![
                     "depends_on",
@@ -1736,18 +1762,24 @@ mod tests {
                     "depends_on",
                     "depends_on",
                     "depends_on",
+                    "depends_on",
+                    "depends_on",
                 ])),
                 Arc::new(StringArray::from(vec![
                     "service", "service", "service", "tool", "service", "service", "service",
+                    "service", "service",
                 ])),
                 Arc::new(StringArray::from(vec![
-                    "db", "db", "cache", "search", "auth", "auth", "queue",
+                    "db", "db", "cache", "search", "auth", "auth", "queue", "redis", "redis",
                 ])),
                 Arc::new(StringArray::from(vec![
-                    "declared", "declared", "declared", "agent", "declared", "declared", "declared",
+                    "declared", "declared", "declared", "agent", "declared", "declared",
+                    "declared", "declared", "declared",
                 ])),
-                Arc::new(StringArray::from(vec![""; 7])),
-                Arc::new(StringArray::from(vec![""; 7])),
+                Arc::new(StringArray::from(vec![""; 9])),
+                Arc::new(StringArray::from(vec![
+                    "", "", "", "", "", "", "", "g1", "g2",
+                ])),
                 Arc::new(Float64Array::from(vec![
                     Some(0.5),
                     Some(1.0),
@@ -1756,16 +1788,20 @@ mod tests {
                     Some(0.5),
                     Some(1.0),
                     Some(1.0),
+                    Some(0.5),
+                    Some(1.0),
                 ])),
-                Arc::new(Int64Array::from(vec![None::<i64>; 7])),
-                Arc::new(Int64Array::from(vec![None::<i64>; 7])),
-                Arc::new(Float64Array::from(vec![None::<f64>; 7])),
-                Arc::new(Int64Array::from(vec![None::<i64>; 7])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 9])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 9])),
+                Arc::new(Float64Array::from(vec![None::<f64>; 9])),
+                Arc::new(Int64Array::from(vec![None::<i64>; 9])),
                 Arc::new(BinaryArray::from(vec![
                     None,
                     None,
                     None,
                     Some(attrs.as_slice()),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -1832,8 +1868,9 @@ mod tests {
 
         // api->cache expired before the window; batch->queue is not yet valid;
         // frontend->db keeps only the latest revision; webapp->auth keeps the
-        // first revision (the second postdates the window).
-        assert_eq!(rows.len(), 3);
+        // first revision (the second postdates the window); gateway->redis
+        // collapses to one row across generations.
+        assert_eq!(rows.len(), 4);
 
         // agent->tool: open-ended validity declared at 90s. The synthesized
         // observed_at is clamped into the queried window; window_end and
@@ -1869,6 +1906,19 @@ mod tests {
         assert_eq!(
             rows[2],
             (
+                "gateway".to_string(),
+                120_000,
+                100_000,
+                600_000,
+                600_000,
+                "declared".to_string(),
+                None,
+            )
+        );
+
+        assert_eq!(
+            rows[3],
+            (
                 "webapp".to_string(),
                 120_000,
                 100_000,
@@ -1878,6 +1928,40 @@ mod tests {
                 None,
             )
         );
+    }
+
+    #[tokio::test]
+    async fn declared_edges_generations_do_not_duplicate() {
+        let ctx = SessionContext::new();
+        declared_table(&ctx);
+        let scan = ctx
+            .table(SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME)
+            .await
+            .unwrap();
+
+        let window = GraphQueryWindow::from_observed(0, 600_000);
+        let plan = build_relationships_plan(vec![], Some(DeclaredSource { scan }), &window)
+            .unwrap()
+            .unwrap();
+
+        // Asserted as g1 (0.5) and g2 (1.0) at the same observed_at: one
+        // visible edge, deterministically the highest generation.
+        let batches = collect(&ctx, plan).await;
+        let mut gateway_rows: Vec<f64> = vec![];
+        for batch in &batches {
+            let src = strings(batch, 5);
+            let confidence = batch
+                .column(10)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for (i, src) in src.into_iter().enumerate() {
+                if src == "gateway" {
+                    gateway_rows.push(confidence.value(i));
+                }
+            }
+        }
+        assert_eq!(gateway_rows, vec![1.0]);
     }
 
     #[tokio::test]
@@ -1919,6 +2003,7 @@ mod tests {
                 ("agent-1".to_string(), 0.8),
                 ("api".to_string(), 1.0),
                 ("frontend".to_string(), 0.5),
+                ("gateway".to_string(), 1.0),
                 ("webapp".to_string(), 0.5),
             ]
         );
@@ -1949,11 +2034,13 @@ mod tests {
         let mut provenance: Vec<String> = batches.iter().flat_map(|b| strings(b, 9)).collect();
         provenance.sort();
         // One trace-derived calls edge plus the declared edges valid somewhere
-        // inside [0s, 600s): frontend (latest revision), api, webapp (first
-        // revision), and the agent-asserted one.
+        // inside [0s, 600s): frontend, api, webapp, gateway, and the
+        // agent-asserted one.
         assert_eq!(
             provenance,
-            vec!["agent", "declared", "declared", "declared", "trace"]
+            vec![
+                "agent", "declared", "declared", "declared", "declared", "trace"
+            ]
         );
     }
 }
