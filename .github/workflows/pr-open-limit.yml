@@ -10,9 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# The warning comment goes through the issues API, hence `issues: write`.
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
   issues: write
 
 jobs:
@@ -20,6 +21,8 @@ jobs:
     name: Check Open Pull Request Limit
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Advisory: a script failure must not put a red cross on the pull request.
+    continue-on-error: true
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     steps:
       - name: Checkout repository

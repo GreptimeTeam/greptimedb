@@ -7,6 +7,8 @@
 import { appendFileSync } from "node:fs";
 
 const MARKER = "<!-- pr-open-limit -->";
+// GITHUB_TOKEN can only edit comments authored by the Actions bot itself.
+const COMMENT_AUTHOR = "github-actions[bot]";
 // Associations that identify an organization member. Outside collaborators and
 // community contributors are out of scope.
 const MEMBER_ASSOCIATIONS = ["OWNER", "MEMBER"];
@@ -44,7 +46,10 @@ async function upsertComment(octokit, params, body) {
     ...params,
     per_page: 100,
   });
-  const existing = comments.find((comment) => comment.body?.includes(MARKER));
+  const existing = comments.find(
+    (comment) =>
+      comment.user?.login === COMMENT_AUTHOR && comment.body?.includes(MARKER)
+  );
 
   if (existing) {
     await octokit.issues.updateComment({
@@ -65,7 +70,8 @@ async function upsertComment(octokit, params, body) {
   const prNumber = Number(process.env.PR_NUMBER);
   const author = process.env.PR_AUTHOR;
   const association = process.env.PR_AUTHOR_ASSOCIATION;
-  const limit = Number(process.env.MAX_OPEN_PRS || 5);
+  const rawLimit = Number(process.env.MAX_OPEN_PRS);
+  const limit = Number.isInteger(rawLimit) && rawLimit >= 0 ? rawLimit : 5;
 
   if (author.endsWith("[bot]")) {
     summary(`Skipping bot author \`${author}\`.`);
