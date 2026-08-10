@@ -42,12 +42,10 @@ pub const METRIC_TYPE_SUMMARY: &str = "summary";
 pub const METRIC_TYPE_INFO: &str = "info";
 pub const METRIC_TYPE_STATESET: &str = "stateset";
 
-/// Maps an OpenMetrics unit name to the UCUM code the
-/// `greptime.semantic.metric.unit` option is defined in (matching what OTLP
-/// carries natively: `s`, `By`, ...). Prometheus/OpenMetrics units are open
-/// vocabulary full words (`seconds`, `bytes`); only the OpenMetrics base units
-/// are mapped, anything else returns `None` and is dropped — a missing unit
-/// beats a corrupted cross-protocol vocabulary.
+/// Maps an OpenMetrics unit name (open vocabulary full words: `seconds`,
+/// `bytes`) to the UCUM code the `greptime.semantic.metric.unit` option is
+/// defined in. Only the OpenMetrics base units are mapped; anything else is
+/// dropped — a missing unit beats a corrupted cross-protocol vocabulary.
 pub fn openmetrics_unit_to_ucum(unit: &str) -> Option<&'static str> {
     Some(match unit {
         "seconds" => "s",

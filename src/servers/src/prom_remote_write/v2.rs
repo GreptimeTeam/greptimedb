@@ -190,13 +190,10 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
     })
 }
 
-/// Stamps the series' inline metadata (remote write 2.0 senders SHOULD attach
-/// per-series type and unit) for the written table's auto-create: an explicit
-/// metric type upgrades the table's metadata quality to `declared`, while
-/// `UNSPECIFIED` series keep the request-level `inferred` stamp. Unit names are
-/// canonicalised from OpenMetrics words to the UCUM codes the semantic
-/// vocabulary is defined in; units outside the OpenMetrics base set are
-/// dropped. Help text is not persisted (table options are no place for prose).
+/// Stamps the series' inline metadata for the written table's auto-create: an
+/// explicit metric type upgrades the table's metadata quality to `declared`,
+/// `UNSPECIFIED` series keep the request-level `inferred` stamp, and units are
+/// canonicalised from OpenMetrics words to UCUM. Help text is not persisted.
 fn record_series_metadata(
     index: &mut SemanticIndexes,
     symbols: &[String],

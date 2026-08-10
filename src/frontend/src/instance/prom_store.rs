@@ -332,9 +332,8 @@ impl PendingRowsSchemaAlterer for Instance {
 
             let mut table_options = std::collections::HashMap::with_capacity(4);
             fill_table_options_for_create(&mut table_options, &create_type, &ctx);
-            // Remote write v2 per-series metadata (metric type/unit, declared
-            // quality) rides the per-table index; the batched create path
-            // bypasses the operator's auto-create, so fold it in here too.
+            // The batched create path bypasses the operator's auto-create, so
+            // fold the per-table semantic index in here too.
             apply_per_table_semantic_options(&mut table_options, &ctx, table_name);
             create_table_expr.table_options.extend(table_options);
             create_exprs.push(create_table_expr);
