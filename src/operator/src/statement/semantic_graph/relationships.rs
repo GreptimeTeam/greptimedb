@@ -74,23 +74,41 @@ pub struct CallsSource {
     pub scan: DataFrame,
 }
 
+/// A declaring table's scan paired with its entity declarations, from which
+/// the same-row co-declaration rules derive edges. `is_trace` gates the
+/// agent-edge vocabulary, which the RFC ties to span structure.
+pub struct CoDeclaredSource {
+    pub declarations: Vec<EntityDeclaration>,
+    pub is_trace: bool,
+    pub scan: DataFrame,
+}
+
 /// The declared-edge table's scan (`semantic_relationships_declared`), whose
 /// rows `build_relationships_plan` unions into the edge set.
 pub struct DeclaredSource {
     pub scan: DataFrame,
 }
 
-/// Builds the `semantic_relationships` plan: the trace-derived `calls` branch
-/// unioned with the declared-edge branch, re-projected to the 16-column
-/// contract. Returns `None` when there is neither a trace table nor a
-/// declared-edge table, so the computed table streams empty.
+/// Everything `build_relationships_plan` derives edges from.
+pub struct RelationshipSources {
+    pub traces: Vec<CallsSource>,
+    pub co_declared: Vec<CoDeclaredSource>,
+    pub declared: Option<DeclaredSource>,
+}
+
+/// Builds the `semantic_relationships` plan: the trace-derived `calls` branch,
+/// the same-row co-declared branch, and the declared-edge branch unioned and
+/// re-projected to the 16-column contract. Returns `None` when no source can
+/// contribute edges, so the computed table streams empty.
 pub fn build_relationships_plan(
-    traces: Vec<CallsSource>,
-    declared: Option<DeclaredSource>,
+    sources: RelationshipSources,
     window: &GraphQueryWindow,
 ) -> DfResult<Option<LogicalPlan>> {
-    let mut union_df = calls_branch(traces, window)?;
-    if let Some(declared) = declared {
+    let mut union_df = calls_branch(sources.traces, window)?;
+    if let Some(co_declared) = co_declared_branch(sources.co_declared, window)? {
+        union_df = union_all(union_df, co_declared)?;
+    }
+    if let Some(declared) = sources.declared {
         union_df = union_all(union_df, declared_edges(declared.scan, window)?)?;
     }
     union_df
@@ -100,6 +118,109 @@ pub fn build_relationships_plan(
                 .into_unoptimized_plan())
         })
         .transpose()
+}
+
+/// The same-row co-declaration vocabulary open to any declaring table: a row
+/// carrying both identities witnesses the edge, and the built-in direction is
+/// `src -> dst`. Rows are `(src_type, dst_type, rel_type)`.
+const ATTRIBUTE_EDGE_VOCABULARY: [(&str, &str, &str); 6] = [
+    ("service.instance", "host", "runs_on"),
+    ("process", "host", "runs_on"),
+    ("k8s.pod", "k8s.node", "runs_on"),
+    ("k8s.pod", "k8s.container", "contains"),
+    ("service.instance", "service", "part_of"),
+    ("k8s.pod", "k8s.workload", "part_of"),
+];
+
+/// The agent-edge vocabulary, applied only to trace sources: the RFC derives
+/// `agent uses model` / `agent invoked tool` from span structure (an LLM- or
+/// tool-call span carries both identities), so a non-trace table co-declaring
+/// these types must not fabricate invocations.
+const AGENT_EDGE_VOCABULARY: [(&str, &str, &str); 2] =
+    [("agent", "model", "uses"), ("agent", "tool", "invoked")];
+
+const CO_DECLARED_VALID_COLUMN: &str = "__edge_valid";
+
+/// The same-row co-declared branch: for each source table, every vocabulary
+/// pair whose two entity types the table declares yields an edge projection,
+/// expanded from one scan via `unnest_rows` (the registry idiom). Attribute
+/// edges carry `provenance = 'attribute'`; agent edges are span-structure
+/// observations and carry `provenance = 'trace'`.
+fn co_declared_branch(
+    sources: Vec<CoDeclaredSource>,
+    window: &GraphQueryWindow,
+) -> DfResult<Option<DataFrame>> {
+    let mut union_df: Option<DataFrame> = None;
+    for source in sources {
+        let find = |ty: &str| source.declarations.iter().find(|d| d.entity_type == ty);
+        let mut pairs = Vec::new();
+        for (src_type, dst_type, rel_type) in ATTRIBUTE_EDGE_VOCABULARY {
+            if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
+                pairs.push((src, dst, rel_type, "attribute"));
+            }
+        }
+        if source.is_trace {
+            for (src_type, dst_type, rel_type) in AGENT_EDGE_VOCABULARY {
+                if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
+                    pairs.push((src, dst, rel_type, "trace"));
+                }
+            }
+        }
+        let Some((first, _, _, _)) = pairs.first() else {
+            continue;
+        };
+
+        let ts = ident(&first.time_index);
+        let bin = bin_ms(ts.clone());
+        let window_predicate = ts
+            .clone()
+            .gt_eq(window.source_start())
+            .and(ts.lt(window.source_end()));
+        let null_i64 = || lit(ScalarValue::Int64(None));
+        let rows = pairs
+            .iter()
+            .map(|(src, dst, rel_type, provenance)| {
+                // Both endpoints must identify something on the row for the
+                // row to witness the edge.
+                let valid = src
+                    .id_columns
+                    .iter()
+                    .chain(&dst.id_columns)
+                    .fold(lit(true), |predicate, id| {
+                        predicate.and(ident(id).is_not_null())
+                    });
+                vec![
+                    valid,
+                    bin.clone(),
+                    bin.clone(),
+                    bin.clone() + bin_interval(),
+                    bin.clone() + bin_interval(),
+                    lit(src.entity_type.as_str()),
+                    entity_id_expr(&src.id_columns, &|c| ident(c)),
+                    lit(dst.entity_type.as_str()),
+                    entity_id_expr(&dst.id_columns, &|c| ident(c)),
+                    lit(*rel_type),
+                    lit(*provenance),
+                    lit(1.0_f64),
+                    null_i64(),
+                    null_i64(),
+                    lit(ScalarValue::Float64(None)),
+                    null_i64(),
+                    null_json(),
+                ]
+            })
+            .collect();
+
+        let branch = super::unnest_rows(
+            source.scan,
+            window_predicate,
+            CO_DECLARED_VALID_COLUMN,
+            &RELATIONSHIP_COLUMNS,
+            rows,
+        )?;
+        union_df = union_all(union_df, branch)?;
+    }
+    Ok(union_df)
 }
 
 /// Ranking column used to pick the latest declared-edge revision per edge key.
@@ -458,8 +579,8 @@ mod tests {
 
     use common_catalog::consts::{SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN};
     use datafusion::arrow::array::{
-        ArrayRef, BinaryArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, UInt64Array,
+        Array, ArrayRef, BinaryArray, Float64Array, Int64Array, StringArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
     };
     use datafusion::arrow::datatypes::{Field, Schema, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -905,6 +1026,202 @@ mod tests {
         );
     }
 
+    /// A metric-like declaring table: ms timestamps, one row with a NULL
+    /// `instance` (witnessing nothing for instance edges), two rows duplicating
+    /// the same identities inside one bin (collapsed by DISTINCT).
+    fn co_declared_ctx() -> SessionContext {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("instance", DataType::Utf8, true),
+            Field::new("host", DataType::Utf8, false),
+            Field::new("service", DataType::Utf8, false),
+            Field::new("agent_id", DataType::Utf8, false),
+            Field::new("model_name", DataType::Utf8, false),
+            Field::new("tool_name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("i-1"), Some("i-1"), None])),
+                Arc::new(StringArray::from(vec!["h-1", "h-1", "h-2"])),
+                Arc::new(StringArray::from(vec!["svc", "svc", "svc"])),
+                Arc::new(StringArray::from(vec!["agent-1"; 3])),
+                Arc::new(StringArray::from(vec!["gpt"; 3])),
+                Arc::new(StringArray::from(vec!["search"; 3])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "co_metrics",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+        ctx
+    }
+
+    fn co_decl(entity_type: &str, id_columns: &[&str]) -> EntityDeclaration {
+        EntityDeclaration {
+            schema: "public".to_string(),
+            table: "co_metrics".to_string(),
+            time_index: "ts".to_string(),
+            entity_type: entity_type.to_string(),
+            id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            descriptive_columns: vec![],
+            scope_columns: vec![],
+        }
+    }
+
+    async fn co_declared_edges(
+        ctx: &SessionContext,
+        declarations: Vec<EntityDeclaration>,
+        is_trace: bool,
+    ) -> Option<Vec<(String, String, String, String, String, String)>> {
+        let scan = ctx.table("co_metrics").await.unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![],
+                co_declared: vec![CoDeclaredSource {
+                    declarations,
+                    is_trace,
+                    scan,
+                }],
+                declared: None,
+            },
+            &test_window(),
+        )
+        .unwrap()?;
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            RELATIONSHIP_COLUMNS
+        );
+        let batches = collect(ctx, plan).await;
+        let mut rows = vec![];
+        for batch in &batches {
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    strings(batch, 4)[i].clone(),
+                    strings(batch, 5)[i].clone(),
+                    strings(batch, 6)[i].clone(),
+                    strings(batch, 7)[i].clone(),
+                    strings(batch, 8)[i].clone(),
+                    strings(batch, 9)[i].clone(),
+                ));
+                assert_eq!(confidence(batch, i), 1.0);
+                // Co-declared edges carry no RED metrics or attributes.
+                for column in 11..=15 {
+                    assert!(batch.column(column).is_null(i));
+                }
+            }
+        }
+        rows.sort();
+        Some(rows)
+    }
+
+    #[tokio::test]
+    async fn co_declared_direction_follows_vocabulary() {
+        let ctx = co_declared_ctx();
+        // Declaration order must not matter: the vocabulary fixes direction.
+        let rows = co_declared_edges(
+            &ctx,
+            vec![
+                co_decl("host", &["host"]),
+                co_decl("service", &["service"]),
+                co_decl("service.instance", &["instance"]),
+            ],
+            false,
+        )
+        .await
+        .unwrap();
+        // The two non-NULL-instance rows share one 60s bin, so DISTINCT folds
+        // them into one row per edge; the NULL-instance row witnesses nothing.
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "service.instance".to_string(),
+                    "i-1".to_string(),
+                    "host".to_string(),
+                    "h-1".to_string(),
+                    "runs_on".to_string(),
+                    "attribute".to_string(),
+                ),
+                (
+                    "service.instance".to_string(),
+                    "i-1".to_string(),
+                    "service".to_string(),
+                    "svc".to_string(),
+                    "part_of".to_string(),
+                    "attribute".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn co_declared_ignores_types_outside_the_vocabulary() {
+        let ctx = co_declared_ctx();
+        // (service, host) is not a vocabulary pair: no edge, no plan.
+        let rows = co_declared_edges(
+            &ctx,
+            vec![co_decl("service", &["service"]), co_decl("host", &["host"])],
+            false,
+        )
+        .await;
+        assert!(rows.is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_edges_require_a_trace_source() {
+        let ctx = co_declared_ctx();
+        let declarations = || {
+            vec![
+                co_decl("agent", &["agent_id"]),
+                co_decl("model", &["model_name"]),
+                co_decl("tool", &["tool_name"]),
+            ]
+        };
+        // A non-trace table co-declaring agent/model/tool must not fabricate
+        // invocations.
+        assert!(
+            co_declared_edges(&ctx, declarations(), false)
+                .await
+                .is_none()
+        );
+
+        let rows = co_declared_edges(&ctx, declarations(), true).await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "agent".to_string(),
+                    "agent-1".to_string(),
+                    "model".to_string(),
+                    "gpt".to_string(),
+                    "uses".to_string(),
+                    "trace".to_string(),
+                ),
+                (
+                    "agent".to_string(),
+                    "agent-1".to_string(),
+                    "tool".to_string(),
+                    "search".to_string(),
+                    "invoked".to_string(),
+                    "trace".to_string(),
+                ),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn real_pair_suppresses_virtual_edge() {
         let ctx = SessionContext::new();
@@ -983,7 +1300,14 @@ mod tests {
         traces: Vec<CallsSource>,
         window: &GraphQueryWindow,
     ) -> DfResult<Option<LogicalPlan>> {
-        build_relationships_plan(traces, None, window)
+        build_relationships_plan(
+            RelationshipSources {
+                traces,
+                co_declared: vec![],
+                declared: None,
+            },
+            window,
+        )
     }
 
     /// Registers a declared-edge table holding:
@@ -1139,9 +1463,16 @@ mod tests {
 
         // Queried window [120s, 600s).
         let window = GraphQueryWindow::from_observed(120_000, 600_000);
-        let plan = build_relationships_plan(vec![], Some(DeclaredSource { scan }), &window)
-            .unwrap()
-            .unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![],
+                co_declared: vec![],
+                declared: Some(DeclaredSource { scan }),
+            },
+            &window,
+        )
+        .unwrap()
+        .unwrap();
         let names = plan
             .schema()
             .fields()
@@ -1255,9 +1586,16 @@ mod tests {
         // the first revision was the edge's state then and must not be hidden
         // by the newer one.
         let window = GraphQueryWindow::from_observed(0, 150_000);
-        let plan = build_relationships_plan(vec![], Some(DeclaredSource { scan }), &window)
-            .unwrap()
-            .unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![],
+                co_declared: vec![],
+                declared: Some(DeclaredSource { scan }),
+            },
+            &window,
+        )
+        .unwrap()
+        .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let mut rows: Vec<(String, f64)> = vec![];
@@ -1298,11 +1636,14 @@ mod tests {
             .unwrap();
 
         let plan = build_relationships_plan(
-            vec![CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                scan: trace,
-            }],
-            Some(DeclaredSource { scan: declared }),
+            RelationshipSources {
+                traces: vec![CallsSource {
+                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    scan: trace,
+                }],
+                co_declared: vec![],
+                declared: Some(DeclaredSource { scan: declared }),
+            },
             &test_window(),
         )
         .unwrap()
