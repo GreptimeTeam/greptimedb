@@ -108,6 +108,7 @@ build-riscv64-bin: ## Build greptime binary for riscv64 (linux-gnu) by the riscv
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${DEV_BUILDER_RISCV64_IMAGE_TAG} \
 	make build \
+	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
 	TARGET_DIR=${TARGET_DIR} \
