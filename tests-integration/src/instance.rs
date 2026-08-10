@@ -563,7 +563,9 @@ mod tests {
             ) -> auth::error::Result<auth::PermissionResp> {
                 if matches!(req, auth::PermissionReq::Action(auth::SEMANTIC_GRAPH_QUERY))
                     && let auth::PermissionTableTargets::Resolved(targets) = targets
-                    && targets.iter().any(|target| target.table == "secret_traces")
+                    && targets
+                        .iter()
+                        .any(|target| target.table.starts_with("secret_"))
                 {
                     return Ok(auth::PermissionResp::Reject);
                 }
@@ -580,7 +582,7 @@ mod tests {
             .await;
         let instance = standalone.fe_instance().clone();
 
-        for table in ["open_traces", "secret_traces"] {
+        for (table, trace_id) in [("open_traces", "t0"), ("secret_traces", "t1")] {
             let create = format!(
                 r#"create table {table} (
                     "timestamp" timestamp(9) time index,
@@ -597,14 +599,59 @@ mod tests {
             create_table(&instance, &create).await;
             let insert = format!(
                 "insert into {table} values \
-                 (now(), 't0', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-{table}', 0), \
-                 (now(), 't0', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-{table}', 100)"
+                 (now(), '{trace_id}', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-{table}', 0), \
+                 (now(), '{trace_id}', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-{table}', 100)"
             );
             let output = query(&instance, &insert).await;
             let OutputData::AffectedRows(x) = output.data else {
                 unreachable!()
             };
             assert_eq!(x, 2);
+        }
+
+        // A pair split across tables (client here, server in a denied table):
+        // a join-derived edge needs read access to all of its input tables.
+        create_table(
+            &instance,
+            r#"create table cross_clients (
+                "timestamp" timestamp(9) time index,
+                trace_id string,
+                span_id string,
+                parent_span_id string,
+                span_kind string,
+                span_status_code string,
+                service_name string,
+                duration_nano bigint unsigned,
+                primary key (service_name)
+            ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#,
+        )
+        .await;
+        create_table(
+            &instance,
+            r#"create table secret_cross_servers (
+                "timestamp" timestamp(9) time index,
+                trace_id string,
+                span_id string,
+                parent_span_id string,
+                span_kind string,
+                span_status_code string,
+                service_name string,
+                duration_nano bigint unsigned,
+                primary key (service_name)
+            ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#,
+        )
+        .await;
+        for insert in [
+            "insert into cross_clients values \
+             (now(), 't9', 'c9', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-cross', 0)",
+            "insert into secret_cross_servers values \
+             (now(), 't9', 's9', 'c9', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-cross', 100)",
+        ] {
+            let output = query(&instance, insert).await;
+            let OutputData::AffectedRows(x) = output.data else {
+                unreachable!()
+            };
+            assert_eq!(x, 1);
         }
 
         let sql = "select src_id, dst_id from greptime_private.semantic_relationships \
@@ -623,6 +670,10 @@ mod tests {
             !pretty_print.contains("secret_traces"),
             "denied source leaked into edges:\n{pretty_print}"
         );
+        assert!(
+            !pretty_print.contains("client-cross"),
+            "edge with a denied join side leaked:\n{pretty_print}"
+        );
 
         let sql = "select entity_id from greptime_private.semantic_entities order by entity_id";
         let output = query(&instance, sql).await;
@@ -636,7 +687,7 @@ mod tests {
             "allowed entity missing:\n{pretty_print}"
         );
         assert!(
-            !pretty_print.contains("secret_traces"),
+            !pretty_print.contains("secret_traces") && !pretty_print.contains("server-cross"),
             "denied source leaked into entities:\n{pretty_print}"
         );
     }
