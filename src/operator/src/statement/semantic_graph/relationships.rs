@@ -34,6 +34,7 @@ use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident,
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
     bin_interval, bin_ms, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
+    unnest_rows,
 };
 
 /// The projected columns of `semantic_relationships`, in order. Every derived
@@ -217,7 +218,7 @@ fn co_declared_branch(
             })
             .collect();
 
-        let branch = super::unnest_rows(
+        let branch = unnest_rows(
             source.scan,
             window_predicate,
             CO_DECLARED_VALID_COLUMN,
