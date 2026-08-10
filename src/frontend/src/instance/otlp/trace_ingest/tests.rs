@@ -234,6 +234,7 @@ fn trace_attribute(key: &str, value: OtlpValue) -> KeyValue {
     KeyValue {
         key: key.to_string(),
         value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
     }
 }
 

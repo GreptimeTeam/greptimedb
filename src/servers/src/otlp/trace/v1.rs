@@ -633,6 +633,12 @@ fn write_attributes_with_schema(
                     row,
                 );
             }
+            // `StringValueStrindex` is profiling-signal-only and references the
+            // Profiling `ProfilesDictionary.string_table`, which is unavailable to
+            // traces. Per the OTLP spec, non-Profiling receivers must treat it as a
+            // non-fatal issue and process the value as if it were absent. Like the
+            // `None` arm, no field is written for the attribute.
+            Some(OtlpValue::StringValueStrindex(_)) => {}
             None => {}
         }
     }
@@ -656,6 +662,7 @@ mod tests {
         KeyValue {
             key: key.to_string(),
             value: Some(AnyValue { value: Some(value) }),
+            ..Default::default()
         }
     }
 
