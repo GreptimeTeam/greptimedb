@@ -34,7 +34,7 @@ async function isTeamMember(octokit, owner, repo, username) {
       repo,
       username,
     });
-    console.log(`Repository permission for \`${username}\`: ${data.permission}.`);
+    // Never log the level itself: job logs are public.
     return TEAM_PERMISSIONS.includes(data.permission);
   } catch (error) {
     console.log(
@@ -102,7 +102,7 @@ async function upsertComment(octokit, params, body) {
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
   if (!(await isTeamMember(octokit, owner, repo, author))) {
-    summary(`Skipping \`${author}\`: no write access, not a team member.`);
+    summary(`Skipping \`${author}\`: not a team member.`);
     return;
   }
 
