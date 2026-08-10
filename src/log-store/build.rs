@@ -14,8 +14,20 @@
 
 //! Generates Rust protobuf bindings for `proto/logstore.proto`.
 //!
-//! Uses a supported compiler from `PROTOC` or `PATH` when available, and falls
-//! back to a prebuilt vendored compiler.
+//! The protoc compiler is selected in the following order:
+//!
+//! 1. Use the compiler specified by the `PROTOC` environment variable.
+//!    If the configured compiler is unusable or does not meet the minimum
+//!    supported version requirement, the build will panic instead of falling
+//!    back to another compiler.
+//!
+//! 2. Use a compatible `protoc` compiler available from `PATH`.
+//!    If it is unavailable or does not meet the minimum supported version
+//!    requirement, continue with the vendored compiler fallback.
+//!
+//! 3. Use a prebuilt vendored `protoc` compiler.
+//!    This provides a portable fallback when no supported system compiler is
+//!    available.
 
 use std::env;
 use std::path::{Path, PathBuf};
