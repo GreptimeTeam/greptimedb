@@ -10,15 +10,31 @@ ADMIN FLUSH_TABLE('discard_unflushed_data_test');
 
 INSERT INTO discard_unflushed_data_test VALUES ('unflushed', 2, 2);
 
-ADMIN discard_unflushed_data('discard_unflushed_data_test');
+ADMIN discard_unflushed('discard_unflushed_data_test');
 
 -- Repeating the operation is idempotent.
-ADMIN discard_unflushed_data('discard_unflushed_data_test');
+ADMIN discard_unflushed('discard_unflushed_data_test');
 
 SELECT host, val FROM discard_unflushed_data_test ORDER BY host;
 
 -- The function must only be available through ADMIN.
-SELECT discard_unflushed_data(0);
+-- SQLNESS REPLACE \nDid\syou\smean.*
+SELECT discard_unflushed(0);
+
+DROP TABLE discard_unflushed_data_test;
+
+CREATE TABLE discard_unflushed_data_test (
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX
+) ENGINE = mito;
+
+INSERT INTO discard_unflushed_data_test VALUES ('unflushed', 1, 1);
+
+-- The table has no persisted data, so discarding leaves it empty.
+ADMIN discard_unflushed('discard_unflushed_data_test');
+
+SELECT COUNT(*) FROM discard_unflushed_data_test;
 
 DROP TABLE discard_unflushed_data_test;
 
@@ -37,7 +53,7 @@ INSERT INTO discard_unflushed_data_logical VALUES ('unflushed', 1, 1);
 
 -- Logical Metric Engine tables share their physical regions with other logical tables.
 -- Discarding by logical table name must not truncate those shared regions.
-ADMIN discard_unflushed_data('discard_unflushed_data_logical');
+ADMIN discard_unflushed('discard_unflushed_data_logical');
 
 SELECT host, val FROM discard_unflushed_data_logical;
 

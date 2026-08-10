@@ -133,7 +133,7 @@ async fn test_admin_discard_unflushed_data(instance: Arc<dyn MockInstance>) {
     let region_ids = region_ids.as_any().downcast_ref::<UInt64Array>().unwrap();
     let region_id = region_ids.value(0);
 
-    let admin_sql = format!("ADMIN discard_unflushed_data({region_id})");
+    let admin_sql = format!("ADMIN discard_unflushed({region_id})");
     for _ in 0..2 {
         let output = execute_sql(&instance, &admin_sql).await;
         let OutputData::RecordBatches(batches) = output.data else {
@@ -159,12 +159,9 @@ async fn test_admin_discard_unflushed_data(instance: Arc<dyn MockInstance>) {
     );
 
     assert!(
-        try_execute_sql(
-            &instance,
-            &format!("SELECT discard_unflushed_data({region_id})"),
-        )
-        .await
-        .is_err()
+        try_execute_sql(&instance, &format!("SELECT discard_unflushed({region_id})"),)
+            .await
+            .is_err()
     );
 }
 

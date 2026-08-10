@@ -34,7 +34,7 @@ use crate::helper::cast_u64;
 /// Discards all unflushed data from a region.
 #[admin_fn(
     name = DiscardUnflushedDataFunction,
-    display_name = discard_unflushed_data,
+    display_name = discard_unflushed,
     sig_fn = signature,
     ret = uint64,
     single_row
@@ -70,7 +70,7 @@ pub(crate) async fn discard_unflushed_data(
         _ => {
             let Some(region_id) = cast_u64(&params[0])? else {
                 return UnsupportedInputDataTypeSnafu {
-                    function: "discard_unflushed_data",
+                    function: "discard_unflushed",
                     datatypes: params
                         .iter()
                         .map(|value| value.data_type())
@@ -118,10 +118,10 @@ mod tests {
 
     #[test]
     fn test_discard_unflushed_data_is_admin_only() {
-        assert!(get_admin_function("discard_unflushed_data").is_some());
+        assert!(get_admin_function("discard_unflushed").is_some());
         assert!(
             FUNCTION_REGISTRY
-                .get_function("discard_unflushed_data")
+                .get_function("discard_unflushed")
                 .is_none()
         );
     }
@@ -131,7 +131,7 @@ mod tests {
         let factory: ScalarFunctionFactory = DiscardUnflushedDataFunction::factory().into();
         let function = factory.provide(FunctionContext::mock());
 
-        assert_eq!("discard_unflushed_data", function.name());
+        assert_eq!("discard_unflushed", function.name());
         assert_eq!(DataType::UInt64, function.return_type(&[]).unwrap());
         assert!(matches!(
             function.signature(),
