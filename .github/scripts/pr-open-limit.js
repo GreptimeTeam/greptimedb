@@ -9,9 +9,8 @@ import { appendFileSync } from "node:fs";
 const MARKER = "<!-- pr-open-limit -->";
 // GITHUB_TOKEN can only edit comments authored by the Actions bot itself.
 const COMMENT_AUTHOR = "github-actions[bot]";
-// Associations that identify an organization member. Outside collaborators and
-// community contributors are out of scope.
-const MEMBER_ASSOCIATIONS = ["OWNER", "MEMBER"];
+// Repository permissions that mark someone as part of the team.
+const TEAM_PERMISSIONS = ["admin", "write"];
 // Keep the comment readable for authors who are far over the limit.
 const MAX_LISTED_PRS = 10;
 
@@ -20,6 +19,29 @@ function summary(text) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
   }
   console.log(text);
+}
+
+// `author_association` cannot be used here: it is computed from what the caller
+// is allowed to see, so GITHUB_TOKEN reports a private organization member as
+// CONTRIBUTOR. Repository permission is viewer-independent.
+//
+// On error this returns true rather than false. A token that cannot read
+// permissions would otherwise make the whole check silently pass everyone.
+async function isTeamMember(octokit, owner, repo, username) {
+  try {
+    const { data } = await octokit.repos.getCollaboratorPermissionLevel({
+      owner,
+      repo,
+      username,
+    });
+    console.log(`Repository permission for \`${username}\`: ${data.permission}.`);
+    return TEAM_PERMISSIONS.includes(data.permission);
+  } catch (error) {
+    console.log(
+      `Cannot read repository permission for \`${username}\` (HTTP ${error.status}); applying the limit anyway.`
+    );
+    return true;
+  }
 }
 
 function buildComment(author, total, limit, openPrs) {
@@ -69,7 +91,6 @@ async function upsertComment(octokit, params, body) {
   const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
   const prNumber = Number(process.env.PR_NUMBER);
   const author = process.env.PR_AUTHOR;
-  const association = process.env.PR_AUTHOR_ASSOCIATION;
   const rawLimit = Number(process.env.MAX_OPEN_PRS);
   const limit = Number.isInteger(rawLimit) && rawLimit >= 0 ? rawLimit : 5;
 
@@ -78,12 +99,12 @@ async function upsertComment(octokit, params, body) {
     return;
   }
 
-  if (!MEMBER_ASSOCIATIONS.includes(association)) {
-    summary(`Skipping \`${author}\`: association is \`${association}\`, not an org member.`);
+  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+  if (!(await isTeamMember(octokit, owner, repo, author))) {
+    summary(`Skipping \`${author}\`: no write access, not a team member.`);
     return;
   }
-
-  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
   const allOpen = await octokit.paginate(octokit.pulls.list, {
     owner,
