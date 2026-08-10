@@ -10,7 +10,7 @@ const MARKER = "<!-- pr-open-limit -->";
 // GITHUB_TOKEN can only edit comments authored by the Actions bot itself.
 const COMMENT_AUTHOR = "github-actions[bot]";
 // Repository permissions that mark someone as part of the team.
-const TEAM_PERMISSIONS = ["admin", "write"];
+const TEAM_PERMISSIONS = ["admin", "maintain", "write"];
 // Keep the comment readable for authors who are far over the limit.
 const MAX_LISTED_PRS = 10;
 
