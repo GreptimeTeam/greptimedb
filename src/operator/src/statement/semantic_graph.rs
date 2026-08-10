@@ -114,7 +114,19 @@ const BIN_NANOS: i64 = 60 * 1_000_000_000;
 pub const OBSERVED_AT_COLUMN: &str = "observed_at";
 
 /// Default retention for the declared-edge table; expiry slides the topology window.
-const DECLARED_RELATIONSHIPS_TTL: &str = "30d";
+const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";
+/// Environment variable overriding the declared-edge table's TTL at creation
+/// time (e.g. `180d`, `forever`).
+// TODO(entity-graph): promote this to a real configuration option.
+const DECLARED_RELATIONSHIPS_TTL_ENV: &str = "GREPTIMEDB_DECLARED_RELATIONSHIPS_TTL";
+
+fn declared_relationships_ttl() -> String {
+    std::env::var(DECLARED_RELATIONSHIPS_TTL_ENV)
+        .ok()
+        .map(|ttl| ttl.trim().to_string())
+        .filter(|ttl| !ttl.is_empty())
+        .unwrap_or_else(|| DEFAULT_DECLARED_RELATIONSHIPS_TTL.to_string())
+}
 
 /// The primary-key (tag) columns, in key order. Starting with the source endpoint
 /// makes out-edge lookup (`WHERE src_type=? AND src_id=?`) a key-prefix scan;
@@ -213,7 +225,7 @@ pub fn build_declared_relationships_expr(catalog: &str) -> CreateTableExpr {
         json_field("attributes"),
     ];
 
-    let table_options = [(TTL_KEY.to_string(), DECLARED_RELATIONSHIPS_TTL.to_string())]
+    let table_options = [(TTL_KEY.to_string(), declared_relationships_ttl())]
         .into_iter()
         .collect();
 
@@ -1462,7 +1474,7 @@ mod tests {
         assert!(!expr.table_options.contains_key("append_mode"));
         assert_eq!(
             expr.table_options.get(TTL_KEY).map(String::as_str),
-            Some("30d")
+            Some(DEFAULT_DECLARED_RELATIONSHIPS_TTL)
         );
 
         // Every primary-key column exists and is a tag.
@@ -1581,7 +1593,7 @@ mod tests {
         let mito = common_catalog::consts::MITO_ENGINE;
         let canonical_pk = || (6..14).collect::<Vec<_>>();
 
-        let ok = declared_table_info(|_| {}, mito, canonical_pk(), &[(TTL_KEY, "30d")]);
+        let ok = declared_table_info(|_| {}, mito, canonical_pk(), &[(TTL_KEY, "180d")]);
         assert!(declared_relationships_schema_matches(&ok));
         let ok = declared_table_info(
             |_| {},

@@ -41,7 +41,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
@@ -238,6 +238,10 @@ impl EntityGraphProviderImpl {
                 {
                     false
                 } else {
+                    debug!(
+                        "Caller lacks the entity-graph read permission; deriving an empty graph \
+                         (catalog: {catalog})"
+                    );
                     return Ok((vec![], vec![]));
                 }
             }
@@ -276,6 +280,11 @@ impl EntityGraphProviderImpl {
                         )]),
                     )?
                 {
+                    debug!(
+                        "Excluding `{schema}.{}` from the entity-graph derivation: caller lacks \
+                         read permission",
+                        table_info.name
+                    );
                     continue;
                 }
                 if is_trace {
@@ -378,6 +387,10 @@ impl EntityGraphProviderImpl {
                 SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
             )]),
         )? {
+            debug!(
+                "Excluding declared edges: caller lacks read permission on \
+                 `{DEFAULT_PRIVATE_SCHEMA_NAME}.{SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME}`"
+            );
             return Ok(None);
         }
         let table_info = table.table_info();
