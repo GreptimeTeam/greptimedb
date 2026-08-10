@@ -1647,7 +1647,7 @@ mod tests {
             Some(ValueData::I32Value(0))
         );
         assert_eq!(
-            histogram_field_value(&rows, 0, COUNT_U64_FIELD),
+            histogram_field_value(&rows, 0, COUNT_I64_FIELD),
             Some(ValueData::I64Value(0))
         );
         assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
@@ -1764,7 +1764,7 @@ mod tests {
         );
 
         assert_eq!(
-            histogram_field_value(&rows, 0, COUNT_U64_FIELD),
+            histogram_field_value(&rows, 0, COUNT_I64_FIELD),
             Some(ValueData::I64Value(0))
         );
         assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
@@ -1778,7 +1778,7 @@ mod tests {
             POSITIVE_BUCKETS_F64_FIELD
         )));
 
-        assert_eq!(histogram_field_value(&rows, 1, COUNT_U64_FIELD), None);
+        assert_eq!(histogram_field_value(&rows, 1, COUNT_I64_FIELD), None);
         assert_eq!(
             histogram_field_value(&rows, 1, COUNT_F64_FIELD),
             Some(ValueData::F64Value(6.0))

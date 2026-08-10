@@ -47,7 +47,7 @@ Each histogram row stores one Struct field named
 
 - common scalar children: `schema`, `zero_threshold`, `sum`, `reset_hint`,
   `start_timestamp`;
-- count children: `count_u64` / `zero_count_u64` or `count_f64` / `zero_count_f64`;
+- count children: `count_i64` / `zero_count_i64` or `count_f64` / `zero_count_f64`;
 - list children for custom values, spans, and positive/negative buckets;
 - original Prometheus labels as Greptime tags.
 
