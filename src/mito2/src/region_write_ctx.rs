@@ -218,9 +218,20 @@ impl RegionWriteCtx {
         self.failed = true;
     }
 
+    /// Returns whether the write operation is already marked as failed.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed
+    }
+
     /// Updates next entry id.
     pub(crate) fn set_next_entry_id(&mut self, next_entry_id: EntryId) {
         self.next_entry_id = next_entry_id
+    }
+
+    /// Returns the next entry id to write.
+    #[cfg(test)]
+    pub(crate) fn next_entry_id(&self) -> EntryId {
+        self.next_entry_id
     }
 
     /// Consumes mutations and writes them into mutable memtable.
