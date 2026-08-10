@@ -33,6 +33,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -2025,6 +2026,8 @@ pub struct SelectorResultValue {
     pub result: SelectorResult,
     /// The read columns of rows.
     pub read_cols: ParquetReadColumns,
+    /// The output schema for flat-format cached batches.
+    pub output_schema: Option<SchemaRef>,
 }
 
 impl SelectorResultValue {
@@ -2033,6 +2036,7 @@ impl SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::PrimaryKey(result),
             read_cols,
+            output_schema: None,
         }
     }
 
@@ -2040,10 +2044,12 @@ impl SelectorResultValue {
     pub fn new_flat(
         result: Vec<RecordBatch>,
         read_cols: ParquetReadColumns,
+        output_schema: SchemaRef,
     ) -> SelectorResultValue {
         SelectorResultValue {
             result: SelectorResult::Flat(result),
             read_cols,
+            output_schema: Some(output_schema),
         }
     }
 

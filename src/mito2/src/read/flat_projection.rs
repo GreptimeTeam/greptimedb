@@ -14,7 +14,6 @@
 
 //! Utilities for projection on flat format.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -87,7 +86,7 @@ impl FlatProjectionMapper {
         let projection: Vec<_> = projection.into_iter().collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
         let read_cols = ReadColumns::from_deduped_column_ids(read_column_ids);
-        Self::new_with_read_columns(metadata, projection, read_cols, None)
+        Self::new_with_read_columns(metadata, projection, read_cols)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
@@ -95,7 +94,6 @@ impl FlatProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: Vec<usize>,
         read_cols: ReadColumns,
-        json_type_hint: Option<&HashMap<String, JsonNativeType>>,
     ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
@@ -115,7 +113,7 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            maybe_concretize_json2_datatype(&mut schema, json_type_hint);
+            maybe_concretize_json2_datatype(&mut schema, col.column_id, &read_cols);
             col_schemas.push(schema);
         }
 
@@ -124,6 +122,7 @@ impl FlatProjectionMapper {
 
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
+            metadata,
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
@@ -138,10 +137,7 @@ impl FlatProjectionMapper {
             {
                 if let Some(concretized) = metadata
                     .column_by_id(*column_id)
-                    .and_then(|metadata| {
-                        json_type_hint.and_then(|x| x.get(&metadata.column_schema.name).cloned())
-                    })
-                    .map(ConcreteDataType::json2)
+                    .and_then(|_| read_cols.json_target_type(*column_id).cloned())
                 {
                     *data_type = concretized;
                 } else if is_empty_json2_type(json_type) {
@@ -403,16 +399,13 @@ impl FlatProjectionMapper {
 
 fn maybe_concretize_json2_datatype(
     schema: &mut ColumnSchema,
-    json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+    column_id: ColumnId,
+    read_cols: &ReadColumns,
 ) {
     if let Some(json_type) = schema.data_type.as_json()
         && json_type.is_json2()
     {
-        if let Some(concretized) = json_type_hint
-            .and_then(|x| x.get(&schema.name))
-            .cloned()
-            .map(ConcreteDataType::json2)
-        {
+        if let Some(concretized) = read_cols.json_target_type(column_id).cloned() {
             schema.data_type = concretized;
         } else if is_empty_json2_type(json_type) {
             // see `merge_scan::maybe_amend_json2_field`
@@ -548,8 +541,7 @@ impl CompactionProjectionMapper {
 
         let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
         let read_cols = ReadColumns::from_deduped_column_ids(read_col_ids);
-        let mapper =
-            FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols, None)?;
+        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
         Ok(Self { mapper, assembler })
@@ -617,7 +609,6 @@ impl DfBatchAssembler {
 #[cfg(test)]
 mod tests {
     use datatypes::schema::ColumnSchema;
-    use datatypes::types::json_type::JsonObjectType;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -687,18 +678,10 @@ mod tests {
     #[test]
     fn test_json_type_hint_does_not_concretize_legacy_json() {
         let metadata = metadata_with_legacy_json();
-        let hint = HashMap::from([(
-            "j".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([(
-                "a".to_string(),
-                JsonNativeType::i64(),
-            )])),
-        )]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
             vec![0, 1],
             ReadColumns::from_deduped_column_ids([0, 1]),
-            Some(&hint),
         )
         .unwrap();
 

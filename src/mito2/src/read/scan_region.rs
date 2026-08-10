@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_json2_extension_type;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
@@ -45,8 +46,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
-    TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -64,7 +65,7 @@ use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
-use crate::read::read_columns::{ReadColumn, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -433,7 +434,7 @@ impl ScanRegion {
             .iter()
             .any(is_json2_extension_type);
         let read_cols = if has_structured_json {
-            self.read_columns_with_json_type_hint(&read_col_ids)
+            self.read_columns_with_json_target_types(&read_col_ids)?
         } else {
             ReadColumns::from_deduped_column_ids(read_col_ids.iter().copied())
         };
@@ -444,23 +445,17 @@ impl ScanRegion {
             .projection
             .clone()
             .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
-        let json_type_hint = has_structured_json
-            .then_some(&self.request.json_type_hint)
-            .inspect(|json_type_hint| {
-                debug!(
-                    "Concretized JSON type: {{{}}}",
-                    json_type_hint
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .join(", ")
-                );
-            });
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            metadata,
-            projection,
-            read_cols,
-            json_type_hint,
-        )?;
+        if has_structured_json {
+            debug!(
+                "Concretized JSON target types: {{{}}}",
+                read_cols
+                    .json_target_types()
+                    .iter()
+                    .map(|(column_id, data_type)| format!("{}: {}", column_id, data_type))
+                    .join(", ")
+            );
+        }
+        let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let mapper = if self.request.preserve_pk_dictionary_encoding {
             mapper.with_pk_dictionary_encoding()
         } else {
@@ -688,27 +683,28 @@ impl ScanRegion {
         Ok(read_col_ids)
     }
 
-    /// Builds read columns with nested paths derived from JSON type hints.
-    fn read_columns_with_json_type_hint(&self, col_ids: &[ColumnId]) -> ReadColumns {
-        let cols = col_ids
-            .iter()
-            .map(|&col_id| {
-                let nested_paths = self
-                    .version
-                    .metadata
-                    .column_by_id(col_id)
-                    .and_then(|column| {
-                        let col_name = &column.column_schema.name;
-                        self.request
-                            .json_type_hint
-                            .get(col_name)
-                            .map(|json_type| json_nested_paths(col_name, json_type))
-                    })
-                    .unwrap_or_default();
-                ReadColumn::new(col_id, nested_paths)
-            })
-            .collect();
-        ReadColumns { cols }
+    /// Builds read columns with JSON2 target types derived from JSON type hints.
+    fn read_columns_with_json_target_types(&self, col_ids: &[ColumnId]) -> Result<ReadColumns> {
+        let metadata = &self.version.metadata;
+        let mut json_target_types = BTreeMap::new();
+        for &col_id in col_ids {
+            let Some(column) = metadata.column_by_id(col_id) else {
+                continue;
+            };
+            let column_name = &column.column_schema.name;
+            let hint = self.request.json_type_hint.get(column_name);
+            if !is_json2_column(&column.column_schema.data_type) {
+                continue;
+            }
+
+            let target_type = hint
+                .cloned()
+                .map(ConcreteDataType::json2)
+                .unwrap_or_else(|| ConcreteDataType::json2(JsonNativeType::Variant));
+            json_target_types.insert(col_id, target_type);
+        }
+
+        Ok(ReadColumns::new(col_ids.iter().copied(), json_target_types))
     }
 
     fn region_id(&self) -> RegionId {
@@ -1583,28 +1579,10 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn json_nested_paths(column_name: &str, json_type: &JsonNativeType) -> Vec<NestedPath> {
-    let mut paths = Vec::new();
-    let mut current = vec![column_name.to_string()];
-    collect_json_nested_paths(json_type, &mut current, &mut paths);
-    paths
-}
-
-fn collect_json_nested_paths(
-    json_type: &JsonNativeType,
-    current: &mut NestedPath,
-    paths: &mut Vec<NestedPath>,
-) {
-    match json_type {
-        JsonNativeType::Object(fields) if !fields.is_empty() => {
-            for (field, child) in fields {
-                current.push(field.clone());
-                collect_json_nested_paths(child, current, paths);
-                current.pop();
-            }
-        }
-        _ => paths.push(current.clone()),
-    }
+fn is_json2_column(data_type: &ConcreteDataType) -> bool {
+    data_type
+        .as_json()
+        .is_some_and(|json_type| json_type.is_json2())
 }
 
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
@@ -1703,9 +1681,11 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
         read_column_types: read_columns
             .column_ids_iter()
             .map(|id| {
-                metadata
-                    .column_by_id(id)
-                    .map(|col| col.column_schema.data_type.clone())
+                read_columns.json_target_type(id).cloned().or_else(|| {
+                    metadata
+                        .column_by_id(id)
+                        .map(|col| col.column_schema.data_type.clone())
+                })
             })
             .collect(),
         read_columns,
@@ -2096,6 +2076,7 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -2109,7 +2090,6 @@ mod tests {
     };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::types::json_type::JsonObjectType;
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -2223,30 +2203,6 @@ mod tests {
             .with_compaction(true)
             .with_compaction(false);
         assert_eq!(256, input.batch_size());
-    }
-
-    #[test]
-    fn test_fill_json_nested_paths_from_hint() -> Result<()> {
-        let hint = JsonNativeType::Object(JsonObjectType::from([
-            ("a".to_string(), JsonNativeType::i64()),
-            (
-                "b".to_string(),
-                JsonNativeType::Object(JsonObjectType::from([(
-                    "c".to_string(),
-                    JsonNativeType::String,
-                )])),
-            ),
-        ]));
-
-        fn nested_path(parts: &[&str]) -> NestedPath {
-            parts.iter().map(|part| part.to_string()).collect()
-        }
-
-        assert_eq!(
-            json_nested_paths("j", &hint),
-            vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
-        );
-        Ok(())
     }
 
     #[tokio::test]
@@ -2368,6 +2324,78 @@ mod tests {
         .build();
         assert_eq!(expected, fingerprint.fingerprint);
         assert_ne!(0, metadata.partition_expr_version);
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_uses_json_target_types() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j".to_string(),
+                    ConcreteDataType::json2(JsonNativeType::Variant),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let make_input = |target_type| async {
+            let env = SchedulerEnv::new().await;
+            let read_cols = ReadColumns::new([0, 1, 2], BTreeMap::from([(2, target_type)]));
+            let mapper =
+                FlatProjectionMapper::new_with_read_columns(&metadata, vec![0, 1, 2], read_cols)
+                    .unwrap();
+            let predicate =
+                PredicateGroup::new(metadata.as_ref(), &[col("k0").eq(lit("foo"))]).unwrap();
+            let file = FileHandle::new(
+                FileMeta::default(),
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            );
+            ScanInput::new(env.access_layer.clone(), mapper)
+                .with_predicate(predicate)
+                .with_cache(CacheStrategy::EnableAll(Arc::new(
+                    CacheManager::builder()
+                        .range_result_cache_size(1024)
+                        .build(),
+                )))
+                .with_files(vec![file])
+        };
+
+        let int_target = ConcreteDataType::json2(JsonNativeType::i64());
+        let string_target = ConcreteDataType::json2(JsonNativeType::String);
+        let int_fingerprint = build_scan_fingerprint(&make_input(int_target.clone()).await)
+            .unwrap()
+            .fingerprint;
+        let string_fingerprint = build_scan_fingerprint(&make_input(string_target).await)
+            .unwrap()
+            .fingerprint;
+
+        assert_ne!(int_fingerprint, string_fingerprint);
+        assert_eq!(
+            Some(&Some(int_target)),
+            int_fingerprint.read_column_types().get(2)
+        );
     }
 
     #[test]

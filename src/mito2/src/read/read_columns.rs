@@ -12,49 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::mem;
 
-use store_api::storage::{ColumnId, NestedPath};
+use datatypes::prelude::ConcreteDataType;
+use store_api::storage::ColumnId;
 
 /// Logical columns to read from a region.
 ///
-/// Read columns describe which logical columns and nested fields should be read
-/// from storage. Each read column is identified by its [`ColumnId`],
-/// which represents the root column in the storage schema.
-///
-/// Nested fields under the column are specified by [`NestedPath`] entries.
-/// Each path includes the root column name as its first element.
-///
-/// For example, assume column id `9` corresponds to a root column named `j`
-/// with nested fields:
-///
-/// ```text
-/// j
-/// ├── a
-/// └── b
-///     └── c
-/// ```
-///
-/// The following SQL:
-///
-/// SELECT j.a, j.b.c FROM t
-///
-/// may produce read columns like:
-///
-/// ```text
-/// ReadColumn {
-///     column_id: 9,
-///     nested_paths: [
-///         ["j", "a"],
-///         ["j", "b", "c"],
-///     ]
-/// }
-/// ```
-///
-/// If `nested_paths` is empty, the whole column will be read.
+/// Read columns describe which logical root columns should be read from storage.
+/// JSON2 columns can carry query-time target types that are later translated to
+/// physical nested parquet paths by the parquet reader.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
     pub cols: Vec<ReadColumn>,
+    json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
 }
 
 impl ReadColumns {
@@ -62,11 +34,22 @@ impl ReadColumns {
     where
         I: IntoIterator<Item = ColumnId>,
     {
-        let cols = column_ids
-            .into_iter()
-            .map(|col_id| ReadColumn::new(col_id, vec![]))
-            .collect();
-        ReadColumns { cols }
+        let cols = column_ids.into_iter().map(ReadColumn::new).collect();
+        ReadColumns {
+            cols,
+            json_target_types: BTreeMap::new(),
+        }
+    }
+
+    pub fn new(
+        column_ids: impl IntoIterator<Item = ColumnId>,
+        json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
+    ) -> Self {
+        let cols = column_ids.into_iter().map(ReadColumn::new).collect();
+        ReadColumns {
+            cols,
+            json_target_types,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,6 +68,14 @@ impl ReadColumns {
         &self.cols
     }
 
+    pub fn json_target_types(&self) -> &BTreeMap<ColumnId, ConcreteDataType> {
+        &self.json_target_types
+    }
+
+    pub fn json_target_type(&self, column_id: ColumnId) -> Option<&ConcreteDataType> {
+        self.json_target_types.get(&column_id)
+    }
+
     pub fn estimated_size(&self) -> usize {
         self.cols.capacity() * mem::size_of::<ReadColumn>()
             + self
@@ -92,39 +83,22 @@ impl ReadColumns {
                 .iter()
                 .map(ReadColumn::estimated_size)
                 .sum::<usize>()
+            + self.json_target_types.len()
+                * (mem::size_of::<ColumnId>() + mem::size_of::<ConcreteDataType>())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
     pub column_id: ColumnId,
-    /// Nested field paths under this column.
-    /// Empty means reading the whole column.
-    pub nested_paths: Vec<NestedPath>,
 }
 
 impl ReadColumn {
-    pub fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
-        Self {
-            column_id,
-            nested_paths,
-        }
-    }
-
-    pub fn nested_paths(&self) -> &[NestedPath] {
-        &self.nested_paths
+    pub fn new(column_id: ColumnId) -> Self {
+        Self { column_id }
     }
 
     pub fn estimated_size(&self) -> usize {
         mem::size_of::<ColumnId>()
-            + self.nested_paths.capacity() * mem::size_of::<NestedPath>()
-            + self
-                .nested_paths
-                .iter()
-                .map(|path| {
-                    path.capacity() * mem::size_of::<String>()
-                        + path.iter().map(|node| node.capacity()).sum::<usize>()
-                })
-                .sum::<usize>()
     }
 }

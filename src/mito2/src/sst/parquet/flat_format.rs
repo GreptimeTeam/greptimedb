@@ -307,6 +307,27 @@ impl FlatReadFormat {
             let nested_paths = read_columns.columns().iter().map(|x| x.nested_paths());
             align_schema_by_nested_paths(&mut schema, nested_paths);
         }
+        let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
+        for (column_id, target_type) in &self.format_projection().json_target_types {
+            let Some(index) = self
+                .format_projection()
+                .column_id_to_projected_index
+                .get(column_id)
+                .copied()
+            else {
+                continue;
+            };
+            let Some(field) = schema.fields().get(index) else {
+                continue;
+            };
+            fields[index] = Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(target_type.as_arrow_type()),
+            );
+        }
+        schema.fields = fields.into();
         Ok(Arc::new(schema))
     }
 
@@ -486,11 +507,13 @@ impl ParquetPrimaryKeyToFlat {
                 FormatProjection {
                     parquet_read_cols: format.parquet_read_columns().clone(),
                     column_id_to_projected_index: format.field_id_to_projected_index().clone(),
+                    json_target_types: read_cols.json_target_types().clone(),
                 },
             )
         } else {
             // Computes the format projection for the new format.
             let format_projection = FormatProjection::compute_format_projection(
+                &metadata,
                 &id_to_index,
                 sst_column_num,
                 read_cols.clone(),
@@ -540,8 +563,12 @@ impl ParquetFlat {
         let id_to_index = sst_column_id_indices(&metadata);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
-        let format_projection =
-            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, read_cols);
+        let format_projection = FormatProjection::compute_format_projection(
+            &metadata,
+            &id_to_index,
+            sst_column_num,
+            read_cols,
+        );
 
         Self {
             metadata,

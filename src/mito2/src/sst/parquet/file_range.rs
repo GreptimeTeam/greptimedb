@@ -235,6 +235,7 @@ impl FileRange {
                 self.row_group_idx,
                 cache_strategy,
                 self.context.read_format().parquet_read_columns(),
+                self.context.read_format().output_arrow_schema()?,
                 flat_row_group_reader,
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)

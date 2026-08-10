@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
@@ -137,6 +138,7 @@ impl FlatRowGroupLastRowCachedReader {
         row_group_idx: usize,
         cache_strategy: CacheStrategy,
         read_cols: &ParquetReadColumns,
+        output_schema: SchemaRef,
         reader: FlatRowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
@@ -148,13 +150,14 @@ impl FlatRowGroupLastRowCachedReader {
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_flat = matches!(&value.result, SelectorResult::Flat(_));
             let schema_matches = value.read_cols == *read_cols;
-            if is_flat && schema_matches {
+            let output_schema_matches = value.output_schema.as_ref() == Some(&output_schema);
+            if is_flat && schema_matches && output_schema_matches {
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, read_cols, reader, cache_strategy)
+                Self::new_miss(key, read_cols, output_schema, reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, read_cols, reader, cache_strategy)
+            Self::new_miss(key, read_cols, output_schema, reader, cache_strategy)
         }
     }
 
@@ -174,6 +177,7 @@ impl FlatRowGroupLastRowCachedReader {
     fn new_miss(
         key: SelectorResultKey,
         read_cols: &ParquetReadColumns,
+        output_schema: SchemaRef,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -181,6 +185,7 @@ impl FlatRowGroupLastRowCachedReader {
         Self::Miss(FlatRowGroupLastRowReader::new(
             key,
             read_cols.clone(),
+            output_schema,
             reader,
             cache_strategy,
         ))
@@ -260,6 +265,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
     read_cols: ParquetReadColumns,
+    output_schema: SchemaRef,
     /// Accumulates small selector-output batches before concatenating.
     pending: BatchBuffer,
 }
@@ -268,6 +274,7 @@ impl FlatRowGroupLastRowReader {
     fn new(
         key: SelectorResultKey,
         read_cols: ParquetReadColumns,
+        output_schema: SchemaRef,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -278,6 +285,7 @@ impl FlatRowGroupLastRowReader {
             yielded_batches: vec![],
             cache_strategy,
             read_cols,
+            output_schema,
             pending: BatchBuffer::new(),
         }
     }
@@ -326,6 +334,7 @@ impl FlatRowGroupLastRowReader {
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
             self.read_cols.clone(),
+            self.output_schema.clone(),
         ));
         self.cache_strategy.put_selector_result(self.key, value);
     }

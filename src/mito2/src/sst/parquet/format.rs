@@ -27,7 +27,7 @@
 //! We stores fields in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
 
 use std::borrow::Borrow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -38,7 +38,8 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::DataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields,
@@ -47,7 +48,7 @@ use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
@@ -233,6 +234,7 @@ impl PrimaryKeyReadFormat {
         let arrow_schema = to_sst_arrow_schema(&metadata);
 
         let format_projection = FormatProjection::compute_format_projection(
+            &metadata,
             &field_id_to_index,
             arrow_schema.fields.len(),
             read_cols,
@@ -585,6 +587,8 @@ pub(crate) struct FormatProjection {
     ///
     /// It doesn't contain time index column if it is not present in the projection.
     pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
+    /// JSON2 target types keyed by column id.
+    pub(crate) json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
 }
 
 impl FormatProjection {
@@ -592,10 +596,12 @@ impl FormatProjection {
     ///
     /// `id_to_index` is a mapping from column id to the index of the column in the SST.
     pub(crate) fn compute_format_projection(
+        metadata: &RegionMetadataRef,
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
         cols: ReadColumns,
     ) -> Self {
+        let json_target_types = cols.json_target_types().clone();
         let mut projected_columns: Vec<_> = cols
             .cols
             .into_iter()
@@ -603,7 +609,11 @@ impl FormatProjection {
                 id_to_index
                     .get(&col.column_id)
                     .copied()
-                    .map(|index_of_sst| (col.column_id, index_of_sst, col.nested_paths))
+                    .map(|index_of_sst| {
+                        let nested_paths =
+                            json_target_nested_paths(metadata, &json_target_types, col.column_id);
+                        (col.column_id, index_of_sst, nested_paths)
+                    })
             })
             .collect();
         // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
@@ -631,6 +641,7 @@ impl FormatProjection {
         Self {
             parquet_read_cols: ParquetReadColumns::from_deduped(parquet_read_cols),
             column_id_to_projected_index,
+            json_target_types,
         }
     }
 
@@ -678,6 +689,48 @@ impl FormatProjection {
         for index in sst_column_num - INTERNAL_COLUMN_NUM..sst_column_num {
             parquet_read_cols.push(ParquetReadColumn::new(index));
         }
+    }
+}
+
+fn json_target_nested_paths(
+    metadata: &RegionMetadataRef,
+    json_target_types: &BTreeMap<ColumnId, ConcreteDataType>,
+    column_id: ColumnId,
+) -> Vec<NestedPath> {
+    let Some(target_type) = json_target_types.get(&column_id) else {
+        return Vec::new();
+    };
+    let Some(json_type) = target_type.as_json() else {
+        return Vec::new();
+    };
+    let Some(column) = metadata.column_by_id(column_id) else {
+        return Vec::new();
+    };
+
+    json_nested_paths(&column.column_schema.name, json_type.native_type())
+}
+
+fn json_nested_paths(column_name: &str, json_type: &JsonNativeType) -> Vec<NestedPath> {
+    let mut paths = Vec::new();
+    let mut current = vec![column_name.to_string()];
+    collect_json_nested_paths(json_type, &mut current, &mut paths);
+    paths
+}
+
+fn collect_json_nested_paths(
+    json_type: &JsonNativeType,
+    current: &mut NestedPath,
+    paths: &mut Vec<NestedPath>,
+) {
+    match json_type {
+        JsonNativeType::Object(fields) if !fields.is_empty() => {
+            for (field, child) in fields {
+                current.push(field.clone());
+                collect_json_nested_paths(child, current, paths);
+                current.pop();
+            }
+        }
+        _ => paths.push(current.clone()),
     }
 }
 
@@ -818,6 +871,7 @@ pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::OpType;
@@ -840,7 +894,6 @@ mod tests {
 
     use super::*;
     use crate::error::InvalidMetadataSnafu;
-    use crate::read::read_columns::ReadColumn;
     use crate::sst::parquet::flat_format::{
         FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
     };
@@ -1049,14 +1102,19 @@ mod tests {
         let metadata = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
         let column_id_to_parquet_index = sst_column_id_indices(&metadata);
         let projection = FormatProjection::compute_format_projection(
+            &metadata,
             &column_id_to_parquet_index,
             metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
-            ReadColumns {
-                cols: vec![ReadColumn::new(
+            ReadColumns::new(
+                [4],
+                BTreeMap::from([(
                     4,
-                    vec![vec!["j".to_string(), "a".to_string()]],
-                )],
-            },
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::i64(),
+                    )]))),
+                )]),
+            ),
         );
 
         let columns = projection.parquet_read_cols.columns();

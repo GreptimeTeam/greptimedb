@@ -29,7 +29,6 @@ use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -40,8 +39,8 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
-    EncodeSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
+    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -99,13 +98,13 @@ impl FlatCompatBatch {
         let actual = read_format.metadata();
         let format_projection = read_format.format_projection();
         let mut actual_schema = flat_projected_columns(actual, format_projection);
-        if read_format
-            .arrow_schema()
+        let output_arrow_schema = read_format.output_arrow_schema()?;
+        if output_arrow_schema
             .fields()
             .iter()
             .any(is_json2_extension_type)
         {
-            for field in read_format.arrow_schema().fields() {
+            for field in output_arrow_schema.fields() {
                 if is_json2_extension_type(field)
                     && let Some(column_id) =
                         actual.column_by_name(field.name()).map(|x| x.column_id)
@@ -270,12 +269,8 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if let Some(json_type) = ty.as_json()
-                            && json_type.is_json2()
-                        {
-                            JsonArray::from(old_column)
-                                .project_to(&json_type.as_arrow_type())
-                                .context(ConvertValueSnafu)?
+                        let casted = if ty.as_json().is_some_and(|json_type| json_type.is_json2()) {
+                            old_column.clone()
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
                                 .context(ComputeArrowSnafu)?
@@ -865,7 +860,6 @@ mod tests {
             &expected_metadata,
             vec![1, 2],
             ReadColumns::from_deduped_column_ids([1, 2, 3]),
-            None,
         )
         .unwrap();
         let read_format = FlatReadFormat::new(

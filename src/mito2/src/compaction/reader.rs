@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use common_time::Timestamp;
@@ -21,6 +21,7 @@ use common_time::timestamp::TimeUnit;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::extension::json::is_json2_extension_type;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
@@ -118,15 +119,27 @@ impl CompactionSstReaderBuilder<'_> {
         };
 
         let projection = (0..self.metadata.column_metadatas.len()).collect();
-        let read_columns = ReadColumns::from_deduped_column_ids(
-            self.metadata.column_metadatas.iter().map(|x| x.column_id),
-        );
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            &self.metadata,
-            projection,
-            read_columns,
-            json_type_hint.as_ref(),
-        )?;
+        let read_column_ids = self
+            .metadata
+            .column_metadatas
+            .iter()
+            .map(|x| x.column_id)
+            .collect::<Vec<_>>();
+        let json_target_types = json_type_hint
+            .as_ref()
+            .map(|hint| {
+                hint.iter()
+                    .filter_map(|(column_name, json_type)| {
+                        self.metadata.column_by_name(column_name).map(|column| {
+                            (column.column_id, ConcreteDataType::json2(json_type.clone()))
+                        })
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let read_columns = ReadColumns::new(read_column_ids, json_target_types);
+        let mapper =
+            FlatProjectionMapper::new_with_read_columns(&self.metadata, projection, read_columns)?;
 
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
