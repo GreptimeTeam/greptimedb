@@ -334,11 +334,6 @@ impl ViewEventLocator<'_> {
                 .map(ValueData::U32Value)
                 .map(Into::into)
                 .unwrap_or_default(),
-            if self.catalog_name.is_some() {
-                default_event_context_value()
-            } else {
-                Value { value_data: None }
-            },
         ]
     }
 }
@@ -354,14 +349,13 @@ fn view_schema() -> Vec<ColumnSchema> {
 }
 
 fn assert_view_event_contract(event: &dyn Event, event_type: &str, locator: ViewEventLocator<'_>) {
-    assert_event_contract(
-        event,
-        event_type,
-        &view_schema(),
-        &[Row {
-            values: locator.values(),
-        }],
-    );
+    let mut values = locator.values();
+    values.push(if event.json_payload().unwrap().is_null() {
+        Value { value_data: None }
+    } else {
+        default_event_context_value()
+    });
+    assert_event_contract(event, event_type, &view_schema(), &[Row { values }]);
 }
 
 fn assert_procedure_event_contract(
@@ -386,6 +380,11 @@ fn assert_procedure_event_contract(
         procedure_trigger_value(trigger),
     ];
     values.extend(locator.values());
+    values.push(if trigger == "Submitted" {
+        default_event_context_value()
+    } else {
+        Value { value_data: None }
+    });
 
     assert_event_contract(event, event_type, &schema, &[Row { values }]);
 }

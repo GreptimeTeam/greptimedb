@@ -654,6 +654,7 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    Default::default(),
                 ],
             }],
         );

@@ -274,7 +274,7 @@ fn assert_procedure_event_contract(
                     .map(ValueData::U32Value)
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
-                if locator.catalog_name.is_some() {
+                if trigger == "Submitted" {
                     default_event_context_value()
                 } else {
                     Value { value_data: None }

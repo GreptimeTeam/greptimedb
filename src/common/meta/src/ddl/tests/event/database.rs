@@ -285,6 +285,7 @@ fn assert_event_locator(
     catalog_name: Option<&str>,
     schema_name: Option<&str>,
 ) {
+    let has_event_context = !event.json_payload().unwrap().is_null();
     assert_event_contract(
         event,
         event_type,
@@ -301,7 +302,7 @@ fn assert_event_locator(
                 Value {
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
-                if catalog_name.is_some() {
+                if has_event_context {
                     default_event_context_value()
                 } else {
                     Value { value_data: None }
@@ -319,6 +320,7 @@ fn assert_procedure_event_contract(
     catalog_name: Option<&str>,
     schema_name: Option<&str>,
 ) {
+    let has_event_context = procedure_trigger == "Submitted";
     assert_event_contract(
         event,
         event_type,
@@ -351,7 +353,7 @@ fn assert_procedure_event_contract(
                 Value {
                     value_data: schema_name.map(|value| ValueData::StringValue(value.to_string())),
                 },
-                if catalog_name.is_some() {
+                if has_event_context {
                     default_event_context_value()
                 } else {
                     Value { value_data: None }

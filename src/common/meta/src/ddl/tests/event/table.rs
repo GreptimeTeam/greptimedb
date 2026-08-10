@@ -171,6 +171,16 @@ fn later_lifecycle_events_are_uniform() {
     for case in procedure_cases() {
         let submitted = event_for(case.procedure.as_ref(), EventTrigger::Submitted);
         let schema = submitted.extra_schema();
+        let expected_rows = submitted
+            .extra_rows()
+            .unwrap()
+            .into_iter()
+            .map(|mut row| {
+                // Lifecycle events retain locators but not submitted event context.
+                *row.values.last_mut().unwrap() = Value::default();
+                row.values
+            })
+            .collect::<Vec<_>>();
 
         for trigger in &triggers {
             let event = event_for(case.procedure.as_ref(), trigger.clone());
@@ -185,12 +195,7 @@ fn later_lifecycle_events_are_uniform() {
                     .into_iter()
                     .map(|row| row.values)
                     .collect::<Vec<_>>(),
-                submitted
-                    .extra_rows()
-                    .unwrap()
-                    .into_iter()
-                    .map(|row| row.values)
-                    .collect::<Vec<_>>()
+                expected_rows
             );
         }
     }
