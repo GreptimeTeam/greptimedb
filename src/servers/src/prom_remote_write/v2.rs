@@ -194,9 +194,7 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
 /// explicit metric type upgrades the table's metadata quality to `declared`,
 /// `UNSPECIFIED` series keep the request-level `inferred` stamp, and units are
 /// canonicalised from OpenMetrics words to UCUM. Type and unit stamp
-/// independently — OpenMetrics models them as separate MetricFamily metadata,
-/// so an `UNSPECIFIED` series still records its unit (which is otherwise
-/// unrecoverable after table creation). Help text is not persisted.
+/// independently, as OpenMetrics defines them. Help text is not persisted.
 ///
 /// Every non-zero symbol reference is validated up front, independent of what
 /// ends up persisted: the spec requires all references to point into the
@@ -2009,9 +2007,6 @@ mod tests {
 
     #[test]
     fn test_metadata_unspecified_stamps_unit_but_not_type() {
-        // UNSPECIFIED declares no type: the table keeps the request-level
-        // `inferred` quality — but OpenMetrics models TYPE and UNIT
-        // independently, so a valid unit still stamps.
         let index = decoded_index(metadata_request(vec![(
             vec![(METRIC_NAME_LABEL, "untyped_total")],
             metadata::MetricType::Unspecified as i32,
@@ -2022,7 +2017,6 @@ mod tests {
         assert!(!untyped.contains_key(SEMANTIC_METRIC_TYPE));
         assert!(!untyped.contains_key(SEMANTIC_METRIC_METADATA_QUALITY));
 
-        // UNSPECIFIED with no unit stamps nothing at all.
         let requests = into_write_requests(metadata_request(vec![(
             vec![(METRIC_NAME_LABEL, "untyped_unitless_total")],
             metadata::MetricType::Unspecified as i32,
