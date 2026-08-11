@@ -1,0 +1,116 @@
+src/common/procedure/src/store.rs
+  s_d0d43704cb1be1::t_786ca69c427cdb 511,515
+  s_d0d43704cb1be1::t_63d6ae93b1a642 517,524-533
+src/common/event-recorder/src/event_table.rs
+  s_d0d43704cb1be1::t_a7e77064327d48 379-391
+  s_d0d43704cb1be1::t_2c29d989ede836 378
+  s_d0d43704cb1be1::t_63c7e3a04c2926 85-87
+src/common/meta/src/ddl/tests/event/database.rs
+  s_3e36520c5b40ae::t_b719d549c281a5 327
+  s_d0d43704cb1be1::t_bc90170977a216 23,303
+tests-integration/tests/wal_prune_event.rs
+  s_d0d43704cb1be1::t_63d6ae93b1a642 103
+src/meta-srv/src/service/procedure.rs
+  s_d0d43704cb1be1::t_972e6e759bd958 315,564-566,569
+  s_d0d43704cb1be1::t_76428b4fcdc463 104,314
+  s_d0d43704cb1be1::t_20717a4846b332 316-317,570-571
+  s_d0d43704cb1be1::t_0d4d8de5a28e90 518,561-563,567-568
+  s_d0d43704cb1be1::t_7633883faa3d86 30,514
+  s_d0d43704cb1be1::t_b4c5724f7d54ef 95
+  s_d0d43704cb1be1::t_d4bb6ce510d798 111
+tests-integration/src/test_util.rs
+  s_d0d43704cb1be1::t_3c75e71656ec67 735-758,794
+src/common/meta/src/ddl/tests/event/view.rs
+  s_d0d43704cb1be1::t_bc90170977a216 20-22,301
+  s_3e36520c5b40ae::t_7bdf4e09ffb165 312
+src/meta-srv/src/event/gc.rs
+  s_d0d43704cb1be1::t_bc90170977a216 215-216,539,557
+tests-integration/tests/table_ddl_event.rs
+  s_d0d43704cb1be1::t_c4a377d07f19d5 688
+  s_d0d43704cb1be1::t_cbbbb82f1e6e9d 40
+  s_d0d43704cb1be1::t_5b39abb686046c 678,681
+  s_3e36520c5b40ae::t_a5ace5719648e5 695-696
+  s_d0d43704cb1be1::t_afc75eb65c0cb5 27,56-57,218-219,221-223,226
+  s_d0d43704cb1be1::t_68df410c5dab94 212-213
+  s_d0d43704cb1be1::t_48d273f0b117aa 30-32,674-677,679-680,682-687,689-694
+  s_d0d43704cb1be1::t_3c75e71656ec67 26,43,205-210
+  s_d0d43704cb1be1::t_43df44129e749c 23-24
+  s_d0d43704cb1be1::t_b13becb24e387f 214-217
+  s_d0d43704cb1be1::t_18049c4622b578 211
+  s_d0d43704cb1be1::t_55cf41293a0732 394-397,436-439
+  s_d0d43704cb1be1::t_0b16293c9004f4 232
+src/common/procedure/src/procedure.rs
+  s_d0d43704cb1be1::t_d4aedde784d5ab 514-515
+  s_d0d43704cb1be1::t_63c7e3a04c2926 38-40,49,55,510-513
+src/operator/src/utils.rs
+  s_d0d43704cb1be1::t_7633883faa3d86 87,133
+  s_d0d43704cb1be1::t_2f1b8fd84b0561 88,121-124,126-132,134,136
+  s_d0d43704cb1be1::t_61024ad5aa4727 39-42,59-60
+  s_d0d43704cb1be1::t_a67b3671279c87 135
+  s_d0d43704cb1be1::t_972e6e759bd958 18-19,50-51,125
+  s_d0d43704cb1be1::t_a72a04f67d3e0b 137-138
+src/meta-srv/src/event/repartition.rs
+  s_d0d43704cb1be1::t_bc90170977a216 367-368,662
+  s_3e36520c5b40ae::t_c9cb4861f0f8eb 680
+src/common/meta/src/ddl_manager.rs
+  s_d0d43704cb1be1::t_6f95d58138f83a 886
+  s_d0d43704cb1be1::t_7633883faa3d86 99,1510,1581,1600
+  s_d0d43704cb1be1::t_3a755f307171f5 1484
+  s_d0d43704cb1be1::t_8beb510ea89ba1 1488,1509,1512,1568-1570,1574,1577,1583,1587-1596,1602-1608
+  s_d0d43704cb1be1::t_a33f54ab358fe1 1514
+  s_d0d43704cb1be1::t_61a47012fee5f4 73-74,897-903,912-917,927-928,931-932,945-951,1511,1575-1576,1578-1580,1582,1597-1599,1601
+  s_d0d43704cb1be1::t_de026fb7e93fdc 1609
+  s_d0d43704cb1be1::t_36c0bc52f742bf 1766,1783,1792
+  s_d0d43704cb1be1::t_43a81b6b68d628 89-96,101-106,891
+  s_d0d43704cb1be1::t_378ac79305e911 23-24,692
+  s_d0d43704cb1be1::t_420b7d498b3677 364,407,423,444,483,512,523,533,540,551,559,570,578,588,595,606,634,646,662,709,721,735,740,748,753,764,769,779,784,794,799,810,816,826,837,906,909,920,924,936,939,942,954,957,960,963,983,1008,1023,1056,1070,1074,1088,1092,1106,1109,1124,1127,1150,1166,1195,1200,1218,1221,1239,1242,1261,1264,1306,1309,1329,1332,1389,1409,1428,1431,1454,1457
+  s_d0d43704cb1be1::t_9c9390bd1ec57f 83-84
+  s_d0d43704cb1be1::t_473c65ff1b9656 97-98,100
+  s_d0d43704cb1be1::t_972e6e759bd958 1571-1573,1584-1586
+src/common/meta/src/rpc/ddl.rs
+  s_d0d43704cb1be1::t_d4bb6ce510d798 73
+  s_d0d43704cb1be1::t_7633883faa3d86 74
+  s_d0d43704cb1be1::t_63d6ae93b1a642 2248-2249,2251
+  s_d0d43704cb1be1::t_b3eb4aa8ec725c 2271
+  s_d0d43704cb1be1::t_61024ad5aa4727 1690,1692-1695
+  s_d0d43704cb1be1::t_972e6e759bd958 1691,2250
+  s_d0d43704cb1be1::t_e5568880782580 2272-2287
+src/common/procedure/src/event.rs
+  s_d0d43704cb1be1::t_63d6ae93b1a642 350-374,379-380
+  s_3e36520c5b40ae::t_6f18ec1c0d964f 348
+  s_d0d43704cb1be1::t_786ca69c427cdb 162,230,241,252,323,331,334,344,347
+  s_d0d43704cb1be1::t_63c7e3a04c2926 22-24,104,132,140
+  s_d0d43704cb1be1::t_c4a377d07f19d5 129,330,375-378
+src/common/meta/src/ddl/tests/event/flow.rs
+  s_d0d43704cb1be1::t_bc90170977a216 22,233
+  s_3e36520c5b40ae::t_1824e6c1f1cca0 253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "f86ab4813f93d15b65e4b6c5d468b6bc5a172dc2",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_3e36520c5b40ae": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_01652d7a9ffeyWA4GRSRXWdohT",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_d0d43704cb1be1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fec6d-a6da-74a1-a7ce-5525e2a9ce84",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": null
+    }
+  }
+}
