@@ -85,7 +85,7 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.into_iter().collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        let read_cols = ReadColumns::from_deduped_column_ids(read_column_ids);
+        let read_cols = ReadColumns::new(read_column_ids);
         Self::new_with_read_columns(metadata, projection, read_cols)
     }
 
@@ -540,7 +540,7 @@ impl CompactionProjectionMapper {
             .collect::<Vec<_>>();
 
         let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
-        let read_cols = ReadColumns::from_deduped_column_ids(read_col_ids);
+        let read_cols = ReadColumns::new(read_col_ids);
         let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
@@ -681,7 +681,7 @@ mod tests {
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
             vec![0, 1],
-            ReadColumns::from_deduped_column_ids([0, 1]),
+            ReadColumns::new([0, 1]),
         )
         .unwrap();
 

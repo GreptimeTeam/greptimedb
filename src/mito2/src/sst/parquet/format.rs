@@ -603,17 +603,14 @@ impl FormatProjection {
     ) -> Self {
         let json_target_types = cols.json_target_types().clone();
         let mut projected_columns: Vec<_> = cols
-            .cols
+            .col_ids
             .into_iter()
-            .filter_map(|col| {
-                id_to_index
-                    .get(&col.column_id)
-                    .copied()
-                    .map(|index_of_sst| {
-                        let nested_paths =
-                            json_target_nested_paths(metadata, &json_target_types, col.column_id);
-                        (col.column_id, index_of_sst, nested_paths)
-                    })
+            .filter_map(|col_id| {
+                id_to_index.get(&col_id).copied().map(|index_of_sst| {
+                    let nested_paths =
+                        json_target_nested_paths(metadata, &json_target_types, col_id);
+                    (col_id, index_of_sst, nested_paths)
+                })
             })
             .collect();
         // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
@@ -763,9 +760,7 @@ impl PrimaryKeyReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
         Self::new(
             Arc::clone(&metadata),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
         )
     }
 }
@@ -1039,29 +1034,25 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([3]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([3]));
         assert_eq!(
             &[2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Only read field1
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([4]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([4]));
         assert_eq!(
             &[0, 2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Only read ts
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([5]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([5]));
         assert_eq!(
             &[2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Read field0, tag0, ts
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids([2, 1, 5]));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new([2, 1, 5]));
         assert_eq!(
             &[1, 2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
@@ -1105,16 +1096,13 @@ mod tests {
             &metadata,
             &column_id_to_parquet_index,
             metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
-            ReadColumns::new(
-                [4],
-                BTreeMap::from([(
-                    4,
-                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
-                        "a".to_string(),
-                        JsonNativeType::i64(),
-                    )]))),
-                )]),
-            ),
+            ReadColumns::new([4]).with_json_target_types(BTreeMap::from([(
+                4,
+                ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
+                    "a".to_string(),
+                    JsonNativeType::i64(),
+                )]))),
+            )])),
         );
 
         let columns = projection.parquet_read_cols.columns();
@@ -1169,8 +1157,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new(column_ids));
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1189,8 +1176,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new(column_ids));
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1218,9 +1204,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let read_format = PrimaryKeyReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
         );
 
         let columns: Vec<ArrayRef> = vec![
@@ -1388,56 +1372,36 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([3]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([3]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[1, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([4]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([4]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[2, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([5]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([5]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata,
-            ReadColumns::from_deduped_column_ids([2, 1, 5]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata, ReadColumns::new([2, 1, 5]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[0, 3, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
@@ -1449,7 +1413,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let mut format = FlatReadFormat::new(
             metadata,
-            ReadColumns::from_deduped_column_ids(std::iter::once(1)), // Just read tag0
+            ReadColumns::new(std::iter::once(1)), // Just read tag0
             Some(build_test_flat_sst_schema()),
             "test",
             false,
@@ -1666,7 +1630,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids),
+            ReadColumns::new(column_ids),
             Some(build_test_arrow_schema()),
             "test",
             false,
@@ -1732,7 +1696,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids.clone()),
+            ReadColumns::new(column_ids.clone()),
             None,
             "test",
             false,
@@ -1802,7 +1766,7 @@ mod tests {
 
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids),
+            ReadColumns::new(column_ids),
             None,
             "test",
             true,

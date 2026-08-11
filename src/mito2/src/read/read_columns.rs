@@ -28,47 +28,39 @@ pub(crate) type JsonTargetTypes = Arc<BTreeMap<ColumnId, ConcreteDataType>>;
 /// physical nested parquet paths by the parquet reader.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
-    pub cols: Vec<ReadColumn>,
+    pub col_ids: Vec<ColumnId>,
     json_target_types: JsonTargetTypes,
 }
 
 impl ReadColumns {
-    pub fn from_deduped_column_ids<I>(column_ids: I) -> Self
+    pub fn new<I>(col_ids: I) -> Self
     where
         I: IntoIterator<Item = ColumnId>,
     {
-        let cols = column_ids.into_iter().map(ReadColumn::new).collect();
-        ReadColumns {
-            cols,
+        Self {
+            col_ids: col_ids.into_iter().collect(),
             json_target_types: Arc::default(),
         }
     }
 
-    pub fn new(
-        column_ids: impl IntoIterator<Item = ColumnId>,
+    pub fn with_json_target_types(
+        mut self,
         json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Self {
-        let cols = column_ids.into_iter().map(ReadColumn::new).collect();
-        ReadColumns {
-            cols,
-            json_target_types: Arc::new(json_target_types),
-        }
+        self.json_target_types = Arc::new(json_target_types);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cols.is_empty()
+        self.col_ids.is_empty()
     }
 
     pub fn column_ids_iter(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.cols.iter().map(|column| column.column_id)
+        self.col_ids.iter().copied()
     }
 
     pub fn column_ids(&self) -> Vec<ColumnId> {
         self.column_ids_iter().collect()
-    }
-
-    pub fn columns(&self) -> &[ReadColumn] {
-        &self.cols
     }
 
     pub fn json_target_types(&self) -> &JsonTargetTypes {
@@ -80,28 +72,9 @@ impl ReadColumns {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.cols.capacity() * mem::size_of::<ReadColumn>()
-            + self
-                .cols
-                .iter()
-                .map(ReadColumn::estimated_size)
-                .sum::<usize>()
+        self.col_ids.capacity() * mem::size_of::<ColumnId>()
+            + self.col_ids.len() * mem::size_of::<ColumnId>()
             + self.json_target_types.len()
                 * (mem::size_of::<ColumnId>() + mem::size_of::<ConcreteDataType>())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReadColumn {
-    pub column_id: ColumnId,
-}
-
-impl ReadColumn {
-    pub fn new(column_id: ColumnId) -> Self {
-        Self { column_id }
-    }
-
-    pub fn estimated_size(&self) -> usize {
-        mem::size_of::<ColumnId>()
     }
 }

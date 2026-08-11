@@ -862,9 +862,7 @@ impl FlatReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
         Self::new(
             Arc::clone(&metadata),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
@@ -986,7 +984,7 @@ mod tests {
             .collect();
         let mut read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids),
+            ReadColumns::new(column_ids),
             None,
             "test",
             false,
@@ -1066,7 +1064,7 @@ mod tests {
         let metadata = Arc::new(build_metadata(1, 2, PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0_u32, 2_u32]),
+            ReadColumns::new([0_u32, 2_u32]),
             None,
             "test",
             false,

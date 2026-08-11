@@ -832,9 +832,7 @@ mod tests {
 
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -900,9 +898,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,

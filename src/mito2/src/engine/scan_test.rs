@@ -108,10 +108,10 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     };
     assert_eq!(
         seq_scan.input().read_cols,
-        ReadColumns::new(
-            [1, 0],
-            BTreeMap::from([(1, ConcreteDataType::json2(JsonNativeType::Variant))])
-        )
+        ReadColumns::new([1, 0]).with_json_target_types(BTreeMap::from([(
+            1,
+            ConcreteDataType::json2(JsonNativeType::Variant)
+        )]))
     );
 
     let stream = scanner.scan().await?;
@@ -152,13 +152,10 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     // whole JSON2 struct. tag_0 is still read as a normal root column.
     assert_eq!(
         seq_scan.input().read_cols,
-        ReadColumns::new(
-            [1, 0],
-            BTreeMap::from([(
-                1,
-                ConcreteDataType::json2(json_type_hint["field_0"].clone())
-            )])
-        )
+        ReadColumns::new([1, 0]).with_json_target_types(BTreeMap::from([(
+            1,
+            ConcreteDataType::json2(json_type_hint["field_0"].clone())
+        )]))
     );
 
     // The scanner should still return a valid RecordBatch in the requested logical projection.
@@ -186,10 +183,7 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     let Scanner::Seq(seq_scan) = &scanner else {
         unreachable!();
     };
-    assert_eq!(
-        seq_scan.input().read_cols,
-        ReadColumns::from_deduped_column_ids([0])
-    );
+    assert_eq!(seq_scan.input().read_cols, ReadColumns::new([0]));
 
     let stream = scanner.scan().await?;
     let batches = RecordBatches::try_collect(stream).await?;

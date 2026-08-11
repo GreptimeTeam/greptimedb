@@ -137,7 +137,8 @@ impl CompactionSstReaderBuilder<'_> {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        let read_columns = ReadColumns::new(read_column_ids, json_target_types);
+        let read_columns =
+            ReadColumns::new(read_column_ids).with_json_target_types(json_target_types);
         let mapper =
             FlatProjectionMapper::new_with_read_columns(&self.metadata, projection, read_columns)?;
 

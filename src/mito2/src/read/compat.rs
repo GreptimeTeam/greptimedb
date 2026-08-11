@@ -25,10 +25,10 @@ use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -39,8 +39,8 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
+    EncodeSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -98,20 +98,12 @@ impl FlatCompatBatch {
         let actual = read_format.metadata();
         let format_projection = read_format.format_projection();
         let mut actual_schema = flat_projected_columns(actual, format_projection);
-        let output_arrow_schema = read_format.output_arrow_schema()?;
-        if output_arrow_schema
-            .fields()
-            .iter()
-            .any(is_json2_extension_type)
-        {
-            for field in output_arrow_schema.fields() {
-                if is_json2_extension_type(field)
-                    && let Some(column_id) =
-                        actual.column_by_name(field.name()).map(|x| x.column_id)
-                    && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
-                {
-                    actual_schema[i].1 = ConcreteDataType::from_arrow_type(field.data_type());
-                }
+        for (column_id, target_type) in format_projection.json_target_types.iter() {
+            if let Some(i) = actual_schema
+                .iter()
+                .position(|(actual_column_id, _)| actual_column_id == column_id)
+            {
+                actual_schema[i].1 = target_type.clone();
             }
         }
 
@@ -269,8 +261,14 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if ty.as_json().is_some_and(|json_type| json_type.is_json2()) {
-                            old_column.clone()
+                        let casted = if ty.is_json2() {
+                            // JSON2 query-time projection should have been handled before
+                            // flat compat. Keep a release-mode fallback for unexpected
+                            // schema paths.
+                            debug_assert!(false, "JSON2 should be materialized before flat compat");
+                            JsonArray::from(old_column)
+                                .project_to(&ty.as_arrow_type())
+                                .context(ConvertValueSnafu)?
                         } else {
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
                                 .context(ComputeArrowSnafu)?
@@ -772,7 +770,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
+            ReadColumns::new([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -859,12 +857,12 @@ mod tests {
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
             vec![1, 2],
-            ReadColumns::from_deduped_column_ids([1, 2, 3]),
+            ReadColumns::new([1, 2, 3]),
         )
         .unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([1, 2, 3]),
+            ReadColumns::new([1, 2, 3]),
             None,
             "test",
             false,
@@ -953,7 +951,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
+            ReadColumns::new([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -1035,7 +1033,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata,
-            ReadColumns::from_deduped_column_ids([0, 1, 2]),
+            ReadColumns::new([0, 1, 2]),
             None,
             "test",
             false,
@@ -1103,7 +1101,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 2, 3]),
+            ReadColumns::new([0, 2, 3]),
             None,
             "test",
             true,

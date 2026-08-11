@@ -436,7 +436,7 @@ impl ScanRegion {
         let read_cols = if has_structured_json {
             self.read_columns_with_json_target_types(&read_col_ids)?
         } else {
-            ReadColumns::from_deduped_column_ids(read_col_ids.iter().copied())
+            ReadColumns::new(read_col_ids.iter().copied())
         };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
@@ -693,7 +693,7 @@ impl ScanRegion {
             };
             let column_name = &column.column_schema.name;
             let hint = self.request.json_type_hint.get(column_name);
-            if !is_json2_column(&column.column_schema.data_type) {
+            if !column.column_schema.data_type.is_json2() {
                 continue;
             }
 
@@ -704,7 +704,7 @@ impl ScanRegion {
             json_target_types.insert(col_id, target_type);
         }
 
-        Ok(ReadColumns::new(col_ids.iter().copied(), json_target_types))
+        Ok(ReadColumns::new(col_ids.iter().copied()).with_json_target_types(json_target_types))
     }
 
     fn region_id(&self) -> RegionId {
@@ -1579,12 +1579,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn is_json2_column(data_type: &ConcreteDataType) -> bool {
-    data_type
-        .as_json()
-        .is_some_and(|json_type| json_type.is_json2())
-}
-
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -2362,7 +2356,8 @@ mod tests {
 
         let make_input = |target_type| async {
             let env = SchedulerEnv::new().await;
-            let read_cols = ReadColumns::new([0, 1, 2], BTreeMap::from([(2, target_type)]));
+            let read_cols = ReadColumns::new([0, 1, 2])
+                .with_json_target_types(BTreeMap::from([(2, target_type)]));
             let mapper =
                 FlatProjectionMapper::new_with_read_columns(&metadata, vec![0, 1, 2], read_cols)
                     .unwrap();

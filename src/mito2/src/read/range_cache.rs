@@ -852,7 +852,7 @@ pub fn bench_cache_flat_range_stream(
     let cache_strategy = CacheStrategy::EnableAll(cache_manager);
 
     let fingerprint = ScanRequestFingerprintBuilder {
-        read_columns: ReadColumns::from_deduped_column_ids(std::iter::empty()),
+        read_columns: ReadColumns::new(std::iter::empty()),
         read_column_types: vec![],
         filters: vec![],
         time_filters: vec![],
@@ -916,7 +916,7 @@ mod tests {
         filter_deleted: bool,
         partition_expr_version: u64,
     ) -> ScanRequestFingerprint {
-        let read_columns = ReadColumns::from_deduped_column_ids([1, 2]);
+        let read_columns = ReadColumns::new([1, 2]);
         ScanRequestFingerprintBuilder {
             read_columns,
             read_column_types: vec![None, None],
