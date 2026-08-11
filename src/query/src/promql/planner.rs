@@ -74,8 +74,8 @@ use promql::functions::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round,
-    StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -4343,9 +4343,9 @@ impl PromPlanner {
             DfExpr::ScalarFunction(ScalarFunction {
                 func: coalesce(),
                 args: vec![
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(float_input.clone()),
-                        data_type: ArrowDataType::Utf8,
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: Arc::new(PromqlFloatToString::scalar_udf()),
+                        args: vec![float_input.clone()],
                     }),
                     DfExpr::ScalarFunction(ScalarFunction {
                         func: Arc::new(NativeHistogramToString::scalar_udf()),
@@ -12825,6 +12825,28 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             let mut actual = numeric_values(&batches, &value_column);
             actual.sort_by(f64::total_cmp);
             assert_eq!(actual, expected, "{query}");
+
+            if query.starts_with("count_values") {
+                let mut sample_labels = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column_by_name("sample")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .flatten()
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>();
+                sample_labels.sort();
+                let mut expected_labels =
+                    vec!["2".to_string(), direct_or_histogram().promql_string()];
+                expected_labels.sort();
+                assert_eq!(sample_labels, expected_labels);
+            }
         }
     }
 

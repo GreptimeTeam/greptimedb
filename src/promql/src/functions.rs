@@ -54,7 +54,7 @@ pub use native_histogram::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString,
+    NativeHistogramToString, PromqlFloatToString,
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;

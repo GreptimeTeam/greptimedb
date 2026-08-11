@@ -40,8 +40,8 @@ use promql::functions::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round,
-    StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -212,6 +212,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramSum::scalar_udf(),
             NativeHistogramSumOverTime::scalar_udf(),
             NativeHistogramToString::scalar_udf(),
+            PromqlFloatToString::scalar_udf(),
         ] {
             let _ = session_state.register_udf(Arc::new(udf));
         }
@@ -374,6 +375,10 @@ mod tests {
                 )),
                 args: vec![col("sum")],
             }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(PromqlFloatToString::scalar_udf()),
+                args: vec![lit(2.0)],
+            }),
         ])
         .unwrap()
         .build()
@@ -403,6 +408,7 @@ mod tests {
         assert!(decoded.contains("prom_native_histogram_drop_float"));
         assert!(decoded.contains(NativeHistogramAggSum::name()));
         assert!(decoded.contains(NativeHistogramAggAvg::name()));
+        assert!(decoded.contains(PromqlFloatToString::name()));
 
         let schema = Arc::new(Schema::new(vec![
             Field::new(

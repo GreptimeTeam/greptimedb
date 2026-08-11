@@ -20,6 +20,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use common_query::native_histogram::*;
+use common_query::prometheus::format_prometheus_float;
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Float64Builder, Int64Array, StringBuilder,
@@ -740,6 +741,39 @@ impl NativeHistogramStdvar {
         scalar_histogram_udf(Self::name(), vec![], |histogram, _, _, _, _| {
             Ok(histogram.estimated_stdvar())
         })
+    }
+}
+
+/// Formats float samples as PromQL label values.
+pub struct PromqlFloatToString;
+
+impl PromqlFloatToString {
+    pub const fn name() -> &'static str {
+        "prom_float_to_string"
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        create_udf(
+            Self::name(),
+            vec![DataType::Float64],
+            DataType::Utf8,
+            Volatility::Volatile,
+            Arc::new(|input: &[ColumnarValue]| {
+                let values = extract_array(&input[0])?;
+                let values = values
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("validated Float64 input");
+                let mut result = StringBuilder::new();
+                for value in values.iter() {
+                    match value {
+                        Some(value) => result.append_value(format_prometheus_float(value)),
+                        None => result.append_null(),
+                    }
+                }
+                Ok(ColumnarValue::Array(Arc::new(result.finish())))
+            }),
+        )
     }
 }
 
