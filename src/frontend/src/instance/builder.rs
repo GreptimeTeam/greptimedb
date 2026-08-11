@@ -20,7 +20,7 @@ use catalog::CatalogManagerRef;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
-use common_event_recorder::EventRecorderImpl;
+use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::key::TableMetadataManager;
@@ -37,8 +37,8 @@ use operator::request::Requester;
 #[cfg(feature = "enterprise")]
 use operator::statement::CreateDatabaseHandlerRef;
 use operator::statement::{
-    ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
-    StatementExecutorRef,
+    AdminEventRecorderHandle, AdminFunctionRecordingLayer, ExecutorConfigureContext,
+    StatementExecutor, StatementExecutorConfiguratorRef, StatementExecutorRef,
 };
 use operator::table::TableMutationOperator;
 use partition::cache::PartitionInfoCacheRef;
@@ -302,6 +302,10 @@ impl FrontendBuilder {
             statement_executor
         };
 
+        let admin_event_recorder = AdminEventRecorderHandle::default();
+        let statement_executor = statement_executor.with_admin_function_layer(Arc::new(
+            AdminFunctionRecordingLayer::new(admin_event_recorder.clone()),
+        ));
         let statement_executor = Arc::new(statement_executor);
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
@@ -316,13 +320,14 @@ impl FrontendBuilder {
         let slow_query_recorder = Arc::new(EventRecorderImpl::new(Box::new(
             EventHandlerImpl::new(statement_executor.clone(), self.options.slow_query.ttl),
         )));
-        let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
+        let event_recorder: EventRecorderRef = Arc::new(EventRecorderImpl::with_event_type_filter(
             Box::new(EventHandlerImpl::new(
                 statement_executor.clone(),
                 self.options.event_recorder.ttl,
             )),
             self.options.event_recorder.event_types.clone(),
         ));
+        admin_event_recorder.install(&event_recorder);
 
         Ok(Instance {
             frontend_peer_addr,

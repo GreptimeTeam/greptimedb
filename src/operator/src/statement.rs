@@ -80,6 +80,11 @@ use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, Co
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+pub use self::admin::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
+    AdminFunctionServiceRef,
+};
 use self::set::{
     set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
@@ -138,6 +143,7 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    admin_function_service: AdminFunctionServiceRef,
     pub(crate) local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     create_database_handler: Option<CreateDatabaseHandlerRef>,
@@ -179,6 +185,7 @@ impl StatementExecutor {
         origin_frontend_addr: String,
         local_file_access: LocalFileAccess,
     ) -> Self {
+        let admin_function_service = admin::new_admin_function_service(query_engine.clone());
         Self {
             catalog_manager,
             query_engine,
@@ -191,12 +198,21 @@ impl StatementExecutor {
             inserter,
             process_manager,
             origin_frontend_addr,
+            admin_function_service,
             local_file_access,
             #[cfg(feature = "enterprise")]
             create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
+    }
+
+    /// Adds a layer around the ADMIN function execution service.
+    ///
+    /// The last added layer is the outermost layer.
+    pub fn with_admin_function_layer(mut self, layer: AdminFunctionLayerRef) -> Self {
+        self.admin_function_service = layer.layer(self.admin_function_service);
+        self
     }
 
     #[cfg(feature = "enterprise")]
