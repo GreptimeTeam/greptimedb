@@ -380,6 +380,23 @@ impl UndropTableProcedure {
     }
 }
 
+impl UndropTableProcedure {
+    fn event_locator(&self) -> TableDdlLocator {
+        self.data
+            .table_name
+            .as_ref()
+            .map(|table_name| {
+                TableDdlLocator::new(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                )
+            })
+            .unwrap_or_default()
+            .with_table_id(self.data.task.table_id)
+    }
+}
+
 #[async_trait]
 impl Procedure for UndropTableProcedure {
     fn type_name(&self) -> &str {
@@ -437,24 +454,12 @@ impl Procedure for UndropTableProcedure {
         {
             return None;
         }
+        let locator = self.event_locator();
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                let locator = self
-                    .data
-                    .table_name
-                    .as_ref()
-                    .map(|table_name| {
-                        TableDdlLocator::new(
-                            &table_name.catalog_name,
-                            &table_name.schema_name,
-                            &table_name.table_name,
-                        )
-                    })
-                    .unwrap_or_default()
-                    .with_table_id(self.data.task.table_id);
                 TableDdlEvent::undrop_table_submitted(locator, self.data.event_context.clone())
             }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable, [locator]),
         };
 
         Some(Box::new(event))

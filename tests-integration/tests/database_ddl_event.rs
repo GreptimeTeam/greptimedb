@@ -138,8 +138,8 @@ FROM greptime_private.events
 WHERE type = '{event_type}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND schema_name IS NULL
+  AND catalog_name = 'greptime'
+  AND schema_name = '{DATABASE_NAME}'
   AND json_is_null(payload)"#
     );
     assert_single_event(instance, &lifecycle).await;

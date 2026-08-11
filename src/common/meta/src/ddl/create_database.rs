@@ -297,7 +297,7 @@ impl Procedure for CreateDatabaseProcedure {
                 self.data.event_context.clone(),
             )
         } else {
-            DatabaseDdlEvent::create_lifecycle()
+            DatabaseDdlEvent::create_lifecycle(&self.data.catalog, &self.data.schema)
         };
         Some(Box::new(event))
     }

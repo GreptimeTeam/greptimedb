@@ -335,6 +335,11 @@ impl Procedure for AlterLogicalTablesProcedure {
         if ctx.trigger != EventTrigger::Submitted {
             return Some(Box::new(TableDdlEvent::lifecycle(
                 TableDdlEventType::AlterLogicalTables,
+                self.data.tasks.iter().map(|task| {
+                    let table_ref = task.table_ref();
+                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+                        .with_physical_table_id(self.data.physical_table_id)
+                }),
             )));
         }
 
@@ -375,12 +380,12 @@ pub struct AlterTablesData {
 }
 
 impl AlterTablesData {
-    /// Clears all data fields except `state` and `table_cache_keys_to_invalidate` after metadata update.
-    /// This is done to avoid persisting unnecessary data after the update metadata step.
+    /// Clears metadata snapshots after the update metadata step.
+    ///
+    /// Keep the tasks and physical table ID until the procedure finishes: lifecycle
+    /// events use them to retain the logical table locator.
     fn clear_metadata_fields(&mut self) {
-        self.tasks.clear();
         self.table_info_values.clear();
-        self.physical_table_id = 0;
         self.physical_table_info = None;
         self.physical_columns.clear();
     }
