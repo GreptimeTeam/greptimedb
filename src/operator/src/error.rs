@@ -65,6 +65,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Admin function execution was cancelled"))]
+    AdminFunctionCancelled,
+
     #[snafu(display("Expected {expected} args, but actual {actual}"))]
     FunctionArityMismatch { expected: usize, actual: usize },
 
@@ -1023,6 +1026,7 @@ impl ErrorExt for Error {
             | Error::EncodeJson { .. }
             | Error::DeserializePartitionExpr { .. }
             | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,
+            Error::AdminFunctionCancelled => StatusCode::Cancelled,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,
