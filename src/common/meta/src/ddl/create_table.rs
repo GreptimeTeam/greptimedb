@@ -421,16 +421,11 @@ impl Procedure for CreateTableProcedure {
             EventTrigger::Succeeded => match ctx.lifecycle_state {
                 ProcedureState::Done {
                     output: Some(output),
-                } => output
-                    .downcast_ref::<TableId>()
-                    .copied()
-                    .map(|table_id| {
-                        TableDdlEvent::create_table_succeeded(locator.clone(), table_id)
-                    })
-                    .unwrap_or_else(|| {
-                        TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator.clone()])
-                    }),
-                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator.clone()]),
+                } => match output.downcast_ref::<TableId>().copied() {
+                    Some(table_id) => TableDdlEvent::create_table_succeeded(locator, table_id),
+                    None => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator]),
+                },
+                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator]),
             },
             _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator]),
         };
