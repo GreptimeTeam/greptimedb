@@ -1,7 +1,8 @@
 // Warns when a repository member has too many open pull requests.
 //
 // Review capacity is the bottleneck, so authors are expected to land or close
-// existing work before opening more. Drafts count: they still occupy attention.
+// existing work before opening more. Drafts are not counted and never warned
+// about: they are not asking for review yet.
 // This is advisory only — it never closes a pull request or fails the job.
 
 import { appendFileSync } from "node:fs";
@@ -47,7 +48,7 @@ async function isTeamMember(octokit, owner, repo, username) {
 function buildComment(author, total, limit, openPrs) {
   const listed = openPrs
     .slice(0, MAX_LISTED_PRS)
-    .map((pr) => `- #${pr.number} ${pr.title}${pr.draft ? " _(draft)_" : ""}`);
+    .map((pr) => `- #${pr.number} ${pr.title}`);
   const hidden = openPrs.length - listed.length;
   const list = hidden > 0 ? `${listed.join("\n")}\n- ...and ${hidden} more` : listed.join("\n");
 
@@ -99,6 +100,11 @@ async function upsertComment(octokit, params, body) {
     return;
   }
 
+  if (process.env.PR_IS_DRAFT === "true") {
+    summary(`Skipping #${prNumber}: draft.`);
+    return;
+  }
+
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
   if (!(await isTeamMember(octokit, owner, repo, author))) {
@@ -117,7 +123,7 @@ async function upsertComment(octokit, params, body) {
   // The pull request that triggered this run is already open, so exclude it and
   // report the total separately.
   const others = allOpen.filter(
-    (pr) => pr.user?.login === author && pr.number !== prNumber
+    (pr) => pr.user?.login === author && pr.number !== prNumber && !pr.draft
   );
   const total = others.length + 1;
 
