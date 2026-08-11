@@ -37,6 +37,7 @@ src/common/meta/src/ddl/create_database.rs
 src/common/meta/src/ddl/undrop_table.rs
   s_3f02b45448515f::t_00ca8584963d6e 46,59-60,68,565,641,656-657,682,721
   s_3f02b45448515f::t_4e4942ec64cdbb 20,446
+  s_3f02b45448515f::t_cd31187894929b 455
 src/common/meta/src/ddl/tests/drop_flow.rs
   s_3f02b45448515f::t_1c17cc4735fad6 29,51,84,89,94,132,136
 src/common/meta/src/ddl/tests/create_logical_tables.rs
@@ -169,6 +170,7 @@ src/common/meta/src/procedure_executor.rs
 src/common/meta/src/ddl/purge_dropped_table.rs
   s_3f02b45448515f::t_d4263119e3e580 41,53,56,60,63,311,327,330
   s_3f02b45448515f::t_4e4942ec64cdbb 17,273
+  s_3f02b45448515f::t_cd31187894929b 282
 src/common/meta/src/ddl/drop_database.rs
   s_3f02b45448515f::t_4e4942ec64cdbb 26,177
   s_3f02b45448515f::t_e124ff4663cd0c 88
@@ -210,6 +212,7 @@ src/common/meta/src/ddl/truncate_table.rs
 src/common/meta/src/ddl/tests/event/view.rs
   s_3f02b45448515f::t_a0249295e34281 22,31,46,74,138-139,189,226,232-233,344,350,353,377
   s_3f02b45448515f::t_4e4942ec64cdbb 27,372
+  s_3f02b45448515f::t_36a35c357b1fca 326
 src/common/procedure/src/local/runner.rs
   s_3f02b45448515f::t_4e4942ec64cdbb 37-38,783
   s_3f02b45448515f::t_178ed0aad35d9f 230,512,667,673,714,788,790-798,890,929,1116,1497,1690,2211,2268
