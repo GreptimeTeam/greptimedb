@@ -1,0 +1,19 @@
+src/common/meta/src/ddl_manager.rs
+  s_d0d43704cb1be1::t_f821299f49775d 407,523,540,559,578,595,634,662,721,740,753,769,784,799,816,837
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "b84b9a8b1933ea8e8e6a25405689e1601b3b5c2a",
+  "prompts": {},
+  "sessions": {
+    "s_d0d43704cb1be1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fec6d-a6da-74a1-a7ce-5525e2a9ce84",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
