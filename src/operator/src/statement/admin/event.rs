@@ -209,8 +209,12 @@ fn sql_value_to_json(value: &SqlValue) -> JsonValue {
 }
 
 fn value_to_json(value: &Value) -> JsonValue {
-    JsonValue::try_from(value.clone())
-        .unwrap_or_else(|_| JsonValue::String(UNSUPPORTED.to_string()))
+    match value {
+        Value::Float32(value) if !value.0.is_finite() => JsonValue::String(value.to_string()),
+        Value::Float64(value) if !value.0.is_finite() => JsonValue::String(value.to_string()),
+        _ => JsonValue::try_from(value.clone())
+            .unwrap_or_else(|_| JsonValue::String(UNSUPPORTED.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -532,6 +536,34 @@ mod tests {
         assert_eq!(
             value_to_json(&Value::from(vec![1_u8, 2, 3])),
             json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn serializes_non_finite_float_results_as_strings() {
+        assert_eq!(
+            value_to_json(&Value::Float32(f32::NAN.into())),
+            json!("NaN")
+        );
+        assert_eq!(
+            value_to_json(&Value::Float32(f32::INFINITY.into())),
+            json!("inf")
+        );
+        assert_eq!(
+            value_to_json(&Value::Float32(f32::NEG_INFINITY.into())),
+            json!("-inf")
+        );
+        assert_eq!(
+            value_to_json(&Value::Float64(f64::NAN.into())),
+            json!("NaN")
+        );
+        assert_eq!(
+            value_to_json(&Value::Float64(f64::INFINITY.into())),
+            json!("inf")
+        );
+        assert_eq!(
+            value_to_json(&Value::Float64(f64::NEG_INFINITY.into())),
+            json!("-inf")
         );
     }
 }
