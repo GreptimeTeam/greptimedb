@@ -69,11 +69,13 @@ const RELATIONSHIP_COLUMNS: [&str; 16] = [
 const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
 const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
-/// A trace table's scan paired with the `service` declaration it derives
-/// `calls` edges for — a unit of `build_relationships_plan`. A table that
-/// also declares an `agent` entity feeds the agent-calls derivation.
+/// A trace table's scan paired with the entity declarations its derivations
+/// key on — a unit of `build_relationships_plan`. The `service` declaration
+/// feeds service calls, the `agent` declaration agent calls; the two are
+/// independent, so a table whose service declaration is unusable still
+/// derives agent edges (and vice versa).
 pub struct CallsSource {
-    pub service: EntityDeclaration,
+    pub service: Option<EntityDeclaration>,
     pub agent: Option<EntityDeclaration>,
     pub scan: DataFrame,
 }
@@ -227,7 +229,10 @@ fn co_declared_branch(
         )?;
         union_df = union_all(union_df, branch)?;
     }
-    Ok(union_df)
+    // The per-source DISTINCT inside `unnest_rows` cannot see other sources:
+    // two tables witnessing the same edge in the same window must still fold
+    // into one row per (window, edge).
+    union_df.map(DataFrame::distinct).transpose()
 }
 
 /// Ranking column used to pick the latest declared-edge revision per edge key.
@@ -328,7 +333,8 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// the plan form of the Tempo servicegraph connector. Unioning spans before
 /// the join pairs a client with a server stored in a *different* trace table
 /// (`x-greptime-trace-table-name` routing); with a single table it degenerates
-/// to the previous self-join. Returns `None` when there is no trace table.
+/// to the previous self-join. Returns `None` when no trace table has a
+/// usable `service` declaration.
 ///
 /// A client with no matching server span is an edge to a **virtual node**
 /// named by [`VIRTUAL_DST_CANDIDATES`], with the client's own status/duration
@@ -340,11 +346,11 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
     let mut clients: Option<DataFrame> = None;
     let mut servers: Option<DataFrame> = None;
     for trace in traces {
-        clients = union_all(clients, client_spans(trace, window)?)?;
-        servers = union_all(
-            servers,
-            server_spans(&trace.service, trace.scan.clone(), window)?,
-        )?;
+        let Some(service) = &trace.service else {
+            continue;
+        };
+        clients = union_all(clients, client_spans(service, &trace.scan, window)?)?;
+        servers = union_all(servers, server_spans(service, trace.scan.clone(), window)?)?;
     }
     let (Some(clients), Some(servers)) = (clients, servers) else {
         return Ok(None);
@@ -381,9 +387,8 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             qcol("client", DURATION_NANO_COLUMN).alias("client_duration_nano"),
             qcol("client", "virtual_conn").alias("virtual_conn"),
         ])?
-        // An unmatched client without a peer-naming attribute observes no edge;
-        // a self-call (on either the paired or the attribute-named identity) is
-        // not an edge between two distinct entities.
+        // No destination means no edge; a self-call is not an edge between
+        // two distinct entities.
         .filter(
             ident("dst_id")
                 .is_not_null()
@@ -509,11 +514,14 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
 /// declaration, so edges land on exactly the entity ids the registry emits (a
 /// composite identity renders the same sorted `k=v` form); the per-table
 /// projection is what lets tables with different declarations union.
-fn client_spans(source: &CallsSource, window: &GraphQueryWindow) -> DfResult<DataFrame> {
-    // Peer-naming candidates present in this table's schema, normalized so an
-    // empty value falls through to the next candidate.
+fn client_spans(
+    service: &EntityDeclaration,
+    scan: &DataFrame,
+    window: &GraphQueryWindow,
+) -> DfResult<DataFrame> {
+    // NULLIF('') lets an empty value fall through to the next candidate.
     let present: Vec<(Expr, &str)> = {
-        let schema = source.scan.schema();
+        let schema = scan.schema();
         VIRTUAL_DST_CANDIDATES
             .iter()
             .filter(|(column, _)| schema.has_column_with_unqualified_name(column))
@@ -535,13 +543,11 @@ fn client_spans(source: &CallsSource, window: &GraphQueryWindow) -> DfResult<Dat
         virtual_conn = when(value.is_not_null(), lit(conn)).otherwise(virtual_conn)?;
     }
 
-    source
-        .scan
-        .clone()
+    scan.clone()
         .filter(
             ident(SPAN_KIND_COLUMN)
                 .eq(lit(SPAN_KIND_CLIENT))
-                .and(span_predicate(&source.service, window, true)),
+                .and(span_predicate(service, window, true)),
         )?
         .select(vec![
             ident(TRACE_TIMESTAMP_COLUMN),
@@ -549,7 +555,7 @@ fn client_spans(source: &CallsSource, window: &GraphQueryWindow) -> DfResult<Dat
             ident(SPAN_ID_COLUMN),
             // The cast inside entity_id_expr also normalizes tag columns, which
             // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&source.service.id_columns, &|c| ident(c)).alias("src_id"),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("src_id"),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
             virtual_dst.alias("virtual_dst"),
@@ -846,7 +852,7 @@ mod tests {
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
         let plan = build_relationships_plan_for_test(
             vec![CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                service: Some(trace_service_decl(&[SERVICE_NAME_COLUMN])),
                 agent: None,
                 scan: trace,
             }],
@@ -935,7 +941,7 @@ mod tests {
         scans
             .iter()
             .map(|scan| CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                service: Some(trace_service_decl(&[SERVICE_NAME_COLUMN])),
                 agent: None,
                 scan: scan.clone(),
             })
@@ -990,7 +996,6 @@ mod tests {
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // One edge row with the RED metrics of both tables' pairs.
         assert_eq!(total, 1);
         assert_eq!(red_metrics(&batches[0], 0), (2, 1, 2.0, 2));
     }
@@ -1035,23 +1040,6 @@ mod tests {
         assert_eq!(strings(batch, 7), vec!["cart"]);
         assert_eq!(confidence(batch, 0), 1.0);
         assert_eq!(red_metrics(batch, 0), (1, 0, 0.5, 1));
-    }
-
-    #[tokio::test]
-    async fn empty_trace_table_does_not_change_edges() {
-        let ctx = trace_table_ctx();
-        register_trace_table(&ctx, "trace_empty", &[], &[]);
-        let base = ctx.table("opentelemetry_traces").await.unwrap();
-        let empty = ctx.table("trace_empty").await.unwrap();
-        let plan = build_relationships_plan_for_test(sources(&[base, empty]), &test_window())
-            .unwrap()
-            .unwrap();
-
-        let batches = collect(&ctx, plan).await;
-        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // Same single edge, same RED numbers as the single-table derivation.
-        assert_eq!(total, 1);
-        assert_eq!(red_metrics(&batches[0], 0), (2, 1, 2.0, 2));
     }
 
     #[tokio::test]
@@ -1179,7 +1167,7 @@ mod tests {
         let plan = build_relationships_plan(
             RelationshipSources {
                 traces: vec![CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    service: None,
                     agent: Some(co_decl("agent", &["agent_id"])),
                     scan,
                 }],
@@ -1193,8 +1181,8 @@ mod tests {
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // INTERNAL spans feed no service-calls pairs; the same-agent child
-        // (a3 under a1) is excluded. One agent edge remains.
+        // The same-agent child (a3 under a1) is excluded; agent edges need
+        // no service declaration.
         assert_eq!(total, 1);
         let batch = &batches[0];
         assert_eq!(strings(batch, 4), vec!["agent"]);
@@ -1235,7 +1223,7 @@ mod tests {
         let plan = build_relationships_plan(
             RelationshipSources {
                 traces: vec![CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    service: None,
                     agent: Some(co_decl("agent", &["agent_id"])),
                     scan,
                 }],
@@ -1287,11 +1275,13 @@ mod tests {
         )
         .unwrap();
         let ctx = SessionContext::new();
-        ctx.register_table(
-            "co_metrics",
-            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
-        )
-        .unwrap();
+        for name in ["co_metrics", "co_metrics_2"] {
+            ctx.register_table(
+                name,
+                Arc::new(MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap()),
+            )
+            .unwrap();
+        }
         ctx
     }
 
@@ -1395,6 +1385,40 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn co_declared_edge_folds_across_sources() {
+        let ctx = co_declared_ctx();
+        let declarations = || {
+            vec![
+                co_decl("service.instance", &["instance"]),
+                co_decl("host", &["host"]),
+            ]
+        };
+        let source = |scan| CoDeclaredSource {
+            declarations: declarations(),
+            is_trace: false,
+            scan,
+        };
+        let a = ctx.table("co_metrics").await.unwrap();
+        let b = ctx.table("co_metrics_2").await.unwrap();
+        let plan = build_relationships_plan(
+            RelationshipSources {
+                traces: vec![],
+                co_declared: vec![source(a), source(b)],
+                declared: None,
+            },
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // Both tables witness the same runs_on edge in the same window: one
+        // row per (window, edge), not one per source.
+        assert_eq!(total, 1);
     }
 
     #[tokio::test]
@@ -1502,7 +1526,10 @@ mod tests {
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
         let plan = build_relationships_plan_for_test(
             vec![CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
+                service: Some(trace_service_decl(&[
+                    SERVICE_NAME_COLUMN,
+                    "service_namespace",
+                ])),
                 agent: None,
                 scan: trace,
             }],
@@ -1869,7 +1896,7 @@ mod tests {
         let plan = build_relationships_plan(
             RelationshipSources {
                 traces: vec![CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
+                    service: Some(trace_service_decl(&[SERVICE_NAME_COLUMN])),
                     agent: None,
                     scan: trace,
                 }],

@@ -80,7 +80,7 @@ struct EntitySource {
 }
 
 struct TraceSource {
-    service: EntityDeclaration,
+    service: Option<EntityDeclaration>,
     agent: Option<EntityDeclaration>,
     table: TableRef,
 }
@@ -98,7 +98,14 @@ fn trace_v1_schema_matches(table_info: &TableInfo) -> bool {
             .column_schema_by_name(name)
             .map(|column| column.data_type.clone())
     };
-    column_type(TRACE_TIMESTAMP_COLUMN) == Some(ConcreteDataType::timestamp_nanosecond_datatype())
+    // The derivations filter and bucket by this column; if it is not the time
+    // index, the window predicate cannot prune the scan and the buckets
+    // diverge from the table's time semantics.
+    schema
+        .timestamp_column()
+        .is_some_and(|column| column.name == TRACE_TIMESTAMP_COLUMN)
+        && column_type(TRACE_TIMESTAMP_COLUMN)
+            == Some(ConcreteDataType::timestamp_nanosecond_datatype())
         && [
             TRACE_ID_COLUMN,
             SPAN_ID_COLUMN,
@@ -336,24 +343,28 @@ impl EntityGraphProviderImpl {
                     continue;
                 }
                 if is_trace {
-                    match table_declarations
-                        .iter()
-                        .find(|d| d.entity_type == "service")
-                    {
-                        Some(service) => traces.push(TraceSource {
-                            service: service.clone(),
-                            agent: table_declarations
-                                .iter()
-                                .find(|d| d.entity_type == "agent")
-                                .cloned(),
-                            table: table.clone(),
-                        }),
+                    let find = |entity_type: &str| {
+                        table_declarations
+                            .iter()
+                            .find(|d| d.entity_type == entity_type)
+                            .cloned()
+                    };
+                    let service = find("service");
+                    let agent = find("agent");
+                    if service.is_none() {
                         // No usable service identity: the table cannot
-                        // contribute calls edges (see declarations_for).
-                        None => warn!(
+                        // contribute service-calls edges (see declarations_for).
+                        warn!(
                             "Trace table `{}` has no usable service declaration; skipping calls derivation",
                             table_info.name
-                        ),
+                        );
+                    }
+                    if service.is_some() || agent.is_some() {
+                        traces.push(TraceSource {
+                            service,
+                            agent,
+                            table: table.clone(),
+                        });
                     }
                 }
                 if !table_declarations.is_empty() {
@@ -740,6 +751,22 @@ mod tests {
             .with_time_index(true);
         });
         assert!(!trace_v1_schema_matches(&ms_timestamp));
+
+        // "timestamp" present with the right type, but the time index is a
+        // different column: the derivations would bucket by a non-indexed
+        // column and the window predicate could not prune the scan.
+        let time_index_elsewhere = trace_v1_info(|columns| {
+            columns[0] = columns[0].clone().with_time_index(false);
+            columns.push(
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+        });
+        assert!(!trace_v1_schema_matches(&time_index_elsewhere));
     }
 
     #[test]
