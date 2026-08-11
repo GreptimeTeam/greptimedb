@@ -2751,7 +2751,7 @@ mod tests {
             custom_values: Vec::new(),
             positive_spans: vec![Span {
                 offset: 0,
-                length: positive_buckets.len() as u32,
+                length: positive_buckets.len() as i32,
             }],
             negative_spans: Vec::new(),
             count,
