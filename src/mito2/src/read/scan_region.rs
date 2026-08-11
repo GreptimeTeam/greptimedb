@@ -39,10 +39,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
-use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
@@ -421,23 +420,7 @@ impl ScanRegion {
 
         let read_col_ids =
             self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
-
-        // Narrow JSON2 columns to avoid reading unnecessary nested fields.
-        //
-        // `read_col_ids` selects the root columns required by the projection and predicates,
-        // while nested projection is currently only applied to JSON2 columns, whose type hints
-        // further narrow them to the requested nested fields.
-        let has_structured_json = metadata
-            .schema
-            .arrow_schema()
-            .fields()
-            .iter()
-            .any(is_json2_extension_type);
-        let read_cols = if has_structured_json {
-            self.read_columns_with_json_target_types(&read_col_ids)?
-        } else {
-            ReadColumns::new(read_col_ids.iter().copied())
-        };
+        let read_cols = self.build_read_columns(&read_col_ids)?;
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let projection = self
@@ -445,16 +428,6 @@ impl ScanRegion {
             .projection
             .clone()
             .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
-        if has_structured_json {
-            debug!(
-                "Concretized JSON target types: {{{}}}",
-                read_cols
-                    .json_target_types()
-                    .iter()
-                    .map(|(column_id, data_type)| format!("{}: {}", column_id, data_type))
-                    .join(", ")
-            );
-        }
         let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
         let mapper = if self.request.preserve_pk_dictionary_encoding {
             mapper.with_pk_dictionary_encoding()
@@ -604,7 +577,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Builds the ordered root column ids required by the pushed-down projection and predicate.
+    /// Builds the deduplicated root column ids required by the projection and
+    /// predicate.
     fn build_read_col_ids(
         &self,
         projection: Option<&[usize]>,
@@ -683,27 +657,52 @@ impl ScanRegion {
         Ok(read_col_ids)
     }
 
-    /// Builds read columns with JSON2 target types derived from JSON type hints.
-    fn read_columns_with_json_target_types(&self, col_ids: &[ColumnId]) -> Result<ReadColumns> {
+    /// Builds logical read columns and attaches JSON2 target types when needed.
+    ///
+    /// The behavior about JSON2 is as follows:
+    /// - JSON2 columns without hints use Variant to read the whole column.
+    /// - Hints targeting non-JSON2 read columns are rejected.
+    fn build_read_columns(&self, col_ids: &[ColumnId]) -> Result<ReadColumns> {
         let metadata = &self.version.metadata;
+        let json_type_hint = &self.request.json_type_hint;
+
+        let has_json2 = metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_json2_extension_type);
+
+        if !has_json2 && json_type_hint.is_empty() {
+            return Ok(ReadColumns::new(col_ids.iter().copied()));
+        }
+
         let mut json_target_types = BTreeMap::new();
         for &col_id in col_ids {
-            let Some(column) = metadata.column_by_id(col_id) else {
+            let Some(col) = metadata.column_by_id(col_id) else {
                 continue;
             };
-            let column_name = &column.column_schema.name;
-            let hint = self.request.json_type_hint.get(column_name);
-            if !column.column_schema.data_type.is_json2() {
+            let col_name = &col.column_schema.name;
+            let hint = json_type_hint.get(col_name);
+            if !col.column_schema.data_type.is_json2() {
+                ensure!(
+                    hint.is_none(),
+                    InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!(
+                            "JSON type hint targets non-JSON2 column {} (id: {}, type: {})",
+                            col_name, col_id, col.column_schema.data_type
+                        ),
+                    }
+                );
                 continue;
             }
-
             let target_type = hint
                 .cloned()
                 .map(ConcreteDataType::json2)
                 .unwrap_or_else(|| ConcreteDataType::json2(JsonNativeType::Variant));
             json_target_types.insert(col_id, target_type);
         }
-
         Ok(ReadColumns::new(col_ids.iter().copied()).with_json_target_types(json_target_types))
     }
 
@@ -2084,6 +2083,7 @@ mod tests {
     };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonObjectType;
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -2391,6 +2391,85 @@ mod tests {
             Some(&Some(int_target)),
             int_fingerprint.read_column_types().get(2)
         );
+    }
+
+    #[tokio::test]
+    async fn test_scan_input_rejects_json_type_hint_for_non_json2_column() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j".to_string(),
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::i64(),
+                    )]))),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "v0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let version = Arc::new(
+            crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
+        );
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![0, 1, 2, 3]),
+            json_type_hint: std::collections::HashMap::from([(
+                "v0".to_string(),
+                JsonNativeType::i64(),
+            )]),
+            ..Default::default()
+        };
+
+        let err = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        )
+        .scan_input()
+        .await;
+        let Err(err) = err else {
+            panic!("scan input should reject JSON type hint for non-JSON2 column");
+        };
+
+        assert!(err.to_string().contains("non-JSON2 column v0"));
     }
 
     #[test]
