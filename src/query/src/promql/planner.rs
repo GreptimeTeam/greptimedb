@@ -9680,6 +9680,68 @@ mod test {
     }
 
     #[tokio::test]
+    async fn timestamp_filters_stale_marker_from_mixed_sample_companion() {
+        let histograms = build_histogram_array(&[None]);
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                greptime_native_histogram(),
+                histograms.data_type().clone(),
+                true,
+            ),
+            Field::new(greptime_value(), ArrowDataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000])),
+                histograms,
+                Arc::new(Float64Array::from(vec![f64::from_bits(
+                    PROMETHEUS_STALE_NAN_BITS,
+                )])),
+            ],
+        )
+        .unwrap();
+        let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+        let input = LogicalPlanBuilder::scan("mixed", provider_as_source(table), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                Vec::new(),
+                "timestamp".to_string(),
+                input,
+            )),
+        });
+        let input = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1_000,
+                1_000,
+                5_000,
+                1_000,
+                "timestamp".to_string(),
+                Vec::new(),
+                Some(greptime_native_histogram().to_string()),
+                input,
+            )),
+        });
+        // Match timestamp()'s parent projection, which otherwise prunes the companion lane.
+        let plan = LogicalPlanBuilder::from(input)
+            .project([col("timestamp")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+    }
+
+    #[tokio::test]
     async fn native_histogram_rate_can_feed_count() {
         let plan = native_histogram_plan("histogram_count(rate(some_metric[5m]))").await;
 

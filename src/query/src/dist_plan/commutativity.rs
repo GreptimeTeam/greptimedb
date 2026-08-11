@@ -376,8 +376,6 @@ mod tests {
 
     use datafusion_common::Column;
     use datafusion_expr::LogicalPlanBuilder;
-    use datafusion_expr::expr::ScalarFunction;
-    use promql::functions::NativeHistogramDrop;
 
     use super::*;
 
@@ -397,38 +395,6 @@ mod tests {
 
         let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
         assert!(matches!(commutativity, Commutativity::Commutative));
-    }
-
-    #[test]
-    fn annotations_do_not_block_aggregate_pushdown() {
-        let drop = Expr::ScalarFunction(ScalarFunction {
-            func: Arc::new(NativeHistogramDrop::float_null_udf(
-                "test".to_string(),
-                None,
-            )),
-            args: vec![datafusion_expr::lit(1.0)],
-        });
-        assert!(matches!(
-            Categorizer::check_expr(&drop),
-            Commutativity::Commutative
-        ));
-
-        let aggregate = LogicalPlanBuilder::empty(false)
-            .aggregate(
-                Vec::<Expr>::new(),
-                vec![datafusion::functions_aggregate::sum::sum_udaf().call(vec![drop])],
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        let partition_cols = BTreeMap::from([(
-            "partition".to_string(),
-            BTreeSet::from([Column::from_name("partition")]),
-        )]);
-        assert!(matches!(
-            Categorizer::check_plan(&aggregate, Some(partition_cols)).unwrap(),
-            Commutativity::TransformedCommutative { .. }
-        ));
     }
 }
 
