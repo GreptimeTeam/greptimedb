@@ -23,13 +23,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int32Array, ListArray, PrimitiveArray, StructArray,
-    TimestampMillisecondArray, UInt64Array,
+    Array, ArrayRef, Float64Array, Int32Array, Int64Array, ListArray, PrimitiveArray, StructArray,
+    TimestampMillisecondArray,
 };
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType as ArrowDataType, Field, Float64Type, Int32Type, Int64Type,
-    TimestampMillisecondType, UInt32Type, UInt64Type,
+    TimestampMillisecondType,
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -50,8 +50,8 @@ pub const POSITIVE_SPAN_OFFSETS_FIELD: &str = "positive_span_offsets";
 pub const POSITIVE_SPAN_LENGTHS_FIELD: &str = "positive_span_lengths";
 pub const NEGATIVE_SPAN_OFFSETS_FIELD: &str = "negative_span_offsets";
 pub const NEGATIVE_SPAN_LENGTHS_FIELD: &str = "negative_span_lengths";
-pub const COUNT_U64_FIELD: &str = "count_u64";
-pub const ZERO_COUNT_U64_FIELD: &str = "zero_count_u64";
+pub const COUNT_I64_FIELD: &str = "count_i64";
+pub const ZERO_COUNT_I64_FIELD: &str = "zero_count_i64";
 pub const POSITIVE_BUCKETS_I64_FIELD: &str = "positive_buckets_i64";
 pub const NEGATIVE_BUCKETS_I64_FIELD: &str = "negative_buckets_i64";
 pub const COUNT_F64_FIELD: &str = "count_f64";
@@ -72,8 +72,8 @@ pub const NATIVE_HISTOGRAM_FIELD_NAMES: &[&str] = &[
     POSITIVE_SPAN_LENGTHS_FIELD,
     NEGATIVE_SPAN_OFFSETS_FIELD,
     NEGATIVE_SPAN_LENGTHS_FIELD,
-    COUNT_U64_FIELD,
-    ZERO_COUNT_U64_FIELD,
+    COUNT_I64_FIELD,
+    ZERO_COUNT_I64_FIELD,
     POSITIVE_BUCKETS_I64_FIELD,
     NEGATIVE_BUCKETS_I64_FIELD,
     COUNT_F64_FIELD,
@@ -108,9 +108,9 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
         ),
         POSITIVE_SPAN_LENGTHS_FIELD | NEGATIVE_SPAN_LENGTHS_FIELD => Some(
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::uint32_datatype())),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
         ),
-        COUNT_U64_FIELD | ZERO_COUNT_U64_FIELD => Some(ConcreteDataType::uint64_datatype()),
+        COUNT_I64_FIELD | ZERO_COUNT_I64_FIELD => Some(ConcreteDataType::int64_datatype()),
         POSITIVE_BUCKETS_I64_FIELD | NEGATIVE_BUCKETS_I64_FIELD => Some(
             ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int64_datatype())),
         ),
@@ -195,7 +195,7 @@ pub struct Span {
     /// The first bucket index, or the gap after the preceding span.
     pub offset: i32,
     /// Number of consecutive buckets in the span.
-    pub length: u32,
+    pub length: i32,
 }
 
 /// Inclusion rules for a materialized bucket's lower and upper bounds.
@@ -1320,7 +1320,7 @@ where
         .collect()
 }
 
-fn read_spans(offsets: Vec<i32>, lengths: Vec<u32>, name: &str) -> DfResult<Vec<Span>> {
+fn read_spans(offsets: Vec<i32>, lengths: Vec<i32>, name: &str) -> DfResult<Vec<Span>> {
     if offsets.len() != lengths.len() {
         return Err(DataFusionError::Execution(format!(
             "native histogram {name} span offsets and lengths mismatch: {} vs {}",
@@ -1328,11 +1328,18 @@ fn read_spans(offsets: Vec<i32>, lengths: Vec<u32>, name: &str) -> DfResult<Vec<
             lengths.len()
         )));
     }
-    Ok(offsets
+    offsets
         .into_iter()
         .zip(lengths)
-        .map(|(offset, length)| Span { offset, length })
-        .collect())
+        .map(|(offset, length)| {
+            if length < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "native histogram {name} span has negative length {length}"
+                )));
+            }
+            Ok(Span { offset, length })
+        })
+        .collect()
 }
 
 fn check_span_bucket_count(spans: &[Span], buckets: usize, name: &str) -> DfResult<()> {
@@ -1362,12 +1369,12 @@ pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<Native
     let schema = required_primitive::<Int32Type>(array, SCHEMA_FIELD, row)?;
     let positive_spans = read_spans(
         list_values::<Int32Type>(array, POSITIVE_SPAN_OFFSETS_FIELD, row)?,
-        list_values::<UInt32Type>(array, POSITIVE_SPAN_LENGTHS_FIELD, row)?,
+        list_values::<Int32Type>(array, POSITIVE_SPAN_LENGTHS_FIELD, row)?,
         "positive",
     )?;
     let negative_spans = read_spans(
         list_values::<Int32Type>(array, NEGATIVE_SPAN_OFFSETS_FIELD, row)?,
-        list_values::<UInt32Type>(array, NEGATIVE_SPAN_LENGTHS_FIELD, row)?,
+        list_values::<Int32Type>(array, NEGATIVE_SPAN_LENGTHS_FIELD, row)?,
         "negative",
     )?;
 
@@ -1382,8 +1389,8 @@ pub fn read_histogram(array: &StructArray, row: usize) -> DfResult<Option<Native
             )
         } else {
             (
-                required_primitive::<UInt64Type>(array, COUNT_U64_FIELD, row)? as f64,
-                optional_primitive::<UInt64Type>(array, ZERO_COUNT_U64_FIELD, row)?
+                required_primitive::<Int64Type>(array, COUNT_I64_FIELD, row)? as f64,
+                optional_primitive::<Int64Type>(array, ZERO_COUNT_I64_FIELD, row)?
                     .unwrap_or_default() as f64,
                 list_values::<Int64Type>(array, POSITIVE_BUCKETS_I64_FIELD, row)?
                     .into_iter()
@@ -1439,8 +1446,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
     let mut positive_span_lengths = Vec::with_capacity(values.len());
     let mut negative_span_offsets = Vec::with_capacity(values.len());
     let mut negative_span_lengths = Vec::with_capacity(values.len());
-    let mut count_u64 = Vec::<Option<u64>>::with_capacity(values.len());
-    let mut zero_count_u64 = Vec::<Option<u64>>::with_capacity(values.len());
+    let mut count_i64 = Vec::<Option<i64>>::with_capacity(values.len());
+    let mut zero_count_i64 = Vec::<Option<i64>>::with_capacity(values.len());
     let mut positive_buckets_i64 = Vec::with_capacity(values.len());
     let mut negative_buckets_i64 = Vec::with_capacity(values.len());
     let mut count_f64 = Vec::with_capacity(values.len());
@@ -1486,8 +1493,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
                     .map(|span| span.length)
                     .collect(),
             ));
-            count_u64.push(None);
-            zero_count_u64.push(None);
+            count_i64.push(None);
+            zero_count_i64.push(None);
             positive_buckets_i64.push(list_opt(Vec::<i64>::new()));
             negative_buckets_i64.push(list_opt(Vec::<i64>::new()));
             count_f64.push(Some(histogram.count));
@@ -1505,8 +1512,8 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
             positive_span_lengths.push(None);
             negative_span_offsets.push(None);
             negative_span_lengths.push(None);
-            count_u64.push(None);
-            zero_count_u64.push(None);
+            count_i64.push(None);
+            zero_count_i64.push(None);
             positive_buckets_i64.push(None);
             negative_buckets_i64.push(None);
             count_f64.push(None);
@@ -1542,7 +1549,7 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
         ),
         (
             POSITIVE_SPAN_LENGTHS_FIELD,
-            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
                 positive_span_lengths,
             )),
         ),
@@ -1554,14 +1561,14 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
         ),
         (
             NEGATIVE_SPAN_LENGTHS_FIELD,
-            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
                 negative_span_lengths,
             )),
         ),
-        (COUNT_U64_FIELD, Arc::new(UInt64Array::from(count_u64))),
+        (COUNT_I64_FIELD, Arc::new(Int64Array::from(count_i64))),
         (
-            ZERO_COUNT_U64_FIELD,
-            Arc::new(UInt64Array::from(zero_count_u64)),
+            ZERO_COUNT_I64_FIELD,
+            Arc::new(Int64Array::from(zero_count_i64)),
         ),
         (
             POSITIVE_BUCKETS_I64_FIELD,
@@ -1672,7 +1679,7 @@ mod tests {
 
         assert_eq!(read_histogram(array, 0).unwrap(), Some(expected));
         assert!(
-            primitive_child::<UInt64Type>(array, COUNT_U64_FIELD)
+            primitive_child::<Int64Type>(array, COUNT_I64_FIELD)
                 .unwrap()
                 .is_null(0)
         );
