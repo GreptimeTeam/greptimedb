@@ -570,10 +570,10 @@ fn registry_source(
 
     let mut rows = Vec::with_capacity(1 + rest.len());
     for decl in std::iter::once(first).chain(rest) {
-        // CAST even a single-column id: id columns must be tags but not
-        // necessarily strings, and the computed table declares entity_id
-        // STRING. Composite ids additionally carry a JSON object of the id
-        // columns in entity_id_attrs.
+        // CAST even a single-column id: id columns need not be strings, and
+        // the computed table declares entity_id STRING. Composite ids
+        // additionally carry a JSON object of the id columns in
+        // entity_id_attrs.
         let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
         let entity_id_attrs = if decl.id_columns.len() == 1 {
             null_json()

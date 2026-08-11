@@ -317,7 +317,8 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// usable `service` declaration.
 ///
 /// A client with no matching server span is an edge to a **virtual node**
-/// named by [`VIRTUAL_DST_CANDIDATES`], with the client's own status/duration
+/// named by the conventions' virtual-destination candidates, with the
+/// client's own status/duration
 /// and `confidence < 1.0`. Real pairs win: when a window's edge key holds any
 /// pair, the edge reports only the pair population (the RFC pins RED metrics
 /// to observed span pairs) and the unmatched clients are suppressed, so one

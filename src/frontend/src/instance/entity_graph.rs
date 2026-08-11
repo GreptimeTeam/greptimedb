@@ -855,8 +855,6 @@ mod tests {
             sorted_declarations(&prom_table_info("http_requests_total", labels, PROM_STAMPS))
                 .is_empty()
         );
-        // The metric engine's physical table aggregates every logical table's
-        // columns and must not become a duplicate source.
         let mut stamps = PROM_STAMPS.to_vec();
         stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
         assert!(sorted_declarations(&prom_table_info("kube_pod_info", labels, &stamps)).is_empty());

@@ -49,8 +49,8 @@ pub struct VirtualDstCandidate {
 #[serde(deny_unknown_fields)]
 pub struct ImplicitEntity {
     pub entity: String,
-    /// Identifying label columns; every one must exist as a tag on the table
-    /// for the declaration to apply.
+    /// Identifying label columns; every one must exist on the table for the
+    /// declaration to apply.
     pub id: Vec<String>,
     /// Descriptive label columns, filtered to those present (kube-state-metrics
     /// label sets vary across versions).

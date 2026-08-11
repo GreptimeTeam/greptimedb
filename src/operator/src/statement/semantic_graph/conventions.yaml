@@ -33,14 +33,11 @@ virtual_dst_candidates:
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
 # Implicit entity declarations for Prometheus entity-descriptor metrics
-# (kube-state-metrics label contracts and the target_info of the
-# OTel<->Prometheus compatibility spec), keyed by metric/table name and gated
-# on signal_type=metric + source=prometheus. Kubernetes identity is
-# name-based: only the *_info metrics carry UIDs, every other metric joins by
-# name labels, so names are what connect the graph (uid stays descriptive).
-# kube_pod_info's pod+node co-declaration means "scheduled on", accepted as
-# the convention. k8s.workload is a Greptime abstraction (OTel has no
-# workload entity type); owner kind is encoded in its identity.
+# (kube-state-metrics label contracts and the compatibility-spec target_info),
+# keyed by table name and gated on signal_type=metric + source=prometheus.
+# Kubernetes identity is name-based: only the *_info metrics carry UIDs, every
+# other metric joins by name labels (uid stays descriptive). k8s.workload is a
+# Greptime abstraction; the owner kind is encoded in its identity.
 prometheus_info_metrics:
   kube_pod_info:
     - entity: k8s.pod

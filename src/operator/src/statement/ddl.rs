@@ -99,8 +99,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
+    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -2429,7 +2429,7 @@ pub fn create_table_info(
         &create_table.time_index,
     )?;
 
-    validate_entity_semantic_options(&table_options, &column_name_to_index_map)?;
+    validate_entity_semantic_options(&table_options, &schema)?;
 
     let meta = TableMeta {
         schema,
@@ -2577,23 +2577,44 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `CAST(column AS Utf8)` yields a stable entity-id string — the
+/// binary-backed and nested types do not, and without the DDL check the
+/// failure would surface only when the graph is scanned.
+fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> bool {
+    use datatypes::prelude::ConcreteDataType;
+    !matches!(
+        data_type,
+        ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Null(_)
+    )
+}
+
 /// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist. Identity columns
-/// are deliberately not required to be tags — trace tables flatten the
-/// identifying attributes (e.g. `span_attributes.gen_ai.agent.id`) into field
-/// columns, and the read-time derivation works on any column.
-fn validate_entity_semantic_options(
-    table_options: &TableOptions,
-    column_name_to_index_map: &HashMap<String, usize>,
-) -> Result<()> {
+/// against the table schema: every named column must exist (tag or field),
+/// and identity columns must have a stable string form.
+fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
     for (key, value) in &table_options.extra_options {
-        if parse_entity_option_key(key).is_none() {
+        let Some((_, role)) = parse_entity_option_key(key) else {
             continue;
         };
         for col in &parse_entity_columns(value) {
+            let column = schema
+                .column_schema_by_name(col)
+                .context(ColumnNotFoundSnafu { msg: col })?;
             ensure!(
-                column_name_to_index_map.contains_key(col),
-                ColumnNotFoundSnafu { msg: col }
+                role != EntityRole::Id || has_stable_string_form(&column.data_type),
+                InvalidSqlSnafu {
+                    err_msg: format!(
+                        "entity id column `{col}` (option `{key}`) has type `{}`, which cannot \
+                         form a string entity id",
+                        column.data_type
+                    ),
+                }
             );
         }
     }
@@ -3130,10 +3151,11 @@ mod test {
 
     #[test]
     fn test_validate_entity_semantic_options() {
-        let col_map = HashMap::from([
-            ("service_name".to_string(), 0usize),
-            ("host_id".to_string(), 1usize),
-            ("value".to_string(), 2usize),
+        let schema = Schema::new(vec![
+            ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
         ]);
         let opts = |pairs: &[(&str, &str)]| TableOptions {
             extra_options: pairs
@@ -3143,8 +3165,7 @@ mod test {
             ..Default::default()
         };
 
-        // Any existing column may be an id — trace tables flatten identifying
-        // attributes into field columns, so tag-ness is not required.
+        // Any existing column with a string form may be an id, tag or field.
         for pairs in [
             &[("greptime.semantic.entity.service.id", "service_name")][..],
             &[(
@@ -3154,16 +3175,22 @@ mod test {
             &[("greptime.semantic.entity.service.id", "value")][..],
             &[("greptime.semantic.entity.service.descriptive", "value")][..],
         ] {
-            assert!(validate_entity_semantic_options(&opts(pairs), &col_map).is_ok());
+            assert!(validate_entity_semantic_options(&opts(pairs), &schema).is_ok());
         }
 
-        // id pointing at a missing column is rejected.
-        let err = validate_entity_semantic_options(
+        let missing = validate_entity_semantic_options(
             &opts(&[("greptime.semantic.entity.service.id", "nope")]),
-            &col_map,
+            &schema,
         )
         .unwrap_err();
-        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
+        assert!(matches!(missing, error::Error::ColumnNotFound { .. }));
+
+        let binary_id = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "payload")]),
+            &schema,
+        )
+        .unwrap_err();
+        assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
     }
 
     #[test]

@@ -200,7 +200,7 @@ drop table greptime_private.semantic_relationships_declared;
 
 -- Agent edges: span structure derives parent_agent calls agent, and span rows
 -- co-declaring gen_ai.agent+gen_ai.model / gen_ai.agent+gen_ai.tool witness
--- uses / invokes.
+-- uses / invokes. The identity columns are fields, not tags.
 create table graph_agent_traces (
   "timestamp" timestamp(9) time index,
   trace_id string,
@@ -213,7 +213,7 @@ create table graph_agent_traces (
   agent_id string,
   model_name string,
   tool_name string,
-  primary key (service_name, agent_id, model_name, tool_name)
+  primary key (service_name)
 ) with (
   'table_data_model' = 'greptime_trace_v1',
   'append_mode' = 'true',
