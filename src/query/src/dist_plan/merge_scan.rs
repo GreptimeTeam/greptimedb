@@ -85,16 +85,6 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
     context.session_config().get_extension()
 }
 
-/// Largest row-count bound safe to pass to DataFusion's join estimation.
-///
-/// Join cardinality estimation multiplies input row counts. Keeping each bound
-/// at or below the square root of `usize::MAX` avoids overflow in that path.
-const MAX_SAFE_NUM_ROWS_ESTIMATE: usize = if usize::BITS >= 64 {
-    i32::MAX as usize
-} else {
-    u16::MAX as usize
-};
-
 /// Returns a deterministic upper bound on rows emitted by the remote plan for
 /// one region.
 ///
@@ -464,6 +454,7 @@ impl MergeScanExec {
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
         let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
         //
@@ -473,7 +464,7 @@ impl MergeScanExec {
         //
         // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
+            && output_partition_count >= regions.len()
         {
             let lex_ordering = sort
                 .expr
@@ -512,10 +503,7 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(
-            partition_exprs,
-            Self::output_partition_count(regions.len(), target_partition),
-        );
+        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -542,7 +530,10 @@ impl MergeScanExec {
         })
     }
 
-    /// Aggregate row-count bound for all selected regions.
+    /// Conservative row-count upper bound for all selected regions.
+    ///
+    /// This is not an expected cardinality: DataFusion receives it as an
+    /// inexact estimate only because `Statistics` has no upper-bound precision.
     fn estimated_num_rows(&self) -> Precision<usize> {
         if self.regions.is_empty() {
             return Precision::Inexact(0);
@@ -551,14 +542,9 @@ impl MergeScanExec {
         let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
             return Precision::Absent;
         };
-        let Some(rows) = rows_per_region.checked_mul(self.regions.len()) else {
-            return Precision::Absent;
-        };
-        if rows > MAX_SAFE_NUM_ROWS_ESTIMATE {
-            return Precision::Absent;
-        }
-
-        Precision::Inexact(rows)
+        rows_per_region
+            .checked_mul(self.regions.len())
+            .map_or(Precision::Absent, Precision::Inexact)
     }
 
     /// Number of partitions populated by the region striping in [`Self::to_stream`].
@@ -1670,6 +1656,22 @@ mod tests {
                 .unwrap()
                 .num_rows,
             Precision::Inexact(100)
+        );
+
+        let large_bound = i32::MAX as usize + 1;
+        let large_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(large_bound))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows,
+            Precision::Inexact(large_bound)
         );
 
         let uncapped = LogicalPlanBuilder::empty(true)
