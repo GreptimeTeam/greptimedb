@@ -22,6 +22,7 @@ use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -56,20 +57,61 @@ impl OptimizerRule for JsonTypeConcretizeRule {
                     return Ok(Transformed::no(plan));
                 };
 
-                let Some(adapter) = source
+                if let Some(adapter) = source
                     .table_provider
                     .as_any()
                     .downcast_ref::<DummyTableProvider>()
-                else {
-                    return Ok(Transformed::no(plan));
-                };
+                {
+                    let json_types = retain_json2_type_hints(&json_types, |column| {
+                        adapter
+                            .region_metadata()
+                            .column_by_name(column)
+                            .is_some_and(|column| column.column_schema.data_type.is_json2())
+                    });
+                    if json_types.is_empty() {
+                        return Ok(Transformed::no(plan));
+                    }
 
-                adapter.with_json_type_hint(json_types.clone());
-                Ok(Transformed::yes(plan))
+                    adapter.with_json_type_hint(json_types);
+                    return Ok(Transformed::yes(plan));
+                }
+
+                if let Some(adapter) = source
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DfTableProviderAdapter>()
+                {
+                    let json_types = retain_json2_type_hints(&json_types, |column| {
+                        adapter
+                            .table()
+                            .schema_ref()
+                            .column_schema_by_name(column)
+                            .is_some_and(|column| column.data_type.is_json2())
+                    });
+                    if json_types.is_empty() {
+                        return Ok(Transformed::no(plan));
+                    }
+
+                    adapter.with_json_type_hint(json_types);
+                    return Ok(Transformed::yes(plan));
+                }
+
+                Ok(Transformed::no(plan))
             }
             _ => Ok(Transformed::no(plan)),
         })
     }
+}
+
+fn retain_json2_type_hints(
+    json_types: &HashMap<String, JsonNativeType>,
+    mut is_json2_column: impl FnMut(&str) -> bool,
+) -> HashMap<String, JsonNativeType> {
+    json_types
+        .iter()
+        .filter(|(column, _)| is_json2_column(column))
+        .map(|(column, json_type)| (column.clone(), json_type.clone()))
+        .collect()
 }
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
@@ -228,11 +270,11 @@ mod tests {
     #[test]
     fn test_json_type_concretize_rule_rewrite() -> Result<()> {
         let exprs = vec![
-            json_get_expr(col("k0"), path_expr("a.b"), Some(DataType::Int64))?.alias("ab"),
-            json_get_expr(col("k0"), path_expr("a.c"), None)?.alias("ac"),
-            json_get_expr(col("k0"), path_expr("d"), Some(DataType::Boolean))?.alias("d"),
+            json_get_expr(col("j"), path_expr("a.b"), Some(DataType::Int64))?.alias("ab"),
+            json_get_expr(col("j"), path_expr("a.c"), None)?.alias("ac"),
+            json_get_expr(col("j"), path_expr("d"), Some(DataType::Boolean))?.alias("d"),
         ];
-        let (provider, plan) = build_plan(exprs)?;
+        let (provider, plan) = build_json2_plan(exprs)?;
 
         assert!(
             JsonTypeConcretizeRule
@@ -253,17 +295,17 @@ mod tests {
 
         let request = provider.scan_request();
         assert_eq!(1, request.json_type_hint.len());
-        assert_eq!(Some(&expected), request.json_type_hint.get("k0"));
+        assert_eq!(Some(&expected), request.json_type_hint.get("j"));
         Ok(())
     }
 
     #[test]
     fn test_json_type_concretize_rule_conflict_to_variant() -> Result<()> {
         let exprs = vec![
-            json_get_expr(col("k0"), path_expr("a"), Some(DataType::Int64))?.alias("a_num"),
-            json_get_expr(col("k0"), path_expr("a.b"), Some(DataType::Boolean))?.alias("a_obj"),
+            json_get_expr(col("j"), path_expr("a"), Some(DataType::Int64))?.alias("a_num"),
+            json_get_expr(col("j"), path_expr("a.b"), Some(DataType::Boolean))?.alias("a_obj"),
         ];
-        let (provider, plan) = build_plan(exprs)?;
+        let (provider, plan) = build_json2_plan(exprs)?;
 
         assert!(
             JsonTypeConcretizeRule
@@ -277,8 +319,23 @@ mod tests {
         )]));
         assert_eq!(
             Some(&expected),
-            provider.scan_request().json_type_hint.get("k0")
+            provider.scan_request().json_type_hint.get("j")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_type_concretize_rule_ignores_non_json2_columns() -> Result<()> {
+        let exprs =
+            vec![json_get_expr(col("k0"), path_expr("a.b"), Some(DataType::Int64))?.alias("ab")];
+        let (provider, plan) = build_plan(exprs)?;
+
+        assert!(
+            !JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert!(provider.scan_request().json_type_hint.is_empty());
         Ok(())
     }
 
