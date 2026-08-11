@@ -463,7 +463,7 @@ pub(crate) fn parse_credential_line(
 
     let (username_part, password) = (parts[0], parts[1]);
     let (username, permission_mode) = if let Some((user, perm)) = username_part.split_once(':') {
-        (user, PermissionMode::from_str(perm))
+        (user, PermissionMode::from_str(perm)?)
     } else {
         (username_part, PermissionMode::default())
     };
@@ -765,6 +765,14 @@ mod tests {
         // Invalid format - multiple equals signs
         let result = parse_credential_line("user=pass=word");
         assert_eq!(result, None);
+
+        for line in [
+            "user:readonyl=password",
+            "user:=password",
+            "user:arbitrary=password",
+        ] {
+            assert_eq!(parse_credential_line(line), None);
+        }
 
         // Empty password
         let result = parse_credential_line("user=");
