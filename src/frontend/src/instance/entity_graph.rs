@@ -47,9 +47,10 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, CoDeclaredSource, DeclaredSource, EntityDeclaration, GraphQueryWindow,
-    OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources, build_registry_plan,
-    build_relationships_plan, declared_relationships_schema_matches,
+    CallsSource, CoDeclaredSource, Conventions, DeclaredSource, EntityDeclaration,
+    GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources,
+    build_registry_plan, build_relationships_plan, conventions,
+    declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -59,7 +60,8 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
-    EntityRole, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
+    EntityRole, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+    is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
 };
 
 use crate::error;
@@ -183,20 +185,20 @@ impl EntityGraphProviderImpl {
             .collect()
     }
 
-    /// All entity declarations of one table. Trace-v1 tables created before the
+    /// All entity declarations of one table: the explicit options plus the
+    /// zero-configuration conventions. Trace-v1 tables created before the
     /// ingest-side auto-stamp carry no `entity.service.id` option; synthesize it
     /// (their schema is fixed), so their `calls` edges have endpoint entities.
-    /// A table with an explicit service declaration never gets the synthesized
-    /// one — not even when the explicit declaration is invalid and skipped:
+    /// An explicit declaration of a type always suppresses the synthesized
+    /// one — even when the explicit declaration is invalid and skipped:
     /// silently falling back would change entity identity behind the user's back.
-    fn declarations_for(table_info: &TableInfo) -> Vec<EntityDeclaration> {
+    fn declarations_for(
+        table_info: &TableInfo,
+        conventions: &Conventions,
+    ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
-        let has_explicit_service = table_info.meta.options.extra_options.keys().any(|key| {
-            parse_entity_option_key(key)
-                .is_some_and(|(ty, role)| ty == "service" && role == EntityRole::Id)
-        });
         if is_trace_v1_table(table_info)
-            && !has_explicit_service
+            && !Self::explicitly_declares(table_info, "service")
             && table_info
                 .meta
                 .schema
@@ -218,7 +220,80 @@ impl EntityGraphProviderImpl {
                 scope_columns: vec![],
             });
         }
+        Self::extend_with_prometheus_conventions(table_info, conventions, &mut declarations);
         declarations
+    }
+
+    /// Whether the table carries an explicit `entity.<type>.id` option.
+    fn explicitly_declares(table_info: &TableInfo, entity_type: &str) -> bool {
+        table_info.meta.options.extra_options.keys().any(|key| {
+            parse_entity_option_key(key)
+                .is_some_and(|(ty, role)| ty == entity_type && role == EntityRole::Id)
+        })
+    }
+
+    /// Implicit declarations of the well-known Prometheus entity-descriptor
+    /// metrics (the `prometheus_info_metrics` whitelist of `conventions.yaml`),
+    /// gated on the ingest-stamped `signal_type=metric` + `source=prometheus`
+    /// options and keyed by table name. The metric engine's physical table
+    /// aggregates every logical table's columns and must not contribute a
+    /// duplicate source. Identifying columns must all exist; descriptive
+    /// columns are filtered to those present (kube-state-metrics label sets
+    /// vary across versions).
+    fn extend_with_prometheus_conventions(
+        table_info: &TableInfo,
+        conventions: &Conventions,
+        declarations: &mut Vec<EntityDeclaration>,
+    ) {
+        let options = &table_info.meta.options.extra_options;
+        if options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) != Some(SIGNAL_TYPE_METRIC)
+            || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(SOURCE_PROMETHEUS)
+            || table_info.is_physical_table()
+        {
+            return;
+        }
+        let Some(implicit_entities) = conventions.prometheus_info_metrics.get(&table_info.name)
+        else {
+            return;
+        };
+        let schema = &table_info.meta.schema;
+        let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
+            return;
+        };
+        for implicit in implicit_entities {
+            if Self::explicitly_declares(table_info, &implicit.entity)
+                || !implicit
+                    .id
+                    .iter()
+                    .all(|c| schema.column_schema_by_name(c).is_some())
+            {
+                continue;
+            }
+            let descriptive_columns = if implicit.descriptive_rest {
+                table_info
+                    .meta
+                    .row_key_column_names()
+                    .filter(|c| !implicit.id.contains(c))
+                    .cloned()
+                    .collect()
+            } else {
+                implicit
+                    .descriptive
+                    .iter()
+                    .filter(|c| schema.column_schema_by_name(c).is_some())
+                    .cloned()
+                    .collect()
+            };
+            declarations.push(EntityDeclaration {
+                schema: table_info.schema_name.clone(),
+                table: table_info.name.clone(),
+                time_index: time_index.clone(),
+                entity_type: implicit.entity.clone(),
+                id_columns: implicit.id.clone(),
+                descriptive_columns,
+                scope_columns: vec![],
+            });
+        }
     }
 
     /// Enumerates entity declarations and trace tables across a catalog. Trace
@@ -233,6 +308,10 @@ impl EntityGraphProviderImpl {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
+        let conventions = conventions()
+            .map_err(datafusion::error::DataFusionError::Internal)
+            .context(error::DataFusionSnafu)
+            .map_err(BoxedError::new)?;
 
         // A target-blind checker (e.g. the default mode-based one) answers the
         // same for every table: ask once up front instead of per table.
@@ -273,7 +352,7 @@ impl EntityGraphProviderImpl {
             let mut tables = catalog_manager.tables(catalog, &schema, query_ctx);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
-                let table_declarations = Self::declarations_for(&table_info);
+                let table_declarations = Self::declarations_for(&table_info, conventions);
                 let is_trace = is_trace_v1_table(&table_info);
                 // Authorize only tables that would contribute rows.
                 if per_table_auth
@@ -541,6 +620,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use table::metadata::{TableInfoBuilder, TableMeta, TableType};
     use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TableOptions};
 
@@ -564,6 +644,15 @@ mod tests {
     }
 
     fn assemble_table_info(column_schemas: Vec<ColumnSchema>, extra: &[(&str, &str)]) -> TableInfo {
+        named_table_info("t1", column_schemas, vec![], extra)
+    }
+
+    fn named_table_info(
+        name: &str,
+        column_schemas: Vec<ColumnSchema>,
+        primary_key_indices: Vec<usize>,
+        extra: &[(&str, &str)],
+    ) -> TableInfo {
         let schema = Arc::new(
             SchemaBuilder::try_from_columns(column_schemas)
                 .unwrap()
@@ -579,7 +668,7 @@ mod tests {
         };
         let meta = TableMeta {
             schema,
-            primary_key_indices: vec![],
+            primary_key_indices,
             value_indices: vec![],
             engine: MITO_ENGINE.to_string(),
             next_column_id: 1,
@@ -591,7 +680,7 @@ mod tests {
         };
         TableInfoBuilder::default()
             .table_id(1)
-            .name("t1")
+            .name(name)
             .catalog_name(DEFAULT_CATALOG_NAME)
             .schema_name(DEFAULT_SCHEMA_NAME)
             .table_version(0)
@@ -599,6 +688,24 @@ mod tests {
             .meta(meta)
             .build()
             .unwrap()
+    }
+
+    /// A metric-engine-logical-table shape: every label column is a tag.
+    fn prom_table_info(name: &str, tags: &[&str], extra: &[(&str, &str)]) -> TableInfo {
+        let mut column_schemas = vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        column_schemas.extend(
+            tags.iter()
+                .map(|c| ColumnSchema::new(*c, ConcreteDataType::string_datatype(), true)),
+        );
+        let primary_key_indices = (1..=tags.len()).collect();
+        named_table_info(name, column_schemas, primary_key_indices, extra)
     }
 
     #[test]
@@ -634,7 +741,7 @@ mod tests {
                 ("greptime.semantic.entity.host.id", "gone"),
             ],
         );
-        let declarations = EntityGraphProviderImpl::declarations_for(&info);
+        let declarations = EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap());
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].entity_type, "service");
 
@@ -645,7 +752,7 @@ mod tests {
                 ("greptime.semantic.entity.service.descriptive", "gone"),
             ],
         );
-        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
     }
 
     #[test]
@@ -654,7 +761,7 @@ mod tests {
             &["service_name"],
             &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
         );
-        let declarations = EntityGraphProviderImpl::declarations_for(&info);
+        let declarations = EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap());
         assert_eq!(declarations.len(), 1);
         let decl = &declarations[0];
         assert_eq!(decl.entity_type, "service");
@@ -669,11 +776,11 @@ mod tests {
                 ("greptime.semantic.entity.service.id", "service_name"),
             ],
         );
-        assert_eq!(EntityGraphProviderImpl::declarations_for(&info).len(), 1);
+        assert_eq!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).len(), 1);
 
         // A trace-model table without the fixed column synthesizes nothing.
         let info = table_info(&[], &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)]);
-        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
 
         // An explicit but invalid declaration must not silently fall back to
         // the synthesized one: identity must not change behind the user's back.
@@ -684,6 +791,106 @@ mod tests {
                 ("greptime.semantic.entity.service.id", "gone"),
             ],
         );
-        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
+    }
+
+    const PROM_STAMPS: &[(&str, &str)] = &[
+        (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+        (SEMANTIC_SOURCE, SOURCE_PROMETHEUS),
+    ];
+
+    fn sorted_declarations(info: &TableInfo) -> Vec<EntityDeclaration> {
+        let mut declarations =
+            EntityGraphProviderImpl::declarations_for(info, conventions().unwrap());
+        declarations.sort_by(|a, b| a.entity_type.cmp(&b.entity_type));
+        declarations
+    }
+
+    #[test]
+    fn prometheus_info_metric_gets_implicit_declarations() {
+        let info = prom_table_info(
+            "kube_pod_info",
+            &["namespace", "pod", "uid", "node", "job", "instance"],
+            PROM_STAMPS,
+        );
+        let declarations = sorted_declarations(&info);
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].entity_type, "k8s.node");
+        assert_eq!(declarations[0].id_columns, vec!["node"]);
+        assert_eq!(declarations[1].entity_type, "k8s.pod");
+        assert_eq!(declarations[1].id_columns, vec!["namespace", "pod"]);
+        // host_ip/pod_ip/created_by_* are absent from this table; descriptive
+        // shrinks to the present columns.
+        assert_eq!(declarations[1].descriptive_columns, vec!["uid", "node"]);
+        assert_eq!(declarations[1].time_index, "greptime_timestamp");
+    }
+
+    #[test]
+    fn prometheus_implicit_declarations_are_gated() {
+        let labels: &[&str] = &["namespace", "pod", "node"];
+        // No semantic stamps at all.
+        assert!(sorted_declarations(&prom_table_info("kube_pod_info", labels, &[])).is_empty());
+        // A non-Prometheus source.
+        assert!(
+            sorted_declarations(&prom_table_info(
+                "kube_pod_info",
+                labels,
+                &[
+                    (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+                    (SEMANTIC_SOURCE, "opentelemetry"),
+                ],
+            ))
+            .is_empty()
+        );
+        // Not a whitelisted metric name.
+        assert!(
+            sorted_declarations(&prom_table_info("http_requests_total", labels, PROM_STAMPS))
+                .is_empty()
+        );
+        // The metric engine's physical table aggregates every logical table's
+        // columns and must not become a duplicate source.
+        let mut stamps = PROM_STAMPS.to_vec();
+        stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
+        assert!(sorted_declarations(&prom_table_info("kube_pod_info", labels, &stamps)).is_empty());
+
+        // A missing id column drops that entity, not the whole table.
+        let info = prom_table_info("kube_pod_info", &["namespace", "pod"], PROM_STAMPS);
+        let declarations = sorted_declarations(&info);
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].entity_type, "k8s.pod");
+        assert!(declarations[0].descriptive_columns.is_empty());
+    }
+
+    #[test]
+    fn explicit_declaration_suppresses_the_implicit_one() {
+        let mut stamps = PROM_STAMPS.to_vec();
+        stamps.push(("greptime.semantic.entity.k8s.pod.id", "pod"));
+        let info = prom_table_info("kube_pod_info", &["namespace", "pod", "node"], &stamps);
+        let declarations = sorted_declarations(&info);
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].entity_type, "k8s.node");
+        assert_eq!(declarations[1].entity_type, "k8s.pod");
+        // The explicit identity wins over the conventional [namespace, pod].
+        assert_eq!(declarations[1].id_columns, vec!["pod"]);
+    }
+
+    #[test]
+    fn target_info_descriptive_rest_covers_remaining_tags() {
+        let info = prom_table_info(
+            "target_info",
+            &["job", "instance", "k8s_cluster_name", "service_version"],
+            PROM_STAMPS,
+        );
+        let declarations = sorted_declarations(&info);
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].entity_type, "service");
+        assert_eq!(declarations[0].id_columns, vec!["job"]);
+        assert_eq!(
+            declarations[0].descriptive_columns,
+            vec!["instance", "k8s_cluster_name", "service_version"]
+        );
+        assert_eq!(declarations[1].entity_type, "service.instance");
+        assert_eq!(declarations[1].id_columns, vec!["job", "instance"]);
+        assert!(declarations[1].descriptive_columns.is_empty());
     }
 }
