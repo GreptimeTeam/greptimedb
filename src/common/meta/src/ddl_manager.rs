@@ -383,8 +383,8 @@ impl DdlManager {
             .ensure_gc_requirement()
             .await
             .context(PersistRepartitionGcRequirementSnafu)?;
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
         if wait {
             self.execute_procedure_and_wait(procedure_with_id).await
         } else {
@@ -499,8 +499,8 @@ impl DdlManager {
             context,
         )?;
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -516,8 +516,8 @@ impl DdlManager {
 
         let procedure = CreateViewProcedure::new(create_view_task, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -535,8 +535,8 @@ impl DdlManager {
         let procedure =
             CreateLogicalTablesProcedure::new(create_table_tasks, physical_table_id, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -554,8 +554,8 @@ impl DdlManager {
         let procedure =
             AlterLogicalTablesProcedure::new(alter_table_tasks, physical_table_id, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -571,8 +571,8 @@ impl DdlManager {
 
         let procedure = DropTableProcedure::new(drop_table_task, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -611,7 +611,7 @@ impl DdlManager {
                 Some(original_table_name),
             );
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-                .with_event_context(event_context.clone());
+                .with_event_context(event_context);
 
             self.execute_procedure_and_wait(procedure_with_id).await
         }
@@ -639,7 +639,7 @@ impl DdlManager {
             let context = self.create_context();
             let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-                .with_event_context(event_context.clone());
+                .with_event_context(event_context);
 
             self.execute_procedure_and_wait(procedure_with_id).await
         }
@@ -669,7 +669,7 @@ impl DdlManager {
             let procedure =
                 PurgeDroppedTableProcedure::new_if_expired(purge_dropped_table_task, context);
             let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-                .with_event_context(event_context.clone());
+                .with_event_context(event_context);
 
             self.execute_procedure_and_wait(procedure_with_id).await
         }
@@ -697,8 +697,8 @@ impl DdlManager {
             creator,
             context,
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -716,8 +716,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -729,8 +729,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = AlterDatabaseProcedure::new(alter_database_task, context)?;
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -745,8 +745,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -760,8 +760,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropFlowProcedure::new(drop_flow, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -775,8 +775,8 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropViewProcedure::new(drop_view, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -792,8 +792,8 @@ impl DdlManager {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -813,8 +813,8 @@ impl DdlManager {
             )
             .await?;
         let procedure = CommentOnProcedure::new(comment_on_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_event_context(event_context.clone());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
