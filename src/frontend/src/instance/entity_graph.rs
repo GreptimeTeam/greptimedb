@@ -302,7 +302,7 @@ impl EntityGraphProviderImpl {
                             .cloned()
                     };
                     let service = find("service");
-                    let agent = find("agent");
+                    let agent = find("gen_ai.agent");
                     if service.is_none() {
                         // No usable service identity: the table cannot
                         // contribute service-calls edges (see declarations_for).

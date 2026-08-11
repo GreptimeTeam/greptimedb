@@ -31,11 +31,17 @@ use datafusion::functions_window::expr_fn::row_number;
 use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
 
+use crate::statement::semantic_graph::conventions::Conventions;
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    bin_interval, bin_ms, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
-    unnest_rows,
+    bin_interval, bin_ms, conventions, entity_id_expr, interval, null_json, parse_json_expr, qcol,
+    union_all, unnest_rows,
 };
+
+/// The embedded conventions, with a broken file surfaced as a plan error.
+fn builtin() -> DfResult<&'static Conventions> {
+    conventions().map_err(datafusion_common::DataFusionError::Internal)
+}
 
 /// The projected columns of `semantic_relationships`, in order. Every derived
 /// branch and the declared-edge branch must project exactly these so the
@@ -129,25 +135,6 @@ pub fn build_relationships_plan(
         .transpose()
 }
 
-/// The same-row co-declaration vocabulary open to any declaring table: a row
-/// carrying both identities witnesses the edge, and the built-in direction is
-/// `src -> dst`. Rows are `(src_type, dst_type, rel_type)`.
-const ATTRIBUTE_EDGE_VOCABULARY: [(&str, &str, &str); 6] = [
-    ("service.instance", "host", "runs_on"),
-    ("process", "host", "runs_on"),
-    ("k8s.pod", "k8s.node", "runs_on"),
-    ("k8s.pod", "k8s.container", "contains"),
-    ("service.instance", "service", "part_of"),
-    ("k8s.pod", "k8s.workload", "part_of"),
-];
-
-/// The agent-edge vocabulary, applied only to trace sources: the RFC derives
-/// `agent uses model` / `agent invokes tool` from span structure (an LLM- or
-/// tool-call span carries both identities), so a non-trace table co-declaring
-/// these types must not fabricate invocations.
-const AGENT_EDGE_VOCABULARY: [(&str, &str, &str); 2] =
-    [("agent", "model", "uses"), ("agent", "tool", "invokes")];
-
 const CO_DECLARED_VALID_COLUMN: &str = "__edge_valid";
 
 /// The same-row co-declared branch: for each source table, every vocabulary
@@ -159,19 +146,22 @@ fn co_declared_branch(
     sources: Vec<CoDeclaredSource>,
     window: &GraphQueryWindow,
 ) -> DfResult<Option<DataFrame>> {
+    let vocabulary = builtin()?;
     let mut union_df: Option<DataFrame> = None;
     for source in sources {
         let find = |ty: &str| source.declarations.iter().find(|d| d.entity_type == ty);
         let mut pairs = Vec::new();
-        for (src_type, dst_type, rel_type) in ATTRIBUTE_EDGE_VOCABULARY {
-            if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
-                pairs.push((src, dst, rel_type, "attribute"));
+        for rule in &vocabulary.edge_vocabulary {
+            if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
+                pairs.push((src, dst, rule.rel.as_str(), "attribute"));
             }
         }
         if source.is_trace {
-            for (src_type, dst_type, rel_type) in AGENT_EDGE_VOCABULARY {
-                if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
-                    pairs.push((src, dst, rel_type, "trace"));
+            // Agent edges are tied to span structure by the RFC: a non-trace
+            // table co-declaring these types must not fabricate invocations.
+            for rule in &vocabulary.agent_edge_vocabulary {
+                if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
+                    pairs.push((src, dst, rule.rel.as_str(), "trace"));
                 }
             }
         }
@@ -311,21 +301,6 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
             ident("attributes"),
         ])
 }
-
-/// Span-attribute columns naming an uninstrumented peer, in precedence order,
-/// each with the `connection_type` its match implies: current OTel names
-/// first (`service.peer.name` and `db.namespace` replaced the deprecated
-/// `peer.service` and `db.name` in semconv 1.39/1.26, kept for existing
-/// telemetry), the bare network endpoint last. Attribute columns are dynamic
-/// in `greptime_trace_v1` (created on first use), so only columns present in
-/// a table's schema participate.
-const VIRTUAL_DST_CANDIDATES: [(&str, &str); 5] = [
-    ("span_attributes.service.peer.name", "virtual_node"),
-    ("span_attributes.peer.service", "virtual_node"),
-    ("span_attributes.db.namespace", "database"),
-    ("span_attributes.db.name", "database"),
-    ("span_attributes.server.address", "virtual_node"),
-];
 
 /// Confidence of a virtual-node edge: the peer was named by a client-side
 /// attribute, not witnessed by a server span (the RFC requires `< 1.0`).
@@ -524,16 +499,22 @@ fn client_spans(
     scan: &DataFrame,
     window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
-    // NULLIF('') lets an empty value fall through to the next candidate.
+    // Attribute columns are dynamic in `greptime_trace_v1` (created on first
+    // use), so only candidate columns present in the table's schema
+    // participate. NULLIF('') lets an empty value fall through to the next
+    // candidate.
     let present: Vec<(Expr, &str)> = {
         let schema = scan.schema();
-        VIRTUAL_DST_CANDIDATES
+        builtin()?
+            .virtual_dst_candidates
             .iter()
-            .filter(|(column, _)| schema.has_column_with_unqualified_name(column))
-            .map(|(column, conn)| {
-                let value =
-                    core_fns::nullif().call(vec![cast(ident(*column), DataType::Utf8), lit("")]);
-                (value, *conn)
+            .filter(|candidate| schema.has_column_with_unqualified_name(&candidate.column))
+            .map(|candidate| {
+                let value = core_fns::nullif().call(vec![
+                    cast(ident(&candidate.column), DataType::Utf8),
+                    lit(""),
+                ]);
+                (value, candidate.connection_type.as_str())
             })
             .collect()
     };
@@ -676,9 +657,9 @@ fn agent_calls_branch(
             ident("observed_at").alias("window_start"),
             (ident("observed_at") + bin_interval()).alias("window_end"),
             (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("agent").alias("src_type"),
+            lit("gen_ai.agent").alias("src_type"),
             ident("src_id"),
-            lit("agent").alias("dst_type"),
+            lit("gen_ai.agent").alias("dst_type"),
             ident("dst_id"),
             lit("calls").alias("rel_type"),
             lit("trace").alias("provenance"),
@@ -1173,7 +1154,7 @@ mod tests {
             RelationshipSources {
                 traces: vec![CallsSource {
                     service: None,
-                    agent: Some(co_decl("agent", &["agent_id"])),
+                    agent: Some(co_decl("gen_ai.agent", &["agent_id"])),
                     scan,
                 }],
                 co_declared: vec![],
@@ -1190,9 +1171,9 @@ mod tests {
         // no service declaration.
         assert_eq!(total, 1);
         let batch = &batches[0];
-        assert_eq!(strings(batch, 4), vec!["agent"]);
+        assert_eq!(strings(batch, 4), vec!["gen_ai.agent"]);
         assert_eq!(strings(batch, 5), vec!["orchestrator"]);
-        assert_eq!(strings(batch, 6), vec!["agent"]);
+        assert_eq!(strings(batch, 6), vec!["gen_ai.agent"]);
         assert_eq!(strings(batch, 7), vec!["researcher"]);
         assert_eq!(strings(batch, 8), vec!["calls"]);
         assert_eq!(strings(batch, 9), vec!["trace"]);
@@ -1229,7 +1210,7 @@ mod tests {
             RelationshipSources {
                 traces: vec![CallsSource {
                     service: None,
-                    agent: Some(co_decl("agent", &["agent_id"])),
+                    agent: Some(co_decl("gen_ai.agent", &["agent_id"])),
                     scan,
                 }],
                 co_declared: vec![],
@@ -1444,9 +1425,9 @@ mod tests {
         let ctx = co_declared_ctx();
         let declarations = || {
             vec![
-                co_decl("agent", &["agent_id"]),
-                co_decl("model", &["model_name"]),
-                co_decl("tool", &["tool_name"]),
+                co_decl("gen_ai.agent", &["agent_id"]),
+                co_decl("gen_ai.model", &["model_name"]),
+                co_decl("gen_ai.tool", &["tool_name"]),
             ]
         };
         // A non-trace table co-declaring agent/model/tool must not fabricate
@@ -1462,17 +1443,17 @@ mod tests {
             rows,
             vec![
                 (
-                    "agent".to_string(),
+                    "gen_ai.agent".to_string(),
                     "agent-1".to_string(),
-                    "model".to_string(),
+                    "gen_ai.model".to_string(),
                     "gpt".to_string(),
                     "uses".to_string(),
                     "trace".to_string(),
                 ),
                 (
-                    "agent".to_string(),
+                    "gen_ai.agent".to_string(),
                     "agent-1".to_string(),
-                    "tool".to_string(),
+                    "gen_ai.tool".to_string(),
                     "search".to_string(),
                     "invokes".to_string(),
                     "trace".to_string(),

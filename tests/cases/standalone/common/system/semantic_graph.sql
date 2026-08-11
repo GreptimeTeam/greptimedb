@@ -266,7 +266,8 @@ order by dst_id;
 drop table graph_traces_virtual;
 
 -- Agent edges: span structure derives parent_agent calls agent, and span rows
--- co-declaring agent+model / agent+tool witness uses / invokes.
+-- co-declaring gen_ai.agent+gen_ai.model / gen_ai.agent+gen_ai.tool witness
+-- uses / invokes.
 create table graph_agent_traces (
   "timestamp" timestamp(9) time index,
   trace_id string,
@@ -283,9 +284,9 @@ create table graph_agent_traces (
 ) with (
   'table_data_model' = 'greptime_trace_v1',
   'append_mode' = 'true',
-  'greptime.semantic.entity.agent.id' = 'agent_id',
-  'greptime.semantic.entity.model.id' = 'model_name',
-  'greptime.semantic.entity.tool.id' = 'tool_name'
+  'greptime.semantic.entity.gen_ai.agent.id' = 'agent_id',
+  'greptime.semantic.entity.gen_ai.model.id' = 'model_name',
+  'greptime.semantic.entity.gen_ai.tool.id' = 'tool_name'
 );
 
 insert into graph_agent_traces values

@@ -153,7 +153,7 @@ pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
 /// `host`, `k8s.pod`, `service.instance`. An entity type is one or more
 /// dot-separated segments, each a non-empty `[a-z0-9_]+` token. The dotted form
 /// carries the two-entity-layer convention (`service` vs `service.instance`).
-fn is_valid_entity_type(ty: &str) -> bool {
+pub fn is_valid_entity_type(ty: &str) -> bool {
     !ty.is_empty()
         && ty.split('.').all(|seg| {
             !seg.is_empty()

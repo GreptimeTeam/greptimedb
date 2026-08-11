@@ -1,0 +1,66 @@
+# The built-in derivation conventions of the entity graph. Embedded and
+# versioned with the binary (include_str!), not an operator-editable surface;
+# non-standard deployments override per table with explicit
+# greptime.semantic.entity.* declarations, which always win.
+
+# Same-row co-declaration vocabulary, open to any declaring table: a row
+# carrying both entity identities witnesses `src -rel-> dst`
+# (provenance = attribute).
+edge_vocabulary:
+  - { src: service.instance, dst: host, rel: runs_on }
+  - { src: process, dst: host, rel: runs_on }
+  - { src: k8s.pod, dst: k8s.node, rel: runs_on }
+  - { src: k8s.pod, dst: k8s.container, rel: contains }
+  - { src: service.instance, dst: service, rel: part_of }
+  - { src: k8s.pod, dst: k8s.workload, rel: part_of }
+
+# Agent-edge vocabulary, applied only to trace sources: the RFC ties these
+# edges to span structure (provenance = trace). Entity types follow the GenAI
+# semantic-convention namespace as written.
+agent_edge_vocabulary:
+  - { src: gen_ai.agent, dst: gen_ai.model, rel: uses }
+  - { src: gen_ai.agent, dst: gen_ai.tool, rel: invokes }
+
+# Span-attribute columns naming an uninstrumented peer, in precedence order:
+# current OTel names first (service.peer.name / db.namespace replaced the
+# deprecated peer.service / db.name in semconv 1.39/1.26, kept for existing
+# telemetry), the bare network endpoint last.
+virtual_dst_candidates:
+  - { column: span_attributes.service.peer.name, connection_type: virtual_node }
+  - { column: span_attributes.peer.service, connection_type: virtual_node }
+  - { column: span_attributes.db.namespace, connection_type: database }
+  - { column: span_attributes.db.name, connection_type: database }
+  - { column: span_attributes.server.address, connection_type: virtual_node }
+
+# Implicit entity declarations for Prometheus entity-descriptor metrics
+# (kube-state-metrics label contracts and the target_info of the
+# OTel<->Prometheus compatibility spec), keyed by metric/table name and gated
+# on signal_type=metric + source=prometheus. Kubernetes identity is
+# name-based: only the *_info metrics carry UIDs, every other metric joins by
+# name labels, so names are what connect the graph (uid stays descriptive).
+# kube_pod_info's pod+node co-declaration means "scheduled on", accepted as
+# the convention. k8s.workload is a Greptime abstraction (OTel has no
+# workload entity type); owner kind is encoded in its identity.
+prometheus_info_metrics:
+  kube_pod_info:
+    - entity: k8s.pod
+      id: [namespace, pod]
+      descriptive: [uid, node, host_ip, pod_ip, created_by_kind, created_by_name]
+    - entity: k8s.node
+      id: [node]
+  kube_node_info:
+    - entity: k8s.node
+      id: [node]
+      descriptive: [kernel_version, os_image, container_runtime_version, kubelet_version]
+  kube_pod_owner:
+    - entity: k8s.pod
+      id: [namespace, pod]
+    - entity: k8s.workload
+      id: [namespace, owner_kind, owner_name]
+      descriptive: [owner_is_controller]
+  target_info:
+    - entity: service
+      id: [job]
+      descriptive_rest: true
+    - entity: service.instance
+      id: [job, instance]

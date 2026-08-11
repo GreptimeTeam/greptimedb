@@ -448,9 +448,9 @@ create table graph_agent_traces (
 ) with (
   'table_data_model' = 'greptime_trace_v1',
   'append_mode' = 'true',
-  'greptime.semantic.entity.agent.id' = 'agent_id',
-  'greptime.semantic.entity.model.id' = 'model_name',
-  'greptime.semantic.entity.tool.id' = 'tool_name'
+  'greptime.semantic.entity.gen_ai.agent.id' = 'agent_id',
+  'greptime.semantic.entity.gen_ai.model.id' = 'model_name',
+  'greptime.semantic.entity.gen_ai.tool.id' = 'tool_name'
 );
 
 Affected Rows: 0

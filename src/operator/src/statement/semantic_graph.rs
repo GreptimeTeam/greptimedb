@@ -25,6 +25,7 @@
 //! including filter pushdown into the source table scans. See
 //! `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 
+mod conventions;
 mod relationships;
 
 use std::sync::{Arc, LazyLock};
@@ -45,6 +46,7 @@ use datafusion::functions::{core as core_fns, datetime as datetime_fns, string a
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
+pub use conventions::{Conventions, ImplicitEntity, conventions};
 pub use relationships::{
     CallsSource, CoDeclaredSource, DeclaredSource, RelationshipSources, build_relationships_plan,
 };
