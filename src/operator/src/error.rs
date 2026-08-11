@@ -235,13 +235,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid entity semantic option, reason: {}", reason))]
-    InvalidEntitySemanticOption {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
@@ -957,7 +950,6 @@ impl ErrorExt for Error {
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
-            | Error::InvalidEntitySemanticOption { .. }
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
