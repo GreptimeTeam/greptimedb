@@ -20,7 +20,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context, EventRuntimeContext, EventTrigger, LockKey, Procedure, Status};
+use common_procedure::{Context, EventContext, EventTrigger, LockKey, Procedure, Status};
 use common_telemetry::{debug, error, info, warn};
 pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::rpc::ddl::{AlterTableTask, EventContext};
+use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::RegionRoute;
 
 pub struct AlterLogicalTablesProcedure {
@@ -88,7 +88,6 @@ impl AlterLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
-        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -101,7 +100,6 @@ impl AlterLogicalTablesProcedure {
                 physical_table_info: None,
                 physical_columns: vec![],
                 table_cache_keys_to_invalidate: vec![],
-                event_context,
             },
             physical_table_route: None,
         }
@@ -322,10 +320,7 @@ impl Procedure for AlterLogicalTablesProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::AlterLogicalTables.as_str())
@@ -335,6 +330,11 @@ impl Procedure for AlterLogicalTablesProcedure {
         if ctx.trigger != EventTrigger::Submitted {
             return Some(Box::new(TableDdlEvent::lifecycle(
                 TableDdlEventType::AlterLogicalTables,
+                self.data.tasks.iter().map(|task| {
+                    let table_ref = task.table_ref();
+                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table)
+                        .with_physical_table_id(self.data.physical_table_id)
+                }),
             )));
         }
 
@@ -353,7 +353,6 @@ impl Procedure for AlterLogicalTablesProcedure {
             locators,
             self.data.tasks.len(),
             kinds,
-            self.data.event_context.clone(),
         )))
     }
 }
@@ -370,17 +369,15 @@ pub struct AlterTablesData {
     physical_table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
     physical_columns: Vec<ColumnMetadata>,
     table_cache_keys_to_invalidate: Vec<CacheIdent>,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 impl AlterTablesData {
-    /// Clears all data fields except `state` and `table_cache_keys_to_invalidate` after metadata update.
-    /// This is done to avoid persisting unnecessary data after the update metadata step.
+    /// Clears metadata snapshots after the update metadata step.
+    ///
+    /// Keep the tasks and physical table ID until the procedure finishes: lifecycle
+    /// events use them to retain the logical table locator.
     fn clear_metadata_fields(&mut self) {
-        self.tasks.clear();
         self.table_info_values.clear();
-        self.physical_table_id = 0;
         self.physical_table_info = None;
         self.physical_columns.clear();
     }

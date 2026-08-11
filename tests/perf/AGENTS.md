@@ -19,9 +19,10 @@
 - Keep the direct-SST generator generic. Issue-specific behavior belongs in case
   files and thresholds, not in Rust generator logic.
 - Before pushing perf harness changes, run at least:
-  - `uv run --no-project python -m py_compile .github/scripts/query-regression-run.py .github/scripts/query-regression-summary.py .github/scripts/query-regression-pr-metadata.py tests/perf/test_query_regression_runner_compaction_toctou.py tests/perf/test_query_regression_runner_otlp_trace_load.py`
-  - `uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py && uv run --no-project python tests/perf/test_query_regression_runner_otlp_trace_load.py`
+  - the Python tests in the `Test query regression tooling` step of
+    `.github/workflows/query-regression.yml`
   - `cargo fmt --all -- --check`
   - `cargo build -p cmd --bin query_perf_fixture --features dev-tools`
+  - `cargo build -p cmd --bin query_regression_runner --features dev-tools`
   - exercise the outer lifecycle script and Rust fixture generator against all
     built-in cases when the DSL or workflow case selection changes.

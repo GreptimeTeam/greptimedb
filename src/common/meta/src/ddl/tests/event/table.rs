@@ -19,13 +19,13 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Repartition, SemanticType, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN,
-    TABLE_ID_COLUMN, TABLE_NAME_COLUMN, jsonb_value,
+    CATALOG_NAME_COLUMN, PHYSICAL_TABLE_ID_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN,
+    TABLE_NAME_COLUMN,
 };
 use common_event_recorder::{Event, EventTypeFilter};
 use common_procedure::{
-    ChildSubmissionOutcome, EventRuntimeContext, EventTrigger, Procedure, ProcedureId,
-    ProcedureState, RetryPhase,
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+    RetryPhase,
 };
 use common_time::Timestamp;
 use serde_json::{Value as JsonValue, json};
@@ -52,9 +52,9 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
-use crate::rpc::ddl::{DropTableTask, EventContext, QueryContext, TruncateTableTask};
+use crate::rpc::ddl::{DropTableTask, TruncateTableTask};
 #[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{PurgeDroppedTableTask, TriggerReason, UndropTableTask};
+use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 struct EventCase {
@@ -108,13 +108,26 @@ fn submitted_event_contracts_are_bounded_and_fixed() {
                 .all(|column| column.semantic_type == SemanticType::Field as i32)
         );
 
-        let lifecycle = TableDdlEvent::lifecycle(case.event_type);
+        let lifecycle = TableDdlEvent::lifecycle(
+            case.event_type,
+            [TableDdlLocator::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "lifecycle",
+            )],
+        );
         assert_eq!(lifecycle.extra_schema(), schema);
         assert_eq!(lifecycle.json_payload().unwrap(), JsonValue::Null);
-        assert_eq!(
-            lifecycle.extra_rows().unwrap()[0].values,
-            vec![Value::default(); schema.len()]
-        );
+        assert_eq!(lifecycle.extra_rows().unwrap()[0].values, {
+            let mut values = table_locator_values(Some("lifecycle"), None);
+            if matches!(
+                case.event_type,
+                TableDdlEventType::CreateLogicalTables | TableDdlEventType::AlterLogicalTables
+            ) {
+                values.push(Value::default());
+            }
+            values
+        });
     }
 }
 
@@ -158,6 +171,12 @@ fn later_lifecycle_events_are_uniform() {
     for case in procedure_cases() {
         let submitted = event_for(case.procedure.as_ref(), EventTrigger::Submitted);
         let schema = submitted.extra_schema();
+        let expected_rows = submitted
+            .extra_rows()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>();
 
         for trigger in &triggers {
             let event = event_for(case.procedure.as_ref(), trigger.clone());
@@ -166,8 +185,13 @@ fn later_lifecycle_events_are_uniform() {
             assert_eq!(event.extra_schema(), schema);
             assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
             assert_eq!(
-                event.extra_rows().unwrap()[0].values,
-                vec![Value::default(); schema.len()]
+                event
+                    .extra_rows()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect::<Vec<_>>(),
+                expected_rows
             );
         }
     }
@@ -177,13 +201,7 @@ fn later_lifecycle_events_are_uniform() {
 fn create_success_events_keep_allocated_ids() {
     let mut task = test_create_table_task("create_success");
     task.table_info.ident.table_id = 7;
-    let create_table = CreateTableProcedure::new(
-        task,
-        QueryContext::default(),
-        EventContext::default(),
-        test_context(),
-    )
-    .unwrap();
+    let create_table = CreateTableProcedure::new(task, test_context()).unwrap();
     let state = ProcedureState::Done {
         output: Some(Arc::new(42_u32)),
     };
@@ -193,7 +211,7 @@ fn create_success_events_keep_allocated_ids() {
     assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
     assert_eq!(
         event.extra_rows().unwrap()[0].values,
-        table_locator_values(None, Some(42))
+        table_locator_values(Some("create_success"), Some(42))
     );
 
     let logical_tables = CreateLogicalTablesProcedure::new(
@@ -202,7 +220,6 @@ fn create_success_events_keep_allocated_ids() {
             test_create_logical_table_task("bar"),
         ],
         1024,
-        EventContext::default(),
         test_context(),
     );
     let state = ProcedureState::Done {
@@ -241,14 +258,13 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "create"),
                 true,
                 "mito2",
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "create_if_not_exists": true,
                 "engine": "mito2",
             }),
-            rows: vec![submitted_table_locator_values(Some("create"), None)],
+            rows: vec![table_locator_values(Some("create"), None)],
         },
         EventCase {
             event_type: TableDdlEventType::CreateLogicalTables,
@@ -260,15 +276,14 @@ fn event_cases() -> Vec<EventCase> {
                         .with_physical_table_id(10),
                 ],
                 2,
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "table_count": 2,
             }),
             rows: vec![
-                submitted_logical_locator_values("logical1", None, 10),
-                submitted_logical_locator_values("logical2", None, 10),
+                logical_locator_values("logical1", None, 10),
+                logical_locator_values("logical2", None, 10),
             ],
         },
         EventCase {
@@ -277,13 +292,12 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "alter")
                     .with_table_id(11),
                 Some("drop_columns"),
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "kind": "drop_columns",
             }),
-            rows: vec![submitted_table_locator_values(Some("alter"), Some(11))],
+            rows: vec![table_locator_values(Some("alter"), Some(11))],
         },
         EventCase {
             event_type: TableDdlEventType::AlterLogicalTables,
@@ -296,7 +310,6 @@ fn event_cases() -> Vec<EventCase> {
                 ],
                 2,
                 ["rename_table", "add_columns", "add_columns"],
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
@@ -304,8 +317,8 @@ fn event_cases() -> Vec<EventCase> {
                 "kinds": ["add_columns", "rename_table"],
             }),
             rows: vec![
-                submitted_logical_locator_values("logical1", None, 10),
-                submitted_logical_locator_values("logical2", None, 10),
+                logical_locator_values("logical1", None, 10),
+                logical_locator_values("logical2", None, 10),
             ],
         },
         EventCase {
@@ -314,33 +327,26 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "drop")
                     .with_table_id(12),
                 true,
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "drop_if_exists": true,
             }),
-            rows: vec![submitted_table_locator_values(Some("drop"), Some(12))],
+            rows: vec![table_locator_values(Some("drop"), Some(12))],
         },
         #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::UndropTable,
-            event: TableDdlEvent::undrop_table_submitted(
-                TableDdlLocator::from_table_id(13),
-                EventContext::default(),
-            ),
+            event: TableDdlEvent::undrop_table_submitted(TableDdlLocator::from_table_id(13)),
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![submitted_table_locator_values(None, Some(13))],
+            rows: vec![table_locator_values(None, Some(13))],
         },
         #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::PurgeDroppedTable,
-            event: TableDdlEvent::purge_dropped_table_submitted(
-                TableDdlLocator::from_table_id(14),
-                EventContext::default(),
-            ),
+            event: TableDdlEvent::purge_dropped_table_submitted(TableDdlLocator::from_table_id(14)),
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![submitted_table_locator_values(None, Some(14))],
+            rows: vec![table_locator_values(None, Some(14))],
         },
         EventCase {
             event_type: TableDdlEventType::TruncateTable,
@@ -348,41 +354,29 @@ fn event_cases() -> Vec<EventCase> {
                 TableDdlLocator::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "truncate")
                     .with_table_id(15),
                 4,
-                EventContext::default(),
             ),
             payload: json!({
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "time_range_count": 4,
             }),
-            rows: vec![submitted_table_locator_values(Some("truncate"), Some(15))],
+            rows: vec![table_locator_values(Some("truncate"), Some(15))],
         },
     ]
 }
 
 fn procedure_cases() -> Vec<ProcedureCase> {
-    let create_table = CreateTableProcedure::new(
-        test_create_table_task("create"),
-        QueryContext::default(),
-        EventContext::default(),
-        test_context(),
-    )
-    .unwrap();
+    let create_table =
+        CreateTableProcedure::new(test_create_table_task("create"), test_context()).unwrap();
     let create_logical_tables = CreateLogicalTablesProcedure::new(
         vec![
             test_create_logical_table_task("logical1"),
             test_create_logical_table_task("logical2"),
         ],
         41,
-        EventContext::default(),
         test_context(),
     );
-    let alter_table = AlterTableProcedure::new(
-        42,
-        test_alter_table_task("alter"),
-        EventContext::default(),
-        test_context(),
-    )
-    .unwrap();
+    let alter_table =
+        AlterTableProcedure::new(42, test_alter_table_task("alter"), test_context()).unwrap();
     let alter_logical_tables = AlterLogicalTablesProcedure::new(
         vec![
             make_alter_logical_table_add_column_task(
@@ -397,7 +391,6 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             ),
         ],
         43,
-        EventContext::default(),
         test_context(),
     );
     let drop_table = DropTableProcedure::new(
@@ -409,20 +402,12 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             drop_if_exists: true,
         },
         test_context(),
-        EventContext::default(),
     );
     #[cfg(feature = "enterprise")]
-    let undrop_table = UndropTableProcedure::new(
-        UndropTableTask { table_id: 45 },
-        test_context(),
-        EventContext::default(),
-    );
+    let undrop_table = UndropTableProcedure::new(UndropTableTask { table_id: 45 }, test_context());
     #[cfg(feature = "enterprise")]
-    let purge_dropped_table = PurgeDroppedTableProcedure::new_if_expired(
-        PurgeDroppedTableTask { table_id: 46 },
-        test_context(),
-        EventContext::new(TriggerReason::ScheduledGc),
-    );
+    let purge_dropped_table =
+        PurgeDroppedTableProcedure::new(PurgeDroppedTableTask { table_id: 46 }, test_context());
     let truncate_table = truncate_procedure(TruncateTableTask {
         catalog: DEFAULT_CATALOG_NAME.to_string(),
         schema: DEFAULT_SCHEMA_NAME.to_string(),
@@ -443,7 +428,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "create_if_not_exists": false,
                 "engine": "mito2",
             }),
-            rows: vec![submitted_table_locator_values(Some("create"), None)],
+            rows: vec![table_locator_values(Some("create"), None)],
         },
         ProcedureCase {
             procedure: Box::new(create_logical_tables),
@@ -453,8 +438,8 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "table_count": 2,
             }),
             rows: vec![
-                submitted_logical_locator_values("logical1", None, 41),
-                submitted_logical_locator_values("logical2", None, 41),
+                logical_locator_values("logical1", None, 41),
+                logical_locator_values("logical2", None, 41),
             ],
         },
         ProcedureCase {
@@ -464,7 +449,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "kind": "drop_columns",
             }),
-            rows: vec![submitted_table_locator_values(Some("alter"), Some(42))],
+            rows: vec![table_locator_values(Some("alter"), Some(42))],
         },
         ProcedureCase {
             procedure: Box::new(alter_logical_tables),
@@ -475,8 +460,8 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "kinds": ["add_columns"],
             }),
             rows: vec![
-                submitted_logical_locator_values("logical1", None, 43),
-                submitted_logical_locator_values("logical2", None, 43),
+                logical_locator_values("logical1", None, 43),
+                logical_locator_values("logical2", None, 43),
             ],
         },
         ProcedureCase {
@@ -486,25 +471,21 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "drop_if_exists": true,
             }),
-            rows: vec![submitted_table_locator_values(Some("drop"), Some(44))],
+            rows: vec![table_locator_values(Some("drop"), Some(44))],
         },
         #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(undrop_table),
             event_type: "undrop_table",
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![submitted_table_locator_values(None, Some(45))],
+            rows: vec![table_locator_values(None, Some(45))],
         },
         #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(purge_dropped_table),
             event_type: "purge_dropped_table",
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
-            rows: vec![submitted_table_locator_values_with_event_context(
-                None,
-                Some(46),
-                EventContext::new(TriggerReason::ScheduledGc),
-            )],
+            rows: vec![table_locator_values(None, Some(46))],
         },
         ProcedureCase {
             procedure: Box::new(truncate_table),
@@ -513,7 +494,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
                 "version": TABLE_DDL_PAYLOAD_VERSION,
                 "time_range_count": 1,
             }),
-            rows: vec![submitted_table_locator_values(Some("truncate"), Some(47))],
+            rows: vec![table_locator_values(Some("truncate"), Some(47))],
         },
     ]
 }
@@ -534,7 +515,6 @@ fn expected_schema(event_type: TableDdlEventType) -> Vec<(&'static str, i32)> {
             ColumnDataType::Uint32 as i32,
         ));
     }
-    schema.push((EVENT_CONTEXT_COLUMN.name(), ColumnDataType::Binary as i32));
     schema
 }
 
@@ -547,14 +527,12 @@ fn table_locator_values(table_name: Option<&str>, table_id: Option<u32>) -> Vec<
     } else {
         (Value::default(), Value::default())
     };
-    let mut values = vec![
+    vec![
         catalog_name,
         schema_name,
         table_name.map(string_value).unwrap_or_default(),
         table_id.map(table_id_value).unwrap_or_default(),
-    ];
-    values.push(Value::default());
-    values
+    ]
 }
 
 fn logical_locator_values(
@@ -563,42 +541,8 @@ fn logical_locator_values(
     physical_table_id: u32,
 ) -> Vec<Value> {
     let mut values = table_locator_values(Some(table_name), table_id);
-    let event_context = values.pop().unwrap();
     values.push(table_id_value(physical_table_id));
-    values.push(event_context);
     values
-}
-
-fn submitted_table_locator_values(table_name: Option<&str>, table_id: Option<u32>) -> Vec<Value> {
-    submitted_table_locator_values_with_event_context(table_name, table_id, EventContext::default())
-}
-
-fn submitted_table_locator_values_with_event_context(
-    table_name: Option<&str>,
-    table_id: Option<u32>,
-    event_context: EventContext,
-) -> Vec<Value> {
-    let mut values = table_locator_values(table_name, table_id);
-    *values.last_mut().unwrap() = event_context_value_for(event_context);
-    values
-}
-
-fn submitted_logical_locator_values(
-    table_name: &str,
-    table_id: Option<u32>,
-    physical_table_id: u32,
-) -> Vec<Value> {
-    let mut values = logical_locator_values(table_name, table_id, physical_table_id);
-    *values.last_mut().unwrap() = event_context_value();
-    values
-}
-
-fn event_context_value() -> Value {
-    event_context_value_for(EventContext::default())
-}
-
-fn event_context_value_for(event_context: EventContext) -> Value {
-    jsonb_value(&serde_json::to_value(event_context).unwrap())
 }
 
 fn string_value(value: &str) -> Value {
@@ -615,7 +559,6 @@ fn truncate_procedure(task: TruncateTableTask) -> TruncateTableProcedure {
         task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
         test_context(),
-        EventContext::default(),
     )
 }
 
@@ -633,11 +576,12 @@ fn event_for_state(
     lifecycle_state: &ProcedureState,
 ) -> Box<dyn Event> {
     procedure
-        .event(&EventRuntimeContext {
+        .event(&EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
             event_type_filter: Arc::new(EventTypeFilter::All),
+            event_context: None,
         })
         .unwrap()
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -29,8 +30,8 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
-    trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
+    trace_operations_table_name, trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -578,15 +579,25 @@ impl Inserter {
         if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
-                let table = self
-                    .get_table(catalog, &schema, &req.table_name)
-                    .await?
-                    .context(InvalidInsertRequestSnafu {
-                        reason: format!(
-                            "Table `{}` does not exist, and {}",
-                            req.table_name, disabled_reason
-                        ),
-                    })?;
+                let table = match self.get_table(catalog, &schema, &req.table_name).await? {
+                    Some(table) => table,
+                    // System-defined table: created canonically by the system,
+                    // so the auto-create config/hint does not apply.
+                    None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                        statement_executor
+                            .create_declared_relationships_table(catalog, ctx.clone())
+                            .await?
+                    }
+                    None => {
+                        return InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Table `{}` does not exist, and {}",
+                                req.table_name, disabled_reason
+                            ),
+                        }
+                        .fail();
+                    }
+                };
                 let table_info = table.table_info();
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
@@ -604,6 +615,7 @@ impl Inserter {
         let mut alter_tables = vec![];
         let mut need_refresh_table_infos = HashSet::new();
         let mut instant_table_ids = HashSet::new();
+        let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
 
         for req in &mut requests.inserts {
             match self.get_table(catalog, &schema, &req.table_name).await? {
@@ -630,9 +642,29 @@ impl Inserter {
                         table_infos.insert(table_info.table_id(), table.table_info());
                     }
                 }
+                // A DDL-reserved table's definition never derives from the
+                // write request; the system creates it canonically, below the
+                // user-DDL guard that rejects the generic create path.
+                None if is_ddl_reserved_table(&schema, &req.table_name) => {
+                    let table = statement_executor
+                        .create_declared_relationships_table(catalog, ctx.clone())
+                        .await?;
+                    let table_info = table.table_info();
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
+                    table_infos.insert(table_info.table_id(), table_info);
+                }
                 None => {
-                    let create_expr =
-                        self.get_create_table_expr_on_demand(req, &auto_create_table_type, ctx)?;
+                    let semantic_index = per_table_semantics
+                        .get_or_insert_with(|| parse_per_table_semantic_index(ctx))
+                        .as_ref();
+                    let create_expr = self.get_create_table_expr_on_demand(
+                        req,
+                        &auto_create_table_type,
+                        ctx,
+                        semantic_index,
+                    )?;
                     create_tables.push(create_expr);
                 }
             }
@@ -910,10 +942,17 @@ impl Inserter {
         req: &RowInsertRequest,
         create_type: &AutoCreateTableType,
         ctx: &QueryContextRef,
+        semantic_index: Option<&PerTableSemanticIndex>,
     ) -> Result<CreateTableExpr> {
+        let schema = ctx.current_schema();
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
-        apply_per_table_semantic_options(&mut table_options, ctx, &req.table_name);
+        apply_per_table_semantic_options(
+            &mut table_options,
+            semantic_index,
+            ctx.current_schema().as_str(),
+            &req.table_name,
+        );
 
         let engine_name = if let AutoCreateTableType::Logical(_) = create_type {
             // engine should be metric engine when creating logical tables.
@@ -922,7 +961,6 @@ impl Inserter {
             default_engine()
         };
 
-        let schema = ctx.current_schema();
         let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
         // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_row_inserts_with_create_type()`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
@@ -962,6 +1000,12 @@ impl Inserter {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
+
+        // Never auto-alter a system-defined table to fit a write; a request
+        // with unknown columns fails instead.
+        if is_ddl_reserved_table(&schema_name, &table_name) {
+            return Ok(None);
+        }
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let request_field_count = request_schema
@@ -1255,32 +1299,45 @@ pub fn fill_table_options_for_create(
     }
 }
 
-/// Folds the semantic keys for `table_name` carried on the internal per-table
-/// index extension into `table_options`.
+/// The parsed per-table semantic index: `{schema -> {table -> {key -> value}}}`,
+/// produced by the OTLP metrics encode path (where one metric can fan out into
+/// several tables with distinct keys) and the Prometheus remote write v2 path
+/// (where per-series metadata declares type/unit, and a series may override its
+/// target schema).
+pub type PerTableSemanticIndex = BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>;
+
+/// Parses the per-table semantic index off the context extension. Call once per
+/// create-planning round: a first write creating N tables would otherwise
+/// re-parse the whole index N times. `None` when the request carries no index
+/// (logs, traces, Prom RW v1) or it fails to parse.
+pub fn parse_per_table_semantic_index(ctx: &QueryContextRef) -> Option<PerTableSemanticIndex> {
+    let raw = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY)?;
+    match serde_json::from_str(raw) {
+        Ok(index) => Some(index),
+        Err(_) => {
+            warn!("failed to parse semantic per-table index, skipping per-table options");
+            None
+        }
+    }
+}
+
+/// Folds the semantic keys of the table being created into `table_options`.
 ///
-/// The index is a `{table_name -> {semantic_key: value}}` JSON blob produced by
-/// the OTLP metrics encode path (where one metric can fan out into several
-/// tables with distinct keys). Common keys shared by every table in a request
-/// travel as plain semantic extensions and are handled by
-/// [`fill_table_options_for_create`]; this carries only the per-table tail.
-/// Keys are re-checked against the vocabulary defensively. Ingestion paths
-/// without a per-table index (logs, traces, Prom RW) carry no extension, so this
-/// is a no-op for them.
-fn apply_per_table_semantic_options(
+/// Common keys shared by every table in a request travel as plain semantic
+/// extensions and are handled by [`fill_table_options_for_create`]; this
+/// carries only the per-table tail and is applied after it, so a per-table
+/// value (e.g. `declared` quality) wins. Keys are re-checked against the
+/// vocabulary defensively.
+pub fn apply_per_table_semantic_options(
     table_options: &mut std::collections::HashMap<String, String>,
-    ctx: &QueryContextRef,
+    index: Option<&PerTableSemanticIndex>,
+    schema: &str,
     table_name: &str,
 ) {
-    let Some(raw) = ctx.extension(SEMANTIC_PER_TABLE_INDEX_KEY) else {
-        return;
-    };
-    let Ok(index) = serde_json::from_str::<
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    >(raw) else {
-        warn!("failed to parse semantic per-table index, skipping per-table options");
-        return;
-    };
-    let Some(entry) = index.get(table_name) else {
+    let Some(entry) = index
+        .and_then(|index| index.get(schema))
+        .and_then(|tables| tables.get(table_name))
+    else {
         return;
     };
     for (key, value) in entry {
@@ -1705,22 +1762,41 @@ mod tests {
             SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_PER_TABLE_INDEX_KEY,
         };
 
-        let index = r#"{
-            "http_requests_total": {
-                "greptime.semantic.metric.type": "counter",
-                "greptime.semantic.metric.unit": "By",
-                "greptime.semantic.metric.type_BOGUS": "x"
-            },
-            "other_table": {
-                "greptime.semantic.metric.type": "gauge"
-            }
-        }"#;
+        let index = format!(
+            r#"{{
+            "{DEFAULT_SCHEMA_NAME}": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "counter",
+                    "greptime.semantic.metric.unit": "By",
+                    "greptime.semantic.metric.type_BOGUS": "x"
+                }},
+                "other_table": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }},
+            "other_schema": {{
+                "http_requests_total": {{
+                    "greptime.semantic.metric.type": "gauge"
+                }}
+            }}
+        }}"#
+        );
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
         let ctx = Arc::new(ctx);
 
+        let index = parse_per_table_semantic_index(&ctx);
+        assert!(index.is_some());
+        let index = index.as_ref();
+
         let mut table_options = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut table_options, &ctx, "http_requests_total");
+        apply_per_table_semantic_options(
+            &mut table_options,
+            index,
+            DEFAULT_SCHEMA_NAME,
+            "http_requests_total",
+        );
+        // The write schema's entry applies — not other_schema's `gauge`.
         assert_eq!(
             table_options.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
             Some("counter")
@@ -1735,16 +1811,33 @@ mod tests {
         assert_eq!(table_options.len(), 2);
 
         let mut empty = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut empty, &ctx, "not_in_index");
+        apply_per_table_semantic_options(&mut empty, index, DEFAULT_SCHEMA_NAME, "not_in_index");
         assert!(empty.is_empty());
 
-        // No extension at all is a no-op (e.g. logs / Prom RW).
+        // A schema with no entry is a no-op even when the table name matches
+        // elsewhere.
+        let mut opts = std::collections::HashMap::new();
+        apply_per_table_semantic_options(
+            &mut opts,
+            index,
+            "schema_without_entry",
+            "http_requests_total",
+        );
+        assert!(opts.is_empty());
+
+        // No extension at all parses to no index (e.g. logs / Prom RW v1).
         let bare = Arc::new(QueryContext::with(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
         ));
+        assert!(parse_per_table_semantic_index(&bare).is_none());
         let mut opts = std::collections::HashMap::new();
-        apply_per_table_semantic_options(&mut opts, &bare, "http_requests_total");
+        apply_per_table_semantic_options(
+            &mut opts,
+            None,
+            DEFAULT_SCHEMA_NAME,
+            "http_requests_total",
+        );
         assert!(opts.is_empty());
     }
 

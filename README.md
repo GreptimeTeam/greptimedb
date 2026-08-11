@@ -203,13 +203,13 @@ See the [Contribution Guidelines](CONTRIBUTING.md) for the full developer workfl
 - **Kubernetes**: [GreptimeDB Operator](https://github.com/GreptimeTeam/greptimedb-operator)
 - **Helm Charts**: [Greptime Helm Charts](https://github.com/GreptimeTeam/helm-charts)
 - **Dashboard**: [Web UI](https://github.com/GreptimeTeam/dashboard)
-- **gRPC Ingester**: [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust), [.NET](https://github.com/GreptimeTeam/greptimedb-ingester-dotnet)
+- **gRPC Ingester**: [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust), [.NET](https://github.com/GreptimeTeam/greptimedb-ingester-dotnet), [TypeScript](https://github.com/GreptimeTeam/greptimedb-ingester-ts)
 - **Grafana Data Source**: [GreptimeDB Grafana data source plugin](https://github.com/GreptimeTeam/greptimedb-grafana-datasource)
 - **Grafana Dashboard**: [Official Dashboard for monitoring](https://github.com/GreptimeTeam/greptimedb/blob/main/grafana/README.md)
 
 ## Project Status
 
-GreptimeDB is at [v1.0 GA](https://github.com/GreptimeTeam/greptimedb/releases/tag/v1.0.0) with stable APIs and regular releases. It runs in production at scale — [OceanBase Cloud](https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb) operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60% after migrating from Grafana Loki. See more in [case studies](https://greptime.com/blogs/?category=Use%20Case).
+GreptimeDB is generally available, with stable APIs and regular releases. It runs in production at scale — [OceanBase Cloud](https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb) operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60% after migrating from Grafana Loki. See more in [case studies](https://greptime.com/blogs/?category=Use%20Case).
 
 Read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026), or browse the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version).
 

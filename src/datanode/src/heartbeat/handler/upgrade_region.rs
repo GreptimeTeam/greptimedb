@@ -408,9 +408,12 @@ mod tests {
     #[tokio::test]
     async fn test_region_error() {
         common_telemetry::init_default_ut_logging();
-        let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
+        // With the default (zero) `replay_timeout`, the handler times out before the
+        // mock handle's 100ms delay elapses: it didn't wait for handle returns; it
+        // had no idea about the error.
+        let region_server = mock_region_server();
         let (mock_engine, _) =
             MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
                 // Region is not ready.
@@ -424,9 +427,9 @@ mod tests {
                 // Note: Don't change.
                 region_engine.handle_request_delay = Some(Duration::from_millis(100));
             });
-        mock_region_server.register_test_region(region_id, mock_engine);
+        region_server.register_test_region(region_id, mock_engine);
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
+        let handler_context = HandlerContext::new_for_test(region_server, kv_backend);
         let reply = UpgradeRegionsHandler::new_test()
             .handle(
                 &handler_context,
@@ -437,12 +440,32 @@ mod tests {
             )
             .await;
 
-        // It didn't wait for handle returns; it had no idea about the error.
         let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
         assert!(!reply.ready);
         assert!(reply.exists);
         assert!(reply.error.is_none());
 
+        // With a 200ms `replay_timeout` and a mock handle that returns the error
+        // immediately (no delay), the handler waits for the handle and propagates
+        // its error deterministically: the catchup future completes on its first
+        // poll, so the `replay_timeout` can never fire first. This avoids racing
+        // real wall-clock time (a 100ms delay vs 200ms timeout is flaky on
+        // Windows CI).
+        let mock_region_server = mock_region_server();
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    error::UnexpectedSnafu {
+                        violated: "mock_error".to_string(),
+                    }
+                    .fail()
+                }));
+            });
+        mock_region_server.register_test_region(region_id, mock_engine);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let reply = UpgradeRegionsHandler::new_test()
             .handle(
                 &handler_context,

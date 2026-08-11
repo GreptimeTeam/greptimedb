@@ -98,8 +98,8 @@ WHERE type = '{CREATE_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND flow_name IS NULL
+  AND catalog_name = 'greptime'
+  AND flow_name = '{flow}'
   AND flow_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
@@ -152,9 +152,9 @@ WHERE type = '{DROP_FLOW_EVENT_TYPE}'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
-  AND catalog_name IS NULL
-  AND flow_name IS NULL
-  AND flow_id IS NULL
+  AND catalog_name = 'greptime'
+  AND flow_name = '{flow}'
+  AND flow_id IS NOT NULL
   AND json_is_null(payload)"#,
         ),
     )

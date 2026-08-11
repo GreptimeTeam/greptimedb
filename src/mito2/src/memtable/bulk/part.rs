@@ -262,6 +262,12 @@ impl BulkPart {
         // Update the batch
         self.batch = new_batch;
 
+        // The raw data no longer matches the batch after filling missing
+        // columns. Clears it so the WAL entry is re-encoded from the filled
+        // batch, otherwise replaying the entry restores a batch without the
+        // filled columns and the memtable rejects it.
+        self.raw_data = None;
+
         Ok(())
     }
 
@@ -2895,5 +2901,63 @@ mod tests {
             .expect("should have results");
         let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();
         assert_eq!(total_rows, 6);
+    }
+
+    #[test]
+    fn test_fill_missing_columns_resets_raw_data() {
+        let metadata = metadata_for_test();
+
+        // A batch missing the `v1` field column, e.g. built against an older
+        // schema before `v1` was added.
+        let k0_array = Arc::new(arrow::array::StringArray::from(vec!["key1", "key2"]));
+        let k1_array = Arc::new(arrow::array::UInt32Array::from(vec![1u32, 2]));
+        let v0_array = Arc::new(arrow::array::Int64Array::from(vec![100i64, 200]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000i64, 2000]));
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("k0", ArrowDataType::Utf8, false),
+            Field::new("k1", ArrowDataType::UInt32, false),
+            Field::new("v0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch =
+            RecordBatch::try_new(input_schema, vec![k0_array, k1_array, v0_array, ts_array])
+                .unwrap();
+
+        // Encodes the batch as raw data like the bulk insert request does.
+        let mut encoder = FlightEncoder::default();
+        let schema_bytes = encoder.encode_schema(batch.schema().as_ref()).data_header;
+        let [flight_data] = encoder
+            .encode(FlightMessage::RecordBatch(batch.clone()))
+            .try_into()
+            .unwrap();
+        let mut part = BulkPart {
+            batch,
+            max_timestamp: 2000,
+            min_timestamp: 1000,
+            sequence: 5,
+            timestamp_index: 3,
+            raw_data: Some(ArrowIpc {
+                schema: schema_bytes,
+                data_header: flight_data.data_header,
+                payload: flight_data.data_body,
+            }),
+        };
+
+        part.fill_missing_columns(&metadata).unwrap();
+        assert!(part.batch.column_by_name("v1").is_some());
+        // The raw data no longer matches the batch after filling missing
+        // columns and must be cleared, otherwise the WAL entry built from
+        // this part loses the filled columns.
+        assert!(part.raw_data.is_none());
+
+        // The WAL entry round trip keeps the filled column.
+        let entry = BulkWalEntry::try_from(&part).unwrap();
+        let replayed = BulkPart::try_from(entry).unwrap();
+        assert_eq!(2, replayed.num_rows());
+        assert!(replayed.batch.column_by_name("v1").is_some());
     }
 }

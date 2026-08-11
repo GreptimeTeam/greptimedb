@@ -21,12 +21,13 @@ use common_event_recorder::Event;
 use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN,
     PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
+    jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
 use table::table_name::TableName;
 
-use super::test_util::{assert_event_filter, default_event_context_value, procedure_trigger_value};
+use super::test_util::assert_event_filter;
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::event::flow::{
@@ -35,7 +36,6 @@ use crate::ddl::event::flow::{
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::ddl::tests::create_flow::{test_create_flow_task, test_query_context};
 use crate::ddl::tests::drop_flow::test_drop_flow_task;
-use crate::rpc::ddl::EventContext;
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 #[test]
@@ -49,7 +49,6 @@ fn test_flow_submitted_event_contracts() {
             expire_after: Some(300),
             eval_interval_secs: Some(60),
         },
-        EventContext::default(),
     );
     assert_event_contract(
         &create,
@@ -60,7 +59,6 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 Value { value_data: None },
-                default_event_context_value(),
             ],
         }],
     );
@@ -75,8 +73,7 @@ fn test_flow_submitted_event_contracts() {
         })
     );
 
-    let drop =
-        FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true, EventContext::default());
+    let drop = FlowDdlEvent::drop_submitted("greptime", "metrics", 42, true);
     assert_event_contract(
         &drop,
         DROP_FLOW_EVENT_TYPE,
@@ -86,7 +83,6 @@ fn test_flow_submitted_event_contracts() {
                 ValueData::StringValue("greptime".to_string()).into(),
                 ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
-                default_event_context_value(),
             ],
         }],
     );
@@ -99,9 +95,18 @@ fn test_flow_submitted_event_contracts() {
 #[test]
 fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
     for (event, event_type) in [
-        (FlowDdlEvent::create_lifecycle(), CREATE_FLOW_EVENT_TYPE),
-        (FlowDdlEvent::create_succeeded(None), CREATE_FLOW_EVENT_TYPE),
-        (FlowDdlEvent::drop_lifecycle(), DROP_FLOW_EVENT_TYPE),
+        (
+            FlowDdlEvent::create_lifecycle("greptime", "metrics"),
+            CREATE_FLOW_EVENT_TYPE,
+        ),
+        (
+            FlowDdlEvent::create_succeeded("greptime", "metrics", None),
+            CREATE_FLOW_EVENT_TYPE,
+        ),
+        (
+            FlowDdlEvent::drop_lifecycle("greptime", "metrics", 42),
+            DROP_FLOW_EVENT_TYPE,
+        ),
     ] {
         assert_event_contract(
             &event,
@@ -109,27 +114,29 @@ fn test_flow_lifecycle_events_have_fixed_schema_and_null_intent() {
             &flow_schema(),
             &[Row {
                 values: vec![
-                    Value { value_data: None },
-                    Value { value_data: None },
-                    Value { value_data: None },
-                    Value { value_data: None },
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("metrics".to_string()).into(),
+                    if event_type == DROP_FLOW_EVENT_TYPE {
+                        ValueData::U32Value(42).into()
+                    } else {
+                        Value { value_data: None }
+                    },
                 ],
             }],
         );
         assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
     }
 
-    let event = FlowDdlEvent::create_succeeded(Some(42));
+    let event = FlowDdlEvent::create_succeeded("greptime", "metrics", Some(42));
     assert_event_contract(
         &event,
         CREATE_FLOW_EVENT_TYPE,
         &flow_schema(),
         &[Row {
             values: vec![
-                Value { value_data: None },
-                Value { value_data: None },
+                ValueData::StringValue("greptime".to_string()).into(),
+                ValueData::StringValue("metrics".to_string()).into(),
                 ValueData::U32Value(42).into(),
-                Value { value_data: None },
             ],
         }],
     );
@@ -149,14 +156,17 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
                 expire_after: None,
                 eval_interval_secs: None,
             },
-            EventContext::default(),
         )),
         ProcedureState::Running,
         EventTrigger::Submitted,
     );
     let succeeded = ProcedureEvent::new(
         procedure_id,
-        Box::new(FlowDdlEvent::create_succeeded(Some(42))),
+        Box::new(FlowDdlEvent::create_succeeded(
+            "greptime",
+            "metrics",
+            Some(42),
+        )),
         ProcedureState::Done { output: None },
         EventTrigger::Succeeded,
     );
@@ -178,8 +188,8 @@ fn test_flow_events_preserve_procedure_envelope_contract() {
         "Done",
         "Succeeded",
         FlowEventLocator {
-            catalog_name: None,
-            flow_name: None,
+            catalog_name: Some("greptime"),
+            flow_name: Some("metrics"),
             flow_id: Some(42),
         },
     );
@@ -195,7 +205,6 @@ fn test_create_flow_event_filter() {
             false,
         ),
         test_query_context(),
-        EventContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, CREATE_FLOW_EVENT_TYPE);
@@ -205,7 +214,6 @@ fn test_create_flow_event_filter() {
 fn test_drop_flow_event_filter() {
     let procedure = DropFlowProcedure::new(
         test_drop_flow_task("flow", 42, false),
-        EventContext::default(),
         new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
     );
     assert_event_filter(&procedure, DROP_FLOW_EVENT_TYPE);
@@ -216,7 +224,6 @@ fn flow_schema() -> Vec<ColumnSchema> {
         CATALOG_NAME_COLUMN.column_schema(),
         FLOW_NAME_COLUMN.column_schema(),
         FLOW_ID_COLUMN.column_schema(),
-        EVENT_CONTEXT_COLUMN.column_schema(),
     ]
 }
 
@@ -240,6 +247,7 @@ fn assert_procedure_event_contract(
         PROCEDURE_TRIGGER_COLUMN.column_schema(),
     ];
     schema.extend(flow_schema());
+    schema.push(EVENT_CONTEXT_COLUMN.column_schema());
     assert_event_contract(
         event,
         event_type,
@@ -249,7 +257,7 @@ fn assert_procedure_event_contract(
                 ValueData::StringValue(event.procedure_id.to_string()).into(),
                 ValueData::StringValue(state.to_string()).into(),
                 ValueData::StringValue(String::new()).into(),
-                procedure_trigger_value(trigger),
+                jsonb_value(&serde_json::json!({"type": trigger})),
                 optional_string(locator.catalog_name),
                 optional_string(locator.flow_name),
                 locator
@@ -257,11 +265,7 @@ fn assert_procedure_event_contract(
                     .map(ValueData::U32Value)
                     .map(Into::into)
                     .unwrap_or(Value { value_data: None }),
-                if locator.catalog_name.is_some() {
-                    default_event_context_value()
-                } else {
-                    Value { value_data: None }
-                },
+                Value { value_data: None },
             ],
         }],
     );

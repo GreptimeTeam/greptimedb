@@ -24,6 +24,7 @@ use api::v1::{
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use bytes::Bytes;
+use common_telemetry::warn;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
@@ -1031,6 +1032,16 @@ fn any_value_to_vrl_value(value: any_value::Value) -> VrlValue {
             VrlValue::Object(key_value_to_map(key_value_list.values))
         }
         any_value::Value::BytesValue(items) => VrlValue::Bytes(Bytes::from(items)),
+        // `StringValueStrindex` references the Profiling signal's
+        // `ProfilesDictionary.string_table`, which is unavailable to logs/traces.
+        // Per the OTLP spec, non-Profiling receivers must treat it as a non-fatal
+        // issue and process the value as if it were absent.
+        any_value::Value::StringValueStrindex(_) => {
+            warn!(
+                "encountered a profiling-only `StringValueStrindex` value in a non-profiling signal; ignoring"
+            );
+            VrlValue::Null
+        }
     }
 }
 
@@ -1082,6 +1093,7 @@ mod tests {
         KeyValue {
             key: key.to_string(),
             value: Some(AnyValue { value: Some(value) }),
+            ..Default::default()
         }
     }
 

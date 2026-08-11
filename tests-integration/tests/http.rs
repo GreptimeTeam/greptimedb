@@ -18,8 +18,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::metadata::MetricType as RemoteWriteV2MetricType;
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Sample as RemoteWriteV2Sample,
+    TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
@@ -2693,6 +2695,52 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
+    // A series carrying inline metadata (v2 senders SHOULD) upgrades its
+    // table's quality to declared, with the metric type and the unit
+    // canonicalised from the OpenMetrics word to UCUM.
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "remote_write_v2_typed_total"),
+            ("job", "api"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 1.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+    let unit_ref = write_request.symbols.len() as u32;
+    write_request.symbols.push("seconds".to_string());
+    write_request.timeseries[0].metadata = Some(RemoteWriteV2Metadata {
+        r#type: RemoteWriteV2MetricType::Counter as i32,
+        help_ref: 0,
+        unit_ref,
+    });
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prometheus_remote_write_v2_declared_metadata",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_typed_total' \
+         and create_options like '%greptime.semantic.metric.type=counter%' \
+         and create_options like '%greptime.semantic.metric.unit=s%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%';",
+        "[[1]]",
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -2830,7 +2878,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
         "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,{\"count_f64\":null,\"count_u64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_u64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_u64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_u64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+        "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
     )
     .await;
 
@@ -2888,6 +2936,53 @@ pub async fn test_prometheus_remote_write_batched(store_type: StorageType) {
          and create_options like '%greptime.semantic.signal_type=metric%' \
          and create_options like '%greptime.semantic.source=prometheus%' \
          and create_options like '%greptime.semantic.metric.metadata_quality=inferred%'",
+        "[[1]]",
+    )
+    .await;
+
+    // The batched path bypasses the operator's auto-create: v2 per-series
+    // metadata must reach its table options through the batch create too.
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_batched_typed_total",
+            ),
+            ("job", "api"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 1.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+    let unit_ref = write_request.symbols.len() as u32;
+    write_request.symbols.push("bytes".to_string());
+    write_request.timeseries[0].metadata = Some(RemoteWriteV2Metadata {
+        r#type: RemoteWriteV2MetricType::Gauge as i32,
+        help_ref: 0,
+        unit_ref,
+    });
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    wait_for_data(
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_batched_typed_total' \
+         and create_options like '%greptime.semantic.metric.type=gauge%' \
+         and create_options like '%greptime.semantic.metric.unit=By%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%'",
         "[[1]]",
     )
     .await;

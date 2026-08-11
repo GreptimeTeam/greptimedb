@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Typed DataFusion plan builders for the read-time derivation behind the
+//! The entity-relationship graph: the physical declared-edge table DDL and the
+//! typed DataFusion plan builders for the read-time derivation behind the
 //! computed `semantic_entities` / `semantic_relationships` tables.
+//!
+//! In OSS the graph is derived at read time, so the *only* stored part is the
+//! declared-edge table: edges a user asserts by hand (`provenance = 'declared'`).
 //!
 //! The derivation is built as typed [`Expr`]s over [`DataFrame`]s (never as SQL
 //! text), so user-controlled identifiers are plain values — no quoting or SQL
@@ -21,26 +25,238 @@
 //! including filter pushdown into the source table scans. See
 //! `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 
+mod relationships;
+
 use std::sync::{Arc, LazyLock};
 
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnDef, CreateTableExpr, JsonTypeExtension,
+    SemanticType,
+};
 use common_catalog::consts::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
-    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR,
-    TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
-use datafusion::functions_aggregate::expr_fn::{count, sum};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
-use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, ScalarUDF, cast, ident, lit};
+use datafusion_expr::{Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
+pub use relationships::{CallsSource, DeclaredSource, build_relationships_plan};
+use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY, TTL_KEY};
+
+/// Whether an existing declared-edge table still matches the canonical
+/// definition ([`build_declared_relationships_expr`]): columns, time index,
+/// primary key, engine, and merge behaviour — the union branch's revision and
+/// dedup semantics lean on all of these. A mismatch (upgrade skew) must be
+/// surfaced, not silently derived wrong; DROP resets the table.
+pub fn declared_relationships_schema_matches(table_info: &table::metadata::TableInfo) -> bool {
+    let meta = &table_info.meta;
+    if meta.engine != common_catalog::consts::MITO_ENGINE {
+        return false;
+    }
+    let schema = &meta.schema;
+    if schema
+        .timestamp_column()
+        .is_none_or(|column| column.name != OBSERVED_AT_COLUMN)
+    {
+        return false;
+    }
+    let primary_keys = meta
+        .primary_key_indices
+        .iter()
+        .filter_map(|idx| schema.column_schemas().get(*idx))
+        .map(|column| column.name.as_str());
+    if !primary_keys.eq(DECLARED_PRIMARY_KEY_COLUMNS) {
+        return false;
+    }
+    // LastRow merge is what makes a re-asserted edge a *revision*; append mode
+    // or another merge mode would change the read-side dedup semantics.
+    let options = &meta.options.extra_options;
+    if options.get(APPEND_MODE_KEY).map(String::as_str) == Some("true")
+        || options
+            .get(MERGE_MODE_KEY)
+            .is_some_and(|mode| mode != "last_row")
+    {
+        return false;
+    }
+
+    let canonical = build_declared_relationships_expr("greptime");
+    if schema.column_schemas().len() != canonical.column_defs.len() {
+        return false;
+    }
+    canonical
+        .column_defs
+        .iter()
+        .zip(schema.column_schemas())
+        .all(|(def, column)| {
+            let Ok(wrapper) = api::helper::ColumnDataTypeWrapper::try_new(
+                def.data_type,
+                def.datatype_extension.clone(),
+            ) else {
+                return false;
+            };
+            def.name == column.name
+                && datatypes::prelude::ConcreteDataType::from(wrapper) == column.data_type
+        })
+}
 
 /// Bin width for the temporal window of derived rows: 60s buckets, matching the
 /// service-graph convention.
 const BIN_NANOS: i64 = 60 * 1_000_000_000;
+
+/// Time index of the graph tables: when an observation was recorded.
+pub const OBSERVED_AT_COLUMN: &str = "observed_at";
+
+/// Default retention for the declared-edge table; expiry slides the topology window.
+const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";
+/// Environment variable overriding the declared-edge table's TTL at creation
+/// time (e.g. `180d`, `forever`).
+// TODO(entity-graph): promote this to a real configuration option.
+const DECLARED_RELATIONSHIPS_TTL_ENV: &str = "GREPTIMEDB_DECLARED_RELATIONSHIPS_TTL";
+
+fn declared_relationships_ttl() -> String {
+    std::env::var(DECLARED_RELATIONSHIPS_TTL_ENV)
+        .ok()
+        .map(|ttl| ttl.trim().to_string())
+        .filter(|ttl| !ttl.is_empty())
+        .unwrap_or_else(|| DEFAULT_DECLARED_RELATIONSHIPS_TTL.to_string())
+}
+
+/// The primary-key (tag) columns, in key order. Starting with the source endpoint
+/// makes out-edge lookup (`WHERE src_type=? AND src_id=?`) a key-prefix scan;
+/// `provenance` and `generation_id` are in the key so a declared edge and a
+/// (future) derived edge for the same pair coexist without clobbering.
+pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
+    "src_type",
+    "src_id",
+    "rel_type",
+    "dst_type",
+    "dst_id",
+    "provenance",
+    "scope",
+    "generation_id",
+];
+
+/// The externally visible edge identity: the primary key minus `scope` and
+/// `generation_id`, which the computed table does not expose. Revision ranking
+/// uses this identity, or assertions differing only in those two columns would
+/// surface as indistinguishable duplicate rows.
+const DECLARED_EDGE_IDENTITY_COLUMNS: [&str; 6] = [
+    "src_type",
+    "src_id",
+    "rel_type",
+    "dst_type",
+    "dst_id",
+    "provenance",
+];
+
+fn column(
+    name: &str,
+    data_type: ColumnDataType,
+    semantic_type: SemanticType,
+    nullable: bool,
+) -> ColumnDef {
+    ColumnDef {
+        name: name.to_string(),
+        data_type: data_type as i32,
+        is_nullable: nullable,
+        default_constraint: vec![],
+        semantic_type: semantic_type as i32,
+        comment: String::new(),
+        datatype_extension: None,
+        options: None,
+    }
+}
+
+fn tag(name: &str) -> ColumnDef {
+    column(name, ColumnDataType::String, SemanticType::Tag, false)
+}
+
+fn field(name: &str, data_type: ColumnDataType) -> ColumnDef {
+    column(name, data_type, SemanticType::Field, true)
+}
+
+fn json_field(name: &str) -> ColumnDef {
+    let mut def = field(name, ColumnDataType::Binary);
+    def.datatype_extension = Some(ColumnDataTypeExtension {
+        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+    });
+    def
+}
+
+/// Builds the `CREATE TABLE` request for the declared-edge table. Columns mirror
+/// the computed `semantic_relationships` shape (temporal window + endpoints +
+/// provenance/confidence + RED metrics) plus the declared-only business validity
+/// window (`valid_from` / `valid_until`), which — unlike TTL (physical retention)
+/// — expresses whether a hand-declared edge is still in effect.
+///
+/// The default `LastRow` merge dedups on primary key **plus** `observed_at`
+/// (the time index is part of mito's dedup key): re-asserting an edge at a new
+/// `observed_at` stores a new revision, and the read-side union keeps only the
+/// latest revision per edge key.
+pub fn build_declared_relationships_expr(catalog: &str) -> CreateTableExpr {
+    let column_defs = vec![
+        // Temporal: when this revision of the edge was declared (time index,
+        // also the TTL clock).
+        column(
+            OBSERVED_AT_COLUMN,
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+            false,
+        ),
+        field("window_start", ColumnDataType::TimestampMillisecond),
+        field("window_end", ColumnDataType::TimestampMillisecond),
+        field("fresh_until", ColumnDataType::TimestampMillisecond),
+        // Declared-only business validity. NULL valid_from = valid since the
+        // declaration; NULL valid_until = valid for as long as the row exists
+        // (TTL expiry retires the edge with the row).
+        field("valid_from", ColumnDataType::TimestampMillisecond),
+        field("valid_until", ColumnDataType::TimestampMillisecond),
+        // Endpoints + edge identity (all tags, in primary-key order).
+        tag("src_type"),
+        tag("src_id"),
+        tag("rel_type"),
+        tag("dst_type"),
+        tag("dst_id"),
+        tag("provenance"),
+        tag("scope"),
+        tag("generation_id"),
+        // Confidence + RED metrics (populated for derived edges; usually NULL here).
+        field("confidence", ColumnDataType::Float64),
+        field("request_count", ColumnDataType::Int64),
+        field("error_count", ColumnDataType::Int64),
+        field("duration_sum", ColumnDataType::Float64),
+        field("duration_count", ColumnDataType::Int64),
+        // JSONB, so the union matches the computed table's json column
+        // without a per-scan parse.
+        json_field("attributes"),
+    ];
+
+    let table_options = [(TTL_KEY.to_string(), declared_relationships_ttl())]
+        .into_iter()
+        .collect();
+
+    CreateTableExpr {
+        catalog_name: catalog.to_string(),
+        schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+        table_name: SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME.to_string(),
+        desc: "Hand-declared edges of the entity-relationship graph".to_string(),
+        column_defs,
+        time_index: OBSERVED_AT_COLUMN.to_string(),
+        primary_keys: DECLARED_PRIMARY_KEY_COLUMNS
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+        create_if_not_exists: true,
+        table_options,
+        table_id: None,
+        engine: common_catalog::consts::MITO_ENGINE.to_string(),
+    }
+}
 
 /// A single table's entity-identity declaration, projected from
 /// `information_schema.table_semantics` (`greptime.semantic.entity.<type>.*`).
@@ -62,33 +278,85 @@ pub struct EntityDeclaration {
     pub scope_columns: Vec<String>,
 }
 
-/// The read-time query window as scalar [`Expr`]s. Kept as expressions so the
-/// provider can fill them from a scan's time predicate or the product default.
+/// The read-time query window, resolved from the scan's `observed_at` predicate
+/// (or the product default). Two half-open `[start, end)` millisecond ranges:
+///
+/// - *observed*: the queried `observed_at` range. The scan's filters are
+///   re-applied above the computed table (`FilterPushDownType::Inexact`), so
+///   every emitted row's `observed_at` must fall inside it. The declared-edge
+///   branch also runs its validity overlap against this range.
+/// - *source scan*: `observed` widened to whole 60s buckets. Derived rows are
+///   `date_bin('60s')` aggregates keyed by the bucket start, so a bucket the
+///   observed range selects must be scanned over its full extent — filtering
+///   the source rows to the observed range instead would silently truncate the
+///   RED numbers of the boundary buckets.
+///
+/// The bounds are plain millisecond values turned into timestamp literals on
+/// demand — wall-clock snapshot semantics like `now()`, but as constants they
+/// prune the source table scans without depending on constant-folding.
 #[derive(Debug, Clone)]
-pub struct GraphWindow {
-    pub start: Expr,
-    pub end: Expr,
+pub struct GraphQueryWindow {
+    observed_start_ms: i64,
+    observed_end_ms: i64,
+    source_start_ms: i64,
+    source_end_ms: i64,
 }
 
-impl GraphWindow {
+impl GraphQueryWindow {
+    /// Builds the window for the queried `observed_at` range `[start_ms, end_ms)`.
+    pub fn from_observed(start_ms: i64, end_ms: i64) -> Self {
+        const BIN_MS: i64 = BIN_NANOS / 1_000_000;
+        // Ceiling division that stays correct for pre-epoch (negative) values.
+        let ceil_to_bin = |ms: i64| {
+            ms.div_euclid(BIN_MS) * BIN_MS
+                + if ms.rem_euclid(BIN_MS) == 0 {
+                    0
+                } else {
+                    BIN_MS
+                }
+        };
+        // A bucket `b` (a 60s multiple, `date_bin`'s floor of its rows) is
+        // selected when `start <= b < end`: the first is ceil(start) and the
+        // last one's rows extend to ceil(end).
+        Self {
+            observed_start_ms: start_ms,
+            observed_end_ms: end_ms,
+            source_start_ms: ceil_to_bin(start_ms),
+            source_end_ms: ceil_to_bin(end_ms),
+        }
+    }
+
     /// Conservative default when a query carries no explicit time predicate: the
     /// last hour, so a bare `SELECT * FROM semantic_entities` never scans every
     /// declaring table's full history. This is a product default, not a cap.
-    ///
-    /// The bounds are timestamp literals taken from the wall clock at plan-build
-    /// time — the same snapshot semantics `now()` would give, but as plain
-    /// constants they prune the source table scans without depending on
-    /// constant-folding.
     pub fn default_last_hour() -> Self {
         let end_ms = common_time::util::current_time_millis();
-        Self {
-            start: lit(ScalarValue::TimestampMillisecond(
-                Some(end_ms - 60 * 60 * 1000),
-                None,
-            )),
-            end: lit(ScalarValue::TimestampMillisecond(Some(end_ms), None)),
-        }
+        Self::from_observed(end_ms - 60 * 60 * 1000, end_ms)
     }
+
+    /// Start of the queried `observed_at` range (inclusive).
+    pub fn observed_start(&self) -> Expr {
+        ts_ms_lit(self.observed_start_ms)
+    }
+
+    /// End of the queried `observed_at` range (exclusive).
+    pub fn observed_end(&self) -> Expr {
+        ts_ms_lit(self.observed_end_ms)
+    }
+
+    /// Start of the source-table scan range (inclusive).
+    pub fn source_start(&self) -> Expr {
+        ts_ms_lit(self.source_start_ms)
+    }
+
+    /// End of the source-table scan range (exclusive).
+    pub fn source_end(&self) -> Expr {
+        ts_ms_lit(self.source_end_ms)
+    }
+}
+
+fn ts_ms_lit(ms: i64) -> Expr {
+    lit(ScalarValue::TimestampMillisecond(Some(ms), None))
 }
 
 /// An `INTERVAL` literal of `nanos` nanoseconds.
@@ -254,14 +522,14 @@ fn registry_source(
     first: &EntityDeclaration,
     rest: &[EntityDeclaration],
     df: DataFrame,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
     let ts = ident(&first.time_index);
     let bin = bin_ms(ts.clone());
     let window_predicate = ts
         .clone()
-        .gt_eq(window.start.clone())
-        .and(ts.lt(window.end.clone()));
+        .gt_eq(window.source_start())
+        .and(ts.lt(window.source_end()));
 
     let mut arrays = vec![Vec::new(); REGISTRY_COLUMNS.len() + 1];
     for decl in std::iter::once(first).chain(rest) {
@@ -349,20 +617,13 @@ pub struct RegistrySource {
     pub scan: DataFrame,
 }
 
-/// A trace table's scan paired with the `service` declaration it derives
-/// `calls` edges for — the unit `build_calls_plan` consumes.
-pub struct CallsSource {
-    pub service: EntityDeclaration,
-    pub scan: DataFrame,
-}
-
 /// Builds the `semantic_entities` registry plan: one branch and source scan per
 /// declaring table, filtered to `window`, then `UNION ALL` across source tables.
 /// Returns `None` when nothing declared an entity, so the computed table streams
 /// empty.
 pub fn build_registry_plan(
     sources: Vec<RegistrySource>,
-    window: &GraphWindow,
+    window: &GraphQueryWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
     for source in sources {
@@ -374,184 +635,16 @@ pub fn build_registry_plan(
     Ok(union_df.map(DataFrame::into_unoptimized_plan))
 }
 
-/// The projected columns of `semantic_relationships`, in order. Every derived
-/// branch and the declared-edge scan must project exactly these so the top-level
-/// `UNION ALL` type-aligns. (The physical declared table additionally stores
-/// `valid_from`/`valid_until`, which are applied as a filter, not projected.)
-/// Test-only until the declared-edge union branch lands and enforces it in code.
+/// RecordBatch readers shared by this module's tests and the `relationships`
+/// tests.
 #[cfg(test)]
-const RELATIONSHIP_COLUMNS: [&str; 16] = [
-    "observed_at",
-    "window_start",
-    "window_end",
-    "fresh_until",
-    "src_type",
-    "src_id",
-    "dst_type",
-    "dst_id",
-    "rel_type",
-    "provenance",
-    "confidence",
-    "request_count",
-    "error_count",
-    "duration_sum",
-    "duration_count",
-    "attributes",
-];
-
-/// A child server span starts no earlier than 5 minutes before its client span
-/// (clock-skew allowance) and no later than 1 hour after it; the bounds keep the
-/// join windowed instead of pairing arbitrarily distant spans of a long-lived
-/// trace.
-const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
-const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
-
-/// Builds the `calls` derivation (RFC §3a) over `traces`: pair each client span
-/// with its child server span on `trace_id` + `parent_span_id`, project to
-/// `service`, union the pairs of all trace tables, and aggregate to RED metrics
-/// per 60s window in one pass — so an edge observed across several trace tables
-/// yields one row, not per-table fragments. This is the plan form of the Tempo
-/// servicegraph connector. Virtual-node edges (uninstrumented peers) are a
-/// separate branch, added on top of this. Column names are the fixed
-/// `greptime_trace_v1` schema (the reason `table_data_model = greptime_trace_v1`
-/// is required); `span_status_code` is a string column (`STATUS_CODE_ERROR`),
-/// verified against the trace ingest path. Returns `None` when there is no
-/// trace table.
-pub fn build_calls_plan(
-    traces: Vec<CallsSource>,
-    window: &GraphWindow,
-) -> DfResult<Option<LogicalPlan>> {
-    let mut union_df: Option<DataFrame> = None;
-    for trace in traces {
-        union_df = union_all(union_df, calls_pairs(&trace.service, trace.scan, window)?)?;
-    }
-    let Some(pairs) = union_df else {
-        return Ok(None);
-    };
-
-    let plan = pairs
-        .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
-            vec![
-                count(lit(1)).alias("request_count"),
-                count(lit(1))
-                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
-                    .build()?
-                    .alias("error_count"),
-                sum(ident("duration_nano")).alias("duration_nano_sum"),
-            ],
-        )?
-        .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("service").alias("src_type"),
-            ident("src_id"),
-            lit("service").alias("dst_type"),
-            ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
-            lit(1.0_f64).alias("confidence"),
-            ident("request_count"),
-            ident("error_count"),
-            // duration_nano sums in nanoseconds; the contract column is seconds.
-            (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
-                .alias("duration_sum"),
-            ident("request_count").alias("duration_count"),
-            null_json().alias("attributes"),
-        ])?
-        .into_unoptimized_plan();
-    Ok(Some(plan))
-}
-
-/// One trace table's client/server span pairs, projected to the aggregation
-/// inputs `(observed_at, src_id, dst_id, status_code, duration_nano)`.
-/// Endpoint ids are built from the table's `service` entity declaration, so
-/// edges land on exactly the entity ids the registry emits (a composite
-/// service identity renders the same sorted `k=v` form on both sides).
-fn calls_pairs(
-    service: &EntityDeclaration,
-    trace: DataFrame,
-    window: &GraphWindow,
-) -> DfResult<DataFrame> {
-    let mut client_pred = ident(SPAN_KIND_COLUMN)
-        .eq(lit(SPAN_KIND_CLIENT))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.start.clone()))
-        .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone()));
-    let mut server_pred = ident(SPAN_KIND_COLUMN)
-        .eq(lit(SPAN_KIND_SERVER))
-        // Static bounds implied by the window and the join's time-proximity
-        // conditions below; the join bounds reference client.timestamp and
-        // cannot prune the server-side scan.
-        .and(
-            ident(TRACE_TIMESTAMP_COLUMN)
-                .gt_eq(window.start.clone() - interval(CHILD_SPAN_EARLY_NANOS)),
-        )
-        .and(
-            ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone() + interval(CHILD_SPAN_LATE_NANOS)),
-        );
-    // A NULL identity component identifies nothing, on either endpoint.
-    for id in &service.id_columns {
-        client_pred = client_pred.and(ident(id).is_not_null());
-        server_pred = server_pred.and(ident(id).is_not_null());
-    }
-
-    let client = trace.clone().filter(client_pred)?.alias("client")?;
-    let server = trace.filter(server_pred)?.alias("server")?;
-
-    let join_conditions = vec![
-        qcol("client", TRACE_ID_COLUMN).eq(qcol("server", TRACE_ID_COLUMN)),
-        qcol("server", PARENT_SPAN_ID_COLUMN).eq(qcol("client", SPAN_ID_COLUMN)),
-        qcol("server", TRACE_TIMESTAMP_COLUMN)
-            .gt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
-        qcol("server", TRACE_TIMESTAMP_COLUMN)
-            .lt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
-    ];
-
-    client
-        .join_on(server, JoinType::Inner, join_conditions)?
-        .select(vec![
-            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            // The cast inside entity_id_expr also normalizes tag columns, which
-            // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| qcol("client", c)).alias("src_id"),
-            entity_id_expr(&service.id_columns, &|c| qcol("server", c)).alias("dst_id"),
-            qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
-            qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
-        ])?
-        // Exclude self-calls on the composed identity: an edge needs two
-        // distinct service entities.
-        .filter(ident("src_id").not_eq(ident("dst_id")))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use common_catalog::consts::SERVICE_NAME_COLUMN;
-    use datafusion::arrow::array::{
-        Array, ArrayRef, BinaryArray, Float64Array, Int64Array, StringArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
-    };
-    use datafusion::arrow::datatypes::{Field, Schema};
+pub(crate) mod test_util {
+    use datafusion::arrow::array::{Array, BinaryArray, StringArray, TimestampMillisecondArray};
     use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionContext;
+    use datafusion_expr::LogicalPlan;
 
-    use super::*;
-
-    fn test_window() -> GraphWindow {
-        GraphWindow {
-            start: lit(ScalarValue::TimestampMillisecond(Some(0), None)),
-            end: lit(ScalarValue::TimestampMillisecond(
-                Some(10 * 60 * 1000),
-                None,
-            )),
-        }
-    }
-
-    async fn collect(ctx: &SessionContext, plan: LogicalPlan) -> Vec<RecordBatch> {
+    pub(crate) async fn collect(ctx: &SessionContext, plan: LogicalPlan) -> Vec<RecordBatch> {
         ctx.execute_logical_plan(plan)
             .await
             .unwrap()
@@ -560,7 +653,7 @@ mod tests {
             .unwrap()
     }
 
-    fn json_texts(batch: &RecordBatch, column: usize) -> Vec<Option<String>> {
+    pub(crate) fn json_texts(batch: &RecordBatch, column: usize) -> Vec<Option<String>> {
         let array = batch
             .column(column)
             .as_any()
@@ -575,7 +668,7 @@ mod tests {
             .collect()
     }
 
-    fn strings(batch: &RecordBatch, column: usize) -> Vec<String> {
+    pub(crate) fn strings(batch: &RecordBatch, column: usize) -> Vec<String> {
         let array = batch
             .column(column)
             .as_any()
@@ -584,6 +677,59 @@ mod tests {
         (0..array.len())
             .map(|i| array.value(i).to_string())
             .collect()
+    }
+
+    pub(crate) fn ts_values(batch: &RecordBatch, column: usize) -> Vec<i64> {
+        let array = batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        (0..array.len()).map(|i| array.value(i)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, TimestampMillisecondArray};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::datasource::MemTable;
+    use datafusion::prelude::SessionContext;
+
+    use super::test_util::{collect, json_texts, strings};
+    use super::*;
+
+    fn test_window() -> GraphQueryWindow {
+        GraphQueryWindow::from_observed(0, 10 * 60 * 1000)
+    }
+
+    #[test]
+    fn window_source_scan_covers_whole_buckets() {
+        // Buckets selected by [10:30.5', 11:30') is exactly {11:00'}; its source
+        // rows span [11:00', 12:00').
+        let window = GraphQueryWindow::from_observed(630_000, 690_000);
+        assert_eq!(
+            (window.source_start_ms, window.source_end_ms),
+            (660_000, 720_000)
+        );
+
+        // Aligned bounds stay put.
+        let window = GraphQueryWindow::from_observed(600_000, 720_000);
+        assert_eq!(
+            (window.source_start_ms, window.source_end_ms),
+            (600_000, 720_000)
+        );
+
+        // A sub-bucket range that selects no bucket start scans nothing.
+        let window = GraphQueryWindow::from_observed(610_000, 650_000);
+        assert!(window.source_start_ms >= window.source_end_ms);
+
+        // Pre-epoch bounds round toward the correct buckets.
+        let window = GraphQueryWindow::from_observed(-90_000, -30_000);
+        assert_eq!((window.source_start_ms, window.source_end_ms), (-60_000, 0));
     }
 
     /// A metric-like table: ms timestamps, service/pid identity, nullable
@@ -843,248 +989,134 @@ mod tests {
         );
     }
 
-    /// A trace-like table in the fixed `greptime_trace_v1` shape (ns timestamps).
-    fn trace_table_ctx() -> SessionContext {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TRACE_TIMESTAMP_COLUMN,
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-                false,
-            ),
-            Field::new(TRACE_ID_COLUMN, DataType::Utf8, false),
-            Field::new(SPAN_ID_COLUMN, DataType::Utf8, false),
-            Field::new(PARENT_SPAN_ID_COLUMN, DataType::Utf8, true),
-            Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
-            Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
-            Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
-            Field::new("service_namespace", DataType::Utf8, false),
-            Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
-        ]));
-        const MS: i64 = 1_000_000;
-        // Two client->server pairs frontend->cart (one errored), one pair
-        // cart->cart (self-call, excluded), one unmatched client span.
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampNanosecondArray::from(vec![
-                    1_000 * MS, // client frontend->cart
-                    1_010 * MS, //   server cart
-                    2_000 * MS, // client frontend->cart (error)
-                    2_010 * MS, //   server cart (error)
-                    3_000 * MS, // client cart->cart (self-call)
-                    3_010 * MS, //   server cart
-                    4_000 * MS, // client with no matching server
-                ])) as ArrayRef,
-                Arc::new(StringArray::from(vec![
-                    "t1", "t1", "t2", "t2", "t3", "t3", "t4",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "c1", "s1", "c2", "s2", "c3", "s3", "c4",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    None,
-                    Some("c1"),
-                    None,
-                    Some("c2"),
-                    None,
-                    Some("c3"),
-                    None,
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                    "SPAN_KIND_SERVER",
-                    "SPAN_KIND_CLIENT",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_ERROR",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                    "STATUS_CODE_UNSET",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "frontend", "cart", "frontend", "cart", "cart", "cart", "frontend",
-                ])),
-                Arc::new(StringArray::from(vec!["ns1"; 7])),
-                Arc::new(UInt64Array::from(vec![
-                    0,
-                    500_000_000, // 0.5s
-                    0,
-                    1_500_000_000, // 1.5s
-                    0,
-                    100,
-                    0,
-                ])),
-            ],
-        )
-        .unwrap();
-        let ctx = SessionContext::new();
-        ctx.register_table(
-            "opentelemetry_traces",
-            Arc::new(MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap()),
-        )
-        .unwrap();
-        ctx.register_table(
-            "opentelemetry_traces_2",
-            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
-        )
-        .unwrap();
-        ctx
-    }
-
-    fn trace_service_decl(id_columns: &[&str]) -> EntityDeclaration {
-        EntityDeclaration {
-            schema: "public".to_string(),
-            table: "opentelemetry_traces".to_string(),
-            time_index: TRACE_TIMESTAMP_COLUMN.to_string(),
-            entity_type: "service".to_string(),
-            id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
-            descriptive_columns: vec![],
-            scope_columns: vec![],
-        }
-    }
-
-    #[tokio::test]
-    async fn calls_plan_aggregates_red_metrics() {
-        let ctx = trace_table_ctx();
-        let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(
-            vec![CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                scan: trace,
-            }],
-            &test_window(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let names = plan
-            .schema()
-            .fields()
+    /// A `TableInfo` derived from the canonical declared-edge definition, with
+    /// injection points for each aspect the schema matcher must check.
+    fn declared_table_info(
+        mutate_columns: impl FnOnce(&mut Vec<datatypes::schema::ColumnSchema>),
+        engine: &str,
+        primary_key_indices: Vec<usize>,
+        extra_options: &[(&str, &str)],
+    ) -> table::metadata::TableInfo {
+        let canonical = build_declared_relationships_expr("greptime");
+        let mut columns: Vec<datatypes::schema::ColumnSchema> = canonical
+            .column_defs
             .iter()
-            .map(|f| f.name().as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, RELATIONSHIP_COLUMNS);
-
-        let batches = collect(&ctx, plan).await;
-        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // frontend->cart only: the self-call and the unmatched client drop out;
-        // both pairs land in the same 60s bin.
-        assert_eq!(total, 1);
-        let batch = &batches[0];
-        assert_eq!(strings(batch, 5), vec!["frontend"]);
-        assert_eq!(strings(batch, 7), vec!["cart"]);
-        assert_eq!(strings(batch, 8), vec!["calls"]);
-        assert_eq!(strings(batch, 9), vec!["trace"]);
-
-        let request_count = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(request_count.value(0), 2);
-        let error_count = batch
-            .column(12)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(error_count.value(0), 1);
-        let duration_sum = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!((duration_sum.value(0) - 2.0).abs() < 1e-9);
-        let duration_count = batch
-            .column(14)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(duration_count.value(0), 2);
-        // Derived calls edges carry no attributes: a typed-JSON NULL.
-        assert!(json_texts(batch, 15)[0].is_none());
+            .map(|def| {
+                let wrapper = api::helper::ColumnDataTypeWrapper::try_new(
+                    def.data_type,
+                    def.datatype_extension.clone(),
+                )
+                .unwrap();
+                datatypes::schema::ColumnSchema::new(
+                    &def.name,
+                    datatypes::prelude::ConcreteDataType::from(wrapper),
+                    def.is_nullable,
+                )
+                .with_time_index(def.name == OBSERVED_AT_COLUMN)
+            })
+            .collect();
+        mutate_columns(&mut columns);
+        let schema = Arc::new(
+            datatypes::schema::SchemaBuilder::try_from_columns(columns)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let options = table::requests::TableOptions {
+            extra_options: extra_options
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let meta = table::metadata::TableMeta {
+            schema,
+            primary_key_indices,
+            value_indices: vec![],
+            engine: engine.to_string(),
+            next_column_id: 1,
+            options,
+            created_on: Default::default(),
+            updated_on: Default::default(),
+            partition_key_indices: vec![],
+            column_ids: vec![],
+        };
+        table::metadata::TableInfoBuilder::default()
+            .table_id(1)
+            .name(SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME)
+            .catalog_name("greptime")
+            .schema_name(DEFAULT_PRIVATE_SCHEMA_NAME)
+            .table_version(0)
+            .table_type(table::metadata::TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap()
     }
 
-    #[tokio::test]
-    async fn calls_plan_merges_edges_across_trace_tables() {
-        let ctx = trace_table_ctx();
-        let t1 = ctx.table("opentelemetry_traces").await.unwrap();
-        let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
-        let plan = build_calls_plan(
-            vec![
-                CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                    scan: t1,
-                },
-                CallsSource {
-                    service: trace_service_decl(&[SERVICE_NAME_COLUMN]),
-                    scan: t2,
-                },
-            ],
-            &test_window(),
-        )
-        .unwrap()
-        .unwrap();
+    #[test]
+    fn declared_schema_match_checks_more_than_columns() {
+        let mito = common_catalog::consts::MITO_ENGINE;
+        let canonical_pk = || (6..14).collect::<Vec<_>>();
 
-        let batches = collect(&ctx, plan).await;
-        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        // The same frontend->cart edge from both tables folds into one row with
-        // summed RED metrics.
-        assert_eq!(total, 1);
-        let batch = &batches[0];
-        let request_count = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(request_count.value(0), 4);
-        let error_count = batch
-            .column(12)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(error_count.value(0), 2);
-        let duration_sum = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!((duration_sum.value(0) - 4.0).abs() < 1e-9);
-    }
-
-    #[tokio::test]
-    async fn calls_endpoints_follow_service_declaration() {
-        let ctx = trace_table_ctx();
-        let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(
-            vec![CallsSource {
-                service: trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
-                scan: trace,
-            }],
-            &test_window(),
-        )
-        .unwrap()
-        .unwrap();
-
-        let batches = collect(&ctx, plan).await;
-        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total, 1);
-        let batch = &batches[0];
-        // Composite service identity renders the same sorted `k=v` form the
-        // registry emits, so edges land on registry entity ids.
+        let ok = declared_table_info(|_| {}, mito, canonical_pk(), &[(TTL_KEY, "180d")]);
+        assert!(declared_relationships_schema_matches(&ok));
+        // The canonical expr must declare attributes as json, matching the
+        // computed table's column.
         assert_eq!(
-            strings(batch, 5),
-            vec!["service_name=frontend,service_namespace=ns1"]
+            ok.meta
+                .schema
+                .column_schema_by_name("attributes")
+                .map(|c| c.data_type.clone()),
+            Some(datatypes::prelude::ConcreteDataType::json_datatype())
         );
-        assert_eq!(
-            strings(batch, 7),
-            vec!["service_name=cart,service_namespace=ns1"]
+        let ok = declared_table_info(
+            |_| {},
+            mito,
+            canonical_pk(),
+            &[(MERGE_MODE_KEY, "last_row")],
         );
+        assert!(declared_relationships_schema_matches(&ok));
+
+        let wrong_engine = declared_table_info(|_| {}, "metric", canonical_pk(), &[]);
+        assert!(!declared_relationships_schema_matches(&wrong_engine));
+
+        let pk_missing_generation_id = declared_table_info(|_| {}, mito, (6..13).collect(), &[]);
+        assert!(!declared_relationships_schema_matches(
+            &pk_missing_generation_id
+        ));
+
+        let wrong_time_index = declared_table_info(
+            |columns| {
+                columns[0] = columns[0].clone().with_time_index(false);
+                columns[4] = datatypes::schema::ColumnSchema::new(
+                    "valid_from",
+                    datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true);
+            },
+            mito,
+            canonical_pk(),
+            &[],
+        );
+        assert!(!declared_relationships_schema_matches(&wrong_time_index));
+
+        let append_mode =
+            declared_table_info(|_| {}, mito, canonical_pk(), &[(APPEND_MODE_KEY, "true")]);
+        assert!(!declared_relationships_schema_matches(&append_mode));
+
+        let wrong_column_type = declared_table_info(
+            |columns| {
+                columns[14] = datatypes::schema::ColumnSchema::new(
+                    "confidence",
+                    datatypes::prelude::ConcreteDataType::int64_datatype(),
+                    true,
+                );
+            },
+            mito,
+            canonical_pk(),
+            &[],
+        );
+        assert!(!declared_relationships_schema_matches(&wrong_column_type));
     }
 }

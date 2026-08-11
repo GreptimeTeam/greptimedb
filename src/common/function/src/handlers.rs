@@ -69,6 +69,20 @@ pub trait TableMutationHandler: Send + Sync {
         region_id: RegionId,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
+
+    /// Discard all unflushed data from a table region.
+    async fn discard_unflushed_data(
+        &self,
+        region_id: RegionId,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
+    /// Discard all unflushed data from all regions of a table.
+    async fn discard_unflushed_data_by_table(
+        &self,
+        table_name: TableName,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
 }
 
 /// A trait for handling procedure service requests in `QueryEngine`.
