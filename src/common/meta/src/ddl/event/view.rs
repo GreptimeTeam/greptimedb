@@ -121,19 +121,38 @@ impl ViewDdlEvent {
         )
     }
 
-    /// Builds a lightweight create-view lifecycle event with no locator data.
-    pub(crate) fn create_lifecycle() -> Self {
-        Self::lifecycle(CREATE_VIEW_EVENT_TYPE)
+    /// Builds a create-view lifecycle event with its submitted locator.
+    pub(crate) fn create_lifecycle(catalog_name: &str, schema_name: &str, view_name: &str) -> Self {
+        Self::lifecycle(CREATE_VIEW_EVENT_TYPE, catalog_name, schema_name, view_name)
     }
 
-    /// Builds the successful create-view row that carries only the allocated id.
-    pub(crate) fn create_succeeded(view_id: u32) -> Self {
-        Self::succeeded(CREATE_VIEW_EVENT_TYPE, view_id)
+    /// Builds the successful create-view row with its submitted locator and allocated ID.
+    pub(crate) fn create_succeeded(
+        catalog_name: &str,
+        schema_name: &str,
+        view_name: &str,
+        view_id: u32,
+    ) -> Self {
+        Self::succeeded(
+            CREATE_VIEW_EVENT_TYPE,
+            catalog_name,
+            schema_name,
+            view_name,
+            view_id,
+        )
     }
 
-    /// Builds a lightweight drop-view lifecycle event with no locator data.
-    pub(crate) fn drop_lifecycle() -> Self {
-        Self::lifecycle(DROP_VIEW_EVENT_TYPE)
+    /// Builds a drop-view lifecycle event with its submitted locator and ID.
+    pub(crate) fn drop_lifecycle(
+        catalog_name: &str,
+        schema_name: &str,
+        view_name: &str,
+        view_id: u32,
+    ) -> Self {
+        Self {
+            view_id: Some(view_id),
+            ..Self::lifecycle(DROP_VIEW_EVENT_TYPE, catalog_name, schema_name, view_name)
+        }
     }
 
     fn submitted(
@@ -156,24 +175,35 @@ impl ViewDdlEvent {
         }
     }
 
-    fn lifecycle(event_type: &'static str) -> Self {
+    fn lifecycle(
+        event_type: &'static str,
+        catalog_name: &str,
+        schema_name: &str,
+        view_name: &str,
+    ) -> Self {
         Self {
             event_type,
-            catalog_name: None,
-            schema_name: None,
-            view_name: None,
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
+            view_name: Some(view_name.to_string()),
             view_id: None,
             payload: None,
             event_context: None,
         }
     }
 
-    fn succeeded(event_type: &'static str, view_id: u32) -> Self {
+    fn succeeded(
+        event_type: &'static str,
+        catalog_name: &str,
+        schema_name: &str,
+        view_name: &str,
+        view_id: u32,
+    ) -> Self {
         Self {
             event_type,
-            catalog_name: None,
-            schema_name: None,
-            view_name: None,
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
+            view_name: Some(view_name.to_string()),
             view_id: Some(view_id),
             payload: None,
             event_context: None,

@@ -809,7 +809,7 @@ impl Procedure for RepartitionProcedure {
             let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
             RepartitionEvent::submitted(&self.context.persistent_ctx, start)
         } else {
-            RepartitionEvent::lifecycle()
+            RepartitionEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }

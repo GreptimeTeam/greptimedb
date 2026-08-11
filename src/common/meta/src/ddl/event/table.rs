@@ -103,6 +103,7 @@ impl TableDdlLocator {
     }
 
     /// Creates a locator containing only a table ID.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn from_table_id(table_id: TableId) -> Self {
         Self {
             table_id: Some(table_id),
@@ -361,36 +362,32 @@ impl TableDdlEvent {
         )
     }
 
-    /// Builds a lightweight lifecycle event with null domain columns and payload.
-    pub(crate) fn lifecycle(event_type: TableDdlEventType) -> Self {
+    /// Builds a lifecycle event with stable object locators and no intent payload.
+    pub(crate) fn lifecycle(
+        event_type: TableDdlEventType,
+        locators: impl IntoIterator<Item = TableDdlLocator>,
+    ) -> Self {
         Self {
             event_type,
-            locators: vec![TableDdlLocator::default()],
+            locators: locators.into_iter().collect(),
             payload: None,
             event_context: None,
         }
     }
 
-    /// Builds a Create Table success event containing only the allocated table ID.
-    pub(crate) fn create_table_succeeded(table_id: TableId) -> Self {
-        Self {
-            event_type: TableDdlEventType::CreateTable,
-            locators: vec![TableDdlLocator::from_table_id(table_id)],
-            payload: None,
-            event_context: None,
-        }
+    /// Builds a Create Table success event containing the submitted locator and allocated ID.
+    pub(crate) fn create_table_succeeded(locator: TableDdlLocator, table_id: TableId) -> Self {
+        Self::lifecycle(
+            TableDdlEventType::CreateTable,
+            [locator.with_table_id(table_id)],
+        )
     }
 
     /// Builds Create Logical Tables success rows from their allocated locators.
     pub(crate) fn create_logical_tables_succeeded(
         locators: impl IntoIterator<Item = TableDdlLocator>,
     ) -> Self {
-        Self {
-            event_type: TableDdlEventType::CreateLogicalTables,
-            locators: locators.into_iter().collect(),
-            payload: None,
-            event_context: None,
-        }
+        Self::lifecycle(TableDdlEventType::CreateLogicalTables, locators)
     }
 
     fn submitted(
