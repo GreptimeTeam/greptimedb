@@ -1,3 +1,6 @@
 [grpc]
 bind_addr = "{addrs.grpc_addr}"
 server_addr = "{addrs.grpc_addr}"
+
+[event_recorder]
+event_types = []

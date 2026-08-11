@@ -27,7 +27,7 @@ use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, ContextProvider, Error as ProcedureError, EventRuntimeContext,
+    Context as ProcedureContext, ContextProvider, Error as ProcedureError, EventContext,
     EventTrigger, LockKey, PoisonKey, PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{error, info, warn};
@@ -58,7 +58,7 @@ use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::poison_key::table_poison_key;
-use crate::rpc::ddl::{AlterTableTask, EventContext};
+use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// The alter table procedure
@@ -97,24 +97,18 @@ fn build_executor_from_alter_expr(alter_data: &AlterTableData) -> AlterTableExec
 impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
-    pub fn new(
-        table_id: TableId,
-        task: AlterTableTask,
-        event_context: EventContext,
-        context: DdlContext,
-    ) -> Result<Self> {
-        Self::new_with_region_locks(table_id, task, event_context, vec![], context)
+    pub fn new(table_id: TableId, task: AlterTableTask, context: DdlContext) -> Result<Self> {
+        Self::new_with_region_locks(table_id, task, vec![], context)
     }
 
     pub(crate) fn new_with_region_locks(
         table_id: TableId,
         task: AlterTableTask,
-        event_context: EventContext,
         region_locks: Vec<RegionId>,
         context: DdlContext,
     ) -> Result<Self> {
         task.validate()?;
-        let data = AlterTableData::new(task, table_id, event_context, region_locks);
+        let data = AlterTableData::new(task, table_id, region_locks);
         let executor = build_executor_from_alter_expr(&data);
         Ok(Self {
             context,
@@ -569,10 +563,7 @@ impl Procedure for AlterTableProcedure {
         PoisonKeys::new(vec![self.table_poison_key()])
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::AlterTable.as_str())
@@ -591,7 +582,7 @@ impl Procedure for AlterTableProcedure {
                     .kind
                     .as_ref()
                     .and_then(alter_table_kind_name);
-                TableDdlEvent::alter_table_submitted(locator, kind, self.data.event_context.clone())
+                TableDdlEvent::alter_table_submitted(locator, kind)
             }
             _ => TableDdlEvent::lifecycle(TableDdlEventType::AlterTable, [locator]),
         };
@@ -619,8 +610,6 @@ pub struct AlterTableData {
     task: AlterTableTask,
     table_id: TableId,
     #[serde(default)]
-    event_context: EventContext,
-    #[serde(default)]
     column_metadatas: Vec<ColumnMetadata>,
     /// Table info value before alteration.
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
@@ -632,17 +621,11 @@ pub struct AlterTableData {
 }
 
 impl AlterTableData {
-    pub fn new(
-        task: AlterTableTask,
-        table_id: TableId,
-        event_context: EventContext,
-        region_locks: Vec<RegionId>,
-    ) -> Self {
+    pub fn new(task: AlterTableTask, table_id: TableId, region_locks: Vec<RegionId>) -> Self {
         Self {
             state: AlterTableState::Prepare,
             task,
             table_id,
-            event_context,
             column_metadatas: vec![],
             table_info_value: None,
             region_distribution: None,

@@ -29,7 +29,7 @@ use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::tests::create_table::test_create_table_task;
 use crate::error::Error;
-use crate::rpc::ddl::{CreateViewTask, EventContext, QueryContext};
+use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 pub(crate) fn test_table_names() -> HashSet<table::table_name::TableName> {
@@ -112,7 +112,7 @@ async fn test_on_prepare_view_exists_err() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateViewProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::ViewAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -138,7 +138,7 @@ async fn test_on_prepare_with_create_if_view_exists() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateViewProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Done { output: Some(..) });
     let table_id = *status.downcast_output_ref::<u32>().unwrap();
@@ -151,7 +151,7 @@ async fn test_on_prepare_without_create_if_table_exists() {
     let ddl_context = new_ddl_context(node_manager);
     let mut task = test_create_view_task("foo");
     task.create_view.create_if_not_exists = true;
-    let mut procedure = CreateViewProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -170,11 +170,12 @@ async fn test_on_create_metadata() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_view_task("foo");
     assert!(!task.create_view.create_if_not_exists);
-    let mut procedure = CreateViewProcedure::new(task, EventContext::default(), ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
@@ -189,12 +190,12 @@ async fn test_replace_view_metadata() {
     let ddl_context = new_ddl_context(node_manager.clone());
     let task = test_create_view_task("foo");
     assert!(!task.create_view.create_if_not_exists);
-    let mut procedure =
-        CreateViewProcedure::new(task.clone(), EventContext::default(), ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
@@ -215,8 +216,7 @@ async fn test_replace_view_metadata() {
     let mut task = test_create_view_task("foo");
     // The view already exists, prepare should fail
     {
-        let mut procedure =
-            CreateViewProcedure::new(task.clone(), EventContext::default(), ddl_context.clone());
+        let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
         let err = procedure.on_prepare().await.unwrap_err();
         assert_matches!(err, Error::ViewAlreadyExists { .. });
         assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -227,12 +227,12 @@ async fn test_replace_view_metadata() {
     task.create_view.logical_plan = vec![4, 5, 6];
     task.create_view.definition = "new_definition".to_string();
 
-    let mut procedure =
-        CreateViewProcedure::new(task, EventContext::default(), ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
     // Triggers procedure to replace view metadata, but the view_id is unchanged.
     let status = procedure.execute(&ctx).await.unwrap();
@@ -262,17 +262,12 @@ async fn test_replace_table() {
     {
         // Create a `foo` table.
         let task = test_create_table_task("foo");
-        let mut procedure = CreateTableProcedure::new(
-            task,
-            QueryContext::default(),
-            EventContext::default(),
-            ddl_context.clone(),
-        )
-        .unwrap();
+        let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
         procedure.on_prepare().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
         };
         procedure.execute(&ctx).await.unwrap();
         procedure.execute(&ctx).await.unwrap();
@@ -281,8 +276,7 @@ async fn test_replace_table() {
     // Try to replace a view named `foo` too.
     let mut task = test_create_view_task("foo");
     task.create_view.or_replace = true;
-    let mut procedure =
-        CreateViewProcedure::new(task.clone(), EventContext::default(), ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);

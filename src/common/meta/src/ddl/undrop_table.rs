@@ -17,7 +17,7 @@ use api::v1::region::{
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing_context::TracingContext;
@@ -43,7 +43,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
-use crate::rpc::ddl::{EventContext, UndropTableTask};
+use crate::rpc::ddl::UndropTableTask;
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
 };
@@ -56,17 +56,16 @@ pub struct UndropTableProcedure {
 impl UndropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::UndropTable";
 
-    pub fn new(task: UndropTableTask, context: DdlContext, event_context: EventContext) -> Self {
-        Self::new_with_original_table_name(task, context, None, event_context)
+    pub fn new(task: UndropTableTask, context: DdlContext) -> Self {
+        Self::new_with_original_table_name(task, context, None)
     }
 
     pub(crate) fn new_with_original_table_name(
         task: UndropTableTask,
         context: DdlContext,
         table_name: Option<TableName>,
-        event_context: EventContext,
     ) -> Self {
-        let mut data = UndropTableData::new(task, event_context);
+        let mut data = UndropTableData::new(task);
         data.table_name = table_name;
         Self { context, data }
     }
@@ -444,10 +443,7 @@ impl Procedure for UndropTableProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::UndropTable.as_str())
@@ -456,9 +452,7 @@ impl Procedure for UndropTableProcedure {
         }
         let locator = self.event_locator();
         let event = match &ctx.trigger {
-            EventTrigger::Submitted => {
-                TableDdlEvent::undrop_table_submitted(locator, self.data.event_context.clone())
-            }
+            EventTrigger::Submitted => TableDdlEvent::undrop_table_submitted(locator),
             _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable, [locator]),
         };
 
@@ -565,12 +559,10 @@ pub struct UndropTableData {
     drop_generation: Option<String>,
     #[serde(default)]
     tombstone_identity_loaded: bool,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 impl UndropTableData {
-    fn new(task: UndropTableTask, event_context: EventContext) -> Self {
+    fn new(task: UndropTableTask) -> Self {
         Self {
             state: UndropTableState::Prepare,
             task,
@@ -582,7 +574,6 @@ impl UndropTableData {
             retention_expires_at: None,
             drop_generation: None,
             tombstone_identity_loaded: false,
-            event_context,
         }
     }
 
@@ -647,11 +638,7 @@ mod tests {
     #[test]
     fn test_map_restore_metadata_error_without_table_name() {
         let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-        let procedure = UndropTableProcedure::new(
-            UndropTableTask { table_id: 42 },
-            context,
-            EventContext::default(),
-        );
+        let procedure = UndropTableProcedure::new(UndropTableTask { table_id: 42 }, context);
 
         let err = procedure.map_restore_metadata_error(
             error::TombstoneTargetAlreadyExistsSnafu {
@@ -666,11 +653,8 @@ mod tests {
     #[test]
     fn test_recovered_legacy_snapshot_reloads_tombstone_identity() {
         let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-        let mut procedure = UndropTableProcedure::new(
-            UndropTableTask { table_id: 42 },
-            context.clone(),
-            EventContext::default(),
-        );
+        let mut procedure =
+            UndropTableProcedure::new(UndropTableTask { table_id: 42 }, context.clone());
         procedure.data.state = UndropTableState::OpenRegions;
         let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
         let data = data.as_object_mut().unwrap();
@@ -695,11 +679,7 @@ mod tests {
 
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
-        let mut procedure = UndropTableProcedure::new(
-            UndropTableTask { table_id },
-            context,
-            EventContext::default(),
-        );
+        let mut procedure = UndropTableProcedure::new(UndropTableTask { table_id }, context);
         procedure.data.table_route_value = Some(TableRouteValue::physical(vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(1)),
@@ -738,11 +718,7 @@ mod tests {
 
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
-        let mut procedure = UndropTableProcedure::new(
-            UndropTableTask { table_id },
-            context,
-            EventContext::default(),
-        );
+        let mut procedure = UndropTableProcedure::new(UndropTableTask { table_id }, context);
         procedure.data.table_name = Some(TableName::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,

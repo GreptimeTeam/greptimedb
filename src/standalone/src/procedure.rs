@@ -20,7 +20,6 @@ use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::rpc::ddl::EventContext;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{EventRecorderHandle, LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
@@ -74,7 +73,6 @@ impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
         _source: RepartitionSource,
         _to_exprs: Vec<String>,
         _timeout: Option<Duration>,
-        _event_context: EventContext,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         Err(BoxedError::new(NoSupportRepartitionProcedureSnafu.build()))
     }

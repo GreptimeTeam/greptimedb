@@ -21,7 +21,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
@@ -41,7 +41,7 @@ use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::lock_key::{CatalogLock, FlowLock};
 use crate::metrics;
-use crate::rpc::ddl::{DropFlowTask, EventContext};
+use crate::rpc::ddl::DropFlowTask;
 
 /// The procedure for dropping a flow.
 pub struct DropFlowProcedure {
@@ -54,7 +54,7 @@ pub struct DropFlowProcedure {
 impl DropFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropFlow";
 
-    pub fn new(task: DropFlowTask, event_context: EventContext, context: DdlContext) -> Self {
+    pub fn new(task: DropFlowTask, context: DdlContext) -> Self {
         Self {
             context,
             data: DropFlowData {
@@ -62,7 +62,6 @@ impl DropFlowProcedure {
                 task,
                 flow_info_value: None,
                 flow_route_values: vec![],
-                event_context,
             },
         }
     }
@@ -223,10 +222,7 @@ impl Procedure for DropFlowProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(DROP_FLOW_EVENT_TYPE) {
             return None;
         }
@@ -237,7 +233,6 @@ impl Procedure for DropFlowProcedure {
                 &self.data.task.flow_name,
                 self.data.task.flow_id,
                 self.data.task.drop_if_exists,
-                self.data.event_context.clone(),
             ),
             _ => FlowDdlEvent::drop_lifecycle(
                 &self.data.task.catalog_name,
@@ -257,8 +252,6 @@ pub(crate) struct DropFlowData {
     task: DropFlowTask,
     pub(crate) flow_info_value: Option<FlowInfoValue>,
     pub(crate) flow_route_values: Vec<FlowRouteValue>,
-    #[serde(default)]
-    pub(crate) event_context: EventContext,
 }
 
 /// The state of drop flow
