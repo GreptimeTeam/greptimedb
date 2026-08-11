@@ -193,7 +193,10 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
 /// Stamps the series' inline metadata for the written table's auto-create: an
 /// explicit metric type upgrades the table's metadata quality to `declared`,
 /// `UNSPECIFIED` series keep the request-level `inferred` stamp, and units are
-/// canonicalised from OpenMetrics words to UCUM. Help text is not persisted.
+/// canonicalised from OpenMetrics words to UCUM. Type and unit stamp
+/// independently — OpenMetrics models them as separate MetricFamily metadata,
+/// so an `UNSPECIFIED` series still records its unit (which is otherwise
+/// unrecoverable after table creation). Help text is not persisted.
 ///
 /// Every non-zero symbol reference is validated up front, independent of what
 /// ends up persisted: the spec requires all references to point into the
@@ -221,18 +224,22 @@ fn record_series_metadata(
     } else {
         None
     };
-    let Some(metric_type) = metric_type_value(series_metadata.r#type) else {
+    let metric_type = metric_type_value(series_metadata.r#type);
+    let ucum = unit.and_then(|unit| openmetrics_unit_to_ucum(unit.trim()));
+    if metric_type.is_none() && ucum.is_none() {
         return Ok(());
-    };
+    }
 
     let index = index.index_for(prom_ctx.schema.as_deref());
-    index.record_scalar(table_name, SEMANTIC_METRIC_TYPE, metric_type);
-    index.record_scalar(
-        table_name,
-        SEMANTIC_METRIC_METADATA_QUALITY,
-        METADATA_QUALITY_DECLARED,
-    );
-    if let Some(ucum) = unit.and_then(|unit| openmetrics_unit_to_ucum(unit.trim())) {
+    if let Some(metric_type) = metric_type {
+        index.record_scalar(table_name, SEMANTIC_METRIC_TYPE, metric_type);
+        index.record_scalar(
+            table_name,
+            SEMANTIC_METRIC_METADATA_QUALITY,
+            METADATA_QUALITY_DECLARED,
+        );
+    }
+    if let Some(ucum) = ucum {
         index.record_scalar(table_name, SEMANTIC_METRIC_UNIT, ucum);
     }
     Ok(())
@@ -2001,13 +2008,25 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_unspecified_leaves_no_stamp() {
-        // UNSPECIFIED declares nothing: the table keeps the request-level
-        // `inferred` quality (no per-table entry at all).
-        let requests = into_write_requests(metadata_request(vec![(
+    fn test_metadata_unspecified_stamps_unit_but_not_type() {
+        // UNSPECIFIED declares no type: the table keeps the request-level
+        // `inferred` quality — but OpenMetrics models TYPE and UNIT
+        // independently, so a valid unit still stamps.
+        let index = decoded_index(metadata_request(vec![(
             vec![(METRIC_NAME_LABEL, "untyped_total")],
             metadata::MetricType::Unspecified as i32,
             Some("seconds"),
+        )]));
+        let untyped = &index["public"]["untyped_total"];
+        assert_eq!(untyped[SEMANTIC_METRIC_UNIT], "s");
+        assert!(!untyped.contains_key(SEMANTIC_METRIC_TYPE));
+        assert!(!untyped.contains_key(SEMANTIC_METRIC_METADATA_QUALITY));
+
+        // UNSPECIFIED with no unit stamps nothing at all.
+        let requests = into_write_requests(metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "untyped_unitless_total")],
+            metadata::MetricType::Unspecified as i32,
+            None,
         )]))
         .unwrap();
         assert!(requests.semantic_index.is_empty());
