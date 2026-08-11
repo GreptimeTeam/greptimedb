@@ -1,0 +1,21 @@
+src/common/meta/src/ddl/tests/event/table.rs
+  s_3f02b45448515f::t_8c3bb09e2b33a3 178
+src/meta-srv/src/event/repartition.rs
+  s_3f02b45448515f::t_aa42572090a0b9 364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7f9c73c4f4b07f70e16f9fafb6f7466d3a06fa40",
+  "prompts": {},
+  "sessions": {
+    "s_3f02b45448515f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019feb04-12f9-7d33-93fd-394a212a696d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
