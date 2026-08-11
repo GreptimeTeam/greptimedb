@@ -9892,6 +9892,7 @@ dependencies = [
  "common-catalog",
  "common-datasource",
  "common-error",
+ "common-event-recorder",
  "common-frontend",
  "common-function",
  "common-grpc",
