@@ -47,9 +47,12 @@ impl State for OpenCandidateRegion {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let instruction = self.build_open_region_instruction(ctx).await?;
+        let trigger_reason = ctx.trigger_reason(procedure_ctx.event_context.as_ref());
+        let instruction = self
+            .build_open_region_instruction(ctx, trigger_reason)
+            .await?;
         let now = Instant::now();
         self.open_candidate_region(ctx, instruction).await?;
         ctx.update_open_candidate_region_elapsed(now);
@@ -67,11 +70,15 @@ impl OpenCandidateRegion {
     ///
     /// Abort(non-retry):
     /// - Datanode Table is not found.
-    async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
+    async fn build_open_region_instruction(
+        &self,
+        ctx: &mut Context,
+        trigger_reason: RegionMigrationTriggerReason,
+    ) -> Result<Instruction> {
         let region_ids = ctx.persistent_ctx.region_ids.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
-        let reason = match ctx.persistent_ctx.trigger_reason {
+        let reason = match trigger_reason {
             RegionMigrationTriggerReason::Failover => OpenRegionReason::RegionFailover,
             _ => OpenRegionReason::RegionMigration,
         };
@@ -280,7 +287,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
 
         let err = state
-            .build_open_region_instruction(&mut ctx)
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Unknown)
             .await
             .unwrap_err();
 
@@ -291,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_open_region_instruction_reason() {
         let state = OpenCandidateRegion;
-        let mut persistent_context = new_persistent_context();
+        let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
         let region_id = persistent_context.region_ids[0];
         let env = TestingEnv::new();
@@ -314,7 +321,10 @@ mod tests {
         let mut ctx = env
             .context_factory()
             .new_context(persistent_context.clone());
-        let instruction = state.build_open_region_instruction(&mut ctx).await.unwrap();
+        let instruction = state
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Unknown)
+            .await
+            .unwrap();
         let open_regions = instruction.into_open_regions().unwrap();
         assert_eq!(
             Some(OpenRegionReason::RegionMigration),
@@ -325,9 +335,11 @@ mod tests {
             open_regions[0].requirements
         );
 
-        persistent_context.trigger_reason = RegionMigrationTriggerReason::Failover;
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let instruction = state.build_open_region_instruction(&mut ctx).await.unwrap();
+        let instruction = state
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Failover)
+            .await
+            .unwrap();
         let open_regions = instruction.into_open_regions().unwrap();
         assert_eq!(
             Some(OpenRegionReason::RegionFailover),

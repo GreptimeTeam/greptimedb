@@ -43,14 +43,14 @@ use api::v1::{
 use base64::Engine as _;
 use base64::engine::general_purpose;
 use common_catalog::{format_full_flow_name, format_full_table_name};
+use common_base::protocol::Channel;
 use common_error::ext::BoxedError;
-use common_session::channel_protocol;
+pub use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{OptionExt, ResultExt};
-use strum::{AsRefStr, EnumString};
 use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
@@ -1668,83 +1668,21 @@ pub struct QueryContext {
     pub sst_min_sequences: HashMap<u64, u64>,
 }
 
-impl QueryContext {
-    /// Returns the protocol name represented by the wire channel value.
-    pub fn channel_protocol(&self) -> Option<&'static str> {
-        channel_protocol(self.channel)
+/// Builds event context from frontend query context metadata.
+pub fn event_context_from_query_context(query_context: &QueryContext) -> PersistentEventContext {
+    let reason = query_context
+        .extensions
+        .get(TRIGGER_REASON_EXTENSION_KEY)
+        .map(|reason| TriggerReason::from_extension(reason))
+        .unwrap_or_default();
+    let channel = Channel::from(u32::from(query_context.channel));
+    let context = PersistentEventContext::new(reason);
+    if channel == Channel::Unknown {
+        context
+    } else {
+        context.with_protocol(channel.as_ref())
     }
 }
-
-/// The stable context recorded for a procedure event.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EventContext {
-    pub reason: TriggerReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extensions: serde_json::Map<String, serde_json::Value>,
-}
-
-impl EventContext {
-    /// Creates an event context with no additional extensions.
-    pub fn new(reason: TriggerReason) -> Self {
-        Self {
-            reason,
-            protocol: None,
-            extensions: Default::default(),
-        }
-    }
-
-    /// Adds the protocol that originated the operation.
-    pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
-        self.protocol = Some(protocol.into());
-        self
-    }
-
-    /// Builds an event context from frontend query context metadata.
-    pub fn from_query_context(query_context: &QueryContext) -> Self {
-        let reason = query_context
-            .extensions
-            .get(TRIGGER_REASON_EXTENSION_KEY)
-            .map(|reason| TriggerReason::from_extension(reason))
-            .unwrap_or_default();
-        let context = Self::new(reason);
-        if let Some(protocol) = query_context.channel_protocol() {
-            context.with_protocol(protocol)
-        } else {
-            context
-        }
-    }
-}
-
-impl Default for EventContext {
-    fn default() -> Self {
-        Self::new(TriggerReason::default())
-    }
-}
-
-/// The stable classification of a procedure trigger.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, AsRefStr, EnumString,
-)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum TriggerReason {
-    Manual,
-    AutoCreate,
-    AutoAlter,
-    AutoRepartition,
-    AutoRebalance,
-    RegionFailover,
-    ScheduledGc,
-    #[default]
-    #[serde(other)]
-    Unknown,
-}
-
-impl TriggerReason {
-    pub fn from_extension(value: &str) -> Self {
-        value.parse().unwrap_or_default()
     }
 }
 
@@ -2329,7 +2267,7 @@ mod tests {
 
     #[test]
     fn test_event_context_serialization() {
-        let context = EventContext::new(TriggerReason::Manual).with_protocol("mysql");
+        let context = PersistentEventContext::new(TriggerReason::Manual).with_protocol("mysql");
 
         assert_eq!(
             serde_json::json!({
@@ -2341,7 +2279,7 @@ mod tests {
 
         assert_eq!(
             serde_json::json!({ "reason": "manual" }),
-            serde_json::to_value(EventContext::new(TriggerReason::Manual)).unwrap()
+            serde_json::to_value(PersistentEventContext::new(TriggerReason::Manual)).unwrap()
         );
     }
 
@@ -2354,7 +2292,7 @@ mod tests {
         );
         query_context.channel = 4;
 
-        let event_context = EventContext::from_query_context(&query_context);
+        let event_context = event_context_from_query_context(&query_context);
 
         assert_eq!(event_context.reason, TriggerReason::AutoCreate);
         assert_eq!(event_context.protocol.as_deref(), Some("prometheus"));

@@ -38,8 +38,8 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
-    LockKey, Procedure, ProcedureId, Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, ProcedureId, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
@@ -262,10 +262,7 @@ impl Procedure for RepartitionGroupProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(REPARTITION_GROUP_EVENT_TYPE) {
             return None;
         }
@@ -634,9 +631,7 @@ mod tests {
     use common_event_recorder::EventTypeFilter;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
-    use common_procedure::{
-        EventRuntimeContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
-    };
+    use common_procedure::{EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState};
 
     use crate::error::Error;
     use crate::event::repartition::REPARTITION_GROUP_EVENT_TYPE;
@@ -713,15 +708,16 @@ mod tests {
             context: env.create_context(new_persistent_context(1024, vec![], vec![])),
         };
         let state = ProcedureState::Running;
-        let runtime_context = |event_type_filter| EventRuntimeContext {
+        let event_context = |event_type_filter| EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(event_type_filter),
+            event_context: None,
         };
 
         let allowed = procedure
-            .event(&runtime_context(EventTypeFilter::Only(HashSet::from([
+            .event(&event_context(EventTypeFilter::Only(HashSet::from([
                 REPARTITION_GROUP_EVENT_TYPE.to_string(),
             ]))))
             .unwrap();
@@ -729,14 +725,14 @@ mod tests {
 
         assert!(
             procedure
-                .event(&runtime_context(EventTypeFilter::Only(HashSet::from([
+                .event(&event_context(EventTypeFilter::Only(HashSet::from([
                     "another_event".to_string(),
                 ]))))
                 .is_none()
         );
         assert!(
             procedure
-                .event(&runtime_context(EventTypeFilter::Only(HashSet::new())))
+                .event(&event_context(EventTypeFilter::Only(HashSet::new())))
                 .is_none()
         );
     }

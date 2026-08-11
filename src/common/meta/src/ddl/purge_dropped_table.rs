@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
@@ -38,7 +38,7 @@ use crate::error::{self, Result};
 use crate::key::DroppedTableMetadata;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::TableLock;
-use crate::rpc::ddl::{EventContext, PurgeDroppedTableTask};
+use crate::rpc::ddl::PurgeDroppedTableTask;
 use crate::rpc::router::RegionRoute;
 
 pub struct PurgeDroppedTableProcedure {
@@ -50,25 +50,17 @@ impl PurgeDroppedTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::PurgeDroppedTable";
     pub const EXPIRED_TYPE_NAME: &'static str = "metasrv-procedure::PurgeExpiredDroppedTable";
 
-    pub fn new(
-        task: PurgeDroppedTableTask,
-        context: DdlContext,
-        event_context: EventContext,
-    ) -> Self {
+    pub fn new(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
         Self {
             context,
-            data: PurgeDroppedTableData::new(task, event_context),
+            data: PurgeDroppedTableData::new(task),
         }
     }
 
-    pub fn new_if_expired(
-        task: PurgeDroppedTableTask,
-        context: DdlContext,
-        event_context: EventContext,
-    ) -> Self {
+    pub fn new_if_expired(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
         Self {
             context,
-            data: PurgeDroppedTableData::new_if_expired(task, event_context),
+            data: PurgeDroppedTableData::new_if_expired(task),
         }
     }
 
@@ -278,10 +270,7 @@ impl Procedure for PurgeDroppedTableProcedure {
         LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::PurgeDroppedTable.as_str())
@@ -290,7 +279,7 @@ impl Procedure for PurgeDroppedTableProcedure {
         }
         let locator = self.event_locator();
         let event = if ctx.trigger == EventTrigger::Submitted {
-            TableDdlEvent::purge_dropped_table_submitted(locator, self.data.event_context.clone())
+            TableDdlEvent::purge_dropped_table_submitted(locator)
         } else {
             TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable, [locator])
         };
@@ -316,12 +305,10 @@ pub struct PurgeDroppedTableData {
     drop_generation_loaded: bool,
     #[serde(default)]
     purging_claimed: bool,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 impl PurgeDroppedTableData {
-    fn new(task: PurgeDroppedTableTask, event_context: EventContext) -> Self {
+    fn new(task: PurgeDroppedTableTask) -> Self {
         Self {
             state: PurgeDroppedTableState::Prepare,
             task,
@@ -334,14 +321,13 @@ impl PurgeDroppedTableData {
             drop_generation: None,
             drop_generation_loaded: false,
             purging_claimed: false,
-            event_context,
         }
     }
 
-    fn new_if_expired(task: PurgeDroppedTableTask, event_context: EventContext) -> Self {
+    fn new_if_expired(task: PurgeDroppedTableTask) -> Self {
         Self {
             check_expired: true,
-            ..Self::new(task, event_context)
+            ..Self::new(task)
         }
     }
 
