@@ -17,10 +17,10 @@ use std::collections::hash_map::Entry;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Request, Sample, TimeSeries,
+    BucketSpan, Histogram, Request, Sample, TimeSeries, metadata,
 };
 #[cfg(test)]
-use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata, metadata};
+use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value};
@@ -31,6 +31,10 @@ use common_query::prelude::{greptime_native_histogram, greptime_timestamp, grept
 use pipeline::{ContextOpt, ContextReq};
 use prost::Message;
 use snafu::{OptionExt, ResultExt, ensure};
+use table::requests::{
+    METADATA_QUALITY_DECLARED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_TYPE,
+    SEMANTIC_METRIC_UNIT,
+};
 
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
@@ -42,6 +46,11 @@ use crate::prom_store::{
     PHYSICAL_TABLE_LABEL_ALT, SCHEMA_LABEL,
 };
 use crate::row_writer::{self, TableData};
+use crate::semantic::{
+    METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, METRIC_TYPE_GAUGE_HISTOGRAM, METRIC_TYPE_HISTOGRAM,
+    METRIC_TYPE_INFO, METRIC_TYPE_STATESET, METRIC_TYPE_SUMMARY, SemanticIndexes,
+    openmetrics_unit_to_ucum,
+};
 
 type PromTags = Vec<(String, String)>;
 type ResolvedSeriesLabels = (PromCtx, String, PromTags);
@@ -67,6 +76,9 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub histograms: ContextReq,
     pub sample_count: u64,
     pub histogram_count: u64,
+    /// Per-table semantic metadata from the series' inline `Metadata`, folded
+    /// into table options at auto-create time.
+    pub semantic_index: SemanticIndexes,
 }
 
 /// Converts a PRW v2 request into normal sample writes and native histogram writes.
@@ -92,6 +104,7 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
     let mut label_names = HashSet::new();
     let mut sample_count_total = 0;
     let mut histogram_count_total = 0;
+    let mut semantic_index = SemanticIndexes::default();
 
     for series in timeseries {
         // Exemplars are intentionally ignored for now.
@@ -104,6 +117,13 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
         let (prom_ctx, table_name, tags) =
             resolve_series_labels(&symbols, &series, &mut label_names)?;
         ensure_no_internal_histogram_labels(&tags)?;
+        record_series_metadata(
+            &mut semantic_index,
+            &symbols,
+            &series,
+            &prom_ctx,
+            &table_name,
+        )?;
         let has_other_value_type = if sample_count > 0 {
             histogram_count > 0
                 || histogram_tables
@@ -166,7 +186,76 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
         histograms: into_context_req(histogram_tables),
         sample_count: sample_count_total,
         histogram_count: histogram_count_total,
+        semantic_index,
     })
+}
+
+/// Stamps the series' inline metadata for the written table's auto-create: an
+/// explicit metric type upgrades the table's metadata quality to `declared`,
+/// `UNSPECIFIED` series keep the request-level `inferred` stamp, and units are
+/// canonicalised from OpenMetrics words to UCUM. Type and unit stamp
+/// independently, as OpenMetrics defines them. Help text is not persisted.
+///
+/// Every non-zero symbol reference is validated up front, independent of what
+/// ends up persisted: the spec requires all references to point into the
+/// symbol table.
+fn record_series_metadata(
+    index: &mut SemanticIndexes,
+    symbols: &[String],
+    series: &TimeSeries,
+    prom_ctx: &PromCtx,
+    table_name: &str,
+) -> Result<()> {
+    let Some(series_metadata) = &series.metadata else {
+        return Ok(());
+    };
+    // Symbol 0 is the mandatory empty string: no help / no unit.
+    if series_metadata.help_ref != 0 {
+        symbol_ref(symbols, series_metadata.help_ref, "metadata help")?;
+    }
+    let unit = if series_metadata.unit_ref != 0 {
+        Some(symbol_ref(
+            symbols,
+            series_metadata.unit_ref,
+            "metadata unit",
+        )?)
+    } else {
+        None
+    };
+    let metric_type = metric_type_value(series_metadata.r#type);
+    let ucum = unit.and_then(|unit| openmetrics_unit_to_ucum(unit.trim()));
+    if metric_type.is_none() && ucum.is_none() {
+        return Ok(());
+    }
+
+    let index = index.index_for(prom_ctx.schema.as_deref());
+    if let Some(metric_type) = metric_type {
+        index.record_scalar(table_name, SEMANTIC_METRIC_TYPE, metric_type);
+        index.record_scalar(
+            table_name,
+            SEMANTIC_METRIC_METADATA_QUALITY,
+            METADATA_QUALITY_DECLARED,
+        );
+    }
+    if let Some(ucum) = ucum {
+        index.record_scalar(table_name, SEMANTIC_METRIC_UNIT, ucum);
+    }
+    Ok(())
+}
+
+/// The `greptime.semantic.metric.type` value for a wire metric type; `None`
+/// for `UNSPECIFIED` (nothing was declared) and out-of-range values.
+fn metric_type_value(wire_type: i32) -> Option<&'static str> {
+    match metadata::MetricType::try_from(wire_type).ok()? {
+        metadata::MetricType::Unspecified => None,
+        metadata::MetricType::Counter => Some(METRIC_TYPE_COUNTER),
+        metadata::MetricType::Gauge => Some(METRIC_TYPE_GAUGE),
+        metadata::MetricType::Histogram => Some(METRIC_TYPE_HISTOGRAM),
+        metadata::MetricType::Gaugehistogram => Some(METRIC_TYPE_GAUGE_HISTOGRAM),
+        metadata::MetricType::Summary => Some(METRIC_TYPE_SUMMARY),
+        metadata::MetricType::Info => Some(METRIC_TYPE_INFO),
+        metadata::MetricType::Stateset => Some(METRIC_TYPE_STATESET),
+    }
 }
 
 fn get_or_create_table_data(
@@ -1822,5 +1911,212 @@ mod tests {
 
     fn is_empty_list(value: Option<ValueData>) -> bool {
         matches!(value, Some(ValueData::ListValue(list)) if list.items.is_empty())
+    }
+
+    fn push_test_symbol(symbols: &mut Vec<String>, symbol: &str) -> u32 {
+        if let Some(idx) = symbols.iter().position(|s| s == symbol) {
+            return idx as u32;
+        }
+        let idx = symbols.len();
+        symbols.push(symbol.to_string());
+        idx as u32
+    }
+
+    /// One sample-carrying test series: `(labels, metric_type, unit)`.
+    type MetadataSeries<'a> = (Vec<(&'a str, &'a str)>, i32, Option<&'a str>);
+
+    fn metadata_request(series: Vec<MetadataSeries<'_>>) -> Request {
+        let mut symbols = vec!["".to_string()];
+        let timeseries = series
+            .into_iter()
+            .map(|(labels, metric_type, unit)| {
+                let mut labels_refs = Vec::with_capacity(labels.len() * 2);
+                for (name, value) in labels {
+                    labels_refs.push(push_test_symbol(&mut symbols, name));
+                    labels_refs.push(push_test_symbol(&mut symbols, value));
+                }
+                let unit_ref = unit.map_or(0, |unit| push_test_symbol(&mut symbols, unit));
+                TimeSeries {
+                    labels_refs,
+                    samples: vec![Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                        start_timestamp: 0,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: Some(Metadata {
+                        r#type: metric_type,
+                        help_ref: 0,
+                        unit_ref,
+                    }),
+                }
+            })
+            .collect();
+        Request {
+            symbols,
+            timeseries,
+        }
+    }
+
+    type DecodedIndex = std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    >;
+
+    fn decoded_index(request: Request) -> DecodedIndex {
+        let encoded = into_write_requests(request)
+            .unwrap()
+            .semantic_index
+            .encode("public")
+            .expect("non-empty semantic index");
+        serde_json::from_str(&encoded).unwrap()
+    }
+
+    #[test]
+    fn test_metadata_stamps_semantic_index() {
+        use table::requests::METADATA_QUALITY_DECLARED;
+
+        let index = decoded_index(metadata_request(vec![
+            (
+                vec![(METRIC_NAME_LABEL, "http_requests_total")],
+                metadata::MetricType::Counter as i32,
+                Some("seconds"),
+            ),
+            (
+                vec![(METRIC_NAME_LABEL, "queue_depth")],
+                metadata::MetricType::Gauge as i32,
+                // Outside the OpenMetrics base set: dropped, not passed through.
+                Some("requests"),
+            ),
+        ]));
+
+        let tables = &index["public"];
+        let typed = &tables["http_requests_total"];
+        assert_eq!(typed[SEMANTIC_METRIC_TYPE], "counter");
+        assert_eq!(
+            typed[SEMANTIC_METRIC_METADATA_QUALITY],
+            METADATA_QUALITY_DECLARED
+        );
+        assert_eq!(typed[SEMANTIC_METRIC_UNIT], "s");
+
+        let unitless = &tables["queue_depth"];
+        assert_eq!(unitless[SEMANTIC_METRIC_TYPE], "gauge");
+        assert!(!unitless.contains_key(SEMANTIC_METRIC_UNIT));
+    }
+
+    #[test]
+    fn test_metadata_unspecified_stamps_unit_but_not_type() {
+        let index = decoded_index(metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "untyped_total")],
+            metadata::MetricType::Unspecified as i32,
+            Some("seconds"),
+        )]));
+        let untyped = &index["public"]["untyped_total"];
+        assert_eq!(untyped[SEMANTIC_METRIC_UNIT], "s");
+        assert!(!untyped.contains_key(SEMANTIC_METRIC_TYPE));
+        assert!(!untyped.contains_key(SEMANTIC_METRIC_METADATA_QUALITY));
+
+        let requests = into_write_requests(metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "untyped_unitless_total")],
+            metadata::MetricType::Unspecified as i32,
+            None,
+        )]))
+        .unwrap();
+        assert!(requests.semantic_index.is_empty());
+
+        // No metadata at all behaves the same.
+        let requests = into_write_requests(test_util::request_with_labels_and_samples(
+            vec![(METRIC_NAME_LABEL, "bare_total")],
+            vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            }],
+        ))
+        .unwrap();
+        assert!(requests.semantic_index.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_type_conflict_collapses_to_mixed() {
+        let index = decoded_index(metadata_request(vec![
+            (
+                vec![(METRIC_NAME_LABEL, "flappy_metric"), ("job", "a")],
+                metadata::MetricType::Counter as i32,
+                None,
+            ),
+            (
+                vec![(METRIC_NAME_LABEL, "flappy_metric"), ("job", "b")],
+                metadata::MetricType::Gauge as i32,
+                None,
+            ),
+        ]));
+        assert_eq!(
+            index["public"]["flappy_metric"][SEMANTIC_METRIC_TYPE],
+            "mixed"
+        );
+    }
+
+    #[test]
+    fn test_metadata_schema_overrides_stay_apart() {
+        // The same metric name written into two schemas by one request must not
+        // collapse each other's metadata.
+        let index = decoded_index(metadata_request(vec![
+            (
+                vec![(METRIC_NAME_LABEL, "cpu_usage")],
+                metadata::MetricType::Counter as i32,
+                None,
+            ),
+            (
+                vec![
+                    (METRIC_NAME_LABEL, "cpu_usage"),
+                    (DATABASE_LABEL, "tenant_b"),
+                ],
+                metadata::MetricType::Gauge as i32,
+                None,
+            ),
+        ]));
+        assert_eq!(
+            index["public"]["cpu_usage"][SEMANTIC_METRIC_TYPE],
+            "counter"
+        );
+        assert_eq!(
+            index["tenant_b"]["cpu_usage"][SEMANTIC_METRIC_TYPE],
+            "gauge"
+        );
+    }
+
+    #[test]
+    fn test_metadata_out_of_range_refs_are_rejected() {
+        let mut request = metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "broken_total")],
+            metadata::MetricType::Counter as i32,
+            None,
+        )]);
+        request.timeseries[0].metadata.as_mut().unwrap().unit_ref = 999;
+        let err = into_write_requests(request).err().unwrap();
+        assert!(err.to_string().contains("out of range"), "{err}");
+
+        // unit_ref must be validated even when the type is UNSPECIFIED
+        // (which persists nothing).
+        let mut request = metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "broken_total")],
+            metadata::MetricType::Unspecified as i32,
+            None,
+        )]);
+        request.timeseries[0].metadata.as_mut().unwrap().unit_ref = 999;
+        let err = into_write_requests(request).err().unwrap();
+        assert!(err.to_string().contains("out of range"), "{err}");
+
+        // help_ref is validated although help is never persisted.
+        let mut request = metadata_request(vec![(
+            vec![(METRIC_NAME_LABEL, "broken_total")],
+            metadata::MetricType::Counter as i32,
+            None,
+        )]);
+        request.timeseries[0].metadata.as_mut().unwrap().help_ref = 999;
+        let err = into_write_requests(request).err().unwrap();
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 }
