@@ -266,7 +266,7 @@ order by dst_id;
 drop table graph_traces_virtual;
 
 -- Agent edges: span structure derives parent_agent calls agent, and span rows
--- co-declaring agent+model / agent+tool witness uses / invoked.
+-- co-declaring agent+model / agent+tool witness uses / invokes.
 create table graph_agent_traces (
   "timestamp" timestamp(9) time index,
   trace_id string,

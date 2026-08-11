@@ -431,7 +431,7 @@ drop table graph_traces_virtual;
 Affected Rows: 0
 
 -- Agent edges: span structure derives parent_agent calls agent, and span rows
--- co-declaring agent+model / agent+tool witness uses / invoked.
+-- co-declaring agent+model / agent+tool witness uses / invokes.
 create table graph_agent_traces (
   "timestamp" timestamp(9) time index,
   trace_id string,
@@ -470,7 +470,7 @@ order by rel_type, dst_id;
 | src_type | src_id       | dst_type | dst_id     | rel_type | provenance |
 +----------+--------------+----------+------------+----------+------------+
 | agent    | orchestrator | agent    | researcher | calls    | trace      |
-| agent    | researcher   | tool     | web_search | invoked  | trace      |
+| agent    | researcher   | tool     | web_search | invokes  | trace      |
 | agent    | researcher   | model    | gpt-5      | uses     | trace      |
 +----------+--------------+----------+------------+----------+------------+
 

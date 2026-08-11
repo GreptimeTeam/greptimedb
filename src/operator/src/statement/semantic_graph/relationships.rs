@@ -142,11 +142,11 @@ const ATTRIBUTE_EDGE_VOCABULARY: [(&str, &str, &str); 6] = [
 ];
 
 /// The agent-edge vocabulary, applied only to trace sources: the RFC derives
-/// `agent uses model` / `agent invoked tool` from span structure (an LLM- or
+/// `agent uses model` / `agent invokes tool` from span structure (an LLM- or
 /// tool-call span carries both identities), so a non-trace table co-declaring
 /// these types must not fabricate invocations.
 const AGENT_EDGE_VOCABULARY: [(&str, &str, &str); 2] =
-    [("agent", "model", "uses"), ("agent", "tool", "invoked")];
+    [("agent", "model", "uses"), ("agent", "tool", "invokes")];
 
 const CO_DECLARED_VALID_COLUMN: &str = "__edge_valid";
 
@@ -313,11 +313,16 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
 }
 
 /// Span-attribute columns naming an uninstrumented peer, in precedence order,
-/// each with the `connection_type` its match implies. Attribute columns are
-/// dynamic in `greptime_trace_v1` (created on first use), so only columns
-/// present in a table's schema participate.
-const VIRTUAL_DST_CANDIDATES: [(&str, &str); 3] = [
+/// each with the `connection_type` its match implies: current OTel names
+/// first (`service.peer.name` and `db.namespace` replaced the deprecated
+/// `peer.service` and `db.name` in semconv 1.39/1.26, kept for existing
+/// telemetry), the bare network endpoint last. Attribute columns are dynamic
+/// in `greptime_trace_v1` (created on first use), so only columns present in
+/// a table's schema participate.
+const VIRTUAL_DST_CANDIDATES: [(&str, &str); 5] = [
+    ("span_attributes.service.peer.name", "virtual_node"),
     ("span_attributes.peer.service", "virtual_node"),
+    ("span_attributes.db.namespace", "database"),
     ("span_attributes.db.name", "database"),
     ("span_attributes.server.address", "virtual_node"),
 ];
@@ -1099,10 +1104,10 @@ mod tests {
             &ctx,
             "trace_a",
             &[
-                // An empty peer.service must fall through to db.name, whose
-                // match maps connection_type to `database`.
-                ("span_attributes.peer.service", &[Some("")]),
-                ("span_attributes.db.name", &[Some("mysql")]),
+                // An empty high-precedence value must fall through to the next
+                // candidate, whose match maps connection_type to `database`.
+                ("span_attributes.service.peer.name", &[Some("")]),
+                ("span_attributes.db.namespace", &[Some("mysql")]),
             ],
             &[(1_000, "t1", "c1", None, CLIENT, UNSET, "frontend", 100)],
         );
@@ -1469,7 +1474,7 @@ mod tests {
                     "agent-1".to_string(),
                     "tool".to_string(),
                     "search".to_string(),
-                    "invoked".to_string(),
+                    "invokes".to_string(),
                     "trace".to_string(),
                 ),
             ]
