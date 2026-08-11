@@ -377,7 +377,7 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_undrop_table_task(
                 common_meta::rpc::ddl::UndropTableTask { table_id },
-                common_meta::rpc::ddl::EventContext::new(
+                common_meta::rpc::ddl::PersistentEventContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
                 ),
             )
@@ -419,7 +419,7 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_purge_dropped_table_task(
                 common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
-                common_meta::rpc::ddl::EventContext::new(
+                common_meta::rpc::ddl::PersistentEventContext::new(
                     common_meta::rpc::ddl::TriggerReason::Manual,
                 ),
             )

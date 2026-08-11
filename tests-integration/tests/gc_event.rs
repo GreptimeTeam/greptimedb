@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::rpc::ddl::{EventContext, TriggerReason};
+use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
 use common_procedure::{ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
@@ -129,7 +129,6 @@ async fn test_batch_gc_event() {
         false,
         Duration::from_secs(10),
         Default::default(),
-        EventContext::new(TriggerReason::Manual),
     );
     let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-00000000bac0").unwrap();
     let mut watcher = cluster
@@ -138,6 +137,9 @@ async fn test_batch_gc_event() {
         .submit(ProcedureWithId {
             id: procedure_id,
             procedure: Box::new(procedure),
+            context: common_procedure::ProcedureContext::from_event_context(
+                PersistentEventContext::new(TriggerReason::Manual),
+            ),
         })
         .await
         .unwrap();

@@ -24,8 +24,8 @@ use common_catalog::consts::METRIC_ENGINE;
 use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
-    ProcedureState, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Status,
 };
 use common_telemetry::{debug, error, warn};
 use futures::future;
@@ -48,7 +48,7 @@ use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
-use crate::rpc::ddl::{CreateTableTask, EventContext};
+use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{RegionRoute, find_leaders};
 
 pub struct CreateLogicalTablesProcedure {
@@ -62,7 +62,6 @@ impl CreateLogicalTablesProcedure {
     pub fn new(
         tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
-        event_context: EventContext,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -75,7 +74,6 @@ impl CreateLogicalTablesProcedure {
                 physical_region_numbers: vec![],
                 physical_columns: vec![],
                 physical_partition_columns: vec![],
-                event_context,
             },
         }
     }
@@ -273,7 +271,7 @@ impl Procedure for CreateLogicalTablesProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(&self, ctx: &EventRuntimeContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         if !ctx
             .event_type_filter
             .allows(TableDdlEventType::CreateLogicalTables.as_str())
@@ -284,7 +282,6 @@ impl Procedure for CreateLogicalTablesProcedure {
             EventTrigger::Submitted => TableDdlEvent::create_logical_tables_submitted(
                 self.event_locators(),
                 self.data.tasks.len(),
-                self.data.event_context.clone(),
             ),
             EventTrigger::Succeeded => match ctx.lifecycle_state {
                 ProcedureState::Done {
@@ -329,8 +326,6 @@ pub struct CreateTablesData {
     physical_region_numbers: Vec<RegionNumber>,
     physical_columns: Vec<ColumnMetadata>,
     physical_partition_columns: Vec<String>,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 impl CreateTablesData {

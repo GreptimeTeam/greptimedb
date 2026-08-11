@@ -2420,6 +2420,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "store-api",
+ "strum 0.27.1",
  "tokio",
  "tokio-util",
  "toml 0.8.23",

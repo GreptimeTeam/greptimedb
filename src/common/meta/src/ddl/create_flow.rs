@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventRuntimeContext, EventTrigger, LockKey, Procedure,
-    ProcedureState, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
@@ -50,7 +50,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, EventContext, FlowQueryContext, QueryContext};
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -62,12 +62,7 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(
-        task: CreateFlowTask,
-        query_context: QueryContext,
-        event_context: EventContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: CreateFlowTask, query_context: QueryContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateFlowData {
@@ -81,7 +76,6 @@ impl CreateFlowProcedure {
                 prev_flow_info_value: None,
                 did_replace: false,
                 flow_type: None,
-                event_context,
             },
         }
     }
@@ -410,10 +404,7 @@ impl Procedure for CreateFlowProcedure {
         ])
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(CREATE_FLOW_EVENT_TYPE) {
             return None;
         }
@@ -428,7 +419,6 @@ impl Procedure for CreateFlowProcedure {
                     expire_after: self.data.task.expire_after,
                     eval_interval_secs: self.data.task.eval_interval_secs,
                 },
-                self.data.event_context.clone(),
             ),
             EventTrigger::Succeeded => {
                 let flow_id = match ctx.lifecycle_state {
@@ -718,8 +708,6 @@ pub struct CreateFlowData {
     #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
-    #[serde(default)]
-    pub(crate) event_context: EventContext,
 }
 
 impl CreateFlowData {

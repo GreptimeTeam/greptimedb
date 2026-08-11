@@ -24,11 +24,11 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{EventContext, TriggerReason};
+use common_meta::rpc::ddl::TriggerReason;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, EventRuntimeContext, EventTrigger,
-    LockKey, Procedure, ProcedureState, Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, ProcedureState, Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::tracing_context::TracingContext;
@@ -200,8 +200,6 @@ pub struct BatchGcData {
     /// mailbox timeout duration
     timeout: Duration,
     gc_report: Option<GcReport>,
-    #[serde(default)]
-    event_context: EventContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -219,7 +217,6 @@ pub enum State {
 impl BatchGcProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::BatchGcProcedure";
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mailbox: MailboxRef,
         table_metadata_manager: TableMetadataManagerRef,
@@ -228,7 +225,6 @@ impl BatchGcProcedure {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
-        event_context: EventContext,
     ) -> Self {
         Self {
             mailbox,
@@ -244,7 +240,6 @@ impl BatchGcProcedure {
                 related_regions: HashMap::new(),
                 file_refs: FileRefsManifest::default(),
                 gc_report: None,
-                event_context,
             },
         }
     }
@@ -275,7 +270,6 @@ impl BatchGcProcedure {
                 related_regions: HashMap::new(),
                 file_refs,
                 gc_report: Some(GcReport::default()),
-                event_context: EventContext::default(),
             },
         }
     }
@@ -1072,23 +1066,21 @@ impl Procedure for BatchGcProcedure {
         LockKey::new(lock_key)
     }
 
-    fn event(
-        &self,
-        ctx: &EventRuntimeContext<'_>,
-    ) -> Option<Box<dyn common_event_recorder::Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
         if !ctx.event_type_filter.allows(BATCH_GC_EVENT_TYPE) {
             return None;
         }
 
         let event = match &ctx.trigger {
             // Keep scheduled GC low-noise; record submitted manual requests for auditability.
-            EventTrigger::Submitted => (self.data.event_context.reason == TriggerReason::Manual)
+            EventTrigger::Submitted => ctx
+                .event_context
+                .is_some_and(|context| context.reason == TriggerReason::Manual)
                 .then(|| {
                     BatchGcEvent::with_config(
                         &self.data.regions,
                         self.data.full_file_listing,
                         self.data.timeout,
-                        Some(self.data.event_context.clone()),
                     )
                 })?,
             EventTrigger::Recovered | EventTrigger::ChildSubmitted { .. } => return None,
@@ -1106,7 +1098,6 @@ impl Procedure for BatchGcProcedure {
                 &self.data.regions,
                 self.data.full_file_listing,
                 self.data.timeout,
-                None,
             ),
             EventTrigger::Failed | EventTrigger::Poisoned => self
                 .data
@@ -1118,7 +1109,6 @@ impl Procedure for BatchGcProcedure {
                         &self.data.regions,
                         self.data.full_file_listing,
                         self.data.timeout,
-                        None,
                     )
                 }),
         };
@@ -1211,16 +1201,6 @@ mod tests {
         assert!(report.need_retry_regions.contains(&region_id));
     }
 
-    #[test]
-    fn test_batch_gc_data_defaults_missing_event_context() {
-        let mut data = serde_json::to_value(&batch_gc_procedure().data).unwrap();
-        data.as_object_mut().unwrap().remove("event_context");
-
-        let recovered: BatchGcData = serde_json::from_value(data).unwrap();
-
-        assert_eq!(recovered.event_context, EventContext::default());
-    }
-
     #[tokio::test]
     async fn test_send_gc_instructions_preserves_partial_report() {
         let first_region = RegionId::new(1024, 1);
@@ -1255,7 +1235,6 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
-            EventContext::default(),
         );
         procedure.data.region_routes = HashMap::from([
             (first_region, (first_peer, vec![])),
@@ -1296,7 +1275,6 @@ mod tests {
             true,
             Duration::from_secs(10),
             HashMap::new(),
-            EventContext::default(),
         )
     }
 }

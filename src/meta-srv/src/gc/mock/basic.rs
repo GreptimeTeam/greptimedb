@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::{EventContext, TriggerReason};
+use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -36,7 +36,7 @@ async fn test_parallel_process_datanodes_empty() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            EventContext::default(),
+            PersistentEventContext::default(),
         )
         .await;
 
@@ -105,7 +105,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            EventContext::default(),
+            PersistentEventContext::default(),
         )
         .await;
 
@@ -189,7 +189,7 @@ async fn test_handle_tick() {
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
     assert_eq!(
         ctx.gc_event_contexts.lock().unwrap().as_slice(),
-        &[EventContext::new(TriggerReason::ScheduledGc)]
+        &[PersistentEventContext::new(TriggerReason::ScheduledGc)]
     );
 
     let tracker = scheduler.region_gc_tracker.lock().await;
@@ -249,6 +249,6 @@ async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
 
     assert_eq!(
         ctx.gc_event_contexts.lock().unwrap().as_slice(),
-        &[EventContext::new(TriggerReason::Manual)]
+        &[PersistentEventContext::new(TriggerReason::Manual)]
     );
 }
