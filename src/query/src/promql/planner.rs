@@ -668,6 +668,8 @@ impl PromPlanner {
                 // convert op and value columns to aggregate exprs
                 let (mut aggr_exprs, prev_field_exprs) =
                     self.create_aggregate_exprs(*op, param, &input)?;
+                let prev_field_exprs =
+                    normalize_cols(prev_field_exprs, &input).context(DataFusionPlanningSnafu)?;
 
                 let keep_tsid = op.id() != token::T_COUNT_VALUES
                     && input_has_tsid
@@ -691,16 +693,28 @@ impl PromPlanner {
                     let label = Self::get_param_value_as_str(*op, param)?;
                     // `count_values` must be grouped by fields,
                     // and project the fields to the new label.
-                    group_exprs.extend(prev_field_exprs.clone());
+                    let count_value_exprs = prev_field_exprs.iter().map(|expr| {
+                        match expr {
+                            DfExpr::Column(column) => DfExpr::Column(column.clone()),
+                            _ => DfExpr::Column(Column::from_name(expr.schema_name().to_string())),
+                        }
+                        .alias(label)
+                    });
+                    let aggregate_group_exprs = group_exprs
+                        .iter()
+                        .cloned()
+                        .chain(prev_field_exprs.clone())
+                        .collect::<Vec<_>>();
+                    group_exprs.push(col(label));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
                         .chain(self.create_tag_column_exprs()?)
                         .chain(Some(self.create_time_index_column_expr()?))
-                        .chain(prev_field_exprs.into_iter().map(|expr| expr.alias(label)));
+                        .chain(count_value_exprs);
 
                     builder
-                        .aggregate(group_exprs.clone(), aggr_exprs)
+                        .aggregate(aggregate_group_exprs, aggr_exprs)
                         .context(DataFusionPlanningSnafu)?
                         .project(project_fields)
                         .context(DataFusionPlanningSnafu)?
@@ -4325,6 +4339,21 @@ impl PromPlanner {
         let histogram_input = DfExpr::Column(Column::from_name(histogram_column));
         let float_count = count_udaf().call(vec![float_input.clone()]);
         let histogram_count = count_udaf().call(vec![histogram_input.clone()]);
+        let mixed_sample_value = || {
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: coalesce(),
+                args: vec![
+                    DfExpr::Cast(Cast {
+                        expr: Box::new(float_input.clone()),
+                        data_type: ArrowDataType::Utf8,
+                    }),
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: Arc::new(NativeHistogramToString::scalar_udf()),
+                        args: vec![histogram_input.clone()],
+                    }),
+                ],
+            })
+        };
 
         let (exprs, prev_field_exprs, field_columns) = match op.id() {
             token::T_SUM | token::T_AVG => (
@@ -4338,46 +4367,31 @@ impl PromPlanner {
                 vec![],
                 vec![float_column.to_string(), histogram_column.to_string()],
             ),
-            token::T_COUNT => (
-                vec![
-                    DfExpr::BinaryExpr(BinaryExpr {
-                        left: Box::new(float_count),
-                        op: Operator::Plus,
-                        right: Box::new(histogram_count),
-                    })
-                    .alias(float_column),
-                ],
-                vec![],
-                vec![float_column.to_string()],
-            ),
+            token::T_COUNT => {
+                let present = when(
+                    float_input
+                        .clone()
+                        .is_not_null()
+                        .or(histogram_input.clone().is_not_null()),
+                    lit(1_i64),
+                )
+                .otherwise(lit(ScalarValue::Int64(None)))
+                .context(DataFusionPlanningSnafu)?;
+                (
+                    vec![count_udaf().call(vec![present]).alias(float_column)],
+                    vec![],
+                    vec![float_column.to_string()],
+                )
+            }
             token::T_GROUP => (
                 vec![max_udaf().call(vec![lit(1_f64)]).alias(float_column)],
                 vec![],
                 vec![float_column.to_string()],
             ),
             token::T_COUNT_VALUES => {
-                let value = DfExpr::ScalarFunction(ScalarFunction {
-                    func: coalesce(),
-                    args: vec![
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(float_input.clone()),
-                            data_type: ArrowDataType::Utf8,
-                        }),
-                        DfExpr::ScalarFunction(ScalarFunction {
-                            func: Arc::new(NativeHistogramToString::scalar_udf()),
-                            args: vec![histogram_input.clone()],
-                        }),
-                    ],
-                });
+                let value = mixed_sample_value();
                 (
-                    vec![
-                        DfExpr::BinaryExpr(BinaryExpr {
-                            left: Box::new(float_count),
-                            op: Operator::Plus,
-                            right: Box::new(histogram_count),
-                        })
-                        .alias(float_column),
-                    ],
+                    vec![count_udaf().call(vec![value.clone()]).alias(float_column)],
                     vec![value],
                     vec![float_column.to_string()],
                 )
@@ -7306,6 +7320,26 @@ mod test {
             .collect()
     }
 
+    fn numeric_values(batches: &[RecordBatch], column: &str) -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let values = datafusion::arrow::compute::cast(
+                    batch.column_by_name(column).unwrap(),
+                    &ArrowDataType::Float64,
+                )
+                .unwrap();
+                values
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn histograms(batches: &[RecordBatch], column: &str) -> Vec<NativeHistogram> {
         batches
             .iter()
@@ -7725,18 +7759,41 @@ mod test {
         ];
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
-            .schema(schema)
+            .schema(schema.clone())
             .primary_key_indices(vec![0])
             .value_indices(vec![2, 3])
             .next_column_id(1024)
             .build()
             .unwrap();
-        let table_info = TableInfoBuilder::default()
-            .name(table_name)
-            .meta(table_meta)
-            .build()
-            .unwrap();
-        let table = EmptyTable::from_table_info(&table_info);
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .name(table_name)
+                .meta(table_meta)
+                .build()
+                .unwrap(),
+        );
+        let batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["float", "histogram"])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+                build_histogram_array(&[None, Some(direct_or_histogram())]),
+                Arc::new(Float64Array::from(vec![Some(2.0), None])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            table_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, batch),
+            1024,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let table = Arc::new(Table::new(
+            table_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
 
         assert!(
             catalog_list
@@ -11570,15 +11627,14 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = "Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]\
-        \n  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N, greptime_value:Float64;N]\
-        \n    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N, greptime_value:Float64;N]\
-        \n      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
-        \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n          PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n            Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(?:(10.0.160.237:8080|10.0.160.237:9090))$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]";
+        let expected = "Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]\
+        \n  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]\
+        \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
+        \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n        PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n          Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n            Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(?:(10.0.160.237:8080|10.0.160.237:9090))$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n              TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -11620,15 +11676,14 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:
                 .unwrap();
         let expected = r#"
 Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, greptime_timestamp:Timestamp(ms)]
-  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]
-    Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N, greptime_value:Float64;N]
-      Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N, greptime_value:Float64;N]
-        Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
-          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-            PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-              Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-                Filter: prometheus_tsdb_head_series.ip ~ Utf8("^(?:(10.0.160.237:8080|10.0.160.237:9090))$") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-                  TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]"#;
+  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]
+    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]
+      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
+          PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
+            Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
+              Filter: prometheus_tsdb_head_series.ip ~ Utf8("^(?:(10.0.160.237:8080|10.0.160.237:9090))$") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
+                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]"#;
         assert_eq!(format!("\n{}", plan.display_indent_schema()), expected);
     }
 
@@ -12662,6 +12717,114 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             assert_eq!(histogram.count, -1.0);
             assert_eq!(histogram.sum, -1.0);
             assert_eq!(histogram.reset_hint, CounterResetHint::Gauge);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_native_histogram_sum_and_avg_execute_real_batches() {
+        for op_name in ["sum", "avg"] {
+            for incompatible in [false, true] {
+                let mut second = direct_or_histogram();
+                if incompatible {
+                    second.schema = CUSTOM_BUCKETS_SCHEMA;
+                    second.custom_values = vec![1.0];
+                }
+                let collector = PromqlAnnotationCollector::default();
+                let (mut planner, input) =
+                    mixed_aggregate_input(vec![direct_or_histogram(), second]).await;
+                planner.promql_annotations = Some(collector.clone());
+                let histogram_column = planner.ctx.field_columns[1].clone();
+                planner.ctx.field_columns = vec![histogram_column.clone()];
+                let input = LogicalPlanBuilder::from(input)
+                    .project([col("ts"), col(&histogram_column)])
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                let PromExpr::Aggregate(AggregateExpr { op, param, .. }) =
+                    parser::parse(&format!("{op_name}(mixed)")).unwrap()
+                else {
+                    unreachable!()
+                };
+                let (aggregate_exprs, _) =
+                    planner.create_aggregate_exprs(op, &param, &input).unwrap();
+                let plan = LogicalPlanBuilder::from(input)
+                    .aggregate(vec![col("ts")], aggregate_exprs)
+                    .unwrap()
+                    .filter(planner.create_empty_values_filter_expr(false).unwrap())
+                    .unwrap()
+                    .build()
+                    .unwrap();
+
+                let (_, batches) = execute(plan, &build_query_engine_state()).await;
+                let mut warnings = vec![];
+                let mut infos = vec![];
+                collector.append_to(&mut warnings, &mut infos);
+                assert!(infos.is_empty());
+                if incompatible {
+                    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+                    assert!(warnings.iter().any(|warning| {
+                        warning
+                            == &format!(
+                                "prom_native_histogram_agg_{op_name}: dropped native histogram aggregate with incompatible schemas"
+                            )
+                    }));
+                } else {
+                    let histograms = histograms(&batches, &histogram_column);
+                    assert_eq!(histograms.len(), 1);
+                    let expected = if op_name == "sum" { 2.0 } else { 1.0 };
+                    assert_eq!(histograms[0].count, expected);
+                    assert_eq!(histograms[0].sum, expected);
+                    assert!(warnings.is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_canonical_mixed_count_group_and_count_values_execute() {
+        let state = build_query_engine_state();
+        for (query, expected) in [
+            ("count(some_metric)", vec![2.0]),
+            ("group(some_metric)", vec![1.0]),
+            (r#"count_values("sample", some_metric)"#, vec![1.0, 1.0]),
+        ] {
+            let plan = PromPlanner::stmt_to_plan(
+                build_test_mixed_native_histogram_table_provider("some_metric").await,
+                &operator_eval_stmt(query),
+                &state,
+            )
+            .await
+            .unwrap();
+            assert!(
+                plan.schema()
+                    .fields()
+                    .iter()
+                    .all(|field| !field.name().starts_with("__promql_sample_count")),
+                "{query}: {plan:?}"
+            );
+            let value_fields = plan
+                .schema()
+                .fields()
+                .iter()
+                .filter(|field| {
+                    matches!(
+                        field.data_type(),
+                        ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+                    ) || field.data_type() == &native_histogram_value_type().as_arrow_type()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(value_fields.len(), 1, "{query}: {plan:?}");
+            assert_ne!(
+                value_fields[0].data_type(),
+                &native_histogram_value_type().as_arrow_type(),
+                "{query}: {plan:?}"
+            );
+            let value_column = value_fields[0].name().clone();
+
+            let (_, batches) = execute(plan, &state).await;
+            let mut actual = numeric_values(&batches, &value_column);
+            actual.sort_by(f64::total_cmp);
+            assert_eq!(actual, expected, "{query}");
         }
     }
 

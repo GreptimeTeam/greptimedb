@@ -336,31 +336,43 @@ mod tests {
             None,
         )
         .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                Arc::new(NativeHistogramAggSum::aggregate_udf())
+                    .call(vec![col("histogram")])
+                    .alias("sum"),
+                Arc::new(NativeHistogramAggAvg::aggregate_udf())
+                    .call(vec![col("histogram")])
+                    .alias("avg"),
+            ],
+        )
+        .unwrap()
         .project(vec![
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramCount::scalar_udf()),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
             }),
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::bool_false_udf(
                     "ignored annotation".to_string(),
                     None,
                 )),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
             }),
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::bool_true_udf(
                     "ignored annotation".to_string(),
                     None,
                 )),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
             }),
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::float_null_udf(
                     "ignored annotation".to_string(),
                     None,
                 )),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
             }),
         ])
         .unwrap()
@@ -389,6 +401,8 @@ mod tests {
         assert!(decoded.contains("prom_native_histogram_drop_bool"));
         assert!(decoded.contains("prom_native_histogram_keep_bool"));
         assert!(decoded.contains("prom_native_histogram_drop_float"));
+        assert!(decoded.contains(NativeHistogramAggSum::name()));
+        assert!(decoded.contains(NativeHistogramAggAvg::name()));
 
         let schema = Arc::new(Schema::new(vec![
             Field::new(
