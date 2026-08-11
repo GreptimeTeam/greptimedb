@@ -113,6 +113,33 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
     TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
 }
 
+/// Returns true when the field is a JSON column, identified either by its
+/// Arrow extension type (`greptime.json` / `greptime.json2`) or by its
+/// `greptime:type=Json` marker.
+fn is_json_field(field: &Field) -> bool {
+    is_any_json_extension_type(field)
+        || field
+            .metadata()
+            .get(datatypes::schema::TYPE_KEY)
+            .map(String::as_ref)
+            == Some("Json")
+}
+
+/// Returns true when two fields describe the same column semantics: same
+/// name, same data type, and same nullability.
+///
+/// Arrow `Field` metadata is auxiliary information (indexing, encoding,
+/// compression hints, ...) and does not participate in the comparison. This
+/// applies to every field, JSON columns included: JSON identity keys
+/// (`greptime:type`, `ARROW:extension:metadata`) are never compared here.
+/// The wire/decoded physical-type difference of JSON columns is exempted
+/// separately by [`json_fields_compatible`].
+fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
+    expected_field.name() == actual_field.name()
+        && expected_field.data_type() == actual_field.data_type()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+}
+
 /// Returns true when two fields are semantically equivalent JSON columns.
 ///
 /// A JSON column is carried on the wire in its binary-encoded form (e.g.
@@ -124,17 +151,8 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
 /// settings (`ARROW:extension:metadata`, e.g. type hints) are the semantic
 /// parts of the field and must match.
 fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
-    let is_json = |field: &Field| {
-        is_any_json_extension_type(field)
-            || field
-                .metadata()
-                .get(datatypes::schema::TYPE_KEY)
-                .map(String::as_ref)
-                == Some("Json")
-    };
-
-    is_json(expected_field)
-        && is_json(actual_field)
+    is_json_field(expected_field)
+        && is_json_field(actual_field)
         && expected_field.name() == actual_field.name()
         && expected_field.is_nullable() == actual_field.is_nullable()
         // Both must carry the same JSON marker.
@@ -151,12 +169,15 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 
 /// Validates the remote schema before positional column handling.
 ///
-/// A timestamp timezone difference is the only intentional exception. It is
-/// accepted by directly comparing the same timestamp unit, distinct timezones,
-/// and equal name, nullability, and field metadata. Top-level Arrow schema
-/// metadata is non-semantic at this boundary. JSON columns are additionally
-/// compared semantically (see [`json_fields_compatible`]) because their wire
-/// and decoded representations use different physical arrow types.
+/// Field metadata (indexing/encoding/compression hints) is non-semantic at
+/// this boundary and is ignored: two fields are equal when their name, data
+/// type, and nullability match (see [`fields_semantically_equal`]). A
+/// timestamp timezone difference is the only intentional exception, accepted
+/// when the fields share the same timestamp unit, distinct timezones, and
+/// equal name and nullability. Top-level Arrow schema metadata is
+/// non-semantic at this boundary as well. JSON columns are compared
+/// semantically (see [`json_fields_compatible`]) because their wire and
+/// decoded representations use different physical arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
@@ -176,7 +197,8 @@ fn validate_remote_schema(
         .zip(actual.fields().iter())
         .enumerate()
     {
-        if expected_field == actual_field {
+        // Field metadata does not participate in the semantic comparison.
+        if fields_semantically_equal(expected_field, actual_field) {
             continue;
         }
 
@@ -197,7 +219,6 @@ fn validate_remote_schema(
                 && expected_timezone != actual_timezone
                 && expected_field.name() == actual_field.name()
                 && expected_field.is_nullable() == actual_field.is_nullable()
-                && expected_field.metadata() == actual_field.metadata()
         );
         if !timezone_only_difference {
             return Err(remote_schema_mismatch(format!(
@@ -2693,9 +2714,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_json_vs_plain_binary_field() {
-        // A JSON column must not be accepted as compatible with a plain Binary
-        // column lacking the JSON extension metadata.
+    fn merge_scan_remote_schema_identity_ignores_json_extension_metadata_when_physical_type_matches()
+     {
+        // Field metadata (including the JSON extension identity) is not part
+        // of the semantic field identity: a JSON column in its binary wire
+        // form and a plain Binary column share the same name, physical type,
+        // and nullability, so they validate as equal.
         let expected = ArrowSchema::new(vec![
             Field::new("j", TestArrowDataType::Binary, true).with_metadata(json_field_metadata(
                 true,
@@ -2703,11 +2727,26 @@ mod tests {
             )),
         ]);
         let actual = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
-        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+
+        // The JSON compatibility exemption is scoped to JSON columns only: a
+        // pair of non-JSON fields with different physical types is still
+        // rejected even though one side is Binary.
+        let plain_binary = ArrowSchema::new(vec![Field::new("v", TestArrowDataType::Binary, true)]);
+        let plain_struct = ArrowSchema::new(vec![Field::new(
+            "v",
+            TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(Field::new(
+                "a",
+                TestArrowDataType::Utf8View,
+                true,
+            ))])),
+            true,
+        )]);
+        assert!(validate_remote_schema(&plain_binary, &plain_struct, "test").is_err());
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_field_metadata_and_nullability_mismatch() {
+    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_mismatch() {
         let expected = expected_int64_schema();
         let metadata_mismatch = ArrowSchema::new_with_metadata(
             vec![
@@ -2730,8 +2769,40 @@ mod tests {
             ],
             expected.metadata().clone(),
         );
-        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_err());
+        // Field metadata is auxiliary and does not participate in the
+        // semantic field comparison.
+        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_ok());
         assert!(validate_remote_schema(&expected, &nullability_mismatch, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_ignores_skipping_index_field_metadata() {
+        // Regression: a remote stream may advertise auxiliary field metadata
+        // (e.g. `greptime:skipping_index`) that the expected schema does not
+        // carry. Field metadata is not part of the semantic field identity
+        // (name + data type + nullability) and must not fail validation.
+        let skipping_index_metadata = StdHashMap::from([(
+            "greptime:skipping_index".to_string(),
+            r#"{"granularity":1,"false-positive-rate-in-10000":100,"index-type":"BloomFilter"}"#
+                .to_string(),
+        )]);
+        let expected =
+            ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Float64, true)]);
+        let actual_with_metadata = ArrowSchema::new(vec![
+            Field::new("value", TestArrowDataType::Float64, true)
+                .with_metadata(skipping_index_metadata),
+        ]);
+        assert!(validate_remote_schema(&expected, &actual_with_metadata, "test").is_ok());
+
+        // A real data type mismatch is still rejected.
+        let wrong_type =
+            ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Int64, true)]);
+        assert!(validate_remote_schema(&expected, &wrong_type, "test").is_err());
+
+        // A name mismatch is still rejected.
+        let wrong_name =
+            ArrowSchema::new(vec![Field::new("other", TestArrowDataType::Float64, true)]);
+        assert!(validate_remote_schema(&expected, &wrong_name, "test").is_err());
     }
 
     #[test]
@@ -2767,9 +2838,13 @@ mod tests {
                 "different".to_string(),
             )])),
         ]);
-        for actual in [&different_unit, &different_name, &nullability, &metadata] {
+        for actual in [&different_unit, &different_name, &nullability] {
             assert!(validate_remote_schema(&expected, actual, "test").is_err());
         }
+        // Field metadata is non-semantic and is ignored even for timezone
+        // pairs: a metadata difference on an otherwise timezone-only
+        // difference is accepted.
+        assert!(validate_remote_schema(&expected, &metadata, "test").is_ok());
     }
 
     #[test]
