@@ -284,6 +284,7 @@ tests-integration/tests/table_ddl_event.rs
   s_d0d43704cb1be1::t_b13becb24e387f 214-217
   s_d0d43704cb1be1::t_18049c4622b578 211
   s_d0d43704cb1be1::t_55cf41293a0732 394-397,438-441
+  s_d0d43704cb1be1::t_fbdc24862c6b61 232
 src/operator/src/utils.rs
   s_d0d43704cb1be1::t_7633883faa3d86 87,133
   s_d0d43704cb1be1::t_2f1b8fd84b0561 88,121-124,126-132,134,136
