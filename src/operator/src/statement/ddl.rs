@@ -99,8 +99,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
-    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
+    TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -109,12 +109,12 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionRuleSnafu,
-    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
+    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;

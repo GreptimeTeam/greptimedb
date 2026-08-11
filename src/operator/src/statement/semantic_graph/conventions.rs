@@ -114,7 +114,10 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
             }
         }
         if !REL_TYPES.contains(&rule.rel.as_str()) {
-            return Err(format!("unknown rel_type `{}` in edge vocabulary", rule.rel));
+            return Err(format!(
+                "unknown rel_type `{}` in edge vocabulary",
+                rule.rel
+            ));
         }
         if !seen_edges.insert((&rule.src, &rule.dst, &rule.rel)) {
             return Err(format!(
@@ -180,7 +183,11 @@ mod tests {
         assert!(!conventions.edge_vocabulary.is_empty());
         assert!(!conventions.agent_edge_vocabulary.is_empty());
         assert!(!conventions.virtual_dst_candidates.is_empty());
-        assert!(conventions.prometheus_info_metrics.contains_key("target_info"));
+        assert!(
+            conventions
+                .prometheus_info_metrics
+                .contains_key("target_info")
+        );
     }
 
     #[test]

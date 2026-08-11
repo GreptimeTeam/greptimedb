@@ -48,9 +48,8 @@ use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
     CallsSource, CoDeclaredSource, Conventions, DeclaredSource, EntityDeclaration,
-    GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources,
-    build_registry_plan, build_relationships_plan, conventions,
-    declared_relationships_schema_matches,
+    GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources, build_registry_plan,
+    build_relationships_plan, conventions, declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -752,7 +751,9 @@ mod tests {
                 ("greptime.semantic.entity.service.descriptive", "gone"),
             ],
         );
-        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
+        assert!(
+            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty()
+        );
     }
 
     #[test]
@@ -776,11 +777,16 @@ mod tests {
                 ("greptime.semantic.entity.service.id", "service_name"),
             ],
         );
-        assert_eq!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).len(), 1);
+        assert_eq!(
+            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).len(),
+            1
+        );
 
         // A trace-model table without the fixed column synthesizes nothing.
         let info = table_info(&[], &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)]);
-        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
+        assert!(
+            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty()
+        );
 
         // An explicit but invalid declaration must not silently fall back to
         // the synthesized one: identity must not change behind the user's back.
@@ -791,7 +797,9 @@ mod tests {
                 ("greptime.semantic.entity.service.id", "gone"),
             ],
         );
-        assert!(EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty());
+        assert!(
+            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty()
+        );
     }
 
     const PROM_STAMPS: &[(&str, &str)] = &[

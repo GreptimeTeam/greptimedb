@@ -44,47 +44,8 @@ drop table greptime_private.semantic_relationships;
 
 Error: 1001(Unsupported), Table `semantic_relationships` is read-only
 
--- Read-time derivation: declare entity identities on a user table and observe
--- them in the computed registry (single-column and composite ids, scope and
--- descriptive columns, JSON output columns).
-create table graph_app_latency (
-  ts timestamp time index,
-  service_name string,
-  host string,
-  env string,
-  latency double,
-  primary key (service_name, host, env)
-) with (
-  'greptime.semantic.entity.service.id' = 'service_name',
-  'greptime.semantic.entity.service.scope' = 'env',
-  'greptime.semantic.entity.process.id' = 'service_name,host',
-  'greptime.semantic.entity.process.descriptive' = 'env'
-);
-
-Affected Rows: 0
-
-insert into graph_app_latency values (now(), 'cart', 'h1', 'us-east', 3.5);
-
-Affected Rows: 1
-
--- SQLNESS PROTOCOL MYSQL
-select entity_type, entity_id, entity_id_attrs, scope, descriptive, source_tables
-from greptime_private.semantic_entities
-order by entity_type, entity_id;
-
-+-------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
-| entity_type | entity_id                 | entity_id_attrs                     | scope   | descriptive       | source_tables                |
-+-------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
-| process     | host=h1,service_name=cart | {"host":"h1","service_name":"cart"} |         | {"env":"us-east"} | ["public.graph_app_latency"] |
-| service     | cart                      |                                     | us-east |                   | ["public.graph_app_latency"] |
-+-------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
-
-drop table graph_app_latency;
-
-Affected Rows: 0
-
--- Renaming a physical table INTO a reserved computed-table name would let the
--- overlay shadow it, orphaning its data.
+-- Renaming a physical table INTO a reserved name would let the overlay shadow
+-- it (or squat the declared table's canonical schema), orphaning its data.
 create table greptime_private.graph_rename_probe (ts timestamp time index);
 
 Affected Rows: 0
@@ -93,13 +54,96 @@ alter table greptime_private.graph_rename_probe rename semantic_entities;
 
 Error: 1001(Unsupported), Table `semantic_entities` is read-only
 
+alter table greptime_private.graph_rename_probe rename semantic_relationships_declared;
+
+Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
+
 drop table greptime_private.graph_rename_probe;
 
 Affected Rows: 0
 
--- Calls derivation: a trace-v1-model table with client/server span pairs.
--- Trace tables need no entity declaration: the service entities are implicit.
-create table graph_traces (
+-- Read-time derivation from one declaring metric table: entity identities in
+-- the computed registry (single-column and composite ids, scope and
+-- descriptive columns, JSON output columns), and the same rows witnessing the
+-- co-declared vocabulary edges (runs_on / part_of, direction built in).
+create table graph_app_metrics (
+  ts timestamp time index,
+  service_name string,
+  instance string,
+  host string,
+  env string,
+  latency double,
+  primary key (service_name, instance, host, env)
+) with (
+  'greptime.semantic.entity.service.id' = 'service_name',
+  'greptime.semantic.entity.service.scope' = 'env',
+  'greptime.semantic.entity.service.instance.id' = 'instance',
+  'greptime.semantic.entity.host.id' = 'host',
+  'greptime.semantic.entity.process.id' = 'service_name,host',
+  'greptime.semantic.entity.process.descriptive' = 'env'
+);
+
+Affected Rows: 0
+
+insert into graph_app_metrics values (now(), 'cart', 'cart-0', 'h1', 'us-east', 3.5);
+
+Affected Rows: 1
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, entity_id_attrs, scope, descriptive, source_tables
+from greptime_private.semantic_entities
+order by entity_type, entity_id;
+
++------------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
+| entity_type      | entity_id                 | entity_id_attrs                     | scope   | descriptive       | source_tables                |
++------------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
+| host             | h1                        |                                     |         |                   | ["public.graph_app_metrics"] |
+| process          | host=h1,service_name=cart | {"host":"h1","service_name":"cart"} |         | {"env":"us-east"} | ["public.graph_app_metrics"] |
+| service          | cart                      |                                     | us-east |                   | ["public.graph_app_metrics"] |
+| service.instance | cart-0                    |                                     |         |                   | ["public.graph_app_metrics"] |
++------------------+---------------------------+-------------------------------------+---------+-------------------+------------------------------+
+
+select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence
+from greptime_private.semantic_relationships
+order by rel_type, src_id;
+
++------------------+---------------------------+----------+--------+----------+------------+------------+
+| src_type         | src_id                    | dst_type | dst_id | rel_type | provenance | confidence |
++------------------+---------------------------+----------+--------+----------+------------+------------+
+| service.instance | cart-0                    | service  | cart   | part_of  | attribute  | 1.0        |
+| service.instance | cart-0                    | host     | h1     | runs_on  | attribute  | 1.0        |
+| process          | host=h1,service_name=cart | host     | h1     | runs_on  | attribute  | 1.0        |
++------------------+---------------------------+----------+--------+----------+------------+------------+
+
+drop table graph_app_metrics;
+
+Affected Rows: 0
+
+-- Calls derivation over trace-v1 tables, all branches in one scan: the client
+-- span and its child server span land in different tables and still pair into
+-- one edge with RED metrics; the epoch-timestamped pair falls outside the
+-- default one-hour window; unmatched clients become virtual-node edges named
+-- from span attributes (confidence < 1.0, connection type); a trace-model
+-- table that lost the fixed span columns is skipped instead of failing the
+-- scan. Trace tables need no entity declaration: service entities are
+-- implicit.
+create table graph_traces_a (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  "span_attributes.peer.service" string,
+  "span_attributes.db.name" string,
+  primary key (service_name)
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+Affected Rows: 0
+
+create table graph_traces_b (
   "timestamp" timestamp(9) time index,
   trace_id string,
   span_id string,
@@ -113,43 +157,68 @@ create table graph_traces (
 
 Affected Rows: 0
 
--- The epoch-timestamped pair falls outside the default one-hour derivation
--- window and must not appear in the results.
-insert into graph_traces values
-  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0),
-  (now(), 't1', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_ERROR', 'cart', 1500000000),
-  (now(), 't2', 'c2', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0),
-  (now(), 't2', 's2', 'c2', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'cart', 500000000),
-  (0, 't0', 'c0', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'stale-src', 0),
-  (0, 't0', 's0', 'c0', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'stale-dst', 100);
+create table graph_traces_malformed (
+  ts timestamp time index,
+  note string
+) with ('table_data_model' = 'greptime_trace_v1');
+
+Affected Rows: 0
+
+insert into graph_traces_a values
+  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0, NULL, NULL),
+  (now(), 't2', 'c2', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0, NULL, NULL),
+  (0, 't0', 'c0', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'stale-src', 0, NULL, NULL),
+  (0, 't0', 's0', 'c0', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'stale-dst', 100, NULL, NULL),
+  (now(), 't3', 'c3', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 250000000, 'redis', NULL),
+  (now(), 't4', 'c4', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 100000000, NULL, 'orders-db');
 
 Affected Rows: 6
 
+insert into graph_traces_b values
+  (now(), 't1', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_ERROR', 'cart', 1500000000),
+  (now(), 't2', 's2', 'c2', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'cart', 500000000);
+
+Affected Rows: 2
+
+insert into graph_traces_malformed values (now(), 'not a trace');
+
+Affected Rows: 1
+
 -- SQLNESS PROTOCOL MYSQL
-select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence,
+select src_id, dst_id, rel_type, provenance, confidence,
   request_count, error_count, duration_sum, duration_count, attributes
 from greptime_private.semantic_relationships
-order by src_id;
+order by dst_id;
 
-+----------+----------+----------+--------+----------+------------+------------+---------------+-------------+--------------+----------------+------------+
-| src_type | src_id   | dst_type | dst_id | rel_type | provenance | confidence | request_count | error_count | duration_sum | duration_count | attributes |
-+----------+----------+----------+--------+----------+------------+------------+---------------+-------------+--------------+----------------+------------+
-| service  | frontend | service  | cart   | calls    | trace      | 1          | 2             | 1           | 2            | 2              |            |
-+----------+----------+----------+--------+----------+------------+------------+---------------+-------------+--------------+----------------+------------+
++----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
+| src_id   | dst_id    | rel_type | provenance | confidence | request_count | error_count | duration_sum | duration_count | attributes                         |
++----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
+| frontend | cart      | calls    | trace      | 1          | 2             | 1           | 2            | 2              |                                    |
+| frontend | orders-db | calls    | trace      | 0.5        | 1             | 0           | 0.1          | 1              | {"connection_type":"database"}     |
+| frontend | redis     | calls    | trace      | 0.5        | 1             | 0           | 0.25         | 1              | {"connection_type":"virtual_node"} |
++----------+-----------+----------+------------+------------+---------------+-------------+--------------+----------------+------------------------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 select entity_type, entity_id, entity_id_attrs, scope, source_tables
 from greptime_private.semantic_entities
 order by entity_id;
 
-+-------------+-----------+-----------------+-------+-------------------------+
-| entity_type | entity_id | entity_id_attrs | scope | source_tables           |
-+-------------+-----------+-----------------+-------+-------------------------+
-| service     | cart      |                 |       | ["public.graph_traces"] |
-| service     | frontend  |                 |       | ["public.graph_traces"] |
-+-------------+-----------+-----------------+-------+-------------------------+
++-------------+-----------+-----------------+-------+---------------------------+
+| entity_type | entity_id | entity_id_attrs | scope | source_tables             |
++-------------+-----------+-----------------+-------+---------------------------+
+| service     | cart      |                 |       | ["public.graph_traces_b"] |
+| service     | frontend  |                 |       | ["public.graph_traces_a"] |
++-------------+-----------+-----------------+-------+---------------------------+
 
-drop table graph_traces;
+drop table graph_traces_a;
+
+Affected Rows: 0
+
+drop table graph_traces_b;
+
+Affected Rows: 0
+
+drop table graph_traces_malformed;
 
 Affected Rows: 0
 
@@ -222,8 +291,7 @@ where observed_at < '2001-01-02 00:00:00';
 Error: 3001(EngineExecuteQuery), Invalid SQL, error: the observed_at filter has no lower bound; the graph cannot derive over unbounded history — add e.g. observed_at >= '2026-01-01 00:00:00'
 
 -- The declared-edge table's definition is system-owned: user CREATE/ALTER are
--- rejected and a physical table cannot be renamed into the name, while plain
--- DML stays allowed.
+-- rejected, while plain DML stays allowed.
 create table greptime_private.semantic_relationships_declared (ts timestamp time index);
 
 Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
@@ -231,18 +299,6 @@ Error: 1001(Unsupported), The definition of table `semantic_relationships_declar
 alter table greptime_private.semantic_relationships_declared add column extra string;
 
 Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
-
-create table greptime_private.declared_rename_probe (ts timestamp time index);
-
-Affected Rows: 0
-
-alter table greptime_private.declared_rename_probe rename semantic_relationships_declared;
-
-Error: 1001(Unsupported), The definition of table `semantic_relationships_declared` is managed by GreptimeDB; it cannot be created or altered (DROP recreates it on the next write)
-
-drop table greptime_private.declared_rename_probe;
-
-Affected Rows: 0
 
 delete from greptime_private.semantic_relationships_declared;
 
@@ -277,161 +333,9 @@ drop table greptime_private.semantic_relationships_declared;
 
 Affected Rows: 0
 
--- Same-row co-declaration: a table declaring both entity types of a built-in
--- vocabulary pair witnesses the edge on every row carrying both identities;
--- the vocabulary fixes the direction.
-create table graph_pod_metrics (
-  ts timestamp time index,
-  instance string,
-  host string,
-  "service" string,
-  cpu double,
-  primary key (instance, host, "service")
-) with (
-  'greptime.semantic.entity.service.instance.id' = 'instance',
-  'greptime.semantic.entity.host.id' = 'host',
-  'greptime.semantic.entity.service.id' = 'service'
-);
-
-Affected Rows: 0
-
-insert into graph_pod_metrics values (now(), 'cart-0', 'node-1', 'cart', 0.5);
-
-Affected Rows: 1
-
-select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence
-from greptime_private.semantic_relationships
-order by rel_type, src_id;
-
-+------------------+--------+----------+--------+----------+------------+------------+
-| src_type         | src_id | dst_type | dst_id | rel_type | provenance | confidence |
-+------------------+--------+----------+--------+----------+------------+------------+
-| service.instance | cart-0 | service  | cart   | part_of  | attribute  | 1.0        |
-| service.instance | cart-0 | host     | node-1 | runs_on  | attribute  | 1.0        |
-+------------------+--------+----------+--------+----------+------------+------------+
-
-drop table graph_pod_metrics;
-
-Affected Rows: 0
-
--- Cross-table calls pairing: the client span and its child server span land in
--- different trace tables and must still pair into one edge. A trace-model
--- table that lost the fixed span columns is skipped instead of failing the
--- scan.
-create table graph_traces_a (
-  "timestamp" timestamp(9) time index,
-  trace_id string,
-  span_id string,
-  parent_span_id string,
-  span_kind string,
-  span_status_code string,
-  service_name string,
-  duration_nano bigint unsigned,
-  primary key (service_name)
-) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
-
-Affected Rows: 0
-
-create table graph_traces_b (
-  "timestamp" timestamp(9) time index,
-  trace_id string,
-  span_id string,
-  parent_span_id string,
-  span_kind string,
-  span_status_code string,
-  service_name string,
-  duration_nano bigint unsigned,
-  primary key (service_name)
-) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
-
-Affected Rows: 0
-
-create table graph_traces_malformed (
-  ts timestamp time index,
-  note string
-) with ('table_data_model' = 'greptime_trace_v1');
-
-Affected Rows: 0
-
-insert into graph_traces_a values
-  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0);
-
-Affected Rows: 1
-
-insert into graph_traces_b values
-  (now(), 't1', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_ERROR', 'cart', 1500000000);
-
-Affected Rows: 1
-
-insert into graph_traces_malformed values (now(), 'not a trace');
-
-Affected Rows: 1
-
-select src_id, dst_id, rel_type, provenance, confidence, request_count, error_count
-from greptime_private.semantic_relationships
-order by src_id;
-
-+----------+--------+----------+------------+------------+---------------+-------------+
-| src_id   | dst_id | rel_type | provenance | confidence | request_count | error_count |
-+----------+--------+----------+------------+------------+---------------+-------------+
-| frontend | cart   | calls    | trace      | 1.0        | 1             | 1           |
-+----------+--------+----------+------------+------------+---------------+-------------+
-
-drop table graph_traces_a;
-
-Affected Rows: 0
-
-drop table graph_traces_b;
-
-Affected Rows: 0
-
-drop table graph_traces_malformed;
-
-Affected Rows: 0
-
--- Virtual nodes: a client span with no matching server span names its peer
--- through span attributes; the edge carries confidence < 1.0 and the
--- connection type.
-create table graph_traces_virtual (
-  "timestamp" timestamp(9) time index,
-  trace_id string,
-  span_id string,
-  parent_span_id string,
-  span_kind string,
-  span_status_code string,
-  service_name string,
-  duration_nano bigint unsigned,
-  "span_attributes.peer.service" string,
-  "span_attributes.db.name" string,
-  primary key (service_name)
-) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
-
-Affected Rows: 0
-
-insert into graph_traces_virtual values
-  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 250000000, 'redis', NULL),
-  (now(), 't2', 'c2', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 100000000, NULL, 'orders-db');
-
-Affected Rows: 2
-
--- SQLNESS PROTOCOL MYSQL
-select src_id, dst_id, rel_type, confidence, request_count, attributes
-from greptime_private.semantic_relationships
-order by dst_id;
-
-+----------+-----------+----------+------------+---------------+------------------------------------+
-| src_id   | dst_id    | rel_type | confidence | request_count | attributes                         |
-+----------+-----------+----------+------------+---------------+------------------------------------+
-| frontend | orders-db | calls    | 0.5        | 1             | {"connection_type":"database"}     |
-| frontend | redis     | calls    | 0.5        | 1             | {"connection_type":"virtual_node"} |
-+----------+-----------+----------+------------+---------------+------------------------------------+
-
-drop table graph_traces_virtual;
-
-Affected Rows: 0
-
 -- Agent edges: span structure derives parent_agent calls agent, and span rows
--- co-declaring agent+model / agent+tool witness uses / invokes.
+-- co-declaring gen_ai.agent+gen_ai.model / gen_ai.agent+gen_ai.tool witness
+-- uses / invokes.
 create table graph_agent_traces (
   "timestamp" timestamp(9) time index,
   trace_id string,
@@ -466,15 +370,147 @@ select src_type, src_id, dst_type, dst_id, rel_type, provenance
 from greptime_private.semantic_relationships
 order by rel_type, dst_id;
 
-+----------+--------------+----------+------------+----------+------------+
-| src_type | src_id       | dst_type | dst_id     | rel_type | provenance |
-+----------+--------------+----------+------------+----------+------------+
-| agent    | orchestrator | agent    | researcher | calls    | trace      |
-| agent    | researcher   | tool     | web_search | invokes  | trace      |
-| agent    | researcher   | model    | gpt-5      | uses     | trace      |
-+----------+--------------+----------+------------+----------+------------+
++--------------+--------------+--------------+------------+----------+------------+
+| src_type     | src_id       | dst_type     | dst_id     | rel_type | provenance |
++--------------+--------------+--------------+------------+----------+------------+
+| gen_ai.agent | orchestrator | gen_ai.agent | researcher | calls    | trace      |
+| gen_ai.agent | researcher   | gen_ai.tool  | web_search | invokes  | trace      |
+| gen_ai.agent | researcher   | gen_ai.model | gpt-5      | uses     | trace      |
++--------------+--------------+--------------+------------+----------+------------+
 
 drop table graph_agent_traces;
+
+Affected Rows: 0
+
+-- Prometheus conventions: whitelisted entity-descriptor metrics (stamped
+-- signal_type=metric + source=prometheus by the remote-write path) get
+-- implicit declarations, and the co-declared vocabulary derives runs_on /
+-- part_of from their rows. A non-whitelisted metric contributes nothing.
+create table kube_pod_info (
+  greptime_timestamp timestamp(3) time index,
+  namespace string,
+  pod string,
+  uid string,
+  node string,
+  greptime_value double,
+  primary key (namespace, pod, uid, node)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+Affected Rows: 0
+
+create table kube_pod_owner (
+  greptime_timestamp timestamp(3) time index,
+  namespace string,
+  pod string,
+  owner_kind string,
+  owner_name string,
+  greptime_value double,
+  primary key (namespace, pod, owner_kind, owner_name)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+Affected Rows: 0
+
+create table target_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  k8s_cluster_name string,
+  greptime_value double,
+  primary key (job, instance, k8s_cluster_name)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+Affected Rows: 0
+
+create table http_requests_total (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  greptime_value double,
+  primary key (job, instance)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+Affected Rows: 0
+
+insert into kube_pod_info values
+  (now(), 'default', 'api-1', 'uid-1', 'node-a', 1),
+  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1);
+
+Affected Rows: 2
+
+insert into kube_pod_owner values
+  (now(), 'default', 'api-1', 'ReplicaSet', 'api-rs', 1),
+  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1);
+
+Affected Rows: 2
+
+insert into target_info values
+  (now(), 'shop/api', 'inst-1', 'prod', 1);
+
+Affected Rows: 1
+
+insert into http_requests_total values
+  (now(), 'shop/api', 'inst-1', 42);
+
+Affected Rows: 1
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, source_tables
+from greptime_private.semantic_entities
+order by entity_type, entity_id, source_tables;
+
++------------------+-----------------------------------------------------------+---------------------------+
+| entity_type      | entity_id                                                 | source_tables             |
++------------------+-----------------------------------------------------------+---------------------------+
+| k8s.node         | node-a                                                    | ["public.kube_pod_info"]  |
+| k8s.pod          | namespace=default,pod=api-1                               | ["public.kube_pod_info"]  |
+| k8s.pod          | namespace=default,pod=api-1                               | ["public.kube_pod_owner"] |
+| k8s.pod          | namespace=default,pod=api-2                               | ["public.kube_pod_info"]  |
+| k8s.pod          | namespace=default,pod=api-2                               | ["public.kube_pod_owner"] |
+| k8s.workload     | namespace=default,owner_kind=ReplicaSet,owner_name=api-rs | ["public.kube_pod_owner"] |
+| service          | shop/api                                                  | ["public.target_info"]    |
+| service.instance | instance=inst-1,job=shop/api                              | ["public.target_info"]    |
++------------------+-----------------------------------------------------------+---------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+select src_type, src_id, dst_type, dst_id, rel_type, provenance
+from greptime_private.semantic_relationships
+order by rel_type, src_id;
+
++------------------+------------------------------+--------------+-----------------------------------------------------------+----------+------------+
+| src_type         | src_id                       | dst_type     | dst_id                                                    | rel_type | provenance |
++------------------+------------------------------+--------------+-----------------------------------------------------------+----------+------------+
+| service.instance | instance=inst-1,job=shop/api | service      | shop/api                                                  | part_of  | attribute  |
+| k8s.pod          | namespace=default,pod=api-1  | k8s.workload | namespace=default,owner_kind=ReplicaSet,owner_name=api-rs | part_of  | attribute  |
+| k8s.pod          | namespace=default,pod=api-2  | k8s.workload | namespace=default,owner_kind=ReplicaSet,owner_name=api-rs | part_of  | attribute  |
+| k8s.pod          | namespace=default,pod=api-1  | k8s.node     | node-a                                                    | runs_on  | attribute  |
+| k8s.pod          | namespace=default,pod=api-2  | k8s.node     | node-a                                                    | runs_on  | attribute  |
++------------------+------------------------------+--------------+-----------------------------------------------------------+----------+------------+
+
+drop table kube_pod_info;
+
+Affected Rows: 0
+
+drop table kube_pod_owner;
+
+Affected Rows: 0
+
+drop table target_info;
+
+Affected Rows: 0
+
+drop table http_requests_total;
 
 Affected Rows: 0
 
