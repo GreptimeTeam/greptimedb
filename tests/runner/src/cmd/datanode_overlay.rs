@@ -106,13 +106,11 @@ impl DatanodeOverlay {
             ));
         }
 
-        let mut file = File::open(&canonical_target).map_err(|error| {
-            format!(
-                "Failed to open datanode overlay {}: {error}",
-                canonical_target.display()
-            )
-        })?;
-        let metadata = file.metadata().map_err(|error| {
+        // Check the type before opening so the error is identical on every
+        // platform: `std::fs::metadata` succeeds on directories on both Unix
+        // and Windows, whereas `File::open` on a directory fails up front on
+        // Windows (with a platform-specific message).
+        let metadata = std::fs::metadata(&canonical_target).map_err(|error| {
             format!(
                 "Failed to inspect datanode overlay {}: {error}",
                 canonical_target.display()
@@ -124,6 +122,13 @@ impl DatanodeOverlay {
                 canonical_target.display()
             ));
         }
+
+        let mut file = File::open(&canonical_target).map_err(|error| {
+            format!(
+                "Failed to open datanode overlay {}: {error}",
+                canonical_target.display()
+            )
+        })?;
 
         let mut content = String::new();
         file.read_to_string(&mut content).map_err(|error| {
@@ -613,7 +618,10 @@ mod tests {
 
         let directory_error =
             DatanodeOverlay::load(temp_dir.path(), Path::new("directory.toml")).unwrap_err();
-        assert!(directory_error.contains("regular file"));
+        assert!(
+            directory_error.contains("regular file"),
+            "unexpected error for directory.toml: {directory_error}"
+        );
         let parse_error =
             DatanodeOverlay::load(temp_dir.path(), Path::new("broken.toml")).unwrap_err();
         assert!(parse_error.contains("Failed to parse datanode overlay"));
