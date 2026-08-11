@@ -46,8 +46,8 @@ The workspace is layered; dependencies point downward only.
   `file-engine`) implement it; `datanode` drives engines **through the trait**,
   not through engine internals.
 - `frontend` reaches storage through `operator` / `query` / `catalog`, not by
-  depending on `datanode` internals. Standalone mode is the one bridge, via a
-  `RegionServer` wrapper (`src/frontend/src/instance/standalone.rs`).
+  depending on `datanode` internals. Standalone mode is the one bridge, via the
+  `RegionServer` adapter in `src/standalone/src/datanode_manager.rs`.
 - Do not introduce circular dependencies. New deps go through
   `[workspace.dependencies]` in the root `Cargo.toml`, not per-crate version
   literals.

@@ -60,7 +60,6 @@ use flow::{
     FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
-use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -72,7 +71,10 @@ use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
 use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};

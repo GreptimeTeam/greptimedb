@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use auth::PermissionCheckerRef;
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use catalog::kvbackend::KvBackendCatalogManager;
@@ -283,6 +284,7 @@ impl FrontendBuilder {
             let provider: EntityGraphProviderRef = Arc::new(EntityGraphProviderImpl::new(
                 query_engine.clone(),
                 Arc::downgrade(&self.catalog_manager),
+                plugins.get::<PermissionCheckerRef>(),
             ));
             kv_catalog.set_entity_graph_provider(provider);
         }

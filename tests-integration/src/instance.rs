@@ -536,4 +536,108 @@ mod tests {
             unreachable!();
         }
     }
+
+    /// The entity-graph derivation must run as the caller: a source table the
+    /// caller cannot read contributes neither entities nor edges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_entity_graph_derivation_runs_as_caller() {
+        common_telemetry::init_default_ut_logging();
+
+        /// Denies the entity-graph derivation on `secret_traces` only.
+        struct DenySecretTraces;
+
+        impl auth::PermissionChecker for DenySecretTraces {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if matches!(req, auth::PermissionReq::Action(auth::SEMANTIC_GRAPH_QUERY))
+                    && let auth::PermissionTableTargets::Resolved(targets) = targets
+                    && targets.iter().any(|target| target.table == "secret_traces")
+                {
+                    return Ok(auth::PermissionResp::Reject);
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(Arc::new(DenySecretTraces));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_entity_graph_runs_as_caller")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance().clone();
+
+        for table in ["open_traces", "secret_traces"] {
+            let create = format!(
+                r#"create table {table} (
+                    "timestamp" timestamp(9) time index,
+                    trace_id string,
+                    span_id string,
+                    parent_span_id string,
+                    span_kind string,
+                    span_status_code string,
+                    service_name string,
+                    duration_nano bigint unsigned,
+                    primary key (service_name)
+                ) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true')"#
+            );
+            create_table(&instance, &create).await;
+            let insert = format!(
+                "insert into {table} values \
+                 (now(), 't0', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'client-{table}', 0), \
+                 (now(), 't0', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'server-{table}', 100)"
+            );
+            let output = query(&instance, &insert).await;
+            let OutputData::AffectedRows(x) = output.data else {
+                unreachable!()
+            };
+            assert_eq!(x, 2);
+        }
+
+        let sql = "select src_id, dst_id from greptime_private.semantic_relationships \
+                   order by src_id";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("client-open_traces"),
+            "allowed edge missing:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("secret_traces"),
+            "denied source leaked into edges:\n{pretty_print}"
+        );
+
+        let sql = "select entity_id from greptime_private.semantic_entities order by entity_id";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("client-open_traces"),
+            "allowed entity missing:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("secret_traces"),
+            "denied source leaked into entities:\n{pretty_print}"
+        );
+    }
 }

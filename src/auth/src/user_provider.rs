@@ -34,8 +34,8 @@ use crate::common::{
     PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
 };
 use crate::error::{
-    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
-    UserNotFoundSnafu, UserPasswordMismatchSnafu,
+    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedAuthMethodSnafu,
+    UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
@@ -64,6 +64,31 @@ pub trait UserProvider: Send + Sync {
         let user_info = self.authenticate(id, password).await?;
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
+    }
+
+    /// Authenticates and authorizes an opaque bearer token (e.g. a JWT or an
+    /// OAuth2 access token).
+    ///
+    /// Unlike [auth()](Self::auth), the caller has no `Identity`/`Password` —
+    /// the provider validates the token and *derives* the identity from it.
+    /// The token is opaque to the server, so JWT/JWKS/OIDC validation policy
+    /// stays pluggable and out of core.
+    ///
+    /// The default rejects token auth with
+    /// [`Error::UnsupportedAuthMethod`], so password-only providers keep
+    /// today's behavior. Providers that support token auth override this to
+    /// validate the token, resolve it to a user, and
+    /// [`authorize`](Self::authorize) the connection.
+    async fn auth_bearer_token(
+        &self,
+        _token: &str,
+        _catalog: &str,
+        _schema: &str,
+    ) -> Result<UserInfoRef> {
+        UnsupportedAuthMethodSnafu {
+            method: "bearer token",
+        }
+        .fail()
     }
 
     async fn postgres_auth_info(&self, _id: Identity<'_>) -> Result<PgAuthInfo> {

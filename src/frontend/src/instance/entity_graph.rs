@@ -27,29 +27,37 @@ use std::collections::HashMap;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
+};
 use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
-    SERVICE_NAME_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
 };
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
+use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, EntityDeclaration, GraphWindow, RegistrySource, build_calls_plan,
-    build_registry_plan,
+    CallsSource, DeclaredSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
+    RegistrySource, build_registry_plan, build_relationships_plan,
+    declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::TableRef;
 use table::metadata::TableInfo;
+use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
     EntityRole, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
 };
@@ -60,6 +68,7 @@ use crate::error;
 pub struct EntityGraphProviderImpl {
     query_engine: QueryEngineRef,
     catalog_manager: Weak<dyn CatalogManager>,
+    permission_checker: Option<PermissionCheckerRef>,
 }
 
 struct EntitySource {
@@ -68,10 +77,40 @@ struct EntitySource {
 }
 
 impl EntityGraphProviderImpl {
-    pub fn new(query_engine: QueryEngineRef, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        catalog_manager: Weak<dyn CatalogManager>,
+        permission_checker: Option<PermissionCheckerRef>,
+    ) -> Self {
         Self {
             query_engine,
             catalog_manager,
+            permission_checker,
+        }
+    }
+
+    /// Whether the caller may read the derivation sources named by `targets`.
+    /// `Ok(false)` = denied: the source is silently excluded, per the
+    /// derivation contract. Errors other than a denial abort the scan.
+    fn authorize_sources(
+        &self,
+        query_ctx: Option<&QueryContext>,
+        targets: PermissionTableTargets,
+    ) -> Result<bool, BoxedError> {
+        let Some(ctx) = query_ctx else {
+            return Ok(true);
+        };
+        match self
+            .permission_checker
+            .as_ref()
+            .check_permission_with_table_targets(
+                ctx.current_user(),
+                PermissionReq::Action(SEMANTIC_GRAPH_QUERY),
+                targets,
+            ) {
+            Ok(_) => Ok(true),
+            Err(err) if err.status_code() == StatusCode::PermissionDenied => Ok(false),
+            Err(err) => Err(BoxedError::new(err)),
         }
     }
 
@@ -182,15 +221,37 @@ impl EntityGraphProviderImpl {
     async fn enumerate(
         &self,
         catalog: &str,
+        query_ctx: Option<&QueryContext>,
     ) -> Result<(Vec<EntitySource>, Vec<(EntityDeclaration, TableRef)>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
 
+        // A target-blind checker (e.g. the default mode-based one) answers the
+        // same for every table: ask once up front instead of per table.
+        let per_table_auth = match self.permission_checker.as_ref() {
+            Some(checker) if query_ctx.is_some() => {
+                if checker.uses_table_targets() {
+                    true
+                } else if self
+                    .authorize_sources(query_ctx, PermissionTableTargets::resolved(vec![]))?
+                {
+                    false
+                } else {
+                    debug!(
+                        "Caller lacks the entity-graph read permission; deriving an empty graph \
+                         (catalog: {catalog})"
+                    );
+                    return Ok((vec![], vec![]));
+                }
+            }
+            _ => false,
+        };
+
         let mut declarations = vec![];
         let mut traces = vec![];
         let schemas = catalog_manager
-            .schema_names(catalog, None)
+            .schema_names(catalog, query_ctx)
             .await
             .map_err(BoxedError::new)?;
         for schema in schemas {
@@ -202,11 +263,31 @@ impl EntityGraphProviderImpl {
             {
                 continue;
             }
-            let mut tables = catalog_manager.tables(catalog, &schema, None);
+            let mut tables = catalog_manager.tables(catalog, &schema, query_ctx);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info);
-                if is_trace_v1_table(&table_info) {
+                let is_trace = is_trace_v1_table(&table_info);
+                // Authorize only tables that would contribute rows.
+                if per_table_auth
+                    && (is_trace || !table_declarations.is_empty())
+                    && !self.authorize_sources(
+                        query_ctx,
+                        PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                            catalog,
+                            &schema,
+                            &table_info.name,
+                        )]),
+                    )?
+                {
+                    debug!(
+                        "Excluding `{schema}.{}` from the entity-graph derivation: caller lacks \
+                         read permission",
+                        table_info.name
+                    );
+                    continue;
+                }
+                if is_trace {
                     // TODO(entity-graph): validate the complete fixed trace-v1
                     // schema before adding the table to calls derivation, and
                     // skip malformed/stale tables instead of letting one poison
@@ -235,37 +316,122 @@ impl EntityGraphProviderImpl {
         Ok((declarations, traces))
     }
 
-    /// The time window to derive over, taken from the scan's time predicate.
+    /// The time window to derive over, taken from the scan's `observed_at`
+    /// predicate.
     ///
-    /// TODO(entity-graph): read the `observed_at` bounds out of `request.filters`
-    /// and build the window from them. Until then this always returns the default
-    /// (last hour), so a query whose time filter falls entirely outside the last
-    /// hour derives nothing and returns empty — a known limitation tracked for the
-    /// scan-time-predicate-pushdown follow-up.
-    fn query_window(_request: &ScanRequest) -> GraphWindow {
-        GraphWindow::default_last_hour()
+    /// The contract (RFC "The contract"): no `observed_at` predicate → the
+    /// product default (last hour); a missing upper bound means "up to now"; a
+    /// predicate without a lower bound or in a shape that cannot be safely
+    /// extracted is an error asking for an explicit range — never a silent
+    /// fallback into incomplete results.
+    /// `Ok(None)` = the window cannot match anything (e.g. a lower bound in
+    /// the future with the implicit "up to now" upper bound): the scan streams
+    /// empty instead of deriving.
+    fn query_window(request: &ScanRequest) -> Result<Option<GraphQueryWindow>, BoxedError> {
+        let invalid =
+            |err_msg: String| Err(BoxedError::new(error::InvalidSqlSnafu { err_msg }.build()));
+        match extract_time_range_strict(OBSERVED_AT_COLUMN, TimeUnit::Millisecond, &request.filters)
+        {
+            TimeRangeExtraction::Absent => Ok(Some(GraphQueryWindow::default_last_hour())),
+            TimeRangeExtraction::Extracted(range) => {
+                let Some(start) = range.start() else {
+                    return invalid(format!(
+                        "the {OBSERVED_AT_COLUMN} filter has no lower bound; the graph cannot \
+                         derive over unbounded history — add e.g. {OBSERVED_AT_COLUMN} >= \
+                         '2026-01-01 00:00:00'"
+                    ));
+                };
+                let end_ms = range
+                    .end()
+                    .map(|ts| ts.value())
+                    .unwrap_or_else(common_time::util::current_time_millis);
+                if start.value() >= end_ms {
+                    return Ok(None);
+                }
+                Ok(Some(GraphQueryWindow::from_observed(start.value(), end_ms)))
+            }
+            TimeRangeExtraction::Unsupported => invalid(format!(
+                "cannot derive the graph window from the {OBSERVED_AT_COLUMN} filter; use plain \
+                 range predicates (>=, <, BETWEEN) with literal bounds"
+            )),
+        }
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame, BoxedError> {
         self.query_engine.read_table(table).map_err(BoxedError::new)
     }
 
-    /// Executes a derivation plan and returns its live result stream.
-    ///
-    /// TODO(entity-graph): the QueryContext must come from the outer query
-    /// instead of being built here, so the derivation inherits the caller's
-    /// permissions, cancellation and deadline. Requires threading the context
-    /// through the computed-table scan path (planned next PR).
+    /// The declared-edge branch source, when the physical table exists, the
+    /// caller may read it, and it still matches the canonical definition. A
+    /// mismatch (upgrade skew) is an explicit error, not a silent skip:
+    /// dropping declared edges would misrepresent the graph.
+    async fn declared_source(
+        &self,
+        catalog: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<DeclaredSource>, BoxedError> {
+        let Some(catalog_manager) = self.catalog_manager.upgrade() else {
+            return Ok(None);
+        };
+        let Some(table) = catalog_manager
+            .table(
+                catalog,
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+                query_ctx,
+            )
+            .await
+            .map_err(BoxedError::new)?
+        else {
+            return Ok(None);
+        };
+        if !self.authorize_sources(
+            query_ctx,
+            PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                catalog,
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+            )]),
+        )? {
+            debug!(
+                "Excluding declared edges: caller lacks read permission on \
+                 `{DEFAULT_PRIVATE_SCHEMA_NAME}.{SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME}`"
+            );
+            return Ok(None);
+        }
+        let table_info = table.table_info();
+        if !declared_relationships_schema_matches(&table_info) {
+            return Err(BoxedError::new(
+                error::InvalidSqlSnafu {
+                    err_msg: format!(
+                        "{DEFAULT_PRIVATE_SCHEMA_NAME}.{SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME} \
+                         does not match its canonical schema; declared edges cannot be derived"
+                    ),
+                }
+                .build(),
+            ));
+        }
+        Ok(Some(DeclaredSource {
+            scan: self.read_table(table)?,
+        }))
+    }
+
+    /// Executes a derivation plan under the caller's context (inheriting its
+    /// permissions, cancellation and deadline); context-less internal scans
+    /// get a minimal default.
     async fn execute_plan(
         &self,
         catalog: &str,
         plan: LogicalPlan,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let query_ctx: QueryContextRef = QueryContextBuilder::default()
-            .current_catalog(catalog.to_string())
-            .current_schema(DEFAULT_SCHEMA_NAME.to_string())
-            .build()
-            .into();
+        let query_ctx = query_ctx.unwrap_or_else(|| {
+            QueryContextBuilder::default()
+                .current_catalog(catalog.to_string())
+                .current_schema(DEFAULT_SCHEMA_NAME.to_string())
+                .build()
+                .into()
+        });
         let output = self
             .query_engine
             .execute(plan, query_ctx)
@@ -286,8 +452,9 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (sources, _) = self.enumerate(catalog).await?;
+        let (sources, _) = self.enumerate(catalog, query_ctx.as_deref()).await?;
         let mut plans = Vec::with_capacity(sources.len());
         for source in sources {
             plans.push(RegistrySource {
@@ -295,22 +462,25 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(source.table)?,
             });
         }
-        let window = Self::query_window(&request);
+        let Some(window) = Self::query_window(&request)? else {
+            return Ok(None);
+        };
         let Some(plan) = build_registry_plan(plans, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
         else {
             return Ok(None);
         };
-        self.execute_plan(catalog, plan).await
+        self.execute_plan(catalog, plan, query_ctx).await
     }
 
     async fn scan_relationships(
         &self,
         catalog: &str,
         request: ScanRequest,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (_, traces) = self.enumerate(catalog).await?;
+        let (_, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
         let mut scans = Vec::with_capacity(traces.len());
         for (service, trace) in traces {
             scans.push(CallsSource {
@@ -318,14 +488,17 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
                 scan: self.read_table(trace)?,
             });
         }
-        let window = Self::query_window(&request);
-        let Some(plan) = build_calls_plan(scans, &window)
+        let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;
+        let Some(window) = Self::query_window(&request)? else {
+            return Ok(None);
+        };
+        let Some(plan) = build_relationships_plan(scans, declared, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
         else {
             return Ok(None);
         };
-        self.execute_plan(catalog, plan).await
+        self.execute_plan(catalog, plan, query_ctx).await
     }
 }
 
@@ -391,6 +564,30 @@ mod tests {
             .meta(meta)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn future_lower_only_window_matches_nothing() {
+        let future_ms = common_time::util::current_time_millis() + 86_400_000;
+        let request = ScanRequest {
+            filters: vec![
+                datafusion_expr::col(OBSERVED_AT_COLUMN).gt_eq(datafusion_expr::lit(
+                    datafusion::common::ScalarValue::TimestampMillisecond(Some(future_ms), None),
+                )),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            EntityGraphProviderImpl::query_window(&request)
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(
+            EntityGraphProviderImpl::query_window(&ScanRequest::default())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

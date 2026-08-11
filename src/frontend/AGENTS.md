@@ -16,8 +16,9 @@ reads go to the query engine (`query` crate), writes go to the inserter/deleter
 Boundary with `servers`: the `servers` crate implements the wire protocols and
 network I/O; `frontend` provides the business logic by implementing handler
 traits (`SqlQueryHandler`, `GrpcQueryHandler`, `InfluxdbLineProtocolHandler`,
-...). In standalone mode the frontend embeds a datanode `RegionServer`; in
-distributed mode it talks to remote datanodes via `operator`/`client`.
+...). In standalone mode the `standalone` crate bridges the frontend to an
+embedded datanode `RegionServer`; in distributed mode the frontend talks to
+remote datanodes via `operator`/`client`.
 
 ## Module map
 
@@ -26,7 +27,6 @@ distributed mode it talks to remote datanodes via `operator`/`client`.
 | `instance` | `src/frontend/src/instance.rs` | `Instance`: the core handler; implements `SqlQueryHandler`, `PrometheusHandler`, etc. |
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
-| `instance/standalone` | `src/frontend/src/instance/standalone.rs` | Calls the local `RegionServer` instead of RPC |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
 | `frontend` | `src/frontend/src/frontend.rs` | `Frontend` lifecycle wrapper (`FrontendOptions`, start/shutdown) |
@@ -70,9 +70,9 @@ cargo nextest run -p frontend
 
 - Keep the frontend/servers split straight: wire format and network live in
   `servers`; permissions, planning, and routing live here.
-- Standalone vs distributed diverge in datanode access (local `RegionServer` vs
-  `NodeClients` RPC), MetaClient usage, and whether heartbeat matters. In
-  standalone, the cache invalidator is a no-op.
+- Standalone vs distributed diverge in datanode access (the `standalone` crate's
+  local `RegionServer` adapter vs `NodeClients` RPC), MetaClient usage, and
+  whether heartbeat matters. In standalone, the cache invalidator is a no-op.
 
 ## Maintenance contract
 
