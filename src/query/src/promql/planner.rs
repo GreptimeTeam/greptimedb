@@ -884,10 +884,10 @@ impl PromPlanner {
         }
 
         if planned_leaves.iter().any(|leaf| {
-            leaf.ctx
-                .field_columns
-                .iter()
-                .any(|field| Self::field_column_is_native_histogram(leaf.plan.schema(), field))
+            Self::field_columns_contain_native_histogram(
+                leaf.plan.schema(),
+                &leaf.ctx.field_columns,
+            )
         }) {
             self.ctx = original_ctx;
             return Ok(None);
@@ -1246,11 +1246,10 @@ impl PromPlanner {
                     &input_schema,
                     &self.ctx.field_columns,
                 );
-                let has_native_histogram = self
-                    .ctx
-                    .field_columns
-                    .iter()
-                    .any(|col| Self::field_column_is_native_histogram(&input_schema, col));
+                let has_native_histogram = Self::field_columns_contain_native_histogram(
+                    &input_schema,
+                    &self.ctx.field_columns,
+                );
                 let retain_field_columns = self
                     .ctx
                     .field_columns
@@ -1296,15 +1295,12 @@ impl PromPlanner {
                 } else {
                     let projected =
                         self.projection_for_each_field_column(input, bin_expr_builder)?;
-                    if has_native_histogram {
-                        self.filter_binary_projection(
-                            projected,
-                            preserve_any_value,
-                            retain_field_columns,
-                        )
-                    } else {
-                        Ok(projected)
-                    }
+                    self.filter_binary_projection(
+                        projected,
+                        has_native_histogram,
+                        preserve_any_value,
+                        retain_field_columns,
+                    )
                 }
             }
             // lhs is a column, rhs is a literal
@@ -1319,11 +1315,10 @@ impl PromPlanner {
                     &input_schema,
                     &self.ctx.field_columns,
                 );
-                let has_native_histogram = self
-                    .ctx
-                    .field_columns
-                    .iter()
-                    .any(|col| Self::field_column_is_native_histogram(&input_schema, col));
+                let has_native_histogram = Self::field_columns_contain_native_histogram(
+                    &input_schema,
+                    &self.ctx.field_columns,
+                );
                 let retain_field_columns = self
                     .ctx
                     .field_columns
@@ -1369,15 +1364,12 @@ impl PromPlanner {
                 } else {
                     let projected =
                         self.projection_for_each_field_column(input, bin_expr_builder)?;
-                    if has_native_histogram {
-                        self.filter_binary_projection(
-                            projected,
-                            preserve_any_value,
-                            retain_field_columns,
-                        )
-                    } else {
-                        Ok(projected)
-                    }
+                    self.filter_binary_projection(
+                        projected,
+                        has_native_histogram,
+                        preserve_any_value,
+                        retain_field_columns,
+                    )
                 }
             }
             // both are columns. join them on time index
@@ -1412,11 +1404,13 @@ impl PromPlanner {
                     );
                 }
 
-                let has_native_histogram = left_field_columns.iter().any(|field| {
-                    Self::field_column_is_native_histogram(left_input.schema(), field)
-                }) || right_field_columns.iter().any(|field| {
-                    Self::field_column_is_native_histogram(right_input.schema(), field)
-                });
+                let has_native_histogram = Self::field_columns_contain_native_histogram(
+                    left_input.schema(),
+                    &left_field_columns,
+                ) || Self::field_columns_contain_native_histogram(
+                    right_input.schema(),
+                    &right_field_columns,
+                );
 
                 // normal join
                 if left_table_ref == right_table_ref {
@@ -1615,15 +1609,12 @@ impl PromPlanner {
                         &self.ctx.field_columns,
                     );
                     let retain_field_columns = vec![true; self.ctx.field_columns.len()];
-                    if has_native_histogram {
-                        self.filter_binary_projection(
-                            projected,
-                            preserve_any_value,
-                            retain_field_columns,
-                        )
-                    } else {
-                        Ok(projected)
-                    }
+                    self.filter_binary_projection(
+                        projected,
+                        has_native_histogram,
+                        preserve_any_value,
+                        retain_field_columns,
+                    )
                 }
             }
         }
@@ -1632,9 +1623,14 @@ impl PromPlanner {
     fn filter_binary_projection(
         &mut self,
         input: LogicalPlan,
+        has_native_histogram: bool,
         preserve_any_value: bool,
         retain_field_columns: Vec<bool>,
     ) -> Result<LogicalPlan> {
+        if !has_native_histogram {
+            return Ok(input);
+        }
+
         ensure!(
             retain_field_columns.len() == self.ctx.field_columns.len(),
             UnexpectedPlanExprSnafu {
@@ -4998,6 +4994,15 @@ impl PromPlanner {
     fn field_column_is_native_histogram(schema: &DFSchemaRef, field_column: &str) -> bool {
         Self::field_column_type(schema, field_column)
             .is_some_and(|data_type| data_type == &Self::native_histogram_arrow_type())
+    }
+
+    fn field_columns_contain_native_histogram(
+        schema: &DFSchemaRef,
+        field_columns: &[String],
+    ) -> bool {
+        field_columns
+            .iter()
+            .any(|field| Self::field_column_is_native_histogram(schema, field))
     }
 
     fn field_column_is_float_range(schema: &DFSchemaRef, field_column: &str) -> bool {

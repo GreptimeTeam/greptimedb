@@ -197,11 +197,11 @@ impl ScalarUDFImpl for NativeHistogramAnnotationUdf {
 pub struct NativeHistogramDrop;
 
 impl NativeHistogramDrop {
-    const fn float_null_name() -> &'static str {
+    pub const fn float_null_name() -> &'static str {
         "prom_native_histogram_drop_float"
     }
 
-    const fn bool_false_name() -> &'static str {
+    pub const fn bool_false_name() -> &'static str {
         "prom_native_histogram_drop_bool"
     }
 

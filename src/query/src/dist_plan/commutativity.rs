@@ -33,8 +33,8 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvgOverTime,
-    NativeHistogramDelta, NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramRate, NativeHistogramSub, NativeHistogramSumOverTime,
+    NativeHistogramDelta, NativeHistogramDrop, NativeHistogramIDelta, NativeHistogramIRate,
+    NativeHistogramIncrease, NativeHistogramRate, NativeHistogramSub, NativeHistogramSumOverTime,
 };
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
@@ -56,8 +56,8 @@ const ANNOTATING_NATIVE_HISTOGRAM_FUNCTIONS: &[&str] = &[
     NativeHistogramRate::name(),
     NativeHistogramSub::name(),
     NativeHistogramSumOverTime::name(),
-    "prom_native_histogram_drop_bool",
-    "prom_native_histogram_drop_float",
+    NativeHistogramDrop::bool_false_name(),
+    NativeHistogramDrop::float_null_name(),
 ];
 
 #[cfg(feature = "vector_index")]
