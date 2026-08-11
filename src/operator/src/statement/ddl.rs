@@ -99,8 +99,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
-    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
+    TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -2595,11 +2595,12 @@ fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> b
 }
 
 /// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist (tag or field),
-/// and identity columns must have a stable string form.
+/// against the table schema: every named column must exist (tag or field) and
+/// have a stable string form — the derivation renders id, scope and
+/// descriptive values as strings.
 fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
     for (key, value) in &table_options.extra_options {
-        let Some((_, role)) = parse_entity_option_key(key) else {
+        if parse_entity_option_key(key).is_none() {
             continue;
         };
         for col in &parse_entity_columns(value) {
@@ -2607,11 +2608,11 @@ fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schem
                 .column_schema_by_name(col)
                 .context(ColumnNotFoundSnafu { msg: col })?;
             ensure!(
-                role != EntityRole::Id || has_stable_string_form(&column.data_type),
+                has_stable_string_form(&column.data_type),
                 InvalidSqlSnafu {
                     err_msg: format!(
-                        "entity id column `{col}` (option `{key}`) has type `{}`, which cannot \
-                         form a string entity id",
+                        "entity column `{col}` (option `{key}`) has type `{}`, which cannot \
+                         render as a string",
                         column.data_type
                     ),
                 }
