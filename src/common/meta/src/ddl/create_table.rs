@@ -406,11 +406,10 @@ impl Procedure for CreateTableProcedure {
         {
             return None;
         }
+        let table_ref = self.data.table_ref();
+        let locator = TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table);
         let event = match &ctx.trigger {
             EventTrigger::Submitted => {
-                let table_ref = self.data.table_ref();
-                let locator =
-                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table);
                 let create_table = &self.data.task.create_table;
                 TableDdlEvent::create_table_submitted(
                     locator,
@@ -425,11 +424,15 @@ impl Procedure for CreateTableProcedure {
                 } => output
                     .downcast_ref::<TableId>()
                     .copied()
-                    .map(TableDdlEvent::create_table_succeeded)
-                    .unwrap_or_else(|| TableDdlEvent::lifecycle(TableDdlEventType::CreateTable)),
-                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable),
+                    .map(|table_id| {
+                        TableDdlEvent::create_table_succeeded(locator.clone(), table_id)
+                    })
+                    .unwrap_or_else(|| {
+                        TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator.clone()])
+                    }),
+                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator.clone()]),
             },
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable),
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable, [locator]),
         };
 
         Some(Box::new(event))

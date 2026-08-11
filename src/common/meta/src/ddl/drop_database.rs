@@ -202,7 +202,7 @@ impl Procedure for DropDatabaseProcedure {
                 self.event_context.clone(),
             )
         } else {
-            DatabaseDdlEvent::drop_lifecycle()
+            DatabaseDdlEvent::drop_lifecycle(&self.context.catalog, &self.context.schema)
         };
         Some(Box::new(event))
     }

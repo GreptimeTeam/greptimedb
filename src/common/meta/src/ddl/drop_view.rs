@@ -231,7 +231,15 @@ impl Procedure for DropViewProcedure {
                     self.data.event_context.clone(),
                 )
             }
-            _ => ViewDdlEvent::drop_lifecycle(),
+            _ => {
+                let table_ref = self.data.table_ref();
+                ViewDdlEvent::drop_lifecycle(
+                    table_ref.catalog,
+                    table_ref.schema,
+                    table_ref.table,
+                    self.data.view_id(),
+                )
+            }
         };
 
         Some(Box::new(event))
