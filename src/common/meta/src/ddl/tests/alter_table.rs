@@ -856,7 +856,6 @@ async fn test_skip_wal_rejects_no_leader_before_updating_metadata() {
     let mut procedure = AlterTableProcedure::new_with_region_locks(
         table_id,
         alter_task,
-        EventContext::default(),
         region_locks,
         ddl_context.clone(),
     )
