@@ -31,34 +31,11 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::functions::{
-    NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvgOverTime,
-    NativeHistogramDelta, NativeHistogramDrop, NativeHistogramIDelta, NativeHistogramIRate,
-    NativeHistogramIncrease, NativeHistogramRate, NativeHistogramSub, NativeHistogramSumOverTime,
-};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-
-// These functions capture the frontend annotation collector. Reconstructing them on a datanode
-// would execute correctly but silently lose their warnings and info messages.
-const ANNOTATING_NATIVE_HISTOGRAM_FUNCTIONS: &[&str] = &[
-    NativeHistogramAdd::name(),
-    NativeHistogramAggAvg::name(),
-    NativeHistogramAggSum::name(),
-    NativeHistogramAvgOverTime::name(),
-    NativeHistogramDelta::name(),
-    NativeHistogramIDelta::name(),
-    NativeHistogramIRate::name(),
-    NativeHistogramIncrease::name(),
-    NativeHistogramRate::name(),
-    NativeHistogramSub::name(),
-    NativeHistogramSumOverTime::name(),
-    NativeHistogramDrop::bool_false_name(),
-    NativeHistogramDrop::float_null_name(),
-];
 
 #[cfg(feature = "vector_index")]
 fn is_vector_sort(sort: &Sort) -> bool {
@@ -179,13 +156,6 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                if aggr
-                    .aggr_expr
-                    .iter()
-                    .any(Self::contains_annotating_native_histogram_function)
-                {
-                    return Ok(Commutativity::NonCommutative);
-                }
                 let is_all_steppable = is_all_aggr_exprs_steppable(&aggr.aggr_expr);
                 let matches_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
                 if !matches_partition && is_all_steppable {
@@ -327,10 +297,6 @@ impl Categorizer {
     }
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
-        if Self::contains_annotating_native_histogram_function(expr) {
-            return Commutativity::NonCommutative;
-        }
-
         #[allow(deprecated)]
         match expr {
             Expr::Column(_)
@@ -373,25 +339,6 @@ impl Categorizer {
         }
     }
 
-    fn contains_annotating_native_histogram_function(expr: &Expr) -> bool {
-        let mut found = false;
-        expr.apply(|expr| {
-            let name = match expr {
-                Expr::ScalarFunction(func) => Some(func.name()),
-                Expr::AggregateFunction(func) => Some(func.func.name()),
-                _ => None,
-            };
-            if name.is_some_and(|name| ANNOTATING_NATIVE_HISTOGRAM_FUNCTIONS.contains(&name)) {
-                found = true;
-                Ok(TreeNodeRecursion::Stop)
-            } else {
-                Ok(TreeNodeRecursion::Continue)
-            }
-        })
-        .expect("expression traversal is infallible");
-        found
-    }
-
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
     ///
@@ -430,7 +377,7 @@ mod tests {
     use datafusion_common::Column;
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_expr::expr::ScalarFunction;
-    use promql::functions::{NativeHistogramCount, NativeHistogramDrop, NativeHistogramRate};
+    use promql::functions::NativeHistogramDrop;
 
     use super::*;
 
@@ -453,54 +400,34 @@ mod tests {
     }
 
     #[test]
-    fn annotating_native_histogram_functions_stay_local() {
-        let call = |udf, args| {
-            Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(udf),
-                args,
-            })
-        };
-        let rate = call(
-            NativeHistogramRate::scalar_udf(),
-            vec![datafusion_expr::col("histogram")],
-        );
-        let count = call(
-            NativeHistogramCount::scalar_udf(),
-            vec![datafusion_expr::col("histogram")],
-        );
-        let drop = call(
-            NativeHistogramDrop::float_null_udf("test".to_string(), None),
-            vec![datafusion_expr::col("histogram")],
-        );
-
-        assert!(matches!(
-            Categorizer::check_expr(&rate),
-            Commutativity::NonCommutative
-        ));
-        assert!(matches!(
-            Categorizer::check_expr(&count),
-            Commutativity::Commutative
-        ));
+    fn annotations_do_not_block_aggregate_pushdown() {
+        let drop = Expr::ScalarFunction(ScalarFunction {
+            func: Arc::new(NativeHistogramDrop::float_null_udf(
+                "test".to_string(),
+                None,
+            )),
+            args: vec![datafusion_expr::lit(1.0)],
+        });
         assert!(matches!(
             Categorizer::check_expr(&drop),
-            Commutativity::NonCommutative
+            Commutativity::Commutative
         ));
 
-        let aggregate_drop = call(
-            NativeHistogramDrop::float_null_udf("test".to_string(), None),
-            vec![datafusion_expr::lit(1.0)],
-        );
         let aggregate = LogicalPlanBuilder::empty(false)
             .aggregate(
                 Vec::<Expr>::new(),
-                vec![datafusion::functions_aggregate::sum::sum_udaf().call(vec![aggregate_drop])],
+                vec![datafusion::functions_aggregate::sum::sum_udaf().call(vec![drop])],
             )
             .unwrap()
             .build()
             .unwrap();
+        let partition_cols = BTreeMap::from([(
+            "partition".to_string(),
+            BTreeSet::from([Column::from_name("partition")]),
+        )]);
         assert!(matches!(
-            Categorizer::check_plan(&aggregate, None).unwrap(),
-            Commutativity::NonCommutative
+            Categorizer::check_plan(&aggregate, Some(partition_cols)).unwrap(),
+            Commutativity::TransformedCommutative { .. }
         ));
     }
 }
