@@ -18,6 +18,11 @@ use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
+use sql::ast::FunctionArguments;
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::admin::Admin;
+use sql::statements::statement::Statement;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
@@ -70,11 +75,11 @@ async fn assert_admin_function_events(instance: &Arc<Instance>) {
         instance,
         "flush_table",
         "\
-+----------------+----------+---------------------+-----------+---------------------------------------------------------+--------------+
-| type           | actor    | admin_function_name | status    | input                                                   | output       |
-+----------------+----------+---------------------+-----------+---------------------------------------------------------+--------------+
-| admin_function | greptime | flush_table         | Succeeded | {\"arguments\":[\"admin_function_event_test\"],\"version\":1} | {\"result\":0} |
-+----------------+----------+---------------------+-----------+---------------------------------------------------------+--------------+",
++----------------+----------+---------------------+-----------+---------------------------------------------------------------------------------+--------------+
+| type           | actor    | admin_function_name | status    | payload                                                                         | output       |
++----------------+----------+---------------------+-----------+---------------------------------------------------------------------------------+--------------+
+| admin_function | greptime | flush_table         | Succeeded | {\"arguments\":{\"type\":\"list\",\"value\":[\"admin_function_event_test\"]},\"version\":1} | {\"result\":0} |
++----------------+----------+---------------------+-----------+---------------------------------------------------------------------------------+--------------+",
     )
     .await;
 
@@ -85,11 +90,56 @@ async fn assert_admin_function_events(instance: &Arc<Instance>) {
         instance,
         "missing_admin_function",
         "\
-+----------------+----------+------------------------+--------+---------------------------------------------+-----------------------------------------------------------------+
-| type           | actor    | admin_function_name    | status | input                                       | output                                                          |
-+----------------+----------+------------------------+--------+---------------------------------------------+-----------------------------------------------------------------+
-| admin_function | greptime | missing_admin_function | Failed | {\"arguments\":[\"missing-input\"],\"version\":1} | {\"error\":\"0: Admin function not found: missing_admin_function\"} |
-+----------------+----------+------------------------+--------+---------------------------------------------+-----------------------------------------------------------------+",
++----------------+----------+------------------------+--------+---------------------------------------------------------------------+-----------------------------------------------------------------+
+| type           | actor    | admin_function_name    | status | payload                                                             | output                                                          |
++----------------+----------+------------------------+--------+---------------------------------------------------------------------+-----------------------------------------------------------------+
+| admin_function | greptime | missing_admin_function | Failed | {\"arguments\":{\"type\":\"list\",\"value\":[\"missing-input\"]},\"version\":1} | {\"error\":\"0: Admin function not found: missing_admin_function\"} |
++----------------+----------+------------------------+--------+---------------------------------------------------------------------+-----------------------------------------------------------------+",
+    )
+    .await;
+
+    let failure =
+        execute_with_arguments(instance, "missing_no_arguments", FunctionArguments::None).await;
+    assert!(failure.is_err());
+
+    assert_admin_event(
+        instance,
+        "missing_no_arguments",
+        "\
++----------------+----------+----------------------+--------+---------------+---------------------------------------------------------------+
+| type           | actor    | admin_function_name  | status | payload       | output                                                        |
++----------------+----------+----------------------+--------+---------------+---------------------------------------------------------------+
+| admin_function | greptime | missing_no_arguments | Failed | {\"version\":1} | {\"error\":\"0: Admin function not found: missing_no_arguments\"} |
++----------------+----------+----------------------+--------+---------------+---------------------------------------------------------------+",
+    )
+    .await;
+
+    let Statement::Query(query) = ParserContext::create_with_dialect(
+        "SELECT 1",
+        &GreptimeDbDialect {},
+        ParseOptions::default(),
+    )
+    .unwrap()
+    .remove(0) else {
+        panic!("expected query statement")
+    };
+    let failure = execute_with_arguments(
+        instance,
+        "missing_subquery",
+        FunctionArguments::Subquery(Box::new(query.inner)),
+    )
+    .await;
+    assert!(failure.is_err());
+
+    assert_admin_event(
+        instance,
+        "missing_subquery",
+        "\
++----------------+----------+---------------------+--------+------------------------------------------------------------------+-----------------------------------------------------------+
+| type           | actor    | admin_function_name | status | payload                                                          | output                                                    |
++----------------+----------+---------------------+--------+------------------------------------------------------------------+-----------------------------------------------------------+
+| admin_function | greptime | missing_subquery    | Failed | {\"arguments\":{\"type\":\"subquery\",\"value\":\"SELECT 1\"},\"version\":1} | {\"error\":\"0: Admin function not found: missing_subquery\"} |
++----------------+----------+---------------------+--------+------------------------------------------------------------------+-----------------------------------------------------------+",
     )
     .await;
 }
@@ -101,7 +151,7 @@ async fn assert_admin_event(instance: &Arc<Instance>, function: &str, expected: 
   actor,
   admin_function_name,
   admin_function_status AS status,
-  json_to_string(payload) AS input,
+  json_to_string(payload) AS payload,
   json_to_string(admin_function_output) AS output
 FROM greptime_private.events
 WHERE type = 'admin_function'
@@ -117,4 +167,27 @@ async fn execute(
     sql: &str,
 ) -> servers::error::Result<common_query::Output> {
     instance.do_query(sql, QueryContext::arc()).await.remove(0)
+}
+
+async fn execute_with_arguments(
+    instance: &Arc<Instance>,
+    function: &str,
+    arguments: FunctionArguments,
+) -> operator::error::Result<common_query::Output> {
+    let Statement::Admin(mut statement) = ParserContext::create_with_dialect(
+        &format!("ADMIN {function}()"),
+        &GreptimeDbDialect {},
+        ParseOptions::default(),
+    )
+    .unwrap()
+    .remove(0) else {
+        panic!("expected ADMIN statement")
+    };
+    let Admin::Func(admin_function) = &mut statement;
+    admin_function.args = arguments;
+
+    instance
+        .statement_executor()
+        .execute_sql(Statement::Admin(statement), QueryContext::arc())
+        .await
 }

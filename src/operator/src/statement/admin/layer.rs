@@ -125,7 +125,7 @@ impl AdminFunctionRecordingGuard {
             return;
         };
         let event = match result {
-            Ok(response) => AdminFunctionEvent::success(input, &response.immediate_result),
+            Ok(response) => AdminFunctionEvent::success(input, response.immediate_result.as_ref()),
             Err(error) => AdminFunctionEvent::failure(input, error),
         };
         recorder.record(Box::new(event));
@@ -151,11 +151,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_event_recorder::event_table::jsonb_value;
     use common_event_recorder::{
         Event, EventRecorder, EventRecorderRef, EventTypeFilter, EventTypeFilterRef,
     };
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use datatypes::value::Value;
+    use serde_json::json;
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -206,6 +208,7 @@ mod tests {
 
     struct TestService {
         trace: Option<Arc<Mutex<Vec<&'static str>>>>,
+        immediate_result: Option<Value>,
     }
 
     #[async_trait::async_trait]
@@ -214,7 +217,7 @@ mod tests {
             if let Some(trace) = &self.trace {
                 trace.lock().unwrap().push("core");
             }
-            Ok(response())
+            Ok(response(self.immediate_result.clone()))
         }
     }
 
@@ -267,6 +270,7 @@ mod tests {
         let trace = Arc::new(Mutex::new(Vec::new()));
         let mut service: AdminFunctionServiceRef = Arc::new(TestService {
             trace: Some(trace.clone()),
+            immediate_result: Some(Value::UInt64(0)),
         });
         for (before, after) in [("a_before", "a_after"), ("b_before", "b_after")] {
             service = TraceLayer {
@@ -380,15 +384,41 @@ mod tests {
         assert_eq!(recorder.events.lock().unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn empty_immediate_result_preserves_success_output_and_records_no_result() {
+        let recorder = Arc::new(TestRecorder::new(EventTypeFilter::All));
+        let recorder_ref: EventRecorderRef = recorder.clone();
+        let handle = AdminEventRecorderHandle::default();
+        handle.install(&recorder_ref);
+        let service = AdminFunctionRecordingLayer::new(handle).layer(Arc::new(TestService {
+            trace: None,
+            immediate_result: None,
+        }));
+
+        let response = service.call(request()).await.unwrap();
+        assert!(matches!(response.output.data, OutputData::AffectedRows(0)));
+        assert_eq!(response.immediate_result, None);
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].extra_rows().unwrap()[0].values[3],
+            jsonb_value(&json!({}))
+        );
+    }
+
     fn recording_service(handle: AdminEventRecorderHandle) -> AdminFunctionServiceRef {
-        let core = Arc::new(TestService { trace: None });
+        let core = Arc::new(TestService {
+            trace: None,
+            immediate_result: Some(Value::UInt64(0)),
+        });
         AdminFunctionRecordingLayer::new(handle).layer(core)
     }
 
-    fn response() -> AdminFunctionResponse {
+    fn response(immediate_result: Option<Value>) -> AdminFunctionResponse {
         AdminFunctionResponse {
             output: Output::new_with_affected_rows(0),
-            immediate_result: Value::UInt64(0),
+            immediate_result,
         }
     }
 

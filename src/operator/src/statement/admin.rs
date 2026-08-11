@@ -59,7 +59,7 @@ pub struct AdminFunctionResponse {
     /// The output returned to the client.
     pub output: Output,
     /// The typed immediate result exposed to outer layers.
-    pub immediate_result: Value,
+    pub immediate_result: Option<Value>,
 }
 
 /// Executes an ADMIN function request.
@@ -183,7 +183,7 @@ impl CoreAdminFunctionService {
             (&result_columnar).try_into().context(CastSnafu)?;
 
         let result_vector: VectorRef = result_columnar.try_into_vector(1).context(CastSnafu)?;
-        let immediate_result = immediate_result(&result_vector)?;
+        let immediate_result = immediate_result(&result_vector);
 
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
@@ -204,12 +204,8 @@ impl CoreAdminFunctionService {
     }
 }
 
-fn immediate_result(result_vector: &VectorRef) -> Result<Value> {
-    ensure!(
-        !result_vector.is_empty(),
-        error::EmptyAdminFunctionResultSnafu
-    );
-    Ok(result_vector.get(0))
+fn immediate_result(result_vector: &VectorRef) -> Option<Value> {
+    (!result_vector.is_empty()).then(|| result_vector.get(0))
 }
 
 #[async_trait::async_trait]
@@ -399,16 +395,12 @@ mod tests {
 
     use datatypes::vectors::{Int32Vector, VectorRef};
 
-    use crate::error::Error;
     use crate::statement::admin::immediate_result;
 
     #[test]
-    fn rejects_empty_admin_function_result() {
+    fn empty_admin_function_result_has_no_immediate_value() {
         let result_vector: VectorRef = Arc::new(Int32Vector::from(vec![]));
 
-        assert!(matches!(
-            immediate_result(&result_vector),
-            Err(Error::EmptyAdminFunctionResult)
-        ));
+        assert_eq!(immediate_result(&result_vector), None);
     }
 }

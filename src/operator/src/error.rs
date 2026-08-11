@@ -65,9 +65,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Admin function returned no immediate result"))]
-    EmptyAdminFunctionResult,
-
     #[snafu(display("Admin function execution was cancelled"))]
     AdminFunctionCancelled,
 
@@ -1026,7 +1023,6 @@ impl ErrorExt for Error {
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
             Error::ExecuteAdminFunction { .. }
-            | Error::EmptyAdminFunctionResult
             | Error::EncodeJson { .. }
             | Error::DeserializePartitionExpr { .. }
             | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,

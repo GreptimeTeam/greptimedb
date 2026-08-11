@@ -36,6 +36,10 @@ pub(crate) const ADMIN_FUNCTION_EVENT_TYPE: &str = "admin_function";
 const PAYLOAD_VERSION: u8 = 1;
 const VERSION_KEY: &str = "version";
 const ARGUMENTS_KEY: &str = "arguments";
+const ARGUMENT_TYPE_KEY: &str = "type";
+const ARGUMENT_VALUE_KEY: &str = "value";
+const LIST_ARGUMENT_TYPE: &str = "list";
+const SUBQUERY_ARGUMENT_TYPE: &str = "subquery";
 const RESULT_KEY: &str = "result";
 const ERROR_KEY: &str = "error";
 const SUCCEEDED_STATUS: &str = "Succeeded";
@@ -47,7 +51,7 @@ const UNSUPPORTED: &str = "<unsupported>";
 pub(crate) struct AdminFunctionEventInput {
     actor: String,
     function: String,
-    arguments: Vec<JsonValue>,
+    arguments: Option<JsonValue>,
 }
 
 impl AdminFunctionEventInput {
@@ -57,10 +61,15 @@ impl AdminFunctionEventInput {
         let function_name = function.name.to_string().to_lowercase();
 
         let arguments = match &function.args {
-            FunctionArguments::List(arguments) => {
-                arguments.args.iter().map(argument_to_json).collect()
-            }
-            _ => vec![JsonValue::String(UNSUPPORTED.to_string())],
+            FunctionArguments::List(arguments) => Some(json!({
+                (ARGUMENT_TYPE_KEY): LIST_ARGUMENT_TYPE,
+                (ARGUMENT_VALUE_KEY): arguments.args.iter().map(argument_to_json).collect::<Vec<_>>(),
+            })),
+            FunctionArguments::Subquery(query) => Some(json!({
+                (ARGUMENT_TYPE_KEY): SUBQUERY_ARGUMENT_TYPE,
+                (ARGUMENT_VALUE_KEY): query.to_string(),
+            })),
+            FunctionArguments::None => None,
         };
 
         Self {
@@ -83,34 +92,43 @@ pub(crate) struct AdminFunctionEvent {
 
 impl AdminFunctionEvent {
     /// Creates a successful ADMIN function event.
-    pub(crate) fn success(input: AdminFunctionEventInput, result: &Value) -> Self {
+    pub(crate) fn success(input: AdminFunctionEventInput, result: Option<&Value>) -> Self {
+        let AdminFunctionEventInput {
+            actor,
+            function,
+            arguments,
+        } = input;
         Self {
-            actor: input.actor,
-            function_name: input.function,
+            actor,
+            function_name: function,
             status: SUCCEEDED_STATUS,
-            output: json!({
-                (RESULT_KEY): value_to_json(result),
-            }),
-            payload: json!({
-                (VERSION_KEY): PAYLOAD_VERSION,
-                (ARGUMENTS_KEY): input.arguments,
-            }),
+            output: result.map_or_else(
+                || json!({}),
+                |result| {
+                    json!({
+                        (RESULT_KEY): value_to_json(result),
+                    })
+                },
+            ),
+            payload: input_payload(arguments),
         }
     }
 
     /// Creates a failed ADMIN function event with the debug representation of the error.
     pub(crate) fn failure(input: AdminFunctionEventInput, error: &Error) -> Self {
+        let AdminFunctionEventInput {
+            actor,
+            function,
+            arguments,
+        } = input;
         Self {
-            actor: input.actor,
-            function_name: input.function,
+            actor,
+            function_name: function,
             status: FAILED_STATUS,
             output: json!({
                 (ERROR_KEY): format!("{error:?}"),
             }),
-            payload: json!({
-                (VERSION_KEY): PAYLOAD_VERSION,
-                (ARGUMENTS_KEY): input.arguments,
-            }),
+            payload: input_payload(arguments),
         }
     }
 
@@ -154,12 +172,21 @@ impl Event for AdminFunctionEvent {
     }
 }
 
-fn argument_to_json(argument: &FunctionArg) -> JsonValue {
-    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = argument else {
-        return JsonValue::String(UNSUPPORTED.to_string());
-    };
+fn input_payload(arguments: Option<JsonValue>) -> JsonValue {
+    let mut payload = json!({ VERSION_KEY: PAYLOAD_VERSION });
+    if let Some(arguments) = arguments {
+        payload[ARGUMENTS_KEY] = arguments;
+    }
+    payload
+}
 
-    sql_value_to_json(&value.value)
+fn argument_to_json(argument: &FunctionArg) -> JsonValue {
+    match argument {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) => {
+            sql_value_to_json(&value.value)
+        }
+        _ => JsonValue::String(argument.to_string()),
+    }
 }
 
 fn sql_value_to_json(value: &SqlValue) -> JsonValue {
@@ -172,8 +199,12 @@ fn sql_value_to_json(value: &SqlValue) -> JsonValue {
         SqlValue::SingleQuotedString(value) | SqlValue::DoubleQuotedString(value) => {
             JsonValue::String(value.clone())
         }
-        SqlValue::HexStringLiteral(_) => JsonValue::String(UNSUPPORTED.to_string()),
-        _ => JsonValue::String(UNSUPPORTED.to_string()),
+        SqlValue::Placeholder(value) => JsonValue::String(value.clone()),
+        _ => value
+            .clone()
+            .into_string()
+            .map(JsonValue::String)
+            .unwrap_or_else(|| JsonValue::String(value.to_string())),
     }
 }
 
@@ -194,14 +225,20 @@ mod tests {
     use datatypes::value::Value;
     use serde_json::json;
     use session::context::QueryContext;
+    use sql::ast::{
+        Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Value as SqlValue,
+    };
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
+    use sql::statements::admin::Admin;
     use sql::statements::statement::Statement;
+    use sqlparser::ast::{DollarQuotedString, FunctionArgOperator, FunctionArgumentList};
 
     use crate::error::Error;
     use crate::statement::admin::AdminFunctionRequest;
     use crate::statement::admin::event::{
-        ADMIN_FUNCTION_EVENT_TYPE, AdminFunctionEvent, AdminFunctionEventInput, value_to_json,
+        ADMIN_FUNCTION_EVENT_TYPE, AdminFunctionEvent, AdminFunctionEventInput, sql_value_to_json,
+        value_to_json,
     };
 
     fn request(sql: &str) -> AdminFunctionRequest {
@@ -216,6 +253,13 @@ mod tests {
             statement,
             query_ctx: QueryContext::arc(),
         }
+    }
+
+    fn request_with_arguments(arguments: FunctionArguments) -> AdminFunctionRequest {
+        let mut request = request("ADMIN plugin_function()");
+        let Admin::Func(function) = &mut request.statement;
+        function.args = arguments;
+        request
     }
 
     fn assert_admin_columns(
@@ -252,14 +296,14 @@ mod tests {
         let input = AdminFunctionEventInput::from_request(&request(
             "ADMIN flush_table('greptime.public.demo')",
         ));
-        let event = AdminFunctionEvent::success(input, &Value::UInt64(3));
+        let event = AdminFunctionEvent::success(input, Some(&Value::UInt64(3)));
 
         assert_admin_columns(&event, "flush_table", "Succeeded", json!({"result": 3}));
         assert_eq!(
             event.json_payload().unwrap(),
             json!({
                 "version": 1,
-                "arguments": ["greptime.public.demo"],
+                "arguments": {"type": "list", "value": ["greptime.public.demo"]},
             })
         );
     }
@@ -269,7 +313,7 @@ mod tests {
         let input = AdminFunctionEventInput::from_request(&request(
             "ADMIN migrate_region(NULL, NULL, NULL)",
         ));
-        let event = AdminFunctionEvent::success(input, &Value::Null);
+        let event = AdminFunctionEvent::success(input, Some(&Value::Null));
 
         assert_admin_columns(
             &event,
@@ -281,7 +325,7 @@ mod tests {
             event.json_payload().unwrap(),
             json!({
                 "version": 1,
-                "arguments": [null, null, null],
+                "arguments": {"type": "list", "value": [null, null, null]},
             })
         );
     }
@@ -291,7 +335,7 @@ mod tests {
         let input = AdminFunctionEventInput::from_request(&request(
             "ADMIN plugin_function('plugin-value', NULL)",
         ));
-        let event = AdminFunctionEvent::success(input, &Value::from("plugin-result"));
+        let event = AdminFunctionEvent::success(input, Some(&Value::from("plugin-result")));
 
         assert_admin_columns(
             &event,
@@ -303,7 +347,7 @@ mod tests {
             event.json_payload().unwrap(),
             json!({
                 "version": 1,
-                "arguments": ["plugin-value", null],
+                "arguments": {"type": "list", "value": ["plugin-value", null]},
             })
         );
     }
@@ -329,7 +373,7 @@ mod tests {
             event.json_payload().unwrap(),
             json!({
                 "version": 1,
-                "arguments": ["greptime.public.demo"],
+                "arguments": {"type": "list", "value": ["greptime.public.demo"]},
             })
         );
     }
@@ -344,6 +388,142 @@ mod tests {
             "flush_table",
             "Failed",
             json!({"error": format!("{:?}", Error::AdminFunctionCancelled)}),
+        );
+    }
+
+    #[test]
+    fn subquery_arguments_use_display() {
+        let Statement::Query(query) = ParserContext::create_with_dialect(
+            "SELECT 1",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0) else {
+            panic!("expected query statement")
+        };
+        let input = AdminFunctionEventInput::from_request(&request_with_arguments(
+            FunctionArguments::Subquery(Box::new(query.inner)),
+        ));
+        let event = AdminFunctionEvent::failure(
+            input,
+            &Error::BuildAdminFunctionArgs {
+                msg: "subquery is not executable".to_string(),
+            },
+        );
+
+        assert_eq!(
+            event.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "arguments": {"type": "subquery", "value": "SELECT 1"},
+            })
+        );
+    }
+
+    #[test]
+    fn no_arguments_omits_arguments_field_and_empty_result() {
+        let input =
+            AdminFunctionEventInput::from_request(&request_with_arguments(FunctionArguments::None));
+        let event = AdminFunctionEvent::success(input, None);
+
+        assert_admin_columns(&event, "plugin_function", "Succeeded", json!({}));
+        assert_eq!(event.json_payload().unwrap(), json!({"version": 1}));
+    }
+
+    #[test]
+    fn empty_argument_list_is_recorded() {
+        let input = AdminFunctionEventInput::from_request(&request("ADMIN plugin_function()"));
+        let event = AdminFunctionEvent::success(input, Some(&Value::UInt64(0)));
+
+        assert_eq!(
+            event.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "arguments": {"type": "list", "value": []},
+            })
+        );
+    }
+
+    #[test]
+    fn records_extended_sql_values_and_non_literal_arguments() {
+        let input = AdminFunctionEventInput::from_request(&request(
+            "ADMIN plugin_function(1, true, NULL, X'48656c6c6f', table_name)",
+        ));
+        let event = AdminFunctionEvent::success(input, Some(&Value::UInt64(0)));
+
+        assert_eq!(
+            event.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "arguments": {
+                    "type": "list",
+                    "value": [1, true, null, "48656c6c6f", "table_name"],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn string_literals_preserve_logical_content() {
+        let values = [
+            SqlValue::SingleQuotedString("single".to_string()),
+            SqlValue::DoubleQuotedString("double".to_string()),
+            SqlValue::DollarQuotedString(DollarQuotedString {
+                value: "dollar".to_string(),
+                tag: None,
+            }),
+            SqlValue::SingleQuotedRawStringLiteral("raw".to_string()),
+            SqlValue::SingleQuotedByteStringLiteral("bytes".to_string()),
+            SqlValue::NationalStringLiteral("national".to_string()),
+            SqlValue::UnicodeStringLiteral("unicode".to_string()),
+            SqlValue::HexStringLiteral("48656c6c6f".to_string()),
+        ];
+
+        let expected = [
+            "single",
+            "double",
+            "dollar",
+            "raw",
+            "bytes",
+            "national",
+            "unicode",
+            "48656c6c6f",
+        ];
+        for (value, expected) in values.iter().zip(expected) {
+            assert_eq!(sql_value_to_json(value), json!(expected));
+        }
+    }
+
+    #[test]
+    fn non_literal_arguments_use_sql_display() {
+        let arguments = FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Named {
+                    name: Ident::new("named"),
+                    arg: FunctionArgExpr::Expr(Expr::Identifier(Ident::new("value"))),
+                    operator: FunctionArgOperator::RightArrow,
+                },
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard),
+            ],
+            clauses: vec![],
+        };
+        let input = AdminFunctionEventInput::from_request(&request_with_arguments(
+            FunctionArguments::List(arguments),
+        ));
+        let event = AdminFunctionEvent::success(input, Some(&Value::UInt64(0)));
+
+        assert_eq!(
+            event.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "arguments": {"type": "list", "value": ["named => value", "*"]},
+            })
+        );
+        assert_eq!(
+            sql_value_to_json(&SqlValue::Placeholder("$1".to_string())),
+            json!("$1")
         );
     }
 
