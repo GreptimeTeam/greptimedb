@@ -1,0 +1,39 @@
+tests-integration/tests/gc_event.rs
+  s_d0d43704cb1be1::t_bf7227e0123286 149
+tests-integration/tests/flow_ddl_event.rs
+  s_d0d43704cb1be1::t_bf7227e0123286 81,103,140,159
+  s_d0d43704cb1be1::t_38afd53f120df6 22
+tests-integration/tests/event_recorder_test_util.rs
+  s_d0d43704cb1be1::t_318e0d37dd7e3e 29-47
+tests-integration/tests/view_ddl_event.rs
+  s_d0d43704cb1be1::t_38afd53f120df6 26
+  s_d0d43704cb1be1::t_bf7227e0123286 116,139,177,197
+tests-integration/tests/region_migration.rs
+  s_d0d43704cb1be1::t_bf7227e0123286 1332
+tests-integration/tests/table_ddl_event.rs
+  s_d0d43704cb1be1::t_52400d04fa0ca0 30
+  s_d0d43704cb1be1::t_318e0d37dd7e3e 45-46
+  s_d0d43704cb1be1::t_1b062ad5538a37 31
+tests-integration/tests/repartition_event.rs
+  s_d0d43704cb1be1::t_bf7227e0123286 124,149,189,218,258
+  s_d0d43704cb1be1::t_38afd53f120df6 26-28
+tests-integration/tests/database_ddl_event.rs
+  s_d0d43704cb1be1::t_bf7227e0123286 122,144
+  s_d0d43704cb1be1::t_38afd53f120df6 25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "dc06bf824cb1cffdca360dfdd1716df82183bd2a",
+  "prompts": {},
+  "sessions": {
+    "s_d0d43704cb1be1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fec6d-a6da-74a1-a7ce-5525e2a9ce84",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
