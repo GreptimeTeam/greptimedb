@@ -327,8 +327,6 @@ impl Drop for Metrics {
 /// The additional remote fetches are only required in the worst cases.
 #[derive(Debug, Clone, Default)]
 pub struct VolatileContext {
-    /// Trigger reason supplied by the framework procedure context.
-    trigger_reason: TriggerReason,
     /// `opening_region_guard` will be set after the
     /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
     ///
@@ -446,14 +444,13 @@ pub struct Context {
 }
 
 impl Context {
-    pub(crate) fn set_event_context(&mut self, event_context: Option<&PersistentEventContext>) {
-        self.volatile_ctx.trigger_reason = event_context
-            .map(|ctx| ctx.reason)
-            .unwrap_or_else(|| self.persistent_ctx.trigger_reason.to_trigger_reason());
-    }
-
-    pub(crate) fn trigger_reason(&self) -> RegionMigrationTriggerReason {
-        RegionMigrationTriggerReason::from_trigger_reason(self.volatile_ctx.trigger_reason)
+    pub(crate) fn trigger_reason(
+        &self,
+        event_context: Option<&PersistentEventContext>,
+    ) -> RegionMigrationTriggerReason {
+        event_context
+            .map(|ctx| RegionMigrationTriggerReason::from_trigger_reason(ctx.reason))
+            .unwrap_or(self.persistent_ctx.trigger_reason)
     }
     /// Returns the next operation's timeout.
     pub fn next_operation_timeout(&self) -> Option<Duration> {
@@ -928,7 +925,6 @@ impl Procedure for RegionMigrationProcedure {
     }
 
     async fn rollback(&mut self, ctx: &ProcedureContext) -> ProcedureResult<()> {
-        self.context.set_event_context(ctx.event_context.as_ref());
         self.rollback_inner(ctx)
             .await
             .map_err(ProcedureError::external)
@@ -945,7 +941,6 @@ impl Procedure for RegionMigrationProcedure {
         to_peer = self.context.persistent_ctx.to_peer.id,
     ))]
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        self.context.set_event_context(ctx.event_context.as_ref());
         let state = &mut self.state;
 
         let name = state.name();
@@ -1005,14 +1000,9 @@ impl Procedure for RegionMigrationProcedure {
 
         Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
             &self.context.persistent_ctx,
-            ctx.event_context
-                .map(|event_context| event_context.reason)
-                .unwrap_or_else(|| {
-                    self.context
-                        .persistent_ctx
-                        .trigger_reason
-                        .to_trigger_reason()
-                }),
+            self.context
+                .trigger_reason(ctx.event_context)
+                .to_trigger_reason(),
         )))
     }
 }
@@ -1147,24 +1137,19 @@ mod tests {
             "Failover"
         );
 
-        let mut recovered = RegionMigrationProcedure::from_json(
+        let recovered = RegionMigrationProcedure::from_json(
             &repersisted,
             env.context_factory(),
             RegionMigrationProcedureTracker::default(),
         )
         .unwrap();
-        recovered.context.set_event_context(None);
         assert_eq!(
-            recovered.context.trigger_reason(),
+            recovered.context.trigger_reason(None),
             RegionMigrationTriggerReason::Failover
         );
-        recovered
-            .context
-            .set_event_context(Some(&PersistentEventContext::new(
-                TriggerReason::AutoRebalance,
-            )));
+        let event_context = PersistentEventContext::new(TriggerReason::AutoRebalance);
         assert_eq!(
-            recovered.context.trigger_reason(),
+            recovered.context.trigger_reason(Some(&event_context)),
             RegionMigrationTriggerReason::AutoRebalance
         );
 
@@ -1189,13 +1174,11 @@ mod tests {
     #[test]
     fn test_migration_reason_uses_event_context() {
         let env = TestingEnv::new();
-        let mut context = env.context_factory().new_context(new_persistent_context());
+        let context = env.context_factory().new_context(new_persistent_context());
         let event_context = PersistentEventContext::new(TriggerReason::RegionFailover);
 
-        context.set_event_context(Some(&event_context));
-
         assert_eq!(
-            context.trigger_reason(),
+            context.trigger_reason(Some(&event_context)),
             RegionMigrationTriggerReason::Failover
         );
 
