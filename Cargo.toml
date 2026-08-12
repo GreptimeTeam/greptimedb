@@ -266,6 +266,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
+uddsketch = { package = "uddsketch-rs", git = "https://github.com/v0y4g3r/uddsketch-rs", rev = "22be4bff8ba98aa926160eeaaf37963f53f8abe8" }
 uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }
 vrl = "0.33"
 zstd = "0.13"

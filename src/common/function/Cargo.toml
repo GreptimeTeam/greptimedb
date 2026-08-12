@@ -65,7 +65,7 @@ snafu.workspace = true
 sql.workspace = true
 store-api.workspace = true
 table.workspace = true
-uddsketch = { git = "https://github.com/GreptimeTeam/timescaledb-toolkit.git", rev = "84828fe8fb494a6a61412a3da96517fc80f7bb20" }
+uddsketch.workspace = true
 wkt = { version = "0.11", optional = true }
 
 [dev-dependencies]
