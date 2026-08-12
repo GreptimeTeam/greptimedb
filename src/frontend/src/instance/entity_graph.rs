@@ -34,10 +34,8 @@ use auth::{
 use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, DURATION_NANO_COLUMN,
-    INFORMATION_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, PG_CATALOG_NAME,
-    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_STATUS_CODE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -83,39 +81,6 @@ struct TraceSource {
     service: Option<EntityDeclaration>,
     agent: Option<EntityDeclaration>,
     table: TableRef,
-}
-
-/// Whether a trace-model table still carries the fixed `greptime_trace_v1`
-/// columns (with their ingest types) the calls/agent derivations reference.
-/// `table_data_model` is only an option: a stale or hand-made table missing
-/// them would otherwise fail plan building and poison every relationships
-/// scan.
-fn trace_v1_schema_matches(table_info: &TableInfo) -> bool {
-    use datatypes::prelude::ConcreteDataType;
-    let schema = &table_info.meta.schema;
-    let column_type = |name: &str| {
-        schema
-            .column_schema_by_name(name)
-            .map(|column| column.data_type.clone())
-    };
-    // The derivations filter and bucket by this column; if it is not the time
-    // index, the window predicate cannot prune the scan and the buckets
-    // diverge from the table's time semantics.
-    schema
-        .timestamp_column()
-        .is_some_and(|column| column.name == TRACE_TIMESTAMP_COLUMN)
-        && column_type(TRACE_TIMESTAMP_COLUMN)
-            == Some(ConcreteDataType::timestamp_nanosecond_datatype())
-        && [
-            TRACE_ID_COLUMN,
-            SPAN_ID_COLUMN,
-            PARENT_SPAN_ID_COLUMN,
-            SPAN_KIND_COLUMN,
-            SPAN_STATUS_CODE_COLUMN,
-        ]
-        .iter()
-        .all(|column| column_type(column) == Some(ConcreteDataType::string_datatype()))
-        && column_type(DURATION_NANO_COLUMN) == Some(ConcreteDataType::uint64_datatype())
 }
 
 impl EntityGraphProviderImpl {
@@ -309,20 +274,7 @@ impl EntityGraphProviderImpl {
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info);
-                let is_trace = match is_trace_v1_table(&table_info) {
-                    true if trace_v1_schema_matches(&table_info) => true,
-                    true => {
-                        // Schema drift never poisons a scan: derive around the
-                        // malformed table instead of failing plan building.
-                        warn!(
-                            "Trace table `{}` does not match the fixed trace-v1 schema; \
-                             skipping calls derivation",
-                            table_info.name
-                        );
-                        false
-                    }
-                    false => false,
-                };
+                let is_trace = is_trace_v1_table(&table_info);
                 // Authorize only tables that would contribute rows.
                 if per_table_auth
                     && (is_trace || !table_declarations.is_empty())
@@ -694,79 +646,6 @@ mod tests {
             ],
         );
         assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
-    }
-
-    /// The canonical fixed trace-v1 columns, with an injection point for the
-    /// aspects `trace_v1_schema_matches` must reject.
-    fn trace_v1_info(mutate: impl FnOnce(&mut Vec<ColumnSchema>)) -> TableInfo {
-        let string =
-            |name: &str| ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
-        let mut columns = vec![
-            ColumnSchema::new(
-                TRACE_TIMESTAMP_COLUMN,
-                ConcreteDataType::timestamp_nanosecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-            string(TRACE_ID_COLUMN),
-            string(SPAN_ID_COLUMN),
-            string(PARENT_SPAN_ID_COLUMN),
-            string(SPAN_KIND_COLUMN),
-            string(SPAN_STATUS_CODE_COLUMN),
-            ColumnSchema::new(
-                DURATION_NANO_COLUMN,
-                ConcreteDataType::uint64_datatype(),
-                true,
-            ),
-        ];
-        mutate(&mut columns);
-        assemble_table_info(columns, &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)])
-    }
-
-    #[test]
-    fn malformed_trace_v1_schema_is_rejected() {
-        assert!(trace_v1_schema_matches(&trace_v1_info(|_| {})));
-
-        let missing_duration = trace_v1_info(|columns| {
-            columns.retain(|c| c.name != DURATION_NANO_COLUMN);
-        });
-        assert!(!trace_v1_schema_matches(&missing_duration));
-
-        let wrong_kind_type = trace_v1_info(|columns| {
-            columns
-                .iter_mut()
-                .find(|c| c.name == SPAN_KIND_COLUMN)
-                .unwrap()
-                .data_type = ConcreteDataType::int64_datatype();
-        });
-        assert!(!trace_v1_schema_matches(&wrong_kind_type));
-
-        // A millisecond time index is not the trace-v1 ingest schema.
-        let ms_timestamp = trace_v1_info(|columns| {
-            columns[0] = ColumnSchema::new(
-                TRACE_TIMESTAMP_COLUMN,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true);
-        });
-        assert!(!trace_v1_schema_matches(&ms_timestamp));
-
-        // "timestamp" present with the right type, but the time index is a
-        // different column: the derivations would bucket by a non-indexed
-        // column and the window predicate could not prune the scan.
-        let time_index_elsewhere = trace_v1_info(|columns| {
-            columns[0] = columns[0].clone().with_time_index(false);
-            columns.push(
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_nanosecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-            );
-        });
-        assert!(!trace_v1_schema_matches(&time_index_elsewhere));
     }
 
     #[test]
