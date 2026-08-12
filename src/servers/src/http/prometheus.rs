@@ -2048,6 +2048,7 @@ fn prometheus_metadata_from_table(table_info: &TableInfo) -> PromMetadata {
     PromMetadata {
         metric_type,
         unit,
+        // TODO: Persist and return Prometheus help text and OTLP metric descriptions.
         help: String::new(),
     }
 }
@@ -3480,6 +3481,7 @@ mod tests {
         for (metric_type, temporality, expected) in [
             ("updown_counter", None, "gauge"),
             ("gauge_histogram", None, "gaugehistogram"),
+            ("summary", None, "summary"),
             ("mixed", None, "unknown"),
             ("counter", Some("delta"), "unknown"),
             ("histogram", Some("delta"), "unknown"),

@@ -2883,6 +2883,28 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     .await;
 
     let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_latency_seconds")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_latency_seconds": [
+      {
+        "type": "histogram",
+        "unit": "",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
         .get("/v1/prometheus/api/v1/query?query=histogram_count(remote_write_v2_latency_seconds)&time=4")
         .send()
         .await;
