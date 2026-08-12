@@ -26,7 +26,7 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::JsonType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;

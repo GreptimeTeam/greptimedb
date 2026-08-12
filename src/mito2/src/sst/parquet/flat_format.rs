@@ -51,7 +51,7 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::ReadColumns;
+use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
@@ -180,6 +180,8 @@ pub(crate) fn field_column_start(metadata: &RegionMetadata, num_columns: usize) 
 pub struct FlatReadFormat {
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
+    /// Logical columns requested by this read.
+    read_cols: ReadColumns,
     /// Parquet format adapter.
     parquet_adapter: ParquetAdapter,
     /// Output schema to wrap binary `__primary_key` back to a dictionary; `None` disables wrapping.
@@ -209,22 +211,25 @@ impl FlatReadFormat {
                 // Only skip auto convert when the primary key encoding is sparse.
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
                     metadata,
-                    read_cols,
+                    read_cols.clone(),
                     skip_auto_convert,
                 ))
             } else {
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
-                    metadata, read_cols, false,
+                    metadata,
+                    read_cols.clone(),
+                    false,
                 ))
             }
         } else {
             let file_schema = file_schema
                 .unwrap_or_else(|| to_flat_sst_arrow_schema(&metadata, &Default::default()));
-            ParquetAdapter::Flat(ParquetFlat::new(metadata, read_cols, file_schema))
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, read_cols.clone(), file_schema))
         };
 
         Ok(FlatReadFormat {
             override_sequence: None,
+            read_cols,
             parquet_adapter,
             pk_dict_wrap_schema: None,
         })
@@ -302,7 +307,7 @@ impl FlatReadFormat {
             .project(projection)
             .context(ComputeArrowSnafu)?;
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
-        for (column_id, target_type) in self.format_projection().json_target_types.iter() {
+        for (column_id, target_type) in self.json_target_types().iter() {
             let Some(index) = self
                 .format_projection()
                 .column_id_to_projected_index
@@ -339,6 +344,11 @@ impl FlatReadFormat {
             ParquetAdapter::Flat(p) => &p.format_projection.parquet_read_cols,
             ParquetAdapter::PrimaryKeyToFlat(p) => p.format.parquet_read_columns(),
         }
+    }
+
+    /// Gets JSON2 target types keyed by column id.
+    pub(crate) fn json_target_types(&self) -> &JsonTargetTypes {
+        self.read_cols.json_target_types()
     }
 
     /// Gets the projection in the flat format.
@@ -501,7 +511,6 @@ impl ParquetPrimaryKeyToFlat {
                 FormatProjection {
                     parquet_read_cols: format.parquet_read_columns().clone(),
                     column_id_to_projected_index: format.field_id_to_projected_index().clone(),
-                    json_target_types: read_cols.json_target_types().clone(),
                 },
             )
         } else {

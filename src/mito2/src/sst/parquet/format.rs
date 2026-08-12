@@ -587,8 +587,6 @@ pub(crate) struct FormatProjection {
     ///
     /// It doesn't contain time index column if it is not present in the projection.
     pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
-    /// JSON2 target types keyed by column id.
-    pub(crate) json_target_types: JsonTargetTypes,
 }
 
 impl FormatProjection {
@@ -638,7 +636,6 @@ impl FormatProjection {
         Self {
             parquet_read_cols: ParquetReadColumns::from_deduped(parquet_read_cols),
             column_id_to_projected_index,
-            json_target_types,
         }
     }
 

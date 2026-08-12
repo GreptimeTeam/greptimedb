@@ -98,7 +98,7 @@ impl FlatCompatBatch {
         let actual = read_format.metadata();
         let format_projection = read_format.format_projection();
         let mut actual_schema = flat_projected_columns(actual, format_projection);
-        for (column_id, target_type) in format_projection.json_target_types.iter() {
+        for (column_id, target_type) in read_format.json_target_types().iter() {
             if let Some(i) = actual_schema
                 .iter()
                 .position(|(actual_column_id, _)| actual_column_id == column_id)
