@@ -16,11 +16,12 @@ use std::collections::HashMap;
 
 use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
-use datafusion::datasource::DefaultTableSource;
+use datafusion::datasource::{DefaultTableSource, TableProvider};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -57,61 +58,51 @@ impl OptimizerRule for JsonTypeConcretizeRule {
                     return Ok(Transformed::no(plan));
                 };
 
-                if let Some(adapter) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DummyTableProvider>()
-                {
-                    let json_types = retain_json2_type_hints(&json_types, |column| {
-                        adapter
-                            .region_metadata()
-                            .column_by_name(column)
-                            .is_some_and(|column| column.column_schema.data_type.is_json2())
-                    });
-                    if json_types.is_empty() {
-                        return Ok(Transformed::no(plan));
-                    }
-
-                    adapter.with_json_type_hint(json_types);
-                    return Ok(Transformed::yes(plan));
+                if apply_json_type_hint(source.table_provider.as_ref(), &json_types) {
+                    Ok(Transformed::yes(plan))
+                } else {
+                    Ok(Transformed::no(plan))
                 }
-
-                if let Some(adapter) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DfTableProviderAdapter>()
-                {
-                    let json_types = retain_json2_type_hints(&json_types, |column| {
-                        adapter
-                            .table()
-                            .schema_ref()
-                            .column_schema_by_name(column)
-                            .is_some_and(|column| column.data_type.is_json2())
-                    });
-                    if json_types.is_empty() {
-                        return Ok(Transformed::no(plan));
-                    }
-
-                    adapter.with_json_type_hint(json_types);
-                    return Ok(Transformed::yes(plan));
-                }
-
-                Ok(Transformed::no(plan))
             }
             _ => Ok(Transformed::no(plan)),
         })
     }
 }
 
-fn retain_json2_type_hints(
+/// Applies JSON type hints to providers that can carry scan request hints.
+///
+/// Returns `true` if at least one JSON2 hint is retained and written to the provider.
+fn apply_json_type_hint(
+    provider: &dyn TableProvider,
     json_types: &HashMap<String, JsonNativeType>,
-    mut is_json2_column: impl FnMut(&str) -> bool,
-) -> HashMap<String, JsonNativeType> {
-    json_types
+) -> bool {
+    let schema = provider.schema();
+    let json_types = json_types
         .iter()
-        .filter(|(column, _)| is_json2_column(column))
+        .filter(|(column, _)| {
+            schema
+                .fields()
+                .iter()
+                .any(|field| field.name() == *column && is_json2_extension_type(field))
+        })
         .map(|(column, json_type)| (column.clone(), json_type.clone()))
-        .collect()
+        .collect::<HashMap<_, _>>();
+
+    if json_types.is_empty() {
+        return false;
+    }
+
+    if let Some(adapter) = provider.as_any().downcast_ref::<DummyTableProvider>() {
+        adapter.with_json_type_hint(json_types);
+        return true;
+    }
+
+    if let Some(adapter) = provider.as_any().downcast_ref::<DfTableProviderAdapter>() {
+        adapter.with_json_type_hint(json_types);
+        return true;
+    }
+
+    false
 }
 
 fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
