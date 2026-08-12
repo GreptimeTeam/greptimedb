@@ -20,21 +20,26 @@ use std::sync::Arc;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
+use common_function::aggrs::approximate::uddsketch::UDDSKETCH_MERGE_STATE_NAME;
+use common_function::function::FunctionContext;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
 use datafusion::sql::unparser::Unparser;
+use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::tree_node::{
     Transformed, TreeNode as _, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{
     Column, DFSchema, DataFusionError, NullEquality, ScalarValue, TableReference,
 };
+use datafusion_expr::expr::{AggregateFunction, ScalarFunction};
 use datafusion_expr::logical_plan::{Aggregate, TableScan};
 use datafusion_expr::{
     Distinct, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and,
-    binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
+    binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, lit, or, when,
 };
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
@@ -64,7 +69,7 @@ mod test;
 /// reference. It may contain dots or other non-identifier characters when the
 /// query keeps DataFusion's raw aggregate output name, e.g.
 /// `max(numbers_with_ts.number)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IncrementalAggregateMergeColumn {
     /// Final output/sink field name for the aggregate result/state column.
     ///
@@ -82,7 +87,7 @@ impl IncrementalAggregateMergeColumn {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IncrementalAggregateMergeOp {
     Sum,
     Min,
@@ -92,6 +97,17 @@ pub enum IncrementalAggregateMergeOp {
     BitAnd,
     BitOr,
     BitXor,
+    /// Merge two UDDSketch aggregate states (both binary) with the given
+    /// `uddsketch_state`/`uddsketch_merge` parameters.
+    ///
+    /// The sink table stores one serialized state per group x window; the delta
+    /// query produces a state for the new rows and the incremental rewrite
+    /// merges the delta state with the existing sink state via
+    /// `uddsketch_merge_state`.
+    UddSketchState {
+        bucket_size: i64,
+        error_rate: f64,
+    },
 }
 
 /// Analysis result for an incremental aggregate plan.
@@ -101,7 +117,7 @@ pub enum IncrementalAggregateMergeOp {
 /// sink table before the left-join merge. They are not DataFusion logical-plan
 /// `Column` references; callers must attach qualifiers structurally instead of
 /// formatting qualified names as strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IncrementalAggregateAnalysis {
     /// Final output/sink field names for group keys used as merge join keys.
     pub group_key_names: Vec<String>,
@@ -348,7 +364,10 @@ fn is_literal_or_cast_literal(expr: &Expr) -> bool {
     }
 }
 
-fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateMergeOp, String> {
+fn merge_op_for_aggregate_expr(
+    aggr_expr: &Expr,
+    input_schema: &DFSchema,
+) -> Result<IncrementalAggregateMergeOp, String> {
     let Some(aggr_func) = get_aggr_func(aggr_expr) else {
         return Err(aggr_expr.to_string());
     };
@@ -371,8 +390,93 @@ fn merge_op_for_aggregate_expr(aggr_expr: &Expr) -> Result<IncrementalAggregateM
         "bit_and" => Ok(IncrementalAggregateMergeOp::BitAnd),
         "bit_or" => Ok(IncrementalAggregateMergeOp::BitOr),
         "bit_xor" => Ok(IncrementalAggregateMergeOp::BitXor),
+        // Both `uddsketch_state` and `uddsketch_merge` produce a serialized
+        // UDDSketch state that can be pairwise-merged with the existing sink
+        // state of the same group x window.
+        "uddsketch_state" | "uddsketch_merge" => {
+            uddsketch_merge_op(aggr_func, aggr_expr, input_schema)
+        }
         _ => Err(aggr_expr.to_string()),
     }
+}
+
+/// Extracts the `(bucket_size, error_rate)` parameters and validates the value
+/// argument type of a `uddsketch_state`/`uddsketch_merge` aggregate expression.
+///
+/// The bucket size and error rate must be literals so that the generated merge
+/// expression can reproduce the same parameters; non-literal or type
+/// incompatible aggregates are reported as unsupported (which permanently
+/// disables incremental mode per the flow contract, falling back to safe full
+/// snapshots).
+fn uddsketch_merge_op(
+    aggr_func: &AggregateFunction,
+    aggr_expr: &Expr,
+    input_schema: &DFSchema,
+) -> Result<IncrementalAggregateMergeOp, String> {
+    let args = &aggr_func.params.args;
+    if args.len() != 3 {
+        return Err(format!(
+            "unsupported UDDSketch aggregate argument count: {aggr_expr}"
+        ));
+    }
+    let bucket_size = match &args[0] {
+        Expr::Literal(ScalarValue::Int64(Some(value)), _) => *value,
+        _ => {
+            return Err(format!(
+                "unsupported UDDSketch aggregate bucket size (must be an Int64 literal): {}",
+                args[0]
+            ));
+        }
+    };
+    let error_rate = match &args[1] {
+        Expr::Literal(ScalarValue::Float64(Some(value)), _) => *value,
+        _ => {
+            return Err(format!(
+                "unsupported UDDSketch aggregate error rate (must be a Float64 literal): {}",
+                args[1]
+            ));
+        }
+    };
+    let value_type = args[2]
+        .get_type(input_schema)
+        .map_err(|_| aggr_expr.to_string())?;
+    let is_state_fn = aggr_func
+        .func
+        .name()
+        .eq_ignore_ascii_case("uddsketch_state");
+    let value_type_ok = if is_state_fn {
+        // `uddsketch_state(bucket_size, error_rate, value)` values are numeric;
+        // the UDAF signature coerces them to Float64 at execution time.
+        matches!(
+            value_type,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Decimal128(_, _)
+                | DataType::Decimal256(_, _)
+        )
+    } else {
+        // `uddsketch_merge(bucket_size, error_rate, states)` merges a column of
+        // already-serialized states.
+        value_type == DataType::Binary
+    };
+    if !value_type_ok {
+        return Err(format!(
+            "unsupported UDDSketch aggregate value type {value_type:?}: {aggr_expr}"
+        ));
+    }
+    Ok(IncrementalAggregateMergeOp::UddSketchState {
+        bucket_size,
+        error_rate,
+    })
 }
 
 fn resolve_aggregate_output_field_name(
@@ -514,7 +618,7 @@ pub fn analyze_incremental_aggregate_plan(
     ));
     unsupported_exprs.extend(projection_info.duplicate_aggregate_aliases.iter().cloned());
     for aggr_expr in aggr_exprs {
-        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr) {
+        let merge_op = match merge_op_for_aggregate_expr(&aggr_expr, aggregate.input.schema()) {
             Ok(merge_op) => merge_op,
             Err(reason) => {
                 unsupported_exprs.push(reason);
@@ -621,6 +725,28 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
                 .to_string()
         }
     );
+
+    // UDDSketch state merge requires the sink's state column to be Binary (the
+    // serialized state). Report a clear error instead of letting the left-join
+    // merge fail with an obscure type-coercion error later.
+    let sink_table_info = sink_table.table_info();
+    let sink_columns = sink_table_info.meta.schema.column_schemas();
+    for merge_col in &analysis.merge_columns {
+        if let IncrementalAggregateMergeOp::UddSketchState { .. } = merge_col.merge_op
+            && let Some(sink_col) = sink_columns
+                .iter()
+                .find(|col| col.name == merge_col.output_field_name)
+            && sink_col.data_type != ConcreteDataType::binary_datatype()
+        {
+            return InvalidQuerySnafu {
+                reason: format!(
+                    "UNSUPPORTED_INCREMENTAL_AGG: UDDSketch state sink column '{}' must be Binary to merge states incrementally, found {}",
+                    merge_col.output_field_name, sink_col.data_type
+                ),
+            }
+            .fail();
+        }
+    }
 
     let delta_alias = "__flow_delta";
     let sink_alias = "__flow_sink";
@@ -838,8 +964,39 @@ fn build_left_join_merge_expr(
             .with_context(|_| DatafusionSnafu {
                 context: "Failed to build BIT_XOR merge expression".to_string(),
             })?,
+        IncrementalAggregateMergeOp::UddSketchState {
+            bucket_size,
+            error_rate,
+        } => uddsketch_merge_state_expr(bucket_size, error_rate, left.clone(), right.clone())?,
     };
     Ok(merged.alias(merge_col.output_field_name.clone()))
+}
+
+/// Builds a call to the registered `uddsketch_merge_state` scalar function that
+/// merges the delta state with the existing sink state of the same group.
+///
+/// The function is looked up from the common-function registry instead of being
+/// constructed locally so the rewritten plan survives the Substrait round trip:
+/// the frontend resolves the function by name from the same registry.
+fn uddsketch_merge_state_expr(
+    bucket_size: i64,
+    error_rate: f64,
+    delta_state: Expr,
+    sink_state: Expr,
+) -> Result<Expr, Error> {
+    let factory = FUNCTION_REGISTRY
+        .scalar_functions()
+        .into_iter()
+        .find(|func| func.name() == UDDSKETCH_MERGE_STATE_NAME)
+        .context(InvalidQuerySnafu {
+            reason: format!(
+                "UDDSketch merge state function {UDDSKETCH_MERGE_STATE_NAME} is not registered"
+            ),
+        })?;
+    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+        Arc::new(factory.provide(FunctionContext::default())),
+        vec![lit(bucket_size), lit(error_rate), delta_state, sink_state],
+    )))
 }
 
 pub async fn get_table_info_df_schema(
