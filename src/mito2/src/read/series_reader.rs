@@ -87,7 +87,6 @@ pub(crate) struct AssignedSeriesBatch {
     enable_range_cache: bool,
 }
 
-#[allow(dead_code)]
 impl AssignedSeriesBatch {
     fn new(range: SeriesRange, series: Vec<MetricSeriesId>, enable_range_cache: bool) -> Self {
         Self {
@@ -111,13 +110,11 @@ impl AssignedSeriesBatch {
 }
 
 /// Collects candidate batches and assigns every TSID by its integer range.
-#[allow(dead_code)]
 pub(crate) struct SeriesBatchCollector {
     assignments: Vec<Vec<MetricSeriesId>>,
     num_series: usize,
 }
 
-#[allow(dead_code)]
 impl SeriesBatchCollector {
     pub(crate) fn new(partitions: usize) -> Option<Self> {
         (partitions > 0).then(|| Self {
@@ -165,11 +162,11 @@ struct MetricSeriesFilter {
 
 impl MetricSeriesFilter {
     fn new(assigned: &AssignedSeriesBatch) -> Self {
-        let series = assigned.series.iter().copied().collect();
+        let series = assigned.series().iter().copied().collect();
         Self {
-            range: assigned.range,
+            range: assigned.range(),
             series: Arc::new(series),
-            enable_range_cache: assigned.enable_range_cache,
+            enable_range_cache: assigned.enable_range_cache(),
         }
     }
 
@@ -254,7 +251,6 @@ fn filter_flat_stream_by_series(
 }
 
 /// Reads all collected metric series assigned to one partition.
-#[allow(dead_code)]
 pub(crate) struct SeriesReader {
     stream_ctx: Arc<StreamContext>,
     partition_ranges: Vec<PartitionRange>,
@@ -266,7 +262,6 @@ pub(crate) struct SeriesReader {
     part_metrics: PartitionMetrics,
 }
 
-#[allow(dead_code)]
 impl SeriesReader {
     /// Creates a reader for the series assigned to one data partition.
     ///
