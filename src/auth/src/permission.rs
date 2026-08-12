@@ -139,6 +139,7 @@ pub const PROMQL_QUERY: PermissionAction = PermissionAction::read("promql.query"
 pub const LOG_QUERY: PermissionAction = PermissionAction::read("log.query");
 pub const OPENTSDB_WRITE: PermissionAction = PermissionAction::write("opentsdb.write");
 pub const INFLUXDB_WRITE: PermissionAction = PermissionAction::write("influxdb.write");
+pub const ICEBERG_READ: PermissionAction = PermissionAction::read("iceberg.read");
 pub const PROM_STORE_WRITE: PermissionAction = PermissionAction::write("prom_store.write");
 pub const PROM_STORE_READ: PermissionAction = PermissionAction::read("prom_store.read");
 pub const OTLP_WRITE: PermissionAction = PermissionAction::write("otlp.write");
@@ -160,6 +161,7 @@ pub const ALL_ACTIONS: &[PermissionAction] = &[
     LOG_QUERY,
     OPENTSDB_WRITE,
     INFLUXDB_WRITE,
+    ICEBERG_READ,
     PROM_STORE_WRITE,
     PROM_STORE_READ,
     OTLP_WRITE,

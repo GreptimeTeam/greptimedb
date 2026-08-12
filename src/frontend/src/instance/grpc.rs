@@ -70,15 +70,21 @@ impl GrpcQueryHandler for Instance {
             let interceptor = interceptor_ref.as_ref();
             interceptor.pre_execute(&request, ctx.clone())?;
 
-            self.plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission_with_context(
-                    ctx.current_user(),
-                    PermissionReq::GrpcRequest(&request),
-                    Some(&ctx.current_schema()),
-                )
-                .context(PermissionSnafu)?;
+            if !matches!(
+                &request,
+                Request::Query(query_request)
+                    if matches!(&query_request.query, Some(Query::Sql(_)))
+            ) {
+                self.plugins
+                    .get::<PermissionCheckerRef>()
+                    .as_ref()
+                    .check_permission_with_context(
+                        ctx.current_user(),
+                        PermissionReq::GrpcRequest(&request),
+                        Some(&ctx.current_schema()),
+                    )
+                    .context(PermissionSnafu)?;
+            }
 
             let output = match request {
                 Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
