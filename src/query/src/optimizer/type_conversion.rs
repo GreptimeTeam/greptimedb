@@ -17,9 +17,9 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
-use datafusion_expr::expr::InList;
+use datafusion_expr::expr::{Cast, InList};
 use datafusion_expr::{
-    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan,
+    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan, WriteOp,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
@@ -122,6 +122,38 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 plan.with_new_exprs(expr, inputs).map(Transformed::yes)
             }
 
+            LogicalPlan::Dml(mut dml) if matches!(dml.op, WriteOp::Insert(_)) => {
+                // DataFusion represents destination-column coercion in an INSERT VALUES
+                // plan as casts inside the Values node. Parse timestamp strings with the
+                // query timezone before those casts are evaluated by Arrow as UTC.
+                let query_ctx = ctx.query_ctx();
+                let input = dml
+                    .input
+                    .as_ref()
+                    .clone()
+                    .transform_up(|plan| match plan {
+                        LogicalPlan::Values(mut values) => {
+                            let mut converter = InsertValueConverter {
+                                query_ctx: query_ctx.clone(),
+                            };
+                            values.values = values
+                                .values
+                                .into_iter()
+                                .map(|row| {
+                                    row.into_iter()
+                                        .map(|expr| expr.rewrite(&mut converter).map(|x| x.data))
+                                        .collect::<Result<Vec<_>>>()
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            Ok(Transformed::yes(LogicalPlan::Values(values)))
+                        }
+                        plan => Ok(Transformed::no(plan)),
+                    })?
+                    .data;
+                dml.input = std::sync::Arc::new(input);
+                Ok(Transformed::yes(LogicalPlan::Dml(dml)))
+            }
+
             LogicalPlan::Distinct { .. }
             | LogicalPlan::Limit { .. }
             | LogicalPlan::Subquery { .. }
@@ -137,6 +169,38 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::RecursiveQuery(_) => Ok(Transformed::no(plan)),
         })
         .map(|x| x.data)
+    }
+}
+
+struct InsertValueConverter {
+    query_ctx: QueryContextRef,
+}
+
+impl TreeNodeRewriter for InsertValueConverter {
+    type Node = Expr;
+
+    fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
+        let Expr::Cast(Cast {
+            expr: inner,
+            data_type: target_type @ DataType::Timestamp(_, _),
+        }) = expr
+        else {
+            return Ok(Transformed::no(expr));
+        };
+        let Expr::Literal(ScalarValue::Utf8(Some(value)), _) = inner.as_ref() else {
+            return Ok(Transformed::no(Expr::Cast(Cast {
+                expr: inner,
+                data_type: target_type,
+            })));
+        };
+
+        let parsed = string_to_timestamp_ms(value, Some(&self.query_ctx.timezone()))?;
+        let parsed = parsed.to_array()?;
+        let casted = compute::cast(&parsed, &target_type)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        let value = ScalarValue::try_from_array(&casted, 0)?;
+
+        Ok(Transformed::yes(Expr::Literal(value, None)))
     }
 }
 
