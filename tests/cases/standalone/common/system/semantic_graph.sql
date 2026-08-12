@@ -286,13 +286,18 @@ create table http_requests_total (
   'greptime.semantic.source' = 'prometheus'
 );
 
+-- The pending pod's empty node (kube-state-metrics emits "" for unscheduled
+-- pods) identifies nothing: the pod entity appears, the ghost node and its
+-- runs_on edge do not.
 insert into kube_pod_info values
   (now(), 'default', 'api-1', 'uid-1', 'node-a', 1),
-  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1);
+  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1),
+  (now(), 'default', 'pending-1', 'uid-3', '', 1);
 
 insert into kube_pod_owner values
   (now(), 'default', 'api-1', 'ReplicaSet', 'api-rs', 1),
-  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1);
+  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1),
+  (now(), 'default', 'pending-1', '', '', 1);
 
 insert into target_info values
   (now(), 'shop/api', 'inst-1', 'prod', 1);

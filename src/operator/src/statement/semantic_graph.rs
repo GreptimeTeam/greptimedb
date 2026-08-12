@@ -421,6 +421,16 @@ fn cast_string_or_empty(column: &str) -> Expr {
 /// a single column, the sorted `k=v,k=v` rendering for a composite. `col`
 /// constructs the column reference (unqualified for registry branches,
 /// join-side-qualified for the calls derivation).
+/// A row identifies an entity only when every identity component is present
+/// and non-empty: kube-state-metrics descriptors emit empty-string labels (an
+/// unscheduled pod's `node`, an owner-less pod's `owner_*`), and an empty
+/// string is never a meaningful entity id.
+pub(crate) fn identifies(column: &str) -> Expr {
+    ident(column)
+        .is_not_null()
+        .and(cast(ident(column), DataType::Utf8).not_eq(lit("")))
+}
+
 fn entity_id_expr(id_columns: &[String], col: &dyn Fn(&str) -> Expr) -> Expr {
     if let [id] = id_columns {
         cast(col(id), DataType::Utf8)
@@ -616,12 +626,12 @@ fn registry_source(
             json_quote(&format!("{}.{}", decl.schema, decl.table))
         )));
 
-        // Tag columns may still be nullable; a NULL identity component
-        // identifies nothing. Keep this predicate per declaration so a NULL
-        // identity for one entity does not remove other entities on the row.
-        let valid = decl.id_columns.iter().fold(lit(true), |predicate, id| {
-            predicate.and(ident(id).is_not_null())
-        });
+        // Keep this predicate per declaration so an absent identity for one
+        // entity does not remove other entities on the row.
+        let valid = decl
+            .id_columns
+            .iter()
+            .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
 
         rows.push(vec![
             valid,
@@ -974,8 +984,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_skips_null_identity_rows() {
-        let ctx = metric_table_ctx();
+    async fn registry_skips_absent_identity_rows() {
+        // NULL identifies nothing, and so does a kube-state-metrics-style
+        // empty label (an unscheduled pod's `node` arrives as "").
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("h2"), None, Some("")])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "app_latency",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
         let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
             vec![RegistrySource {
@@ -987,9 +1020,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let batches = collect(&ctx, plan).await;
-        let mut ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
-        ids.sort();
-        assert_eq!(ids, vec!["h2", r#"we"ird\host"#]);
+        let ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
+        assert_eq!(ids, vec!["h2"]);
     }
 
     #[tokio::test]

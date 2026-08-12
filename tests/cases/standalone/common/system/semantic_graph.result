@@ -443,17 +443,22 @@ create table http_requests_total (
 
 Affected Rows: 0
 
+-- The pending pod's empty node (kube-state-metrics emits "" for unscheduled
+-- pods) identifies nothing: the pod entity appears, the ghost node and its
+-- runs_on edge do not.
 insert into kube_pod_info values
   (now(), 'default', 'api-1', 'uid-1', 'node-a', 1),
-  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1);
+  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1),
+  (now(), 'default', 'pending-1', 'uid-3', '', 1);
 
-Affected Rows: 2
+Affected Rows: 3
 
 insert into kube_pod_owner values
   (now(), 'default', 'api-1', 'ReplicaSet', 'api-rs', 1),
-  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1);
+  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1),
+  (now(), 'default', 'pending-1', '', '', 1);
 
-Affected Rows: 2
+Affected Rows: 3
 
 insert into target_info values
   (now(), 'shop/api', 'inst-1', 'prod', 1);
@@ -478,6 +483,8 @@ order by entity_type, entity_id, source_tables;
 | k8s.pod          | namespace=default,pod=api-1                               | ["public.kube_pod_owner"] |
 | k8s.pod          | namespace=default,pod=api-2                               | ["public.kube_pod_info"]  |
 | k8s.pod          | namespace=default,pod=api-2                               | ["public.kube_pod_owner"] |
+| k8s.pod          | namespace=default,pod=pending-1                           | ["public.kube_pod_info"]  |
+| k8s.pod          | namespace=default,pod=pending-1                           | ["public.kube_pod_owner"] |
 | k8s.workload     | namespace=default,owner_kind=ReplicaSet,owner_name=api-rs | ["public.kube_pod_owner"] |
 | service          | shop/api                                                  | ["public.target_info"]    |
 | service.instance | instance=inst-1,job=shop/api                              | ["public.target_info"]    |

@@ -41,7 +41,7 @@ use crate::statement::semantic_graph::conventions::{
 };
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, bin_interval, bin_ms,
-    conventions, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
+    conventions, entity_id_expr, identifies, interval, null_json, parse_json_expr, qcol, union_all,
     unnest_rows,
 };
 
@@ -192,9 +192,7 @@ fn co_declared_branch(
                     .id_columns
                     .iter()
                     .chain(&dst.id_columns)
-                    .fold(lit(true), |predicate, id| {
-                        predicate.and(ident(id).is_not_null())
-                    });
+                    .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
                 vec![
                     valid,
                     bin.clone(),
@@ -495,9 +493,9 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
             .gt_eq(window.source_start() - interval(CHILD_SPAN_EARLY_NANOS))
             .and(ts.lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)))
     };
-    // A NULL identity component identifies nothing, on either endpoint.
+    // An absent identity component identifies nothing, on either endpoint.
     for id in &service.id_columns {
-        predicate = predicate.and(ident(id).is_not_null());
+        predicate = predicate.and(identifies(id));
     }
     predicate
 }
