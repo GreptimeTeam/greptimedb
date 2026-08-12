@@ -37,9 +37,7 @@ use common_catalog::consts::{
 };
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-#[cfg(feature = "enterprise")]
-use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::cache_invalidator::Context;
+use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
 };

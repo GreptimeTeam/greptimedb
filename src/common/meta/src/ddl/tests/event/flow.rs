@@ -19,9 +19,8 @@ use api::v1::{ColumnSchema, Row, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
-    ACTOR_COLUMN, CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN,
-    PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN,
-    jsonb_value,
+    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, FLOW_ID_COLUMN, FLOW_NAME_COLUMN, jsonb_value,
+    procedure_event_column_schemas,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -240,13 +239,7 @@ fn assert_procedure_event_contract(
     trigger: &str,
     locator: FlowEventLocator<'_>,
 ) {
-    let mut schema = vec![
-        ACTOR_COLUMN.column_schema(),
-        PROCEDURE_ID_COLUMN.column_schema(),
-        PROCEDURE_STATE_COLUMN.column_schema(),
-        PROCEDURE_ERROR_COLUMN.column_schema(),
-        PROCEDURE_TRIGGER_COLUMN.column_schema(),
-    ];
+    let mut schema = procedure_event_column_schemas();
     schema.extend(flow_schema());
     schema.push(EVENT_CONTEXT_COLUMN.column_schema());
     assert_event_contract(

@@ -350,16 +350,7 @@ impl ProcedureExecutor for MetaClient {
         ctx: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
-        self.procedure_client()
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?
-            .migrate_region(
-                ctx,
-                request.region_id,
-                request.from_peer,
-                request.to_peer,
-                request.timeout,
-            )
+        self.migrate_region(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -432,10 +423,7 @@ impl ProcedureExecutor for MetaClient {
         ctx: &ExecutorContext,
         request: GcRegionsRequest,
     ) -> MetaResult<GcResponse> {
-        self.procedure_client()
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?
-            .gc_regions(ctx, request)
+        self.gc_regions(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -446,10 +434,7 @@ impl ProcedureExecutor for MetaClient {
         ctx: &ExecutorContext,
         request: GcTableRequest,
     ) -> MetaResult<GcResponse> {
-        self.procedure_client()
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?
-            .gc_table(ctx, request)
+        self.gc_table(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -824,11 +809,12 @@ impl MetaClient {
     /// Submit a region migration task.
     pub async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse> {
         self.procedure_client()?
             .migrate_region(
-                &ExecutorContext::default(),
+                context,
                 request.region_id,
                 request.from_peer,
                 request.to_peer,

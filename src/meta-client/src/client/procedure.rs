@@ -21,8 +21,9 @@ use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
     DdlTaskRequest, DdlTaskResponse, GcRegionsRequest, GcRegionsResponse, GcTableRequest,
     GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureDetailRequest,
-    ProcedureDetailResponse, ProcedureId, ProcedureStateResponse, QueryProcedureRequest,
-    ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader, Role,
+    ProcedureDetailResponse, ProcedureEventContext, ProcedureId, ProcedureStateResponse,
+    QueryProcedureRequest, ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader,
+    Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::procedure_executor::ExecutorContext;
@@ -246,7 +247,10 @@ impl Inner {
             from_peer,
             to_peer,
             timeout_secs: timeout.as_secs() as u32,
-            event_context: context.event_context.as_ref().map(Into::into),
+            event_context: context
+                .event_context
+                .as_ref()
+                .map(ProcedureEventContext::from),
             actor: context
                 .actor
                 .as_ref()
@@ -312,7 +316,10 @@ impl Inner {
             region_ids: request.region_ids,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
-            event_context: context.event_context.as_ref().map(Into::into),
+            event_context: context
+                .event_context
+                .as_ref()
+                .map(ProcedureEventContext::from),
             actor: context
                 .actor
                 .as_ref()
@@ -362,7 +369,10 @@ impl Inner {
             table_name: request.table_name,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
-            event_context: context.event_context.as_ref().map(Into::into),
+            event_context: context
+                .event_context
+                .as_ref()
+                .map(ProcedureEventContext::from),
             actor: context
                 .actor
                 .as_ref()

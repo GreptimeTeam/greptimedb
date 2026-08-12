@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionRole;
@@ -101,7 +102,7 @@ async fn test_concurrent_table_processing_limits() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            common_meta::procedure_executor::ExecutorContext::default(),
+            ExecutorContext::default(),
         )
         .await;
 
@@ -189,7 +190,7 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            common_meta::procedure_executor::ExecutorContext::default(),
+            ExecutorContext::default(),
         )
         .await;
 
@@ -295,7 +296,7 @@ async fn test_region_gc_concurrency_limit() {
             candidates.into_iter().map(|c| (table_id, c)).collect(),
             HashSet::new(),
             HashMap::new(),
-            common_meta::procedure_executor::ExecutorContext::default(),
+            ExecutorContext::default(),
         )
         .await
         .unwrap();
@@ -412,7 +413,7 @@ async fn test_region_gc_concurrency_with_partial_failures() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            common_meta::procedure_executor::ExecutorContext::default(),
+            ExecutorContext::default(),
         )
         .await;
 
@@ -556,7 +557,7 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            common_meta::procedure_executor::ExecutorContext::default(),
+            ExecutorContext::default(),
         )
         .await;
 

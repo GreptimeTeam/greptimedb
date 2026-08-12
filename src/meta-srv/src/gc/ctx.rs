@@ -32,7 +32,7 @@ use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::PurgeDroppedTableTask;
-use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
+use common_procedure::{ProcedureContext, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
 use store_api::storage::{GcReport, RegionId};
@@ -327,8 +327,11 @@ impl DefaultGcSchedulerCtx {
             timeout,
             region_routes_override,
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure))
-            .with_context((&executor_context).into());
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(ProcedureContext {
+                actor: executor_context.actor,
+                event_context: executor_context.event_context,
+            });
 
         let id = procedure_with_id.id;
 

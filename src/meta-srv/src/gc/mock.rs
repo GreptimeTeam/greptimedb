@@ -30,6 +30,7 @@ use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::PersistentEventContext;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::debug;
@@ -214,7 +215,7 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
-        executor_context: common_meta::procedure_executor::ExecutorContext,
+        executor_context: ExecutorContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
         self.gc_event_contexts

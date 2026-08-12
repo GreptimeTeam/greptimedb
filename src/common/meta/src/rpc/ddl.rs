@@ -30,7 +30,8 @@ use api::v1::meta::{
     CreateViewTask as PbCreateViewTask, DdlTaskRequest as PbDdlTaskRequest,
     DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
     DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
-    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
+    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition,
+    ProcedureEventContext as PbProcedureEventContext, ProcedureId,
     PurgeDroppedTableTask as PbPurgeDroppedTableTask, TruncateTableTask as PbTruncateTableTask,
     UndropTableTask as PbUndropTableTask,
 };
@@ -454,7 +455,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             timeout_secs: ddl_timeout_secs(timeout),
             wait,
             task: Some(task),
-            event_context: event_context.as_ref().map(Into::into),
+            event_context: event_context.as_ref().map(PbProcedureEventContext::from),
             actor: actor.map(|username| api::v1::meta::ProcedureActor { username }),
         })
     }

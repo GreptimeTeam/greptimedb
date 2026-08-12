@@ -20,8 +20,8 @@ use api::v1::alter_table_expr::Kind;
 use api::v1::repartition::Source as PbRepartitionSource;
 use common_error::ext::BoxedError;
 use common_procedure::{
-    BoxedProcedure, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef,
-    ProcedureWithId, watcher,
+    BoxedProcedure, BoxedProcedureLoader, Output, ProcedureContext, ProcedureId,
+    ProcedureManagerRef, ProcedureWithId, watcher,
 };
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
@@ -341,7 +341,7 @@ impl DdlManager {
         repartition: Repartition,
         wait: bool,
         timeout: Duration,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -400,7 +400,7 @@ impl DdlManager {
         &self,
         table_id: TableId,
         alter_table_task: AlterTableTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
         ddl_options: DdlOptions,
     ) -> Result<(ProcedureId, Option<Output>)> {
         // make alter_table_task mutable so we can call .take() on its field
@@ -489,7 +489,7 @@ impl DdlManager {
         &self,
         create_table_task: CreateTableTask,
         query_context: QueryContext,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -510,7 +510,7 @@ impl DdlManager {
     pub async fn submit_create_view_task(
         &self,
         create_view_task: CreateViewTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -528,7 +528,7 @@ impl DdlManager {
         &self,
         create_table_tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -547,7 +547,7 @@ impl DdlManager {
         &self,
         alter_table_tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -565,7 +565,7 @@ impl DdlManager {
     pub async fn submit_drop_table_task(
         &self,
         drop_table_task: DropTableTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -583,7 +583,7 @@ impl DdlManager {
     pub async fn submit_undrop_table_task(
         &self,
         undrop_table_task: UndropTableTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         #[cfg(not(feature = "enterprise"))]
         {
@@ -623,7 +623,7 @@ impl DdlManager {
     pub async fn submit_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         #[cfg(not(feature = "enterprise"))]
         {
@@ -665,7 +665,7 @@ impl DdlManager {
         #[cfg(feature = "enterprise")]
         {
             let context = self.create_context();
-            let procedure_context = common_procedure::ProcedureContext::from_event_context(
+            let procedure_context = ProcedureContext::from_event_context(
                 PersistentEventContext::new(TriggerReason::ScheduledGc),
             );
             let procedure =
@@ -688,7 +688,7 @@ impl DdlManager {
             options,
             creator,
         }: CreateDatabaseTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = CreateDatabaseProcedure::new(
@@ -714,7 +714,7 @@ impl DdlManager {
             schema,
             drop_if_exists,
         }: DropDatabaseTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
@@ -727,7 +727,7 @@ impl DdlManager {
     pub async fn submit_alter_database(
         &self,
         alter_database_task: AlterDatabaseTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = AlterDatabaseProcedure::new(alter_database_task, context)?;
@@ -743,7 +743,7 @@ impl DdlManager {
         &self,
         create_flow: CreateFlowTask,
         query_context: QueryContext,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
@@ -758,7 +758,7 @@ impl DdlManager {
     pub async fn submit_drop_flow_task(
         &self,
         drop_flow: DropFlowTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropFlowProcedure::new(drop_flow, context);
@@ -773,7 +773,7 @@ impl DdlManager {
     pub async fn submit_drop_view_task(
         &self,
         drop_view: DropViewTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropViewProcedure::new(drop_view, context);
@@ -789,7 +789,7 @@ impl DdlManager {
         &self,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
@@ -805,7 +805,7 @@ impl DdlManager {
     pub async fn submit_comment_on_task(
         &self,
         mut comment_on_task: CommentOnTask,
-        procedure_context: common_procedure::ProcedureContext,
+        procedure_context: ProcedureContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         comment_on_task
@@ -875,7 +875,7 @@ impl DdlManager {
             .event_context
             .clone()
             .unwrap_or_else(|| crate::rpc::ddl::event_context_from_query_context(&query_context));
-        let procedure_context = common_procedure::ProcedureContext {
+        let procedure_context = ProcedureContext {
             actor: ctx.actor.clone(),
             event_context: Some(event_context),
         };
@@ -970,7 +970,7 @@ impl DdlManager {
 async fn handle_truncate_table_task(
     ddl_manager: &DdlManager,
     truncate_table_task: TruncateTableTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = truncate_table_task.table_id;
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
@@ -1010,7 +1010,7 @@ async fn handle_alter_table_task(
     ddl_manager: &DdlManager,
     alter_table_task: AlterTableTask,
     ddl_options: DdlOptions,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_ref = alter_table_task.table_ref();
 
@@ -1057,7 +1057,7 @@ async fn handle_alter_table_task(
 async fn handle_drop_table_task(
     ddl_manager: &DdlManager,
     drop_table_task: DropTableTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
     let (id, _) = ddl_manager
@@ -1075,7 +1075,7 @@ async fn handle_drop_table_task(
 async fn handle_undrop_table_task(
     ddl_manager: &DdlManager,
     undrop_table_task: UndropTableTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = undrop_table_task.table_id;
     let (id, _) = ddl_manager
@@ -1093,7 +1093,7 @@ async fn handle_undrop_table_task(
 async fn handle_purge_dropped_table_task(
     ddl_manager: &DdlManager,
     purge_dropped_table_task: PurgeDroppedTableTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_purge_dropped_table_task(purge_dropped_table_task, procedure_context)
@@ -1111,7 +1111,7 @@ async fn handle_create_table_task(
     ddl_manager: &DdlManager,
     create_table_task: CreateTableTask,
     query_context: QueryContext,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
         .submit_create_table_task(create_table_task, query_context, procedure_context)
@@ -1137,7 +1137,7 @@ async fn handle_create_table_task(
 async fn handle_create_logical_table_tasks(
     ddl_manager: &DdlManager,
     create_table_tasks: Vec<CreateTableTask>,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !create_table_tasks.is_empty(),
@@ -1182,7 +1182,7 @@ async fn handle_create_logical_table_tasks(
 async fn handle_create_database_task(
     ddl_manager: &DdlManager,
     create_database_task: CreateDatabaseTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let catalog = create_database_task.catalog.clone();
     let schema = create_database_task.schema.clone();
@@ -1205,7 +1205,7 @@ async fn handle_create_database_task(
 async fn handle_drop_database_task(
     ddl_manager: &DdlManager,
     drop_database_task: DropDatabaseTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_drop_database(drop_database_task.clone(), procedure_context)
@@ -1226,7 +1226,7 @@ async fn handle_drop_database_task(
 async fn handle_alter_database_task(
     ddl_manager: &DdlManager,
     alter_database_task: AlterDatabaseTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_alter_database(alter_database_task.clone(), procedure_context)
@@ -1248,7 +1248,7 @@ async fn handle_alter_database_task(
 async fn handle_drop_flow_task(
     ddl_manager: &DdlManager,
     drop_flow_task: DropFlowTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_drop_flow_task(drop_flow_task.clone(), procedure_context)
@@ -1293,7 +1293,7 @@ async fn handle_drop_trigger_task(
 async fn handle_drop_view_task(
     ddl_manager: &DdlManager,
     drop_view_task: DropViewTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_drop_view_task(drop_view_task.clone(), procedure_context)
@@ -1316,7 +1316,7 @@ async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     create_flow_task: CreateFlowTask,
     query_context: QueryContext,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
         .submit_create_flow_task(create_flow_task.clone(), query_context, procedure_context)
@@ -1376,7 +1376,7 @@ async fn handle_create_trigger_task(
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     alter_table_tasks: Vec<AlterTableTask>,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !alter_table_tasks.is_empty(),
@@ -1415,7 +1415,7 @@ async fn handle_alter_logical_table_tasks(
 async fn handle_create_view_task(
     ddl_manager: &DdlManager,
     create_view_task: CreateViewTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
         .submit_create_view_task(create_view_task, procedure_context)
@@ -1441,7 +1441,7 @@ async fn handle_create_view_task(
 async fn handle_comment_on_task(
     ddl_manager: &DdlManager,
     comment_on_task: CommentOnTask,
-    procedure_context: common_procedure::ProcedureContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
         .submit_comment_on_task(comment_on_task.clone(), procedure_context)
@@ -1471,7 +1471,7 @@ mod tests {
     use common_error::status_code::StatusCode;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
-    use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+    use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
@@ -1709,7 +1709,7 @@ mod tests {
         let err = ddl_manager
             .submit_undrop_table_task(
                 UndropTableTask { table_id: 1024 },
-                common_procedure::ProcedureContext::default(),
+                ProcedureContext::default(),
             )
             .await
             .unwrap_err();
@@ -1726,7 +1726,7 @@ mod tests {
         let err = ddl_manager
             .submit_undrop_table_task(
                 UndropTableTask { table_id: 1024 },
-                common_procedure::ProcedureContext::default(),
+                ProcedureContext::default(),
             )
             .await
             .unwrap_err();
@@ -1735,7 +1735,7 @@ mod tests {
         let err = ddl_manager
             .submit_purge_dropped_table_task(
                 PurgeDroppedTableTask { table_id: 1024 },
-                common_procedure::ProcedureContext::default(),
+                ProcedureContext::default(),
             )
             .await
             .unwrap_err();

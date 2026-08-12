@@ -24,7 +24,9 @@ use common_meta::peer::Peer;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::PersistentEventContext;
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
+use common_procedure::{
+    ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
+};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -506,12 +508,11 @@ impl RegionMigrationManager {
             self.context_factory.clone(),
             procedure_guards,
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure)).with_context(
-            common_procedure::ProcedureContext {
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(ProcedureContext {
                 actor: executor_context.actor.clone(),
                 event_context: Some(event_context),
-            },
-        );
+            });
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
@@ -622,12 +623,11 @@ impl RegionMigrationManager {
             self.context_factory.clone(),
             vec![guard],
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure)).with_context(
-            common_procedure::ProcedureContext {
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(ProcedureContext {
                 actor: executor_context.actor,
                 event_context: Some(event_context),
-            },
-        );
+            });
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();

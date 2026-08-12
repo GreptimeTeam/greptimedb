@@ -18,9 +18,10 @@ use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, GcRegionsRequest,
     GcRegionsResponse, GcStats, GcTableRequest, GcTableResponse, MigrateRegionRequest,
-    MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
-    QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
-    ReconcileResponse, ReconcileTable, ResolveStrategy, Role, procedure_service_server,
+    MigrateRegionResponse, ProcedureActor, ProcedureDetailRequest, ProcedureDetailResponse,
+    ProcedureStateResponse, QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase,
+    ReconcileRequest, ReconcileResponse, ReconcileTable, ResolveStrategy, Role,
+    procedure_service_server,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
@@ -47,6 +48,10 @@ use crate::procedure::region_migration::manager::{
 };
 use crate::service::GrpcResult;
 use crate::{check_leader, error, gc};
+
+fn procedure_actor_from_pb(actor: Option<ProcedureActor>) -> Option<String> {
+    actor.map(|actor| actor.username)
+}
 
 #[async_trait::async_trait]
 impl procedure_service_server::ProcedureService for Metasrv {
@@ -95,14 +100,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
         } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let actor = actor
-            .map(|actor| {
-                (!actor.username.is_empty())
-                    .then_some(actor.username)
-                    .ok_or_else(|| Status::invalid_argument("Procedure actor must not be empty"))
-            })
-            .transpose()?;
-        let event_context = event_context.map(Into::into);
+        let actor = procedure_actor_from_pb(actor);
+        let event_context = event_context.map(PersistentEventContext::from);
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -156,17 +155,9 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let executor_context = ExecutorContext {
             tracing_context: Some(header.tracing_context),
-            actor: actor
-                .map(|actor| {
-                    (!actor.username.is_empty())
-                        .then_some(actor.username)
-                        .ok_or_else(|| {
-                            Status::invalid_argument("Procedure actor must not be empty")
-                        })
-                })
-                .transpose()?,
+            actor: procedure_actor_from_pb(actor),
             event_context: event_context
-                .map(Into::into)
+                .map(PersistentEventContext::from)
                 .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
         };
         let from_peer = self
@@ -307,17 +298,9 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let executor_context = ExecutorContext {
             tracing_context: Some(header.tracing_context),
-            actor: actor
-                .map(|actor| {
-                    (!actor.username.is_empty())
-                        .then_some(actor.username)
-                        .ok_or_else(|| {
-                            Status::invalid_argument("Procedure actor must not be empty")
-                        })
-                })
-                .transpose()?,
+            actor: procedure_actor_from_pb(actor),
             event_context: event_context
-                .map(Into::into)
+                .map(PersistentEventContext::from)
                 .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
         };
 
@@ -352,17 +335,9 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let executor_context = ExecutorContext {
             tracing_context: Some(header.tracing_context),
-            actor: actor
-                .map(|actor| {
-                    (!actor.username.is_empty())
-                        .then_some(actor.username)
-                        .ok_or_else(|| {
-                            Status::invalid_argument("Procedure actor must not be empty")
-                        })
-                })
-                .transpose()?,
+            actor: procedure_actor_from_pb(actor),
             event_context: event_context
-                .map(Into::into)
+                .map(PersistentEventContext::from)
                 .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
         };
 
@@ -596,14 +571,14 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
 mod tests {
     use std::time::Duration;
 
-    use api::v1::meta::Role;
+    use api::v1::meta::{ProcedureActor, Role};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
         CreatorGrantIntent, DdlTask, QueryContext,
     };
     use tonic::metadata::{MetadataMap, MetadataValue};
 
-    use super::{Metasrv, restore_create_database_creator};
+    use super::{Metasrv, procedure_actor_from_pb, restore_create_database_creator};
 
     fn create_database_task() -> DdlTask {
         DdlTask::new_create_database(
@@ -739,5 +714,22 @@ mod tests {
         };
         assert_eq!(task.creator, Some(creator));
         assert!(trusted.extensions.is_empty());
+    }
+
+    #[test]
+    fn test_procedure_actor_presence_distinguishes_missing_from_empty() {
+        assert_eq!(procedure_actor_from_pb(None), None);
+        assert_eq!(
+            procedure_actor_from_pb(Some(ProcedureActor {
+                username: "alice".to_string(),
+            })),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            procedure_actor_from_pb(Some(ProcedureActor {
+                username: String::new(),
+            })),
+            Some(String::new())
+        );
     }
 }
