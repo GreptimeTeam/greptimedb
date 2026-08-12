@@ -178,6 +178,7 @@ common-version.workspace = true
 [[bench]]
 name = "bench_prom"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "to_http_output"
