@@ -36,7 +36,6 @@ impl FunctionState {
         use async_trait::async_trait;
         use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
-        use common_meta::procedure_executor::ExecutorContext;
         use common_meta::rpc::procedure::{
             GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
             MigrateRegionRequest, ProcedureStateResponse,
@@ -61,15 +60,15 @@ impl FunctionState {
         impl ProcedureServiceHandler for MockProcedureServiceHandler {
             async fn purge_table(
                 &self,
-                _table_name: table::table_name::TableName,
                 _query_ctx: QueryContextRef,
+                _table_name: table::table_name::TableName,
             ) -> Result<()> {
                 Ok(())
             }
 
             async fn migrate_region(
                 &self,
-                _ctx: &ExecutorContext,
+                _ctx: QueryContextRef,
                 _request: MigrateRegionRequest,
             ) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))
@@ -96,7 +95,7 @@ impl FunctionState {
 
             async fn gc_regions(
                 &self,
-                _context: &ExecutorContext,
+                _context: QueryContextRef,
                 _request: GcRegionsRequest,
             ) -> Result<GcResponse> {
                 Ok(GcResponse {
@@ -109,7 +108,7 @@ impl FunctionState {
 
             async fn gc_table(
                 &self,
-                _context: &ExecutorContext,
+                _context: QueryContextRef,
                 _request: GcTableRequest,
             ) -> Result<GcResponse> {
                 Ok(GcResponse {

@@ -23,9 +23,10 @@ use api::v1::meta::{
     QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
     ReconcileResponse, ReconcileTable, ResolveStrategy, Role, procedure_service_server,
 };
-use common_event_recorder::PersistentEventContext;
+use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
     CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
@@ -51,7 +52,7 @@ use crate::{check_leader, error, gc};
 
 struct ProcedureSubmission {
     actor: Option<String>,
-    event_context: Option<PersistentEventContext>,
+    event_context: Option<PbProcedureEventContext>,
 }
 
 impl TryFrom<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for ProcedureSubmission {
@@ -74,7 +75,7 @@ impl TryFrom<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for Proc
 
         Ok(Self {
             actor,
-            event_context: event_context.map(PersistentEventContext::from),
+            event_context,
         })
     }
 }
@@ -83,7 +84,7 @@ impl From<ProcedureSubmission> for ProcedureContext {
     fn from(context: ProcedureSubmission) -> Self {
         Self {
             actor: context.actor,
-            event_context: context.event_context,
+            event_context: context.event_context.map(PersistentEventContext::from),
         }
     }
 }
@@ -135,8 +136,10 @@ impl procedure_service_server::ProcedureService for Metasrv {
         } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let procedure_context =
-            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
+        let ProcedureSubmission {
+            actor,
+            event_context,
+        } = ProcedureSubmission::try_from((actor, event_context))?;
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -147,12 +150,16 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
         restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
+        let executor_context = ExecutorContext {
+            tracing_context: Some(header.tracing_context),
+            query_context: Some(query_context),
+            actor,
+            event_input: event_context.map(ProcedureEventInput::from),
+        };
         let resp = self
             .ddl_manager()
             .submit_ddl_task(
-                Some(&header.tracing_context),
-                query_context,
-                procedure_context,
+                executor_context,
                 SubmitDdlTaskRequest {
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
@@ -750,7 +757,7 @@ mod tests {
             submission
                 .event_context
                 .as_ref()
-                .and_then(|context| context.protocol.as_deref()),
+                .map(|context| context.protocol.as_str()),
             Some("postgres")
         );
 

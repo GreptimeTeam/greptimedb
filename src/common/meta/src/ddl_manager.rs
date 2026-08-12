@@ -19,8 +19,9 @@ use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
 use api::v1::repartition::Source as PbRepartitionSource;
 use common_error::ext::BoxedError;
+use common_event_recorder::PersistentEventContext;
 #[cfg(feature = "enterprise")]
-use common_event_recorder::{PersistentEventContext, TriggerReason};
+use common_event_recorder::TriggerReason;
 use common_procedure::{
     BoxedProcedure, BoxedProcedureLoader, Output, ProcedureContext, ProcedureId,
     ProcedureManagerRef, ProcedureWithId, watcher,
@@ -56,11 +57,12 @@ use crate::error::{
     PersistRepartitionGcRequirementSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
     RegisterRepartitionProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu,
     TableNotFoundSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
-    WaitProcedureSnafu,
+    UnsupportedSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
 #[cfg(feature = "enterprise")]
@@ -856,12 +858,25 @@ impl DdlManager {
 
     pub async fn submit_ddl_task(
         &self,
-        tracing_context: Option<&common_telemetry::tracing_context::W3cTrace>,
-        query_context: QueryContext,
-        procedure_context: ProcedureContext,
+        context: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
+        let ExecutorContext {
+            tracing_context,
+            query_context,
+            actor,
+            event_input,
+        } = context;
+        let query_context = query_context.context(UnsupportedSnafu {
+            operation: "submit_ddl_task without query context",
+        })?;
+        let procedure_context = ProcedureContext {
+            actor,
+            event_context: event_input
+                .map(|input| PersistentEventContext::from((input, query_context.protocol()))),
+        };
         let span = tracing_context
+            .as_ref()
             .map(TracingContext::from_w3c)
             .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
@@ -1473,13 +1488,15 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    #[cfg(feature = "enterprise")]
+    use common_base::protocol::Channel;
     use common_error::ext::BoxedError;
     #[cfg(feature = "enterprise")]
     use common_error::ext::ErrorExt;
     #[cfg(feature = "enterprise")]
     use common_error::status_code::StatusCode;
     #[cfg(feature = "enterprise")]
-    use common_event_recorder::{PersistentEventContext, TriggerReason};
+    use common_event_recorder::{PersistentEventContext, ProcedureEventInput, TriggerReason};
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
     use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
@@ -1504,6 +1521,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
+    use crate::procedure_executor::ExecutorContext;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
     #[cfg(feature = "enterprise")]
@@ -1770,12 +1788,19 @@ mod tests {
                 PersistentEventContext::new(TriggerReason::Manual).with_protocol("mysql"),
             ),
         };
+        let executor_context = || ExecutorContext {
+            query_context: Some(QueryContext {
+                channel: Channel::Mysql as u8,
+                ..Default::default()
+            }),
+            actor: Some("test-user".to_string()),
+            event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
+            ..Default::default()
+        };
 
         ddl_manager
             .submit_ddl_task(
-                None,
-                QueryContext::default(),
-                procedure_context.clone(),
+                executor_context(),
                 SubmitDdlTaskRequest::new(DdlTask::CreateTrigger(CreateTriggerTask {
                     catalog_name: "greptime".to_string(),
                     trigger_name: "test_trigger".to_string(),
@@ -1796,9 +1821,7 @@ mod tests {
             .unwrap();
         ddl_manager
             .submit_ddl_task(
-                None,
-                QueryContext::default(),
-                procedure_context.clone(),
+                executor_context(),
                 SubmitDdlTaskRequest::new(DdlTask::DropTrigger(DropTriggerTask {
                     catalog_name: "greptime".to_string(),
                     trigger_name: "test_trigger".to_string(),
@@ -1866,9 +1889,10 @@ mod tests {
         ] {
             let err = ddl_manager
                 .submit_ddl_task(
-                    None,
-                    QueryContext::default(),
-                    ProcedureContext::default(),
+                    ExecutorContext {
+                        query_context: Some(QueryContext::default()),
+                        ..Default::default()
+                    },
                     SubmitDdlTaskRequest::new(task),
                 )
                 .await

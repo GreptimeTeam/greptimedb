@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
-use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef};
+use common_event_recorder::ProcedureEventInput;
+use common_procedure::{ProcedureId, ProcedureManagerRef};
 use common_telemetry::tracing_context::W3cTrace;
 use snafu::{OptionExt, ResultExt};
 
@@ -44,22 +44,13 @@ pub struct ExecutorContext {
     pub event_input: Option<ProcedureEventInput>,
 }
 
-impl ExecutorContext {
-    pub fn with_query_context(query_context: QueryContext) -> Self {
-        Self {
-            query_context: Some(query_context),
-            ..Default::default()
-        }
-    }
-}
-
 /// The procedure executor that accepts ddl, region migration task etc.
 #[async_trait::async_trait]
 pub trait ProcedureExecutor: Send + Sync {
     /// Submit a ddl task
     async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
 
@@ -144,27 +135,10 @@ impl LocalProcedureExecutor {
 impl ProcedureExecutor for LocalProcedureExecutor {
     async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let query_context = ctx.query_context.clone().context(UnsupportedSnafu {
-            operation: "submit_ddl_task without query context",
-        })?;
-        let procedure_context = ProcedureContext {
-            actor: ctx.actor.clone(),
-            event_context: ctx
-                .event_input
-                .as_ref()
-                .map(|input| PersistentEventContext::from_input(input, query_context.protocol())),
-        };
-        self.ddl_manager
-            .submit_ddl_task(
-                ctx.tracing_context.as_ref(),
-                query_context,
-                procedure_context,
-                request,
-            )
-            .await
+        self.ddl_manager.submit_ddl_task(ctx, request).await
     }
 
     async fn migrate_region(

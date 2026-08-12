@@ -2461,7 +2461,6 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
- "common-event-recorder",
  "common-macro",
  "common-meta",
  "common-query",

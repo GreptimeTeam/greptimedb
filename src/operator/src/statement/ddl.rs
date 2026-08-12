@@ -729,7 +729,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_create_trigger(task));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -791,7 +791,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1106,7 +1106,7 @@ impl StatementExecutor {
 
         let resp = self
             .procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1189,7 +1189,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_flow(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1222,7 +1222,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_trigger(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1301,7 +1301,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_view(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1786,7 +1786,7 @@ impl StatementExecutor {
 
         let response = self
             .procedure_executor
-            .submit_ddl_task(&executor_context, req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1910,7 +1910,7 @@ impl StatementExecutor {
         };
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -2013,7 +2013,7 @@ impl StatementExecutor {
         ));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2032,7 +2032,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_create_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2047,7 +2047,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2069,7 +2069,7 @@ impl StatementExecutor {
         ));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2086,7 +2086,7 @@ impl StatementExecutor {
             SubmitDdlTaskRequest::new(DdlTask::new_drop_database(catalog, schema, drop_if_exists));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2100,7 +2100,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_database(alter_expr));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2122,7 +2122,7 @@ impl StatementExecutor {
         ));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2212,7 +2212,7 @@ impl StatementExecutor {
         ));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2846,7 +2846,7 @@ async fn execute_undrop_table(
     let executor_context = to_executor_context(query_context, TriggerReason::Manual);
     let request = SubmitDdlTaskRequest::new(DdlTask::new_undrop_table(dropped.table_id));
     procedure_executor
-        .submit_ddl_task(&executor_context, request)
+        .submit_ddl_task(executor_context, request)
         .await
         .context(error::ExecuteDdlSnafu)?;
 
@@ -2921,10 +2921,10 @@ mod test {
     impl ProcedureExecutor for RecordingProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            ctx: &ExecutorContext,
+            ctx: ExecutorContext,
             request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
-            self.contexts.lock().unwrap().push(ctx.clone());
+            self.contexts.lock().unwrap().push(ctx);
             self.requests.lock().unwrap().push(request);
             if self.fail {
                 return common_meta::error::UnsupportedSnafu {

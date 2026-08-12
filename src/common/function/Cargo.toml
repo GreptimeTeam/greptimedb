@@ -27,7 +27,6 @@ chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
-common-event-recorder.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-query.workspace = true

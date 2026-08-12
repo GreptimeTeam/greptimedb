@@ -18,9 +18,6 @@ use api::v1::meta::ReconcileRequest;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
-use common_event_recorder::{ProcedureEventInput, TriggerReason};
-use common_meta::procedure_executor::ExecutorContext;
-use common_meta::rpc::ddl::QueryContext;
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
     GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
@@ -92,12 +89,12 @@ pub trait TableMutationHandler: Send + Sync {
 #[async_trait]
 pub trait ProcedureServiceHandler: Send + Sync {
     /// Permanently purge a dropped table.
-    async fn purge_table(&self, table_name: TableName, query_ctx: QueryContextRef) -> Result<()>;
+    async fn purge_table(&self, query_ctx: QueryContextRef, table_name: TableName) -> Result<()>;
 
     /// Migrate a region from source peer to target peer, returns the procedure id if success.
     async fn migrate_region(
         &self,
-        context: &ExecutorContext,
+        query_ctx: QueryContextRef,
         request: MigrateRegionRequest,
     ) -> Result<Option<String>>;
 
@@ -116,14 +113,14 @@ pub trait ProcedureServiceHandler: Send + Sync {
     /// Manually trigger GC for specific regions.
     async fn gc_regions(
         &self,
-        context: &ExecutorContext,
+        query_ctx: QueryContextRef,
         request: MetaGcRegionsRequest,
     ) -> Result<MetaGcResponse>;
 
     /// Manually trigger GC for a table.
     async fn gc_table(
         &self,
-        context: &ExecutorContext,
+        query_ctx: QueryContextRef,
         request: MetaGcTableRequest,
     ) -> Result<MetaGcResponse>;
 }
@@ -142,26 +139,5 @@ pub trait FlowServiceHandler: Send + Sync {
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;
 
 pub type ProcedureServiceHandlerRef = Arc<dyn ProcedureServiceHandler>;
-
-/// Builds the frontend execution envelope for a manually submitted procedure.
-pub fn procedure_executor_context(
-    query_context: QueryContextRef,
-    trigger_reason: TriggerReason,
-) -> ExecutorContext {
-    ExecutorContext {
-        query_context: Some(QueryContext {
-            current_catalog: query_context.current_catalog().to_string(),
-            current_schema: query_context.current_schema().clone(),
-            timezone: query_context.timezone().to_string(),
-            extensions: query_context.extensions(),
-            channel: query_context.channel() as u8,
-            snapshot_seqs: query_context.snapshots(),
-            sst_min_sequences: query_context.sst_min_sequences(),
-        }),
-        actor: Some(query_context.current_user().username().to_string()),
-        event_input: Some(ProcedureEventInput::new(trigger_reason)),
-        ..Default::default()
-    }
-}
 
 pub type FlowServiceHandlerRef = Arc<dyn FlowServiceHandler>;

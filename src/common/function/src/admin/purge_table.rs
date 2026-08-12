@@ -64,8 +64,8 @@ pub(crate) async fn purge_table(
 
     procedure_service_handler
         .purge_table(
-            TableName::new(catalog_name, schema_name, table_name),
             query_ctx.clone(),
+            TableName::new(catalog_name, schema_name, table_name),
         )
         .await?;
     Ok(Value::from(0_u64))
@@ -85,7 +85,6 @@ mod tests {
     use async_trait::async_trait;
     use catalog::CatalogManagerRef;
     use common_macro::admin_fn;
-    use common_meta::procedure_executor::ExecutorContext;
     use common_meta::rpc::procedure::{
         GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
         MigrateRegionRequest, ProcedureStateResponse,
@@ -132,8 +131,8 @@ mod tests {
     impl ProcedureServiceHandler for RecordingHandler {
         async fn purge_table(
             &self,
-            table_name: TableName,
             query_ctx: QueryContextRef,
+            table_name: TableName,
         ) -> Result<()> {
             if self.fail {
                 return InvalidFuncArgsSnafu {
@@ -147,7 +146,7 @@ mod tests {
 
         async fn migrate_region(
             &self,
-            _: &ExecutorContext,
+            _: QueryContextRef,
             _: MigrateRegionRequest,
         ) -> Result<Option<String>> {
             unreachable!()
@@ -164,10 +163,10 @@ mod tests {
         fn catalog_manager(&self) -> &CatalogManagerRef {
             unreachable!()
         }
-        async fn gc_regions(&self, _: &ExecutorContext, _: GcRegionsRequest) -> Result<GcResponse> {
+        async fn gc_regions(&self, _: QueryContextRef, _: GcRegionsRequest) -> Result<GcResponse> {
             unreachable!()
         }
-        async fn gc_table(&self, _: &ExecutorContext, _: GcTableRequest) -> Result<GcResponse> {
+        async fn gc_table(&self, _: QueryContextRef, _: GcTableRequest) -> Result<GcResponse> {
             unreachable!()
         }
     }

@@ -57,7 +57,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(ExecuteDdlSnafu)?;
 
@@ -89,7 +89,7 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
-            .submit_ddl_task(&executor_context, request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(ExecuteDdlSnafu)?;
 

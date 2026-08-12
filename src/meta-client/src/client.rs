@@ -337,7 +337,7 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
         MetaClient::submit_ddl_task(self, ctx, request)
@@ -850,13 +850,12 @@ impl MetaClient {
     /// Submit a DDL task.
     pub async fn submit_ddl_task(
         &self,
-        context: &ExecutorContext,
+        context: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let mut query_context = context
-            .query_context
-            .clone()
-            .context(MissingQueryContextSnafu)?;
+        let event_context = procedure_event_context(&context);
+        let actor = procedure_actor(&context);
+        let mut query_context = context.query_context.context(MissingQueryContextSnafu)?;
         query_context
             .extensions
             .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
@@ -874,8 +873,8 @@ impl MetaClient {
         let mut request: api::v1::meta::DdlTaskRequest =
             request.try_into().context(ConvertMetaRequestSnafu)?;
         request.query_context = Some(api::v1::QueryContext::from(query_context));
-        request.event_context = procedure_event_context(context);
-        request.actor = procedure_actor(context);
+        request.event_context = event_context;
+        request.actor = actor;
 
         self.procedure_client()?
             .submit_ddl_task(request)

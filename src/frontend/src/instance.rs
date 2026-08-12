@@ -2281,7 +2281,7 @@ mod tests {
     impl ProcedureExecutor for NoopProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            _ctx: ExecutorContext,
             _request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
             common_meta::error::UnsupportedSnafu {
@@ -2358,7 +2358,7 @@ mod tests {
     impl ProcedureExecutor for MockProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            _ctx: ExecutorContext,
             request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
             self.submitted.lock().unwrap().push(request.task.clone());

@@ -47,6 +47,15 @@ impl From<&ProcedureEventInput> for PbProcedureEventContext {
     }
 }
 
+impl From<PbProcedureEventContext> for ProcedureEventInput {
+    fn from(context: PbProcedureEventContext) -> Self {
+        Self {
+            reason: TriggerReason::from_extension(&context.reason),
+            extensions: context.extensions,
+        }
+    }
+}
+
 /// Stable context recorded for a procedure event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistentEventContext {
@@ -72,16 +81,17 @@ impl PersistentEventContext {
         self.protocol = Some(protocol.into());
         self
     }
+}
 
-    /// Resolves persistent event metadata from a protocol-free submission input.
-    pub fn from_input(input: &ProcedureEventInput, protocol: Option<String>) -> Self {
+impl From<(ProcedureEventInput, Option<String>)> for PersistentEventContext {
+    fn from((input, protocol): (ProcedureEventInput, Option<String>)) -> Self {
         Self {
             reason: input.reason,
             protocol,
             extensions: input
                 .extensions
-                .iter()
-                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
                 .collect(),
         }
     }
@@ -192,6 +202,15 @@ mod tests {
                 protocol: String::new(),
                 extensions: input.extensions.clone(),
             }
+        );
+
+        assert_eq!(
+            ProcedureEventInput::from(PbProcedureEventContext {
+                reason: "auto_create".to_string(),
+                protocol: "untrusted".to_string(),
+                extensions: input.extensions.clone(),
+            }),
+            input
         );
     }
 

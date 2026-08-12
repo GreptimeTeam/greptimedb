@@ -728,18 +728,18 @@ mod tests {
             username: "alice".to_string(),
             created_at_ns: 42,
         };
-        let executor_context = ExecutorContext {
+        let executor_context = |actor: String| ExecutorContext {
             query_context: Some(QueryContext {
                 channel: Channel::Postgres as u8,
                 ..Default::default()
             }),
-            actor: Some("effective-user".to_string()),
+            actor: Some(actor),
             event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
             ..Default::default()
         };
         ProcedureExecutor::submit_ddl_task(
             &client,
-            &executor_context,
+            executor_context("effective-user".to_string()),
             SubmitDdlTaskRequest::new(DdlTask::new_create_database(
                 "greptime".to_string(),
                 "metrics".to_string(),
@@ -772,13 +772,9 @@ mod tests {
         let extensions = &request.query_context.unwrap().extensions;
         assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
 
-        let empty_actor_context = ExecutorContext {
-            actor: Some(String::new()),
-            ..executor_context
-        };
         ProcedureExecutor::submit_ddl_task(
             &client,
-            &empty_actor_context,
+            executor_context(String::new()),
             SubmitDdlTaskRequest::new(DdlTask::new_drop_database(
                 "greptime".to_string(),
                 "metrics".to_string(),
@@ -850,7 +846,10 @@ mod tests {
         let now = Instant::now();
         let err = client
             .submit_ddl_task(
-                &ExecutorContext::with_query_context(QueryContext::default()),
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
                 request,
             )
             .await

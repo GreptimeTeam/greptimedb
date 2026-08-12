@@ -14,6 +14,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use common_event_recorder::ProcedureEventInput;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TriggerReason};
 use common_time::Timezone;
@@ -41,7 +42,13 @@ pub fn to_executor_context(
     query_context: QueryContextRef,
     trigger_reason: TriggerReason,
 ) -> ExecutorContext {
-    common_function::handlers::procedure_executor_context(query_context, trigger_reason)
+    let actor = query_context.current_user().username().to_string();
+    ExecutorContext {
+        query_context: Some(to_meta_query_context(query_context)),
+        actor: Some(actor),
+        event_input: Some(ProcedureEventInput::new(trigger_reason)),
+        ..Default::default()
+    }
 }
 
 pub fn to_executor_context_with_origin_frontend(
