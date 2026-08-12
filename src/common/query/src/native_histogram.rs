@@ -247,6 +247,25 @@ pub struct NativeHistogram {
     pub negative_buckets: Vec<f64>,
 }
 
+/// Formats a histogram component like Prometheus's default `%g` formatter.
+fn format_promql_histogram_float(value: f64) -> String {
+    let abs = value.abs();
+    if !value.is_finite() || value == 0.0 || (1e-4..1e6).contains(&abs) {
+        return format_prometheus_float(value);
+    }
+
+    let scientific = format!("{value:e}");
+    let Some((mantissa, exponent)) = scientific.rsplit_once('e') else {
+        return scientific;
+    };
+    let (sign, exponent) = if let Some(exponent) = exponent.strip_prefix('-') {
+        ('-', exponent)
+    } else {
+        ('+', exponent.strip_prefix('+').unwrap_or(exponent))
+    };
+    format!("{mantissa}e{sign}{exponent:0>2}")
+}
+
 impl NativeHistogram {
     fn uses_custom_buckets(&self) -> bool {
         self.schema == CUSTOM_BUCKETS_SCHEMA
@@ -378,7 +397,10 @@ impl NativeHistogram {
 
     /// Formats this histogram using PromQL native histogram sample notation.
     pub fn promql_string(&self) -> String {
-        let mut parts = vec![format!("count:{}", self.count), format!("sum:{}", self.sum)];
+        let mut parts = vec![
+            format!("count:{}", format_promql_histogram_float(self.count)),
+            format!("sum:{}", format_promql_histogram_float(self.sum)),
+        ];
         if let Some(buckets) = self.all_buckets() {
             parts.extend(
                 buckets
@@ -392,7 +414,11 @@ impl NativeHistogram {
                         };
                         format!(
                             "{}{},{}{}:{}",
-                            left, bucket.lower, bucket.upper, right, bucket.count
+                            left,
+                            format_promql_histogram_float(bucket.lower),
+                            format_promql_histogram_float(bucket.upper),
+                            right,
+                            format_promql_histogram_float(bucket.count)
                         )
                     }),
             );
@@ -1622,6 +1648,35 @@ mod tests {
             positive_buckets,
             negative_buckets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn promql_string_matches_prometheus_float_format() {
+        assert_eq!(format_promql_histogram_float(0.0001), "0.0001");
+        assert_eq!(format_promql_histogram_float(1_000_000.0), "1e+06");
+
+        let histogram = NativeHistogram {
+            schema: CUSTOM_BUCKETS_SCHEMA,
+            zero_threshold: 0.0,
+            sum: 2_349_209.324,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: vec![0.00001],
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            negative_spans: Vec::new(),
+            count: 3.0,
+            zero_count: 0.0,
+            positive_buckets: vec![1.0, 2.0],
+            negative_buckets: Vec::new(),
+        };
+
+        assert_eq!(
+            histogram.promql_string(),
+            "{count:3, sum:2.349209324e+06, [-Inf,1e-05]:1, (1e-05,+Inf]:2}"
+        );
     }
 
     #[test]

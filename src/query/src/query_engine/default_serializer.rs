@@ -40,8 +40,8 @@ use promql::functions::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round,
-    StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -188,6 +188,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramDelta::scalar_udf(),
             NativeHistogramDivScalar::scalar_udf(),
             NativeHistogramDrop::bool_false_udf(String::new(), None),
+            NativeHistogramDrop::bool_true_udf(String::new(), None),
             NativeHistogramDrop::float_null_udf(String::new(), None),
             NativeHistogramEq::scalar_udf(),
             NativeHistogramFraction::scalar_udf(),
@@ -211,6 +212,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             NativeHistogramSum::scalar_udf(),
             NativeHistogramSumOverTime::scalar_udf(),
             NativeHistogramToString::scalar_udf(),
+            PromqlFloatToString::scalar_udf(),
         ] {
             let _ = session_state.register_udf(Arc::new(udf));
         }
@@ -335,24 +337,47 @@ mod tests {
             None,
         )
         .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                Arc::new(NativeHistogramAggSum::aggregate_udf())
+                    .call(vec![col("histogram")])
+                    .alias("sum"),
+                Arc::new(NativeHistogramAggAvg::aggregate_udf())
+                    .call(vec![col("histogram")])
+                    .alias("avg"),
+            ],
+        )
+        .unwrap()
         .project(vec![
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramCount::scalar_udf()),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
             }),
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::bool_false_udf(
                     "ignored annotation".to_string(),
                     None,
                 )),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(NativeHistogramDrop::bool_true_udf(
+                    "ignored annotation".to_string(),
+                    None,
+                )),
+                args: vec![col("sum")],
             }),
             Expr::ScalarFunction(ScalarFunction {
                 func: Arc::new(NativeHistogramDrop::float_null_udf(
                     "ignored annotation".to_string(),
                     None,
                 )),
-                args: vec![col("histogram")],
+                args: vec![col("sum")],
+            }),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(PromqlFloatToString::scalar_udf()),
+                args: vec![lit(2.0)],
             }),
         ])
         .unwrap()
@@ -379,7 +404,11 @@ mod tests {
         let decoded = decoded.to_string();
         assert!(decoded.contains("prom_native_histogram_count"));
         assert!(decoded.contains("prom_native_histogram_drop_bool"));
+        assert!(decoded.contains("prom_native_histogram_keep_bool"));
         assert!(decoded.contains("prom_native_histogram_drop_float"));
+        assert!(decoded.contains(NativeHistogramAggSum::name()));
+        assert!(decoded.contains(NativeHistogramAggAvg::name()));
+        assert!(decoded.contains(PromqlFloatToString::name()));
 
         let schema = Arc::new(Schema::new(vec![
             Field::new(
