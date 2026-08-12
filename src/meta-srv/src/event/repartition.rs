@@ -364,8 +364,8 @@ mod tests {
     use api::v1::{ColumnSchema, Row, Value};
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
-        EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+        PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
     use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -676,6 +676,7 @@ mod tests {
             &schema,
             &[Row {
                 values: vec![
+                    Value { value_data: None },
                     ValueData::StringValue(procedure_id.to_string()).into(),
                     ValueData::StringValue("Running".to_string()).into(),
                     ValueData::StringValue(String::new()).into(),
@@ -716,6 +717,7 @@ mod tests {
 
     fn procedure_schema() -> Vec<ColumnSchema> {
         column_schemas([
+            &ACTOR_COLUMN,
             &PROCEDURE_ID_COLUMN,
             &PROCEDURE_STATE_COLUMN,
             &PROCEDURE_ERROR_COLUMN,

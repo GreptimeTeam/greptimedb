@@ -25,6 +25,7 @@ use api::v1::meta::{
     ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
 };
@@ -92,6 +93,7 @@ impl Client {
     /// - `timeout`: timeout for downgrading region and upgrading region operations
     pub async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
@@ -99,7 +101,7 @@ impl Client {
     ) -> Result<MigrateRegionResponse> {
         let inner = self.inner.read().await;
         inner
-            .migrate_region(region_id, from_peer, to_peer, timeout)
+            .migrate_region(context, region_id, from_peer, to_peer, timeout)
             .await
     }
 
@@ -114,14 +116,22 @@ impl Client {
         inner.list_procedures().await
     }
 
-    pub async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+    pub async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse> {
         let inner = self.inner.read().await;
-        inner.gc_regions(request).await
+        inner.gc_regions(context, request).await
     }
 
-    pub async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+    pub async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse> {
         let inner = self.inner.read().await;
-        inner.gc_table(request).await
+        inner.gc_table(context, request).await
     }
 }
 
@@ -225,6 +235,7 @@ impl Inner {
 
     async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
@@ -235,6 +246,13 @@ impl Inner {
             from_peer,
             to_peer,
             timeout_secs: timeout.as_secs() as u32,
+            event_context: context.event_context.as_ref().map(Into::into),
+            actor: context
+                .actor
+                .as_ref()
+                .map(|username| api::v1::meta::ProcedureActor {
+                    username: username.clone(),
+                }),
             ..Default::default()
         };
 
@@ -278,7 +296,11 @@ impl Inner {
         .await
     }
 
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+    async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse> {
         let timeout = request.timeout;
         let req = GcRegionsRequest {
             header: Some(RequestHeader {
@@ -290,6 +312,13 @@ impl Inner {
             region_ids: request.region_ids,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
+            event_context: context.event_context.as_ref().map(Into::into),
+            actor: context
+                .actor
+                .as_ref()
+                .map(|username| api::v1::meta::ProcedureActor {
+                    username: username.clone(),
+                }),
         };
 
         let resp: GcRegionsResponse = self
@@ -315,7 +344,11 @@ impl Inner {
         })
     }
 
-    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+    async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse> {
         let timeout = request.timeout;
         let req = GcTableRequest {
             header: Some(RequestHeader {
@@ -329,6 +362,13 @@ impl Inner {
             table_name: request.table_name,
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
+            event_context: context.event_context.as_ref().map(Into::into),
+            actor: context
+                .actor
+                .as_ref()
+                .map(|username| api::v1::meta::ProcedureActor {
+                    username: username.clone(),
+                }),
         };
 
         let resp: GcTableResponse = self
@@ -461,10 +501,11 @@ mod tests {
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
+    use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
-        CommentObjectType, CommentOnTask, CreatorGrantIntent, DdlTask, QueryContext,
-        SubmitDdlTaskRequest,
+        CommentObjectType, CommentOnTask, CreatorGrantIntent, DdlTask, PersistentEventContext,
+        QueryContext, SubmitDdlTaskRequest, TriggerReason,
     };
     use common_telemetry::common_error::ext::ErrorExt;
     use common_telemetry::info;
@@ -621,8 +662,17 @@ mod tests {
             username: "alice".to_string(),
             created_at_ns: 42,
         };
-        client
-            .submit_ddl_task(SubmitDdlTaskRequest::new(
+        let executor_context = ExecutorContext {
+            actor: Some("effective-user".to_string()),
+            event_context: Some(
+                PersistentEventContext::new(TriggerReason::Manual).with_protocol("postgres"),
+            ),
+            ..Default::default()
+        };
+        ProcedureExecutor::submit_ddl_task(
+            &client,
+            &executor_context,
+            SubmitDdlTaskRequest::new(
                 QueryContext::default(),
                 DdlTask::new_create_database(
                     "greptime".to_string(),
@@ -631,9 +681,10 @@ mod tests {
                     Default::default(),
                     Some(creator.clone()),
                 ),
-            ))
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap();
 
         let request = request_rx.recv().await.unwrap();
         let encoded = serde_json::to_string(&creator).unwrap();
@@ -647,7 +698,13 @@ mod tests {
                 .as_ref(),
             encoded.as_bytes()
         );
-        let extensions = &request.into_inner().query_context.unwrap().extensions;
+        let request = request.into_inner();
+        assert_eq!(request.actor.unwrap().username, "effective-user");
+        assert_eq!(
+            PersistentEventContext::from(request.event_context.unwrap()),
+            executor_context.event_context.unwrap()
+        );
+        let extensions = &request.query_context.unwrap().extensions;
         assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
 
         server_handle.abort();

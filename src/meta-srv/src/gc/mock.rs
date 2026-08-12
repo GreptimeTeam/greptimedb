@@ -214,10 +214,13 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
-        event_context: PersistentEventContext,
+        executor_context: common_meta::procedure_executor::ExecutorContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
-        self.gc_event_contexts.lock().unwrap().push(event_context);
+        self.gc_event_contexts
+            .lock()
+            .unwrap()
+            .push(executor_context.event_context.unwrap_or_default());
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::ProcedureEventContext as PbProcedureEventContext;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumString};
 
@@ -21,8 +22,8 @@ pub struct PersistentEventContext {
     pub reason: TriggerReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extensions: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
 }
 
 impl PersistentEventContext {
@@ -45,6 +46,26 @@ impl PersistentEventContext {
 impl Default for PersistentEventContext {
     fn default() -> Self {
         Self::new(TriggerReason::default())
+    }
+}
+
+impl From<&PersistentEventContext> for PbProcedureEventContext {
+    fn from(context: &PersistentEventContext) -> Self {
+        Self {
+            reason: context.reason.as_ref().to_string(),
+            protocol: context.protocol.clone().unwrap_or_default(),
+            extensions: context.extensions.clone(),
+        }
+    }
+}
+
+impl From<PbProcedureEventContext> for PersistentEventContext {
+    fn from(context: PbProcedureEventContext) -> Self {
+        Self {
+            reason: TriggerReason::from_extension(&context.reason),
+            protocol: (!context.protocol.is_empty()).then_some(context.protocol),
+            extensions: context.extensions,
+        }
     }
 }
 
@@ -94,6 +115,17 @@ mod tests {
             json!({ "reason": "manual" }),
             serde_json::to_value(PersistentEventContext::new(TriggerReason::Manual)).unwrap()
         );
+    }
+
+    #[test]
+    fn test_event_context_protobuf_roundtrip() {
+        let context = PersistentEventContext {
+            reason: TriggerReason::AutoCreate,
+            protocol: Some("postgres".to_string()),
+            extensions: vec!["source=sql".to_string(), "tenant=a".to_string()],
+        };
+        let pb = api::v1::meta::ProcedureEventContext::from(&context);
+        assert_eq!(PersistentEventContext::from(pb), context);
     }
 
     #[test]

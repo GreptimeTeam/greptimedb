@@ -21,6 +21,7 @@ use std::time::Duration;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::PersistentEventContext;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
@@ -459,7 +460,17 @@ impl RegionMigrationManager {
 
         let submitting_region_ids = task.region_ids.clone();
         let procedure_id = self
-            .submit_procedure_inner(task, procedure_guards, catalog_and_schema)
+            .submit_procedure_inner(
+                ExecutorContext {
+                    event_context: Some(PersistentEventContext::new(
+                        task.trigger_reason.to_trigger_reason(),
+                    )),
+                    ..Default::default()
+                },
+                task,
+                procedure_guards,
+                catalog_and_schema,
+            )
             .await?;
         Ok(SubmitRegionMigrationTaskResult {
             migrated,
@@ -475,11 +486,14 @@ impl RegionMigrationManager {
 
     async fn submit_procedure_inner(
         &self,
+        executor_context: ExecutorContext,
         task: RegionMigrationTaskBatch,
         procedure_guards: Vec<RegionMigrationProcedureGuard>,
         catalog_and_schema: Vec<(String, String)>,
     ) -> Result<ProcedureId> {
-        let event_context = PersistentEventContext::new(task.trigger_reason.to_trigger_reason());
+        let event_context = executor_context.event_context.clone().unwrap_or_else(|| {
+            PersistentEventContext::new(task.trigger_reason.to_trigger_reason())
+        });
         let procedure = RegionMigrationProcedure::new(
             PersistentContext::new(
                 catalog_and_schema,
@@ -492,8 +506,12 @@ impl RegionMigrationManager {
             self.context_factory.clone(),
             procedure_guards,
         );
-        let procedure_with_id =
-            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure)).with_context(
+            common_procedure::ProcedureContext {
+                actor: executor_context.actor.clone(),
+                event_context: Some(event_context),
+            },
+        );
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();
@@ -529,8 +547,23 @@ impl RegionMigrationManager {
     /// Submits a new region migration procedure.
     pub async fn submit_procedure(
         &self,
+        task: RegionMigrationProcedureTask,
+    ) -> Result<Option<ProcedureId>> {
+        self.submit_procedure_with_context(ExecutorContext::default(), task)
+            .await
+    }
+
+    pub async fn submit_procedure_with_context(
+        &self,
+        executor_context: ExecutorContext,
         mut task: RegionMigrationProcedureTask,
     ) -> Result<Option<ProcedureId>> {
+        let event_context = executor_context.event_context.clone().unwrap_or_else(|| {
+            PersistentEventContext::new(task.trigger_reason.to_trigger_reason())
+        });
+        task.trigger_reason =
+            RegionMigrationTriggerReason::from_trigger_reason(event_context.reason);
+
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
                 region_id: task.region_id,
@@ -577,7 +610,6 @@ impl RegionMigrationManager {
             timeout,
             trigger_reason,
         } = task.clone();
-        let event_context = PersistentEventContext::new(trigger_reason.to_trigger_reason());
         let procedure = RegionMigrationProcedure::new(
             PersistentContext::new(
                 vec![(catalog_name, schema_name)],
@@ -590,8 +622,12 @@ impl RegionMigrationManager {
             self.context_factory.clone(),
             vec![guard],
         );
-        let procedure_with_id =
-            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure)).with_context(
+            common_procedure::ProcedureContext {
+                actor: executor_context.actor,
+                event_context: Some(event_context),
+            },
+        );
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let procedure_manager = self.procedure_manager.clone();

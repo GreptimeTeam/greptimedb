@@ -281,6 +281,7 @@ pub fn base_column_schemas() -> Vec<ColumnSchema> {
 /// Builds the canonical procedure event envelope schema.
 pub fn procedure_event_column_schemas() -> Vec<ColumnSchema> {
     column_schemas([
+        &ACTOR_COLUMN,
         &PROCEDURE_ID_COLUMN,
         &PROCEDURE_STATE_COLUMN,
         &PROCEDURE_ERROR_COLUMN,
@@ -350,6 +351,7 @@ mod tests {
         assert_eq!(
             procedure_event_column_schemas(),
             vec![
+                ACTOR_COLUMN.column_schema(),
                 ColumnSchema {
                     column_name: "procedure_id".to_string(),
                     datatype: ColumnDataType::String.into(),

@@ -20,7 +20,7 @@ use api::v1::value::ValueData;
 use api::v1::{AlterDatabaseExpr, Row, SetDatabaseOptions as PbSetDatabaseOptions, Value};
 use common_event_recorder::Event;
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN,
+    ACTOR_COLUMN, CATALOG_NAME_COLUMN as EVENT_TABLE_CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN,
     PROCEDURE_ERROR_COLUMN as EVENT_TABLE_PROCEDURE_ERROR_COLUMN,
     PROCEDURE_ID_COLUMN as EVENT_TABLE_PROCEDURE_ID_COLUMN,
     PROCEDURE_STATE_COLUMN as EVENT_TABLE_PROCEDURE_STATE_COLUMN,
@@ -297,6 +297,7 @@ fn assert_procedure_event_contract(
         event,
         event_type,
         &[
+            ACTOR_COLUMN.column_schema(),
             EVENT_TABLE_PROCEDURE_ID_COLUMN.column_schema(),
             EVENT_TABLE_PROCEDURE_STATE_COLUMN.column_schema(),
             EVENT_TABLE_PROCEDURE_ERROR_COLUMN.column_schema(),
@@ -307,6 +308,7 @@ fn assert_procedure_event_contract(
         ],
         &[Row {
             values: vec![
+                Value { value_data: None },
                 Value {
                     value_data: Some(ValueData::StringValue(
                         "00000000-0000-0000-0000-000000000001".to_string(),

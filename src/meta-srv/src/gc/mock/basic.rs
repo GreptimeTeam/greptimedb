@@ -36,7 +36,7 @@ async fn test_parallel_process_datanodes_empty() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await;
 
@@ -105,7 +105,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await;
 
@@ -245,7 +245,18 @@ async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    scheduler.handle_manual_gc(None, None, None).await.unwrap();
+    scheduler
+        .handle_manual_gc(
+            None,
+            None,
+            None,
+            common_meta::procedure_executor::ExecutorContext {
+                event_context: Some(PersistentEventContext::new(TriggerReason::Manual)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(
         ctx.gc_event_contexts.lock().unwrap().as_slice(),

@@ -20,7 +20,8 @@ use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
     EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-    PROCEDURE_TRIGGER_COLUMN, jsonb_value, nullable_json, procedure_event_column_schemas,
+    PROCEDURE_TRIGGER_COLUMN, jsonb_value, nullable_json, nullable_string,
+    procedure_event_column_schemas,
 };
 use common_time::timestamp::{TimeUnit, Timestamp};
 use snafu::ResultExt;
@@ -126,8 +127,9 @@ impl Event for ProcedureEvent {
             .context(SerializeEventSnafu)?;
 
         for internal_event_extra_row in internal_event_extra_rows.iter_mut() {
-            let mut values = Vec::with_capacity(5 + internal_event_extra_row.values.len());
+            let mut values = Vec::with_capacity(6 + internal_event_extra_row.values.len());
             values.extend([
+                nullable_string(self.context.actor.as_deref()),
                 ValueData::StringValue(procedure_id.clone()).into(),
                 ValueData::StringValue(state.clone()).into(),
                 ValueData::StringValue(error.clone()).into(),
@@ -155,7 +157,7 @@ mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_event_recorder::event_table::{
-        EVENT_CONTEXT_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::{Event, PersistentEventContext, TriggerReason};
     use serde_json::json;
@@ -217,6 +219,7 @@ mod tests {
             vec![
                 Row {
                     values: vec![
+                        Value { value_data: None },
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
@@ -227,6 +230,7 @@ mod tests {
                 },
                 Row {
                     values: vec![
+                        Value { value_data: None },
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
@@ -237,6 +241,7 @@ mod tests {
                 },
                 Row {
                     values: vec![
+                        Value { value_data: None },
                         ValueData::StringValue(procedure_id.to_string()).into(),
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
@@ -263,15 +268,15 @@ mod tests {
 
         assert_eq!(procedure_event_extra_rows.len(), 3);
         assert_eq!(
-            procedure_event_extra_rows[0].values[1],
+            procedure_event_extra_rows[0].values[2],
             ValueData::StringValue("Failed".to_string()).into()
         );
         assert_eq!(
-            procedure_event_extra_rows[0].values[2],
+            procedure_event_extra_rows[0].values[3],
             ValueData::StringValue(format!("{error:?}")).into()
         );
         assert_eq!(
-            procedure_event_extra_rows[0].values[3],
+            procedure_event_extra_rows[0].values[4],
             jsonb_value(&json!({"type": "Failed"}))
         );
     }
@@ -288,6 +293,7 @@ mod tests {
         assert_eq!(
             procedure_event.extra_schema(),
             vec![
+                ACTOR_COLUMN.column_schema(),
                 ColumnSchema {
                     column_name: "procedure_id".to_string(),
                     datatype: ColumnDataType::String.into(),
@@ -320,9 +326,10 @@ mod tests {
 
     #[test]
     fn procedure_event_only_records_context_on_submission() {
-        let context = ProcedureContext::from_event_context(PersistentEventContext::new(
-            TriggerReason::AutoRepartition,
-        ));
+        let context = ProcedureContext {
+            actor: Some("alice".to_string()),
+            event_context: Some(PersistentEventContext::new(TriggerReason::AutoRepartition)),
+        };
         let submitted = ProcedureEvent::new_with_context(
             ProcedureId::random(),
             Box::new(TestEvent {}),
@@ -339,11 +346,19 @@ mod tests {
         );
 
         assert_eq!(
-            submitted.extra_rows().unwrap()[0].values[5],
+            submitted.extra_rows().unwrap()[0].values[0],
+            ValueData::StringValue("alice".to_string()).into()
+        );
+        assert_eq!(
+            succeeded.extra_rows().unwrap()[0].values[0],
+            ValueData::StringValue("alice".to_string()).into()
+        );
+        assert_eq!(
+            submitted.extra_rows().unwrap()[0].values[6],
             jsonb_value(&json!({"reason": "auto_repartition"}))
         );
         assert_eq!(
-            succeeded.extra_rows().unwrap()[0].values[5],
+            succeeded.extra_rows().unwrap()[0].values[6],
             Value { value_data: None }
         );
     }

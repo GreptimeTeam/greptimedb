@@ -340,6 +340,8 @@ pub struct SubmitDdlTaskRequest {
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
+    pub actor: Option<String>,
+    pub event_context: Option<PersistentEventContext>,
 }
 
 impl SubmitDdlTaskRequest {
@@ -350,6 +352,8 @@ impl SubmitDdlTaskRequest {
             wait: Self::default_wait(),
             timeout: Self::default_timeout(),
             task,
+            actor: None,
+            event_context: None,
         }
     }
 
@@ -381,6 +385,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             wait,
             timeout,
             task,
+            actor,
+            event_context,
         } = request;
 
         query_context
@@ -448,6 +454,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             timeout_secs: ddl_timeout_secs(timeout),
             wait,
             task: Some(task),
+            event_context: event_context.as_ref().map(Into::into),
+            actor: actor.map(|username| api::v1::meta::ProcedureActor { username }),
         })
     }
 }
@@ -1917,6 +1925,31 @@ mod tests {
 
         let de = serde_json::from_slice(&output).unwrap();
         assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_submit_ddl_task_transport_includes_procedure_context() {
+        let mut request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::UndropTable(UndropTableTask { table_id: 1024 }),
+        );
+        request.actor = Some("alice".to_string());
+        request.event_context = Some(PersistentEventContext {
+            reason: TriggerReason::Manual,
+            protocol: Some("postgres".to_string()),
+            extensions: vec!["source=admin".to_string()],
+        });
+
+        let pb = PbDdlTaskRequest::try_from(request).unwrap();
+        assert_eq!(pb.actor.unwrap().username, "alice");
+        assert_eq!(
+            PersistentEventContext::from(pb.event_context.unwrap()),
+            PersistentEventContext {
+                reason: TriggerReason::Manual,
+                protocol: Some("postgres".to_string()),
+                extensions: vec!["source=admin".to_string()],
+            }
+        );
     }
 
     #[test]

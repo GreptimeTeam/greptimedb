@@ -38,6 +38,15 @@ pub struct ExecutorContext {
     pub event_context: Option<PersistentEventContext>,
 }
 
+impl From<&ExecutorContext> for common_procedure::ProcedureContext {
+    fn from(context: &ExecutorContext) -> Self {
+        Self {
+            actor: context.actor.clone(),
+            event_context: context.event_context.clone(),
+        }
+    }
+}
+
 /// The procedure executor that accepts ddl, region migration task etc.
 #[async_trait::async_trait]
 pub trait ProcedureExecutor: Send + Sync {

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
-    PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
-    VIEW_NAME_COLUMN, jsonb_value,
+    ACTOR_COLUMN, CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN,
+    PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN,
+    VIEW_ID_COLUMN, VIEW_NAME_COLUMN, jsonb_value,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -335,6 +335,7 @@ fn assert_procedure_event_contract(
     locator: ViewEventLocator<'_>,
 ) {
     let mut schema = vec![
+        ACTOR_COLUMN.column_schema(),
         PROCEDURE_ID_COLUMN.column_schema(),
         PROCEDURE_STATE_COLUMN.column_schema(),
         PROCEDURE_ERROR_COLUMN.column_schema(),
@@ -344,6 +345,7 @@ fn assert_procedure_event_contract(
     schema.push(EVENT_CONTEXT_COLUMN.column_schema());
 
     let mut values = vec![
+        Value { value_data: None },
         ValueData::StringValue(event.procedure_id.to_string()).into(),
         ValueData::StringValue(state.to_string()).into(),
         ValueData::StringValue(String::new()).into(),

@@ -514,6 +514,14 @@ mod tests {
             r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4,"context":{"event_context":{"reason":"auto_rebalance"}}}"#
         );
 
+        message.context.actor = Some("alice".to_string());
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains(r#""actor":"alice""#));
+        assert_eq!(
+            serde_json::from_str::<ProcedureMessage>(&json).unwrap(),
+            message
+        );
+
         let legacy: ProcedureMessage = serde_json::from_str(
             r#"{"type_name":"TestMessage","data":"legacy","parent_id":null,"step":1}"#,
         )

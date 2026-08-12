@@ -35,6 +35,9 @@ pub type Output = Arc<dyn Any + Send + Sync>;
 /// Context attached to a procedure submission and inherited by its children.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureContext {
+    /// Effective user that submitted the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Context describing why and how the procedure was submitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_context: Option<PersistentEventContext>,
@@ -43,12 +46,13 @@ pub struct ProcedureContext {
 impl ProcedureContext {
     pub fn from_event_context(event_context: PersistentEventContext) -> Self {
         Self {
+            actor: None,
             event_context: Some(event_context),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.event_context.is_none()
+        self.actor.is_none() && self.event_context.is_none()
     }
 }
 
@@ -496,6 +500,12 @@ impl ProcedureWithId {
             procedure,
             context: ProcedureContext::default(),
         }
+    }
+
+    /// Attaches a complete persisted context to this procedure submission.
+    pub fn with_context(mut self, context: ProcedureContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Attaches event context to this procedure submission.

@@ -27,7 +27,8 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
-    CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
+    CreatorGrantIntent, DdlTask, PersistentEventContext, QueryContext, SubmitDdlTaskRequest,
+    TriggerReason,
 };
 use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
@@ -89,9 +90,19 @@ impl procedure_service_server::ProcedureService for Metasrv {
             task,
             wait,
             timeout_secs,
+            event_context,
+            actor,
         } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
+        let actor = actor
+            .map(|actor| {
+                (!actor.username.is_empty())
+                    .then_some(actor.username)
+                    .ok_or_else(|| Status::invalid_argument("Procedure actor must not be empty"))
+            })
+            .transpose()?;
+        let event_context = event_context.map(Into::into);
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -107,13 +118,16 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .submit_ddl_task(
                 &ExecutorContext {
                     tracing_context: Some(header.tracing_context),
-                    ..Default::default()
+                    actor,
+                    event_context,
                 },
                 SubmitDdlTaskRequest {
                     query_context,
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
                     task,
+                    actor: None,
+                    event_context: None,
                 },
             )
             .await
@@ -135,9 +149,26 @@ impl procedure_service_server::ProcedureService for Metasrv {
             from_peer,
             to_peer,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
-        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let header = header.context(error::MissingRequestHeaderSnafu)?;
+        let executor_context = ExecutorContext {
+            tracing_context: Some(header.tracing_context),
+            actor: actor
+                .map(|actor| {
+                    (!actor.username.is_empty())
+                        .then_some(actor.username)
+                        .ok_or_else(|| {
+                            Status::invalid_argument("Procedure actor must not be empty")
+                        })
+                })
+                .transpose()?,
+            event_context: event_context
+                .map(Into::into)
+                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
+        };
         let from_peer = self
             .lookup_datanode_peer(from_peer)
             .await?
@@ -149,13 +180,16 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let pid = self
             .region_migration_manager()
-            .submit_procedure(RegionMigrationProcedureTask {
-                region_id: region_id.into(),
-                from_peer,
-                to_peer,
-                timeout: Duration::from_secs(timeout_secs.into()),
-                trigger_reason: RegionMigrationTriggerReason::Manual,
-            })
+            .submit_procedure_with_context(
+                executor_context,
+                RegionMigrationProcedureTask {
+                    region_id: region_id.into(),
+                    from_peer,
+                    to_peer,
+                    timeout: Duration::from_secs(timeout_secs.into()),
+                    trigger_reason: RegionMigrationTriggerReason::Manual,
+                },
+            )
             .await?
             .map(procedure::pid_to_pb_pid);
 
@@ -266,16 +300,36 @@ impl procedure_service_server::ProcedureService for Metasrv {
             region_ids,
             full_file_listing,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
-        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let header = header.context(error::MissingRequestHeaderSnafu)?;
+        let executor_context = ExecutorContext {
+            tracing_context: Some(header.tracing_context),
+            actor: actor
+                .map(|actor| {
+                    (!actor.username.is_empty())
+                        .then_some(actor.username)
+                        .ok_or_else(|| {
+                            Status::invalid_argument("Procedure actor must not be empty")
+                        })
+                })
+                .transpose()?,
+            event_context: event_context
+                .map(Into::into)
+                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
+        };
 
         let response = self
-            .handle_gc_regions(MetaGcRegionsRequest {
-                region_ids,
-                full_file_listing,
-                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
-            })
+            .handle_gc_regions(
+                executor_context,
+                MetaGcRegionsRequest {
+                    region_ids,
+                    full_file_listing,
+                    timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
+                },
+            )
             .await?;
 
         Ok(Response::new(gc_response_to_regions_pb(response)))
@@ -291,18 +345,38 @@ impl procedure_service_server::ProcedureService for Metasrv {
             table_name,
             full_file_listing,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
-        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let header = header.context(error::MissingRequestHeaderSnafu)?;
+        let executor_context = ExecutorContext {
+            tracing_context: Some(header.tracing_context),
+            actor: actor
+                .map(|actor| {
+                    (!actor.username.is_empty())
+                        .then_some(actor.username)
+                        .ok_or_else(|| {
+                            Status::invalid_argument("Procedure actor must not be empty")
+                        })
+                })
+                .transpose()?,
+            event_context: event_context
+                .map(Into::into)
+                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
+        };
 
         let response = self
-            .handle_gc_table(MetaGcTableRequest {
-                catalog_name,
-                schema_name,
-                table_name,
-                full_file_listing,
-                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
-            })
+            .handle_gc_table(
+                executor_context,
+                MetaGcTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    full_file_listing,
+                    timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
+                },
+            )
             .await?;
 
         Ok(Response::new(gc_response_to_table_pb(response)))
@@ -371,17 +445,30 @@ impl Metasrv {
         }
     }
 
-    async fn handle_gc_regions(&self, request: MetaGcRegionsRequest) -> error::Result<GcResponse> {
+    async fn handle_gc_regions(
+        &self,
+        executor_context: ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> error::Result<GcResponse> {
         let region_ids: Vec<RegionId> = request
             .region_ids
             .into_iter()
             .map(RegionId::from_u64)
             .collect();
-        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
-            .await
+        self.trigger_gc_for_regions(
+            executor_context,
+            region_ids,
+            request.full_file_listing,
+            request.timeout,
+        )
+        .await
     }
 
-    async fn handle_gc_table(&self, request: MetaGcTableRequest) -> error::Result<GcResponse> {
+    async fn handle_gc_table(
+        &self,
+        executor_context: ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> error::Result<GcResponse> {
         let table_name_key = TableNameKey::new(
             &request.catalog_name,
             &request.schema_name,
@@ -406,13 +493,19 @@ impl Metasrv {
             .context(TableMetadataManagerSnafu)?;
 
         let region_ids: Vec<RegionId> = route.region_routes.iter().map(|r| r.region.id).collect();
-        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
-            .await
+        self.trigger_gc_for_regions(
+            executor_context,
+            region_ids,
+            request.full_file_listing,
+            request.timeout,
+        )
+        .await
     }
 
     /// Triggers manual GC for specified regions and returns the GC response.
     async fn trigger_gc_for_regions(
         &self,
+        executor_context: ExecutorContext,
         region_ids: Vec<RegionId>,
         full_file_listing: bool,
         timeout: Option<Duration>,
@@ -429,6 +522,7 @@ impl Metasrv {
                 region_ids: Some(region_ids),
                 full_file_listing: Some(full_file_listing),
                 timeout,
+                executor_context,
             })
             .await
             .map_err(|_| {

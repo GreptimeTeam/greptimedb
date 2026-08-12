@@ -334,9 +334,11 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
-        _ctx: &ExecutorContext,
-        request: SubmitDdlTaskRequest,
+        ctx: &ExecutorContext,
+        mut request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
+        request.actor = ctx.actor.clone();
+        request.event_context = ctx.event_context.clone();
         self.submit_ddl_task(request)
             .await
             .map_err(BoxedError::new)
@@ -345,10 +347,19 @@ impl ProcedureExecutor for MetaClient {
 
     async fn migrate_region(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
-        self.migrate_region(request)
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .migrate_region(
+                ctx,
+                request.region_id,
+                request.from_peer,
+                request.to_peer,
+                request.timeout,
+            )
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -418,10 +429,13 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_regions(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcRegionsRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_regions(request)
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .gc_regions(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -429,10 +443,13 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_table(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcTableRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_table(request)
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .gc_table(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -811,6 +828,7 @@ impl MetaClient {
     ) -> Result<MigrateRegionResponse> {
         self.procedure_client()?
             .migrate_region(
+                &ExecutorContext::default(),
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
@@ -826,12 +844,16 @@ impl MetaClient {
 
     /// Manually trigger GC for specific regions.
     pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_regions(request).await
+        self.procedure_client()?
+            .gc_regions(&ExecutorContext::default(), request)
+            .await
     }
 
     /// Manually trigger GC for a table (all its regions).
     pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_table(request).await
+        self.procedure_client()?
+            .gc_table(&ExecutorContext::default(), request)
+            .await
     }
 
     /// Submit a DDL task

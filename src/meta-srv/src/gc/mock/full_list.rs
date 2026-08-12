@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::PersistentEventContext;
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -83,7 +82,7 @@ async fn test_full_file_listing_first_time_gc() {
             vec![(table_id, mock_candidate(region_id))],
             HashSet::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await
         .unwrap();
@@ -157,7 +156,7 @@ async fn test_full_file_listing_interval_enforcement() {
             vec![(table_id, mock_candidate(region_id))],
             HashSet::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await
         .unwrap();
@@ -184,7 +183,7 @@ async fn test_full_file_listing_interval_enforcement() {
             vec![(table_id, mock_candidate(region_id))],
             HashSet::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await
         .unwrap();
@@ -260,7 +259,7 @@ async fn test_full_file_listing_no_interval_passed() {
             vec![(table_id, mock_candidate(region_id))],
             HashSet::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await
         .unwrap();
@@ -284,7 +283,7 @@ async fn test_full_file_listing_no_interval_passed() {
             vec![(table_id, mock_candidate(region_id))],
             HashSet::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            common_meta::procedure_executor::ExecutorContext::default(),
         )
         .await
         .unwrap();
