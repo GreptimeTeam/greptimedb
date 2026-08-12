@@ -2741,6 +2741,28 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
+    let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_typed_total")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_typed_total": [
+      {
+        "type": "counter",
+        "unit": "seconds",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
     guard.remove_all().await;
 }
 
@@ -2881,6 +2903,202 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
     )
     .await;
+
+    let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_latency_seconds")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_latency_seconds": [
+      {
+        "type": "histogram",
+        "unit": "",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=histogram_count(remote_write_v2_latency_seconds)&time=4")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "value": [
+          4.0,
+          "6"
+        ]
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=remote_write_v2_latency_seconds&time=4")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histogram": [
+          4.0,
+          {
+            "count": "6",
+            "sum": "20",
+            "buckets": [
+              [
+                3,
+                "-0.002",
+                "0.002",
+                "0.5"
+              ],
+              [
+                0,
+                "1.4142135623730951",
+                "1.681792830507429",
+                "2"
+              ],
+              [
+                0,
+                "1.681792830507429",
+                "2",
+                "3.5"
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}"#
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?query=remote_write_v2_latency_seconds&start=3&end=4&step=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histograms": [
+          [
+            3.0,
+            {
+              "count": "8",
+              "sum": "10",
+              "buckets": [
+                [
+                  1,
+                  "-0.5",
+                  "-0.3535533905932738",
+                  "1"
+                ],
+                [
+                  3,
+                  "-0.001",
+                  "0.001",
+                  "1"
+                ],
+                [
+                  0,
+                  "0.7071067811865476",
+                  "1",
+                  "1"
+                ],
+                [
+                  0,
+                  "1",
+                  "1.4142135623730951",
+                  "3"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "2",
+                  "2"
+                ]
+              ]
+            }
+          ],
+          [
+            4.0,
+            {
+              "count": "6",
+              "sum": "20",
+              "buckets": [
+                [
+                  3,
+                  "-0.002",
+                  "0.002",
+                  "0.5"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "1.681792830507429",
+                  "2"
+                ],
+                [
+                  0,
+                  "1.681792830507429",
+                  "2",
+                  "3.5"
+                ]
+              ]
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}"#
+    );
 
     validate_data(
         "prometheus_remote_write_v2_native_histogram_table_created",
