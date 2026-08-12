@@ -73,10 +73,10 @@ type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 
 /// Candidate assignment senders for output partitions.
-type CandidateSenderList = Vec<Option<Sender<Result<SeriesReaderInput>>>>;
+type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
 struct CandidateReceiver {
-    receiver: Receiver<Result<SeriesReaderInput>>,
+    receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
     active_receivers: Arc<AtomicUsize>,
 }
 
@@ -519,7 +519,10 @@ fn new_candidate_channel_list(
     let active_receivers = Arc::new(AtomicUsize::new(num_partitions));
     let (senders, receivers) = (0..num_partitions)
         .map(|_| {
-            let (sender, receiver) = mpsc::channel(1);
+            // Partition streams can be consumed sequentially. A bounded channel for an unpolled
+            // partition could block the distributor and prevent it from sending more assignments
+            // to the partition currently being consumed, causing a deadlock.
+            let (sender, receiver) = mpsc::unbounded_channel();
             let receiver = CandidateReceiver {
                 receiver,
                 active_receivers: active_receivers.clone(),
@@ -830,7 +833,7 @@ struct SeriesCandidateDistributor {
 impl SeriesCandidateDistributor {
     async fn execute(&mut self) {
         if let Err(e) = self.distribute().await {
-            self.send_error(e).await;
+            self.send_error(e);
         }
     }
 
@@ -873,8 +876,7 @@ impl SeriesCandidateDistributor {
             collector.push(batch);
             if collector.len() >= CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD {
                 chunked = true;
-                self.send_assignments(collector.finish(false), &partition_pruner)
-                    .await;
+                self.send_assignments(collector.finish(false), &partition_pruner);
                 if !self.should_fetch_candidates() {
                     part_metrics.on_finish();
                     return Ok(());
@@ -885,14 +887,13 @@ impl SeriesCandidateDistributor {
         }
 
         if collector.len() > 0 {
-            self.send_assignments(collector.finish(!chunked), &partition_pruner)
-                .await;
+            self.send_assignments(collector.finish(!chunked), &partition_pruner);
         }
         part_metrics.on_finish();
         Ok(())
     }
 
-    async fn send_assignments(
+    fn send_assignments(
         &mut self,
         assignments: Vec<AssignedSeriesBatch>,
         partition_pruner: &Arc<PartitionPruner>,
@@ -910,7 +911,6 @@ impl SeriesCandidateDistributor {
                     partition_pruner: partition_pruner.clone(),
                     range_semaphore: self.range_semaphore.clone(),
                 }))
-                .await
                 .is_ok();
             if !sent {
                 self.senders[partition] = None;
@@ -922,11 +922,11 @@ impl SeriesCandidateDistributor {
         self.active_receivers.load(Ordering::Relaxed) > 0
     }
 
-    async fn send_error(&mut self, error: Error) {
+    fn send_error(&mut self, error: Error) {
         let error = Arc::new(error);
         for sender in self.senders.iter_mut().filter_map(Option::take) {
             let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result).await;
+            let _ = sender.send(result);
         }
     }
 }
