@@ -2887,48 +2887,174 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<Value>(&res.text().await).unwrap();
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    let series = body["data"]["result"].as_array().unwrap();
-    assert_eq!(series.len(), 1);
-    let value = series[0]["value"].as_array().unwrap();
-    assert_eq!(value[0].as_f64(), Some(4.0));
-    assert_eq!(value[1], "6");
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "value": [
+          4.0,
+          "6"
+        ]
+      }
+    ]
+  }
+}"#
+    );
 
     let res = client
         .get("/v1/prometheus/api/v1/query?query=remote_write_v2_latency_seconds&time=4")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<Value>(&res.text().await).unwrap();
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    let series = body["data"]["result"].as_array().unwrap();
-    assert_eq!(series.len(), 1);
-    assert!(series[0].get("value").is_none());
-    let histogram = series[0]["histogram"].as_array().unwrap();
-    assert_eq!(histogram[0].as_f64(), Some(4.0));
-    assert_eq!(histogram[1]["count"], "6");
-    assert_eq!(histogram[1]["sum"], "20");
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histogram": [
+          4.0,
+          {
+            "count": "6",
+            "sum": "20",
+            "buckets": [
+              [
+                3,
+                "-0.002",
+                "0.002",
+                "0.5"
+              ],
+              [
+                0,
+                "1.4142135623730951",
+                "1.681792830507429",
+                "2"
+              ],
+              [
+                0,
+                "1.681792830507429",
+                "2",
+                "3.5"
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}"#
+    );
 
     let res = client
         .get("/v1/prometheus/api/v1/query_range?query=remote_write_v2_latency_seconds&start=3&end=4&step=1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<Value>(&res.text().await).unwrap();
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "matrix");
-    let series = body["data"]["result"].as_array().unwrap();
-    assert_eq!(series.len(), 1);
-    assert!(series[0].get("values").is_none());
-    let histograms = series[0]["histograms"].as_array().unwrap();
-    assert_eq!(histograms.len(), 2);
-    assert_eq!(histograms[0][0].as_f64(), Some(3.0));
-    assert_eq!(histograms[0][1]["count"], "8");
-    assert_eq!(histograms[1][0].as_f64(), Some(4.0));
-    assert_eq!(histograms[1][1]["count"], "6");
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "resultType": "matrix",
+    "result": [
+      {
+        "metric": {
+          "__name__": "remote_write_v2_latency_seconds",
+          "instance": "localhost:9090",
+          "job": "api"
+        },
+        "histograms": [
+          [
+            3.0,
+            {
+              "count": "8",
+              "sum": "10",
+              "buckets": [
+                [
+                  1,
+                  "-0.5",
+                  "-0.3535533905932738",
+                  "1"
+                ],
+                [
+                  3,
+                  "-0.001",
+                  "0.001",
+                  "1"
+                ],
+                [
+                  0,
+                  "0.7071067811865476",
+                  "1",
+                  "1"
+                ],
+                [
+                  0,
+                  "1",
+                  "1.4142135623730951",
+                  "3"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "2",
+                  "2"
+                ]
+              ]
+            }
+          ],
+          [
+            4.0,
+            {
+              "count": "6",
+              "sum": "20",
+              "buckets": [
+                [
+                  3,
+                  "-0.002",
+                  "0.002",
+                  "0.5"
+                ],
+                [
+                  0,
+                  "1.4142135623730951",
+                  "1.681792830507429",
+                  "2"
+                ],
+                [
+                  0,
+                  "1.681792830507429",
+                  "2",
+                  "3.5"
+                ]
+              ]
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}"#
+    );
 
     validate_data(
         "prometheus_remote_write_v2_native_histogram_table_created",

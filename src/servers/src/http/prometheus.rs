@@ -139,6 +139,7 @@ pub struct PromData {
     pub result: PromQueryResult,
 }
 
+/// Metadata for a Prometheus metric family.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromMetadata {
     #[serde(rename = "type")]
@@ -221,6 +222,7 @@ pub struct FormatQuery {
     query: Option<String>,
 }
 
+/// Query parameters for the Prometheus metric metadata endpoint.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetadataQuery {
     db: Option<String>,
@@ -1971,18 +1973,30 @@ async fn retrieve_metric_metadata(
 
     let catalog = query_ctx.current_catalog();
     let schema = query_ctx.current_schema();
+
+    if let Some(metric) = &params.metric {
+        let Some(table) = manager
+            .table(catalog, &schema, metric, Some(query_ctx))
+            .await?
+        else {
+            return Ok(metadata);
+        };
+        let table_info = table.table_info();
+        if is_prometheus_metric_table(table_info.as_ref()) {
+            metadata.insert(
+                table_info.name.clone(),
+                vec![prometheus_metadata_from_table(table_info.as_ref())],
+            );
+        }
+        return Ok(metadata);
+    }
+
     let mut tables_stream = manager.tables(catalog, &schema, Some(query_ctx));
 
     while let Some(table) = tables_stream.next().await {
         let table = table?;
         let table_info = table.table_info();
         if !is_prometheus_metric_table(table_info.as_ref()) {
-            continue;
-        }
-
-        if let Some(metric) = &params.metric
-            && table_info.name.as_str() != metric
-        {
             continue;
         }
 
@@ -2348,10 +2362,13 @@ mod tests {
     use catalog::memory::MemoryCatalogManager;
     use catalog::{RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::native_histogram::native_histogram_value_type;
+    use common_query::native_histogram::{
+        CounterResetHint, NativeHistogram, build_histogram_array, native_histogram_value_type,
+    };
     use common_query::prelude::greptime_native_histogram;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{StringVector, StructVector};
     use promql_parser::parser::value::ValueType;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
     use table::requests::{
@@ -3349,12 +3366,52 @@ mod tests {
             ),
         ]));
         let batch = RecordBatch::new_empty(schema.clone());
-        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+        let batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
         let mut labels = HashSet::new();
 
         record_batches_to_labels_name(batches, &mut labels).unwrap();
 
         assert!(labels.is_empty());
+
+        let histogram = NativeHistogram {
+            schema: 0,
+            zero_threshold: 0.001,
+            sum: 1.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: vec![],
+            positive_spans: vec![],
+            negative_spans: vec![],
+            count: 1.0,
+            zero_count: 1.0,
+            positive_buckets: vec![],
+            negative_buckets: vec![],
+        };
+        let histogram_array = build_histogram_array(&[Some(histogram)]);
+        let histogram_array = histogram_array
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap()
+            .clone();
+        let ConcreteDataType::Struct(histogram_type) = native_histogram_value_type().clone() else {
+            unreachable!("native histogram type must be a struct")
+        };
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(StringVector::from(vec![Some("localhost")])) as _,
+                Arc::new(StructVector::try_new(histogram_type, histogram_array).unwrap()) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        record_batches_to_labels_name(batches, &mut labels).unwrap();
+
+        assert_eq!(
+            labels,
+            HashSet::from(["host".to_string(), greptime_native_histogram().to_string(),])
+        );
     }
 
     fn prometheus_metric_table_info(table_id: u32, name: &str) -> TableInfo {
@@ -3461,6 +3518,19 @@ mod tests {
             })
             .unwrap();
         let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+
+        let metadata = retrieve_metric_metadata(
+            &query_ctx,
+            manager.clone(),
+            &MetadataQuery {
+                metric: Some("allowed".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert!(metadata.contains_key("allowed"));
 
         let response = metadata_query(
             State(Arc::new(TestPrometheusHandler {
