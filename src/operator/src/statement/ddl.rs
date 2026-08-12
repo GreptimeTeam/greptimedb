@@ -43,6 +43,8 @@ use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
 };
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::FlowExtensionRef;
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
 use common_meta::key::TableMetadataManagerRef;
@@ -126,7 +128,7 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
+const ALLOWED_FLOW_OPTIONS: &[&str] = &[
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
@@ -188,9 +190,20 @@ fn normalize_flow_bool_option(key: &str, value: &str) -> Result<String> {
         })
 }
 
+fn unknown_flow_option_error(key: &str) -> crate::error::Error {
+    InvalidSqlSnafu {
+        err_msg: format!(
+            "unknown flow option '{key}', supported options: {}",
+            supported_flow_options()
+        ),
+    }
+    .build()
+}
+
 fn validate_and_normalize_flow_options(
     options: HashMap<String, String>,
     eval_interval: Option<i64>,
+    #[cfg(feature = "enterprise")] flow_extension: Option<&FlowExtensionRef>,
 ) -> Result<HashMap<String, String>> {
     // Reject non-positive eval_interval (zero or negative).
     if let Some(secs) = eval_interval
@@ -202,34 +215,67 @@ fn validate_and_normalize_flow_options(
         .fail();
     }
 
-    options
-        .into_iter()
-        .map(|(key, value)| {
-            if key == FlowType::FLOW_TYPE_KEY {
-                return InvalidSqlSnafu {
-                    err_msg: format!("flow option '{key}' is reserved for internal use"),
-                }
-                .fail();
+    let mut oss_normalized = HashMap::new();
+    let mut extension_options = HashMap::new();
+
+    for (key, value) in options {
+        if key == FlowType::FLOW_TYPE_KEY {
+            return InvalidSqlSnafu {
+                err_msg: format!("flow option '{key}' is reserved for internal use"),
             }
+            .fail();
+        }
 
-            let normalized_value = match key.as_str() {
-                DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
-                    normalize_flow_bool_option(&key, &value)?
-                }
-                _ => {
-                    return InvalidSqlSnafu {
-                        err_msg: format!(
-                            "unknown flow option '{key}', supported options: {}",
-                            supported_flow_options()
-                        ),
-                    }
-                    .fail();
-                }
-            };
+        match key.as_str() {
+            DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
+                let normalized = normalize_flow_bool_option(&key, &value)?;
+                oss_normalized.insert(key, normalized);
+            }
+            // Unknown keys may be owned by an injected enterprise
+            // `FlowExtension`: they are batch-validated/normalized through it;
+            // otherwise they are rejected as unknown options below.
+            _ => {
+                extension_options.insert(key, value);
+            }
+        }
+    }
 
-            Ok((key, normalized_value))
-        })
-        .collect()
+    if extension_options.is_empty() {
+        return Ok(oss_normalized);
+    }
+
+    #[cfg(feature = "enterprise")]
+    if let Some(extension) = flow_extension {
+        let normalized = extension
+            .validate_and_normalize_options(&oss_normalized, extension_options.clone())
+            .context(ExternalSnafu)?;
+
+        // Key-set contract: the returned key set must exactly match the input
+        // extension key set. Missing, extra or renamed keys fail closed, and
+        // the extension can never overwrite an OSS-owned key.
+        let input_keys: HashSet<&String> = extension_options.keys().collect();
+        let returned_keys: HashSet<&String> = normalized.keys().collect();
+        ensure!(
+            input_keys == returned_keys,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "flow extension returned mismatched option keys: input {:?}, got {:?}",
+                    input_keys.iter().collect::<Vec<_>>(),
+                    returned_keys.iter().collect::<Vec<_>>(),
+                )
+            }
+        );
+
+        oss_normalized.extend(normalized);
+        return Ok(oss_normalized);
+    }
+
+    // No extension (or non-enterprise build): reject the first unknown key
+    // with the standard unknown-option error.
+    let Some(unknown) = extension_options.keys().next() else {
+        return Ok(oss_normalized);
+    };
+    Err(unknown_flow_option_error(unknown))
 }
 
 fn determine_flow_type_for_source_state(
@@ -772,8 +818,21 @@ impl StatementExecutor {
             .fail();
         }
 
-        expr.flow_options =
+        #[cfg(feature = "enterprise")]
+        let normalized_flow_options = match self.flow_extension.as_ref() {
+            Some(extension) => validate_and_normalize_flow_options(
+                expr.flow_options,
+                eval_interval_secs,
+                Some(extension),
+            )?,
+            None => {
+                validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs, None)?
+            }
+        };
+        #[cfg(not(feature = "enterprise"))]
+        let normalized_flow_options =
             validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs)?;
+        expr.flow_options = normalized_flow_options;
 
         let flow_type = self
             .determine_flow_type(&expr, query_context.clone())
@@ -2872,6 +2931,8 @@ async fn execute_undrop_table(
 #[cfg(test)]
 mod test {
     #[cfg(feature = "enterprise")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(feature = "enterprise")]
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -2879,6 +2940,8 @@ mod test {
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     #[cfg(feature = "enterprise")]
     use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
+    #[cfg(feature = "enterprise")]
+    use common_meta::ddl_manager::{CreateFlowExtensionOutcome, FlowExtension, FlowExtensionRef};
     #[cfg(feature = "enterprise")]
     use common_meta::instruction::CacheIdent;
     #[cfg(feature = "enterprise")]
@@ -2899,6 +2962,8 @@ mod test {
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
+    #[cfg(feature = "enterprise")]
+    use common_procedure::ProcedureManagerRef;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -3174,6 +3239,103 @@ mod test {
         assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
     }
 
+    /// 2-arg wrapper over the real [`validate_and_normalize_flow_options`]
+    /// used by OSS tests. The real function takes an additional enterprise-gated
+    /// extension parameter that only exists in enterprise builds; this wrapper
+    /// hides that difference so the OSS tests compile in both builds.
+    fn validate_and_normalize_flow_options(
+        options: HashMap<String, String>,
+        eval_interval: Option<i64>,
+    ) -> Result<HashMap<String, String>> {
+        #[cfg(feature = "enterprise")]
+        {
+            super::validate_and_normalize_flow_options(options, eval_interval, None)
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            super::validate_and_normalize_flow_options(options, eval_interval)
+        }
+    }
+
+    /// How a generic mock [`FlowExtension`] responds to batch option
+    /// validation, used to exercise the extension seam.
+    #[cfg(feature = "enterprise")]
+    #[derive(Clone, Copy)]
+    enum MockExtensionMode {
+        /// Normalize `key` to `to`, pass every other extension key through.
+        Normalize { key: &'static str, to: &'static str },
+        /// Return an empty map (drops all extension keys -> key subset).
+        DropKeys,
+        /// Add a key the caller never sent (extra key).
+        AddExtraKey,
+        /// Rename every returned key (renamed keys).
+        RenameKey,
+        /// Always fail.
+        Fail,
+    }
+
+    #[cfg(feature = "enterprise")]
+    struct MockFlowExtension {
+        mode: MockExtensionMode,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "enterprise")]
+    impl MockFlowExtension {
+        fn new(mode: MockExtensionMode) -> Self {
+            Self {
+                mode,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[async_trait::async_trait]
+    impl FlowExtension for MockFlowExtension {
+        fn validate_and_normalize_options(
+            &self,
+            _oss_options: &HashMap<String, String>,
+            mut extension_options: HashMap<String, String>,
+        ) -> std::result::Result<HashMap<String, String>, BoxedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                MockExtensionMode::Normalize { key, to } => {
+                    if let Some(value) = extension_options.get_mut(key) {
+                        *value = to.to_string();
+                    }
+                    Ok(extension_options)
+                }
+                MockExtensionMode::DropKeys => Ok(HashMap::new()),
+                MockExtensionMode::AddExtraKey => {
+                    extension_options.insert("extra_key".to_string(), "value".to_string());
+                    Ok(extension_options)
+                }
+                MockExtensionMode::RenameKey => Ok(extension_options
+                    .drain()
+                    .map(|(key, value)| (format!("renamed_{key}"), value))
+                    .collect()),
+                MockExtensionMode::Fail => Err(BoxedError::new(
+                    error::UnexpectedSnafu {
+                        violated: "mock extension failure".to_string(),
+                    }
+                    .build(),
+                )),
+            }
+        }
+
+        async fn intercept_create_flow(
+            &self,
+            task: common_meta::rpc::ddl::CreateFlowTask,
+            _procedure_manager: &ProcedureManagerRef,
+            _ddl_context: &common_meta::ddl::DdlContext,
+            _query_context: &common_meta::rpc::ddl::QueryContext,
+            _event_context: &common_event_recorder::PersistentEventContext,
+        ) -> std::result::Result<CreateFlowExtensionOutcome, BoxedError> {
+            Ok(CreateFlowExtensionOutcome::Passthrough(task))
+        }
+    }
+
     #[test]
     fn test_validate_and_normalize_flow_options_empty() {
         assert!(
@@ -3250,6 +3412,144 @@ mod test {
         assert!(
             err.to_string()
                 .contains("invalid flow option 'defer_on_missing_source': 'not-a-bool'")
+        );
+    }
+
+    #[test]
+    fn test_flow_option_enterprise_private_rejected_without_extension() {
+        // A fake enterprise-private option is not in the OSS allowlist and
+        // must be rejected as unknown in every build when no extension owns it.
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([("ee_test_option".to_string(), "true".to_string())]),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'ee_test_option'")
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_flow_option_extension_normalizes_batch() {
+        // Batch validation through the extension: multiple unknown keys are
+        // normalized in one call and the returned key set matches the input.
+        let extension = Arc::new(MockFlowExtension::new(MockExtensionMode::Normalize {
+            key: "ee_test_option",
+            to: "normalized",
+        }));
+        let extension_ref: FlowExtensionRef = extension.clone();
+
+        let normalized = super::validate_and_normalize_flow_options(
+            HashMap::from([
+                ("ee_test_option".to_string(), "raw value".to_string()),
+                ("ee_other_option".to_string(), "v".to_string()),
+            ]),
+            None,
+            Some(&extension_ref),
+        )
+        .unwrap();
+
+        assert_eq!(
+            normalized,
+            HashMap::from([
+                ("ee_test_option".to_string(), "normalized".to_string()),
+                ("ee_other_option".to_string(), "v".to_string()),
+            ])
+        );
+        assert_eq!(extension.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_flow_option_extension_key_subset_rejected() {
+        // The extension drops keys (`DropKeys`): the returned key set is a
+        // strict subset of the input and must fail closed.
+        let extension: FlowExtensionRef =
+            Arc::new(MockFlowExtension::new(MockExtensionMode::DropKeys));
+
+        let err = super::validate_and_normalize_flow_options(
+            HashMap::from([("ee_test_option".to_string(), "value".to_string())]),
+            None,
+            Some(&extension),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, error::Error::Unexpected { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_flow_option_extension_extra_or_renamed_keys_rejected() {
+        // The extension adds a key it never received (`AddExtraKey`).
+        let extension: FlowExtensionRef =
+            Arc::new(MockFlowExtension::new(MockExtensionMode::AddExtraKey));
+
+        let err = super::validate_and_normalize_flow_options(
+            HashMap::from([("ee_test_option".to_string(), "value".to_string())]),
+            None,
+            Some(&extension),
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::Error::Unexpected { .. }));
+
+        // The extension renames the key it received (`RenameKey`).
+        let extension: FlowExtensionRef =
+            Arc::new(MockFlowExtension::new(MockExtensionMode::RenameKey));
+
+        let err = super::validate_and_normalize_flow_options(
+            HashMap::from([("ee_test_option".to_string(), "value".to_string())]),
+            None,
+            Some(&extension),
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::Error::Unexpected { .. }));
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_flow_option_extension_error_propagates() {
+        let extension: FlowExtensionRef = Arc::new(MockFlowExtension::new(MockExtensionMode::Fail));
+
+        let err = super::validate_and_normalize_flow_options(
+            HashMap::from([("ee_test_option".to_string(), "value".to_string())]),
+            None,
+            Some(&extension),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, error::Error::External { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_flow_option_oss_keys_do_not_call_extension() {
+        // All keys are OSS-owned: the extension must not be consulted at all.
+        let extension = Arc::new(MockFlowExtension::new(MockExtensionMode::Normalize {
+            key: "ee_test_option",
+            to: "normalized",
+        }));
+        let extension_ref: FlowExtensionRef = extension.clone();
+
+        let normalized = super::validate_and_normalize_flow_options(
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "TRUE".to_string())]),
+            None,
+            Some(&extension_ref),
+        )
+        .unwrap();
+
+        assert_eq!(extension.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            normalized,
+            HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())])
         );
     }
 

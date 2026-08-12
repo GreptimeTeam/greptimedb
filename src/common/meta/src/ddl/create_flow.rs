@@ -839,3 +839,47 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
         (flow_info, flow_routes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use table::table_name::TableName;
+
+    use super::validate_flow_options;
+    use crate::rpc::ddl::CreateFlowTask;
+
+    fn test_create_flow_task() -> CreateFlowTask {
+        CreateFlowTask {
+            catalog_name: "greptime".to_string(),
+            flow_name: "flow".to_string(),
+            source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "sink"),
+            or_replace: false,
+            create_if_not_exists: false,
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            sql: "select 1".to_string(),
+            flow_options: HashMap::new(),
+            eval_schedule: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_flow_options_rejects_ee_option() {
+        // A fake enterprise-private option is not known to OSS and must be
+        // rejected as an unknown option in every build. Enterprise builds
+        // intercept such options via the `FlowExtension` seam before the
+        // ordinary `CreateFlowProcedure` validation runs.
+        let mut task = test_create_flow_task();
+        task.flow_options
+            .insert("ee_test_option".to_string(), "value".to_string());
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unknown flow option 'ee_test_option'")
+        );
+    }
+}
