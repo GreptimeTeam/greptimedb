@@ -53,8 +53,8 @@ pub struct PersistentEventContext {
     pub reason: TriggerReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extensions: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 impl PersistentEventContext {
@@ -78,7 +78,11 @@ impl PersistentEventContext {
         Self {
             reason: input.reason,
             protocol,
-            extensions: input.extensions.clone(),
+            extensions: input
+                .extensions
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .collect(),
         }
     }
 }
@@ -89,22 +93,16 @@ impl Default for PersistentEventContext {
     }
 }
 
-impl From<&PersistentEventContext> for PbProcedureEventContext {
-    fn from(context: &PersistentEventContext) -> Self {
-        Self {
-            reason: context.reason.as_ref().to_string(),
-            protocol: context.protocol.clone().unwrap_or_default(),
-            extensions: context.extensions.clone(),
-        }
-    }
-}
-
 impl From<PbProcedureEventContext> for PersistentEventContext {
     fn from(context: PbProcedureEventContext) -> Self {
         Self {
             reason: TriggerReason::from_extension(&context.reason),
             protocol: (!context.protocol.is_empty()).then_some(context.protocol),
-            extensions: context.extensions,
+            extensions: context
+                .extensions
+                .into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
+                .collect(),
         }
     }
 }
@@ -158,17 +156,26 @@ mod tests {
     }
 
     #[test]
-    fn test_event_context_protobuf_roundtrip() {
-        let context = PersistentEventContext {
-            reason: TriggerReason::AutoCreate,
-            protocol: Some("postgres".to_string()),
+    fn test_event_context_from_protobuf() {
+        let protobuf = PbProcedureEventContext {
+            reason: "auto_create".to_string(),
+            protocol: "postgres".to_string(),
             extensions: HashMap::from([
                 ("source".to_string(), "sql".to_string()),
                 ("tenant".to_string(), "a".to_string()),
             ]),
         };
-        let pb = api::v1::meta::ProcedureEventContext::from(&context);
-        assert_eq!(PersistentEventContext::from(pb), context);
+        assert_eq!(
+            PersistentEventContext::from(protobuf),
+            PersistentEventContext {
+                reason: TriggerReason::AutoCreate,
+                protocol: Some("postgres".to_string()),
+                extensions: serde_json::Map::from_iter([
+                    ("source".to_string(), json!("sql")),
+                    ("tenant".to_string(), json!("a")),
+                ]),
+            }
+        );
     }
 
     #[test]

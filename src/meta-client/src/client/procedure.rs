@@ -49,7 +49,7 @@ use crate::error::Result;
 ///
 /// The caller can only supply reason/extensions. Protocol is derived here from
 /// the trusted, typed query channel held locally in the executor context.
-pub(super) fn procedure_event_context(context: &ExecutorContext) -> Option<ProcedureEventContext> {
+pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<ProcedureEventContext> {
     context.event_input.as_ref().map(|input| {
         let mut event_context = ProcedureEventContext::from(input);
         event_context.protocol = context
@@ -534,8 +534,8 @@ mod tests {
     use tonic::codec::CompressionEncoding;
     use tonic::{Request, Response, Status};
 
-    use super::{gc_timeout_secs, procedure_event_context};
     use crate::client::MetaClientBuilder;
+    use crate::client::procedure::{gc_timeout_secs, procedure_event_context};
 
     #[test]
     fn test_gc_timeout_secs() {

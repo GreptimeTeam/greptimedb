@@ -340,7 +340,7 @@ impl ProcedureExecutor for MetaClient {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
-        self.submit_ddl_task_with_context(ctx, request)
+        MetaClient::submit_ddl_task(self, ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -849,14 +849,6 @@ impl MetaClient {
 
     /// Submit a DDL task.
     pub async fn submit_ddl_task(
-        &self,
-        context: &ExecutorContext,
-        req: SubmitDdlTaskRequest,
-    ) -> Result<SubmitDdlTaskResponse> {
-        self.submit_ddl_task_with_context(context, req).await
-    }
-
-    async fn submit_ddl_task_with_context(
         &self,
         context: &ExecutorContext,
         request: SubmitDdlTaskRequest,

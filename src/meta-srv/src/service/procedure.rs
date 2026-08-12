@@ -196,7 +196,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let pid = self
             .region_migration_manager()
-            .submit_procedure_with_context(
+            .submit_procedure(
                 procedure_context,
                 RegionMigrationProcedureTask {
                     region_id: region_id.into(),
