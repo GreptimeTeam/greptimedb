@@ -29,6 +29,7 @@ use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
 };
+use common_procedure::ProcedureContext;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
@@ -377,8 +378,10 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_undrop_table_task(
                 common_meta::rpc::ddl::UndropTableTask { table_id },
-                common_meta::rpc::ddl::PersistentEventContext::new(
-                    common_meta::rpc::ddl::TriggerReason::Manual,
+                ProcedureContext::from_event_context(
+                    common_meta::rpc::ddl::PersistentEventContext::new(
+                        common_meta::rpc::ddl::TriggerReason::Manual,
+                    ),
                 ),
             )
             .await
@@ -419,8 +422,10 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_purge_dropped_table_task(
                 common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
-                common_meta::rpc::ddl::PersistentEventContext::new(
-                    common_meta::rpc::ddl::TriggerReason::Manual,
+                ProcedureContext::from_event_context(
+                    common_meta::rpc::ddl::PersistentEventContext::new(
+                        common_meta::rpc::ddl::TriggerReason::Manual,
+                    ),
                 ),
             )
             .await
