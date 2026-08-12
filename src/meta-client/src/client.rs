@@ -69,7 +69,7 @@ use common_time::util::DefaultSystemTimer;
 use config::Client as ConfigClient;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
-use procedure::{Client as ProcedureClient, procedure_event_context};
+use procedure::{Client as ProcedureClient, procedure_actor, procedure_event_context};
 use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -875,12 +875,7 @@ impl MetaClient {
             request.try_into().context(ConvertMetaRequestSnafu)?;
         request.query_context = Some(api::v1::QueryContext::from(query_context));
         request.event_context = procedure_event_context(context);
-        request.actor = context
-            .actor
-            .as_ref()
-            .map(|username| api::v1::meta::ProcedureActor {
-                username: username.clone(),
-            });
+        request.actor = procedure_actor(context);
 
         self.procedure_client()?
             .submit_ddl_task(request)

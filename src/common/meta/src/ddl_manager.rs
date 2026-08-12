@@ -121,6 +121,7 @@ pub trait TriggerDdlManager: Send + Sync {
         procedure_manager: ProcedureManagerRef,
         ddl_context: DdlContext,
         query_context: QueryContext,
+        procedure_context: ProcedureContext,
     ) -> Result<SubmitDdlTaskResponse>;
 
     async fn drop_trigger(
@@ -129,6 +130,7 @@ pub trait TriggerDdlManager: Send + Sync {
         procedure_manager: ProcedureManagerRef,
         ddl_context: DdlContext,
         query_context: QueryContext,
+        procedure_context: ProcedureContext,
     ) -> Result<SubmitDdlTaskResponse>;
 
     fn as_any(&self) -> &dyn std::any::Any;
@@ -943,11 +945,23 @@ impl DdlManager {
                 }
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
-                    handle_create_trigger_task(self, create_trigger_task, query_context).await
+                    handle_create_trigger_task(
+                        self,
+                        create_trigger_task,
+                        query_context,
+                        procedure_context,
+                    )
+                    .await
                 }
                 #[cfg(feature = "enterprise")]
                 DropTrigger(drop_trigger_task) => {
-                    handle_drop_trigger_task(self, drop_trigger_task, query_context).await
+                    handle_drop_trigger_task(
+                        self,
+                        drop_trigger_task,
+                        query_context,
+                        procedure_context,
+                    )
+                    .await
                 }
             }
         }
@@ -1260,6 +1274,7 @@ async fn handle_drop_trigger_task(
     ddl_manager: &DdlManager,
     drop_trigger_task: DropTriggerTask,
     query_context: QueryContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
         use crate::error::UnsupportedSnafu;
@@ -1275,6 +1290,7 @@ async fn handle_drop_trigger_task(
         ddl_manager.procedure_manager.clone(),
         ddl_manager.ddl_context.clone(),
         query_context,
+        procedure_context,
     )
     .await
 }
@@ -1343,6 +1359,7 @@ async fn handle_create_trigger_task(
     ddl_manager: &DdlManager,
     create_trigger_task: CreateTriggerTask,
     query_context: QueryContext,
+    procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
         use crate::error::UnsupportedSnafu;
@@ -1358,6 +1375,7 @@ async fn handle_create_trigger_task(
         ddl_manager.procedure_manager.clone(),
         ddl_manager.ddl_context.clone(),
         query_context,
+        procedure_context,
     )
     .await
 }
@@ -1451,6 +1469,8 @@ async fn handle_comment_on_task(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    #[cfg(feature = "enterprise")]
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use common_error::ext::BoxedError;
@@ -1458,6 +1478,8 @@ mod tests {
     use common_error::ext::ErrorExt;
     #[cfg(feature = "enterprise")]
     use common_error::status_code::StatusCode;
+    #[cfg(feature = "enterprise")]
+    use common_event_recorder::{PersistentEventContext, TriggerReason};
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
     use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
@@ -1484,9 +1506,13 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
+    #[cfg(feature = "enterprise")]
+    use crate::rpc::ddl::trigger::{CreateTriggerTask, DropTriggerTask};
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     #[cfg(not(feature = "enterprise"))]
     use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
+    #[cfg(feature = "enterprise")]
+    use crate::rpc::ddl::{DdlTask, QueryContext, SubmitDdlTaskRequest};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -1550,6 +1576,50 @@ mod tests {
             _creator: &CreatorGrantIntent,
         ) -> std::result::Result<AtomicCreateOutcome, BoxedError> {
             unreachable!()
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[derive(Default)]
+    struct RecordingTriggerDdlManager {
+        procedure_contexts: Mutex<Vec<ProcedureContext>>,
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[async_trait::async_trait]
+    impl super::TriggerDdlManager for RecordingTriggerDdlManager {
+        async fn create_trigger(
+            &self,
+            _create_trigger_task: CreateTriggerTask,
+            _procedure_manager: ProcedureManagerRef,
+            _ddl_context: DdlContext,
+            _query_context: QueryContext,
+            procedure_context: ProcedureContext,
+        ) -> crate::error::Result<crate::rpc::ddl::SubmitDdlTaskResponse> {
+            self.procedure_contexts
+                .lock()
+                .unwrap()
+                .push(procedure_context);
+            Ok(Default::default())
+        }
+
+        async fn drop_trigger(
+            &self,
+            _drop_trigger_task: DropTriggerTask,
+            _procedure_manager: ProcedureManagerRef,
+            _ddl_context: DdlContext,
+            _query_context: QueryContext,
+            procedure_context: ProcedureContext,
+        ) -> crate::error::Result<crate::rpc::ddl::SubmitDdlTaskResponse> {
+            self.procedure_contexts
+                .lock()
+                .unwrap()
+                .push(procedure_context);
+            Ok(Default::default())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -1686,6 +1756,62 @@ mod tests {
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
         )
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_trigger_ddl_forwards_procedure_context() {
+        let trigger_ddl_manager = Arc::new(RecordingTriggerDdlManager::default());
+        let ddl_manager = build_soft_drop_test_ddl_manager()
+            .with_trigger_ddl_manager(trigger_ddl_manager.clone());
+        let procedure_context = ProcedureContext {
+            actor: Some("test-user".to_string()),
+            event_context: Some(
+                PersistentEventContext::new(TriggerReason::Manual).with_protocol("mysql"),
+            ),
+        };
+
+        ddl_manager
+            .submit_ddl_task(
+                None,
+                QueryContext::default(),
+                procedure_context.clone(),
+                SubmitDdlTaskRequest::new(DdlTask::CreateTrigger(CreateTriggerTask {
+                    catalog_name: "greptime".to_string(),
+                    trigger_name: "test_trigger".to_string(),
+                    if_not_exists: false,
+                    sql: "SELECT 1".to_string(),
+                    channels: vec![],
+                    labels: Default::default(),
+                    annotations: Default::default(),
+                    interval: Duration::from_secs(1),
+                    raw_interval_expr: None,
+                    r#for: None,
+                    for_raw_expr: None,
+                    keep_firing_for: None,
+                    keep_firing_for_raw_expr: None,
+                })),
+            )
+            .await
+            .unwrap();
+        ddl_manager
+            .submit_ddl_task(
+                None,
+                QueryContext::default(),
+                procedure_context.clone(),
+                SubmitDdlTaskRequest::new(DdlTask::DropTrigger(DropTriggerTask {
+                    catalog_name: "greptime".to_string(),
+                    trigger_name: "test_trigger".to_string(),
+                    drop_if_exists: false,
+                })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *trigger_ddl_manager.procedure_contexts.lock().unwrap(),
+            vec![procedure_context.clone(), procedure_context]
+        );
     }
 
     #[cfg(feature = "enterprise")]

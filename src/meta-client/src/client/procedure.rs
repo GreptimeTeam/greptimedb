@@ -20,10 +20,10 @@ use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
     DdlTaskRequest, DdlTaskResponse, GcRegionsRequest, GcRegionsResponse, GcTableRequest,
-    GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureDetailRequest,
-    ProcedureDetailResponse, ProcedureEventContext, ProcedureId, ProcedureStateResponse,
-    QueryProcedureRequest, ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader,
-    Role,
+    GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureActor,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureEventContext, ProcedureId,
+    ProcedureStateResponse, QueryProcedureRequest, ReconcileRequest, ReconcileResponse,
+    RequestHeader, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::procedure_executor::ExecutorContext;
@@ -59,6 +59,17 @@ pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<Proce
             .unwrap_or_default();
         event_context
     })
+}
+
+/// Builds the optional procedure actor transported by a procedure RPC.
+pub(crate) fn procedure_actor(context: &ExecutorContext) -> Option<ProcedureActor> {
+    context
+        .actor
+        .as_deref()
+        .filter(|username| !username.is_empty())
+        .map(|username| ProcedureActor {
+            username: username.to_string(),
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -264,12 +275,7 @@ impl Inner {
             to_peer,
             timeout_secs: timeout.as_secs() as u32,
             event_context: procedure_event_context(context),
-            actor: context
-                .actor
-                .as_ref()
-                .map(|username| api::v1::meta::ProcedureActor {
-                    username: username.clone(),
-                }),
+            actor: procedure_actor(context),
             ..Default::default()
         };
 
@@ -330,12 +336,7 @@ impl Inner {
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
             event_context: procedure_event_context(context),
-            actor: context
-                .actor
-                .as_ref()
-                .map(|username| api::v1::meta::ProcedureActor {
-                    username: username.clone(),
-                }),
+            actor: procedure_actor(context),
         };
 
         let resp: GcRegionsResponse = self
@@ -380,12 +381,7 @@ impl Inner {
             full_file_listing: request.full_file_listing,
             timeout_secs: gc_timeout_secs(timeout),
             event_context: procedure_event_context(context),
-            actor: context
-                .actor
-                .as_ref()
-                .map(|username| api::v1::meta::ProcedureActor {
-                    username: username.clone(),
-                }),
+            actor: procedure_actor(context),
         };
 
         let resp: GcTableResponse = self
@@ -535,7 +531,7 @@ mod tests {
     use tonic::{Request, Response, Status};
 
     use crate::client::MetaClientBuilder;
-    use crate::client::procedure::{gc_timeout_secs, procedure_event_context};
+    use crate::client::procedure::{gc_timeout_secs, procedure_actor, procedure_event_context};
 
     #[test]
     fn test_gc_timeout_secs() {
@@ -580,6 +576,21 @@ mod tests {
             procedure_event_context(&unknown_channel_context).map(PersistentEventContext::from),
             Some(PersistentEventContext::new(TriggerReason::Manual))
         );
+    }
+
+    #[test]
+    fn test_procedure_actor() {
+        let context = ExecutorContext {
+            actor: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(procedure_actor(&context).is_none());
+
+        let context = ExecutorContext {
+            actor: Some("alice".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(procedure_actor(&context).unwrap().username, "alice");
     }
 
     #[derive(Clone)]
@@ -760,6 +771,31 @@ mod tests {
         );
         let extensions = &request.query_context.unwrap().extensions;
         assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
+
+        let empty_actor_context = ExecutorContext {
+            actor: Some(String::new()),
+            ..executor_context
+        };
+        ProcedureExecutor::submit_ddl_task(
+            &client,
+            &empty_actor_context,
+            SubmitDdlTaskRequest::new(DdlTask::new_drop_database(
+                "greptime".to_string(),
+                "metrics".to_string(),
+                false,
+            )),
+        )
+        .await
+        .unwrap();
+        assert!(
+            request_rx
+                .recv()
+                .await
+                .unwrap()
+                .into_inner()
+                .actor
+                .is_none()
+        );
 
         server_handle.abort();
     }
