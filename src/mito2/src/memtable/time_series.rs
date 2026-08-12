@@ -78,6 +78,87 @@ fn checked_string_values_size(mut lengths: impl Iterator<Item = usize>) -> Optio
     })
 }
 
+/// Checks whether a string field builder that currently holds `current_len` bytes can
+/// additionally accommodate `space_needed` bytes of string data, given that the offset of a
+/// single Arrow string array is limited to `limit` (`i32::MAX` in production).
+///
+/// Returns:
+/// - `Ok(true)` if `current_len + space_needed <= limit`;
+/// - `Ok(false)` if `space_needed <= limit` but `current_len + space_needed > limit`, i.e.
+///   the current builder is too full but an empty builder could accommodate the batch (the
+///   caller may freeze the current builder and replay the batch onto an empty one);
+/// - `Err(InvalidBatchSnafu)` if the batch's string data alone (`space_needed`, or the fact
+///   that its total bytes cannot even be represented as `i32`) exceeds `limit`, i.e. the
+///   batch can never be accommodated by any builder.
+fn check_string_capacity(current_len: i32, space_needed: Option<i32>, limit: i32) -> Result<bool> {
+    let Some(space_needed) = space_needed.filter(|&space| space <= limit) else {
+        return error::InvalidBatchSnafu {
+            reason: format!(
+                "String data of the batch exceeds the Arrow string array offset limit ({limit}) and cannot be stored in a single column"
+            ),
+        }
+        .fail();
+    };
+    Ok(current_len
+        .checked_add(space_needed)
+        .is_some_and(|v| v <= limit))
+}
+
+/// Scans all string fields of a batch and checks whether they can be accommodated.
+///
+/// Every string field is checked (no early return on `Ok(false)`) so that an intrinsic
+/// oversize in *any* field surfaces as an error even when an earlier field only overflows
+/// the current builder.
+///
+/// Returns:
+/// - `Ok(true)` if every string field fits into the current builders;
+/// - `Ok(false)` if no field is intrinsically oversized but at least one field only fits
+///   into an empty builder (the caller may freeze the current builder and replay the batch
+///   onto an empty one);
+/// - `Err(InvalidBatchSnafu)` if any single field's string data alone (`space_needed`, or
+///   the fact that its total bytes cannot even be represented as `i32`) exceeds `limit`,
+///   i.e. that field can never be accommodated by any builder.
+fn scan_string_capacity(
+    fields: &[VectorRef],
+    field_builders: &[Option<FieldBuilder>],
+    field_types: &[ConcreteDataType],
+    limit: i32,
+) -> Result<bool> {
+    let mut can_fit_current = true;
+    for ((field_src, field_dest), field_type) in fields
+        .iter()
+        .zip(field_builders.iter())
+        .zip(field_types.iter())
+    {
+        if !matches!(field_type, ConcreteDataType::String(_)) {
+            continue;
+        }
+        let current_size = match field_dest {
+            Some(FieldBuilder::String(builder)) => builder.next_offset(),
+            None => 0,
+            Some(FieldBuilder::Other(_)) => unreachable!(),
+        };
+        let array = field_src.to_arrow_array();
+        let space_needed = if let Some(string_array) = array.as_any().downcast_ref::<StringArray>()
+        {
+            i32::try_from(string_array.value_data().len()).ok()
+        } else {
+            let string_vector = field_src
+                .as_any()
+                .downcast_ref::<StringVector>()
+                .with_context(|| error::InvalidBatchSnafu {
+                    reason: format!(
+                        "Field type mismatch, expecting String, given: {}",
+                        field_src.data_type()
+                    ),
+                })?;
+            checked_string_values_size(string_vector.iter_data().flatten().map(str::len))
+        };
+        can_fit_current &= check_string_capacity(current_size, space_needed, limit)?;
+    }
+    Ok(can_fit_current)
+}
+
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
 pub struct TimeSeriesMemtableBuilder {
@@ -926,46 +1007,17 @@ impl ValueBuilder {
     }
 
     /// Checks if current value builder have sufficient space to accommodate `fields`.
-    /// Returns false if there is no space to accommodate fields due to offset overflow.
+    ///
+    /// Returns `Ok(false)` if the current builder lacks the remaining space to accommodate
+    /// the fields due to offset overflow, but an empty builder would be able to accommodate
+    /// the batch (the caller may freeze the current builder and replay the batch onto an
+    /// empty one).
+    ///
+    /// Returns `Err(InvalidBatchSnafu)` if the string data of a single batch itself exceeds
+    /// the Arrow string array offset limit and thus can never be accommodated, not even by an
+    /// empty builder.
     pub(crate) fn can_accommodate(&self, fields: &[VectorRef]) -> Result<bool> {
-        for ((field_src, field_dest), field_type) in fields
-            .iter()
-            .zip(self.fields.iter())
-            .zip(self.field_types.iter())
-        {
-            if !matches!(field_type, ConcreteDataType::String(_)) {
-                continue;
-            }
-            let current_size = match field_dest {
-                Some(FieldBuilder::String(builder)) => builder.next_offset(),
-                None => 0,
-                Some(FieldBuilder::Other(_)) => unreachable!(),
-            };
-            let array = field_src.to_arrow_array();
-            let space_needed =
-                if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
-                    i32::try_from(string_array.value_data().len()).ok()
-                } else {
-                    let string_vector = field_src
-                        .as_any()
-                        .downcast_ref::<StringVector>()
-                        .with_context(|| error::InvalidBatchSnafu {
-                            reason: format!(
-                                "Field type mismatch, expecting String, given: {}",
-                                field_src.data_type()
-                            ),
-                        })?;
-                    checked_string_values_size(string_vector.iter_data().flatten().map(str::len))
-                };
-            let Some(space_needed) = space_needed else {
-                return Ok(false);
-            };
-            // offset may overflow
-            if current_size.checked_add(space_needed).is_none() {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        scan_string_capacity(fields, &self.fields, &self.field_types, i32::MAX)
     }
 
     pub(crate) fn extend(
@@ -2324,5 +2376,64 @@ mod tests {
         }
 
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_can_accommodate_string_offset_overflow() {
+        // A batch whose string data alone exceeds the Arrow string array offset limit can
+        // never be accommodated, not even by an empty builder. `can_accommodate` must return
+        // a structured `InvalidBatch` error instead of `Ok(false)`: the latter would make
+        // `Series::extend` freeze the current builder and replay the same oversized batch
+        // onto an empty builder, which then panics on offset overflow in `StringBuilder`.
+        assert!(check_string_capacity(0, Some(101), 100).is_err());
+        assert!(check_string_capacity(0, None, i32::MAX).is_err());
+
+        // A batch that fits in an empty builder but not in the current one reports
+        // `Ok(false)` so the caller can freeze and replay onto an empty builder.
+        assert!(!check_string_capacity(95, Some(10), 100).unwrap());
+        assert!(!check_string_capacity(91, Some(10), 100).unwrap());
+
+        // The current builder can accommodate the batch when the combined size fits,
+        // including the case where it exactly reaches the limit.
+        assert!(check_string_capacity(0, Some(100), 100).unwrap());
+        assert!(check_string_capacity(90, Some(10), 100).unwrap());
+    }
+
+    #[test]
+    fn test_can_accommodate_checks_all_string_fields() {
+        // Two string fields: the first only overflows the *current* builder (an empty
+        // builder would fit it), the second is intrinsically oversized. The scan must not
+        // early-return `Ok(false)` on the first field: it has to check every string field so
+        // the intrinsic oversize of the second field still surfaces as `InvalidBatch`.
+        let limit = 10;
+        // 8 bytes already in the current builder: 8 + 4 > 10, but 4 <= 10, so this field
+        // alone fits an empty builder.
+        let mut current = StringBuilder::with_capacity(1, 8);
+        current.append("12345678");
+        let field_builders = [Some(FieldBuilder::String(current)), None];
+        let field_types = [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::string_datatype(),
+        ];
+
+        let first = Arc::new(StringVector::from(StringArray::from(vec!["abcd"]))) as VectorRef;
+        // 15 bytes > limit: intrinsically oversized, can never fit any builder.
+        let second = Arc::new(StringVector::from(StringArray::from(vec![
+            "123456789012345",
+        ]))) as VectorRef;
+
+        let err = scan_string_capacity(&[first, second], &field_builders, &field_types, limit)
+            .unwrap_err();
+        assert!(
+            matches!(err, error::Error::InvalidBatch { .. }),
+            "expected InvalidBatch, got {err:?}"
+        );
+
+        // Sanity: without the oversized field the result is just `Ok(false)` (current full,
+        // empty builder fits), which lets the caller freeze and replay onto an empty builder.
+        let first_only = Arc::new(StringVector::from(StringArray::from(vec!["abcd"]))) as VectorRef;
+        assert!(
+            !scan_string_capacity(&[first_only], &field_builders, &field_types, limit).unwrap()
+        );
     }
 }
