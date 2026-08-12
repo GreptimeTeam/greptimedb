@@ -40,7 +40,10 @@ use common_catalog::consts::{
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
-pub use conventions::{Conventions, ImplicitEntity, conventions};
+pub use conventions::{
+    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE,
+    PROVENANCE_TRACE, PromImplicitEntity, REL_TYPE_CALLS, conventions,
+};
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};

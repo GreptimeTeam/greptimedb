@@ -47,7 +47,7 @@ pub struct VirtualDstCandidate {
 /// One implicit entity declaration of a whitelisted Prometheus info metric.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImplicitEntity {
+pub struct PromImplicitEntity {
     pub entity: String,
     /// Identifying label columns; every one must exist on the table for the
     /// declaration to apply.
@@ -69,8 +69,16 @@ pub struct Conventions {
     pub edge_vocabulary: Vec<EdgeRule>,
     pub agent_edge_vocabulary: Vec<EdgeRule>,
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
-    pub prometheus_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
+    pub prometheus_info_metrics: BTreeMap<String, Vec<PromImplicitEntity>>,
 }
+
+/// The entity types and edge attributes the derivation code itself anchors on;
+/// the rest of the vocabulary lives in the YAML data.
+pub const ENTITY_TYPE_SERVICE: &str = "service";
+pub const ENTITY_TYPE_GEN_AI_AGENT: &str = "gen_ai.agent";
+pub const REL_TYPE_CALLS: &str = "calls";
+pub const PROVENANCE_TRACE: &str = "trace";
+pub const PROVENANCE_ATTRIBUTE: &str = "attribute";
 
 /// The closed relationship vocabulary (the RFC's rel_type table). A
 /// conventions rule naming anything else is a defect in the embedded file.

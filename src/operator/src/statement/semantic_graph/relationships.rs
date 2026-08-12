@@ -31,7 +31,10 @@ use datafusion::functions_window::expr_fn::row_number;
 use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
 
-use crate::statement::semantic_graph::conventions::Conventions;
+use crate::statement::semantic_graph::conventions::{
+    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE,
+    PROVENANCE_TRACE, REL_TYPE_CALLS,
+};
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
     bin_interval, bin_ms, conventions, entity_id_expr, interval, null_json, parse_json_expr, qcol,
@@ -153,7 +156,7 @@ fn co_declared_branch(
         let mut pairs = Vec::new();
         for rule in &vocabulary.edge_vocabulary {
             if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
-                pairs.push((src, dst, rule.rel.as_str(), "attribute"));
+                pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_ATTRIBUTE));
             }
         }
         if source.is_trace {
@@ -161,7 +164,7 @@ fn co_declared_branch(
             // table co-declaring these types must not fabricate invocations.
             for rule in &vocabulary.agent_edge_vocabulary {
                 if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
-                    pairs.push((src, dst, rule.rel.as_str(), "trace"));
+                    pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_TRACE));
                 }
             }
         }
@@ -425,12 +428,12 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             ident("observed_at").alias("window_start"),
             (ident("observed_at") + bin_interval()).alias("window_end"),
             (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("service").alias("src_type"),
+            lit(ENTITY_TYPE_SERVICE).alias("src_type"),
             ident("src_id"),
-            lit("service").alias("dst_type"),
+            lit(ENTITY_TYPE_SERVICE).alias("dst_type"),
             ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
+            lit(REL_TYPE_CALLS).alias("rel_type"),
+            lit(PROVENANCE_TRACE).alias("provenance"),
             real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias("confidence"),
             real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("request_count"),
             real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias("error_count"),
@@ -658,12 +661,12 @@ fn agent_calls_branch(
             ident("observed_at").alias("window_start"),
             (ident("observed_at") + bin_interval()).alias("window_end"),
             (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("gen_ai.agent").alias("src_type"),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias("src_type"),
             ident("src_id"),
-            lit("gen_ai.agent").alias("dst_type"),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias("dst_type"),
             ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
+            lit(REL_TYPE_CALLS).alias("rel_type"),
+            lit(PROVENANCE_TRACE).alias("provenance"),
             lit(1.0_f64).alias("confidence"),
             ident("request_count"),
             ident("error_count"),

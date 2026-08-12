@@ -47,9 +47,10 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, CoDeclaredSource, Conventions, DeclaredSource, EntityDeclaration,
-    GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources, build_registry_plan,
-    build_relationships_plan, conventions, declared_relationships_schema_matches,
+    CallsSource, CoDeclaredSource, Conventions, DeclaredSource, ENTITY_TYPE_GEN_AI_AGENT,
+    ENTITY_TYPE_SERVICE, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource,
+    RelationshipSources, build_registry_plan, build_relationships_plan, conventions,
+    declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -197,7 +198,7 @@ impl EntityGraphProviderImpl {
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
         if is_trace_v1_table(table_info)
-            && !Self::explicitly_declares(table_info, "service")
+            && !Self::explicitly_declares(table_info, ENTITY_TYPE_SERVICE)
             && table_info
                 .meta
                 .schema
@@ -213,7 +214,7 @@ impl EntityGraphProviderImpl {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
                 time_index,
-                entity_type: "service".to_string(),
+                entity_type: ENTITY_TYPE_SERVICE.to_string(),
                 id_columns: vec![SERVICE_NAME_COLUMN.to_string()],
                 descriptive_columns: vec![],
                 scope_columns: vec![],
@@ -244,28 +245,49 @@ impl EntityGraphProviderImpl {
         conventions: &Conventions,
         declarations: &mut Vec<EntityDeclaration>,
     ) {
+        let Some(implicit_entities) = conventions.prometheus_info_metrics.get(&table_info.name)
+        else {
+            return;
+        };
         let options = &table_info.meta.options.extra_options;
         if options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) != Some(SIGNAL_TYPE_METRIC)
             || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(SOURCE_PROMETHEUS)
             || table_info.is_physical_table()
         {
+            debug!(
+                "Table `{}` matches the info-metric whitelist but is not a prometheus logical \
+                 metric table; skipping its implicit declarations",
+                table_info.name
+            );
             return;
         }
-        let Some(implicit_entities) = conventions.prometheus_info_metrics.get(&table_info.name)
-        else {
-            return;
-        };
         let schema = &table_info.meta.schema;
         let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
+            debug!(
+                "Info metric `{}` has no time index; skipping its implicit declarations",
+                table_info.name
+            );
             return;
         };
         for implicit in implicit_entities {
-            if Self::explicitly_declares(table_info, &implicit.entity)
-                || !implicit
-                    .id
-                    .iter()
-                    .all(|c| schema.column_schema_by_name(c).is_some())
+            if Self::explicitly_declares(table_info, &implicit.entity) {
+                debug!(
+                    "Info metric `{}` explicitly declares `{}`; the implicit declaration is \
+                     suppressed",
+                    table_info.name, implicit.entity
+                );
+                continue;
+            }
+            if let Some(missing) = implicit
+                .id
+                .iter()
+                .find(|c| schema.column_schema_by_name(c).is_none())
             {
+                debug!(
+                    "Info metric `{}` lacks the id column `{}`; skipping the implicit `{}` \
+                     declaration",
+                    table_info.name, missing, implicit.entity
+                );
                 continue;
             }
             let descriptive_columns = if implicit.descriptive_rest {
@@ -379,8 +401,8 @@ impl EntityGraphProviderImpl {
                             .find(|d| d.entity_type == entity_type)
                             .cloned()
                     };
-                    let service = find("service");
-                    let agent = find("gen_ai.agent");
+                    let service = find(ENTITY_TYPE_SERVICE);
+                    let agent = find(ENTITY_TYPE_GEN_AI_AGENT);
                     if service.is_none() {
                         // No usable service identity: the table cannot
                         // contribute service-calls edges (see declarations_for).
