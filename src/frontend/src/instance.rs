@@ -1665,6 +1665,7 @@ fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bo
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -1676,10 +1677,12 @@ mod tests {
     use api::prom_store::remote::{
         Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
     };
+    use api::v1::greptime_request::Request;
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use api::v1::query_request::Query;
     use auth::{
         DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY, PIPELINE_DELETE,
-        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfoRef,
+        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfo, UserInfoRef,
     };
     use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
@@ -1940,6 +1943,23 @@ mod tests {
                 .process_id(process_id)
                 .build(),
         )
+    }
+
+    #[derive(Debug)]
+    struct AdminUserInfo;
+
+    impl UserInfo for AdminUserInfo {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn username(&self) -> &str {
+            "admin"
+        }
+
+        fn is_admin(&self) -> bool {
+            true
+        }
     }
 
     struct RejectUnresolvedPermissionChecker;
@@ -3103,6 +3123,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_write_only_grpc_sql_is_checked_after_parsing() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let insert = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO target SELECT * FROM source".to_string(),
+            )),
+        });
+        servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            insert,
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+
+        let select = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT * FROM source".to_string())),
+        });
+        assert_permission_denied(
+            servers::query_handler::grpc::GrpcQueryHandler::do_query(
+                &instance,
+                select,
+                QueryContext::arc(),
+            )
+            .await,
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_target_independent_checker_skips_target_resolution() -> TestResult<()> {
         let physical_table = "physical_metric";
         let checker = Arc::new(TargetIndependentPermissionChecker::default());
@@ -3434,6 +3493,57 @@ mod tests {
             .send(())
             .map_err(|_| ReleaseBlockedInsertSnafu.build())?;
         insert_task.await.context(InsertTaskPanicSnafu)??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_show_processlist_catalog_scope() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let _current_catalog = instance.process_manager().register_query(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            "current_catalog_query".to_string(),
+            String::new(),
+            None,
+            None,
+        );
+        let _other_catalog = instance.process_manager().register_query(
+            "other".to_string(),
+            vec!["public".to_string()],
+            "other_catalog_query".to_string(),
+            String::new(),
+            None,
+            None,
+        );
+
+        for sql in ["SHOW PROCESSLIST", "SHOW FULL PROCESSLIST"] {
+            let output = execute_one_sql(&instance, sql, test_query_ctx(43)).await?;
+            let process_list = output.data.pretty_print().await;
+            assert!(
+                process_list.contains("current_catalog_query"),
+                "{process_list}"
+            );
+            assert!(
+                !process_list.contains("other_catalog_query"),
+                "{process_list}"
+            );
+
+            let admin_ctx = test_query_ctx(44);
+            admin_ctx.set_current_user(Arc::new(AdminUserInfo));
+            let output = execute_one_sql(&instance, sql, admin_ctx).await?;
+            let process_list = output.data.pretty_print().await;
+            assert!(
+                process_list.contains("current_catalog_query"),
+                "{process_list}"
+            );
+            assert!(
+                process_list.contains("other_catalog_query"),
+                "{process_list}"
+            );
+        }
 
         Ok(())
     }
