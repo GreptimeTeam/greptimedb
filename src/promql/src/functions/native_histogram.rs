@@ -405,10 +405,8 @@ fn histogram_pair_udf_with_collector(
                     match (read_histogram(lhs, row)?, read_histogram(rhs, row)?) {
                         (Some(lhs), Some(rhs)) => {
                             record_custom_reconciliation(&collector, name, &lhs, &rhs);
+                            record_counter_reset_contradiction(&collector, name, &lhs, &rhs);
                             let result = op(&lhs, &rhs);
-                            if result.is_some() {
-                                record_counter_reset_contradiction(&collector, name, &lhs, &rhs);
-                            }
                             if result.is_none() {
                                 record_warning(
                                     &collector,
@@ -926,9 +924,6 @@ impl NativeHistogramAggregateAccumulator {
     }
 
     fn push_histogram(&mut self, histogram: NativeHistogram, count: u64) -> DfResult<()> {
-        if self.dropped_incompatible {
-            return Ok(());
-        }
         if self.kind.needs_count() && count == 0 {
             return Ok(());
         }
@@ -937,6 +932,9 @@ impl NativeHistogramAggregateAccumulator {
             histogram.reset_hint == COUNTER_RESET_HINT,
             histogram.reset_hint == NOT_COUNTER_RESET_HINT,
         );
+        if self.dropped_incompatible {
+            return Ok(());
+        }
         let combined_count = if self.kind.needs_count() {
             self.count.checked_add(count).ok_or_else(|| {
                 DataFusionError::Execution(format!(
@@ -1009,16 +1007,19 @@ fn range_fold_histograms(
     name: &'static str,
     collector: &Option<PromqlAnnotationCollector>,
 ) -> Option<NativeHistogram> {
+    if samples
+        .iter()
+        .any(|histogram| histogram.reset_hint == COUNTER_RESET_HINT)
+        && samples
+            .iter()
+            .any(|histogram| histogram.reset_hint == NOT_COUNTER_RESET_HINT)
+    {
+        record_counter_reset_contradiction_warning(collector, name);
+    }
+
     let mut value = None;
     let mut count = 0u64;
-    let mut counter_reset_seen = false;
-    let mut not_counter_reset_seen = false;
     for histogram in samples {
-        counter_reset_seen |= histogram.reset_hint == COUNTER_RESET_HINT;
-        not_counter_reset_seen |= histogram.reset_hint == NOT_COUNTER_RESET_HINT;
-        if counter_reset_seen && not_counter_reset_seen {
-            record_counter_reset_contradiction_warning(collector, name);
-        }
         value = match value {
             Some(value) => {
                 record_custom_reconciliation(collector, name, &value, &histogram);
@@ -2340,17 +2341,16 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
             })?;
 
         for row in 0..histograms.len() {
-            if dropped.value(row) {
-                self.mark_incompatible();
-                continue;
-            }
-            if self.dropped_incompatible {
-                continue;
-            }
             self.observe_reset_hints(
                 counter_reset_seen.value(row),
                 not_counter_reset_seen.value(row),
             );
+            if dropped.value(row) {
+                self.mark_incompatible();
+            }
+            if self.dropped_incompatible {
+                continue;
+            }
             let Some(histogram) = read_histogram(histograms, row)? else {
                 continue;
             };
@@ -3520,25 +3520,32 @@ mod tests {
     }
 
     #[test]
-    fn subtraction_records_reset_hint_contradictions() {
-        let mut left = sample_histogram(2.0, 2.0, vec![2.0]);
-        left.reset_hint = COUNTER_RESET_HINT;
-        let mut right = sample_histogram(1.0, 1.0, vec![1.0]);
-        right.reset_hint = NOT_COUNTER_RESET_HINT;
-        let collector = PromqlAnnotationCollector::default();
+    fn subtraction_records_reset_hint_contradictions_for_incompatible_histograms() {
+        for incompatible in [false, true] {
+            let mut left = sample_histogram(2.0, 2.0, vec![2.0]);
+            left.reset_hint = COUNTER_RESET_HINT;
+            let mut right = sample_histogram(1.0, 1.0, vec![1.0]);
+            right.reset_hint = NOT_COUNTER_RESET_HINT;
+            if incompatible {
+                right.schema = CUSTOM_BUCKETS_SCHEMA;
+                right.custom_values = vec![1.0];
+            }
+            let collector = PromqlAnnotationCollector::default();
 
-        run_histogram_udf(
-            NativeHistogramSub::scalar_udf_with_collector(Some(collector.clone())),
-            vec![
-                ColumnarValue::Array(build_histogram_array(&[Some(left)])),
-                ColumnarValue::Array(build_histogram_array(&[Some(right)])),
-            ],
-        );
+            run_udf(
+                NativeHistogramSub::scalar_udf_with_collector(Some(collector.clone())),
+                vec![
+                    ColumnarValue::Array(build_histogram_array(&[Some(left)])),
+                    ColumnarValue::Array(build_histogram_array(&[Some(right)])),
+                ],
+                native_histogram_arrow_type(),
+            );
 
-        assert!(collected_warnings(&collector).contains(&format!(
-            "{}: native histogram counter reset hints contradict",
-            NativeHistogramSub::name()
-        )));
+            assert!(collected_warnings(&collector).contains(&format!(
+                "{}: native histogram counter reset hints contradict",
+                NativeHistogramSub::name()
+            )));
+        }
     }
 
     #[test]
@@ -3596,6 +3603,115 @@ mod tests {
             assert!(collected_warnings(&collector).contains(&format!(
                 "{}: native histogram counter reset hints contradict",
                 kind.name()
+            )));
+        }
+    }
+
+    #[test]
+    fn incompatible_aggregates_do_not_hide_reset_hint_contradictions() {
+        let mut reset = sample_histogram(1.0, 1.0, vec![1.0]);
+        reset.reset_hint = COUNTER_RESET_HINT;
+        let mut incompatible_reset = sample_histogram(2.0, 2.0, vec![2.0]);
+        incompatible_reset.schema = CUSTOM_BUCKETS_SCHEMA;
+        incompatible_reset.custom_values = vec![1.0];
+        incompatible_reset.reset_hint = COUNTER_RESET_HINT;
+        let mut not_reset = sample_histogram(3.0, 3.0, vec![3.0]);
+        not_reset.reset_hint = NOT_COUNTER_RESET_HINT;
+
+        for kind in [
+            NativeHistogramAggregateKind::Sum,
+            NativeHistogramAggregateKind::Avg,
+        ] {
+            for histograms in [
+                [reset.clone(), incompatible_reset.clone(), not_reset.clone()],
+                [reset.clone(), not_reset.clone(), incompatible_reset.clone()],
+            ] {
+                let collector = PromqlAnnotationCollector::default();
+                let mut aggregate =
+                    NativeHistogramAggregateAccumulator::new(kind, Some(collector.clone()));
+                for histogram in histograms {
+                    aggregate.push_histogram(histogram, 1).unwrap();
+                }
+
+                assert!(aggregate.dropped_incompatible);
+                let warnings = collected_warnings(&collector);
+                assert!(warnings.contains(&format!(
+                    "{}: dropped native histogram aggregate with incompatible schemas",
+                    kind.name()
+                )));
+                assert!(warnings.contains(&format!(
+                    "{}: native histogram counter reset hints contradict",
+                    kind.name()
+                )));
+            }
+
+            let mut dropped_partial = NativeHistogramAggregateAccumulator::new(kind, None);
+            dropped_partial.push_histogram(reset.clone(), 1).unwrap();
+            dropped_partial
+                .push_histogram(incompatible_reset.clone(), 1)
+                .unwrap();
+            let dropped_states = dropped_partial
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+
+            let mut opposing_partial = NativeHistogramAggregateAccumulator::new(kind, None);
+            opposing_partial
+                .push_histogram(not_reset.clone(), 1)
+                .unwrap();
+            let opposing_states = opposing_partial
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+
+            for (first, second) in [
+                (&dropped_states, &opposing_states),
+                (&opposing_states, &dropped_states),
+            ] {
+                let collector = PromqlAnnotationCollector::default();
+                let mut merged =
+                    NativeHistogramAggregateAccumulator::new(kind, Some(collector.clone()));
+                merged.merge_batch(first).unwrap();
+                merged.merge_batch(second).unwrap();
+
+                assert!(merged.dropped_incompatible);
+                assert!(collected_warnings(&collector).contains(&format!(
+                    "{}: native histogram counter reset hints contradict",
+                    kind.name()
+                )));
+            }
+        }
+
+        for (kind, name) in [
+            (
+                NativeHistogramAggregateKind::Sum,
+                NativeHistogramSumOverTime::name(),
+            ),
+            (
+                NativeHistogramAggregateKind::Avg,
+                NativeHistogramAvgOverTime::name(),
+            ),
+        ] {
+            let collector = PromqlAnnotationCollector::default();
+            assert!(
+                range_fold_histograms(
+                    vec![reset.clone(), incompatible_reset.clone(), not_reset.clone()],
+                    kind,
+                    name,
+                    &Some(collector.clone()),
+                )
+                .is_none()
+            );
+            let warnings = collected_warnings(&collector);
+            assert!(warnings.contains(&format!(
+                "{name}: dropped native histogram range with incompatible schemas"
+            )));
+            assert!(warnings.contains(&format!(
+                "{name}: native histogram counter reset hints contradict"
             )));
         }
     }
