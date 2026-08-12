@@ -14,6 +14,7 @@
 
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::procedure::{GcRegionsRequest, GcTableRequest};
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result, TableMutationSnafu,
@@ -44,11 +45,14 @@ pub(crate) async fn gc_regions(
     let (region_ids, full_file_listing) = parse_gc_regions_params(params)?;
 
     let resp = procedure_service_handler
-        .gc_regions(GcRegionsRequest {
-            region_ids,
-            full_file_listing,
-            timeout: None,
-        })
+        .gc_regions(
+            &ExecutorContext::default(),
+            GcRegionsRequest {
+                region_ids,
+                full_file_listing,
+                timeout: None,
+            },
+        )
         .await?;
 
     Ok(Value::from(resp.processed_regions))
@@ -69,13 +73,16 @@ pub(crate) async fn gc_table(
         parse_gc_table_params(params, query_ctx)?;
 
     let resp = procedure_service_handler
-        .gc_table(GcTableRequest {
-            catalog_name,
-            schema_name,
-            table_name,
-            full_file_listing,
-            timeout: None,
-        })
+        .gc_table(
+            &ExecutorContext::default(),
+            GcTableRequest {
+                catalog_name,
+                schema_name,
+                table_name,
+                full_file_listing,
+                timeout: None,
+            },
+        )
         .await?;
 
     Ok(Value::from(resp.processed_regions))
@@ -182,6 +189,7 @@ mod tests {
     use api::v1::meta::ReconcileRequest;
     use async_trait::async_trait;
     use catalog::CatalogManagerRef;
+    use common_meta::procedure_executor::ExecutorContext;
     use common_meta::rpc::procedure::{
         GcResponse, ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
     };
@@ -297,12 +305,20 @@ mod tests {
             unreachable!()
         }
 
-        async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
+        async fn gc_regions(
+            &self,
+            _context: &ExecutorContext,
+            request: GcRegionsRequest,
+        ) -> Result<GcResponse> {
             *self.gc_regions_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }
 
-        async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
+        async fn gc_table(
+            &self,
+            _context: &ExecutorContext,
+            request: GcTableRequest,
+        ) -> Result<GcResponse> {
             *self.gc_table_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }

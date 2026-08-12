@@ -135,17 +135,25 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
         &self.catalog_manager
     }
 
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> QueryResult<MetaGcResponse> {
+    async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> QueryResult<MetaGcResponse> {
         self.procedure_executor
-            .gc_regions(&ExecutorContext::default(), request)
+            .gc_regions(context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)
     }
 
-    async fn gc_table(&self, request: MetaGcTableRequest) -> QueryResult<MetaGcResponse> {
+    async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> QueryResult<MetaGcResponse> {
         self.procedure_executor
-            .gc_table(&ExecutorContext::default(), request)
+            .gc_table(context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)

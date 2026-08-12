@@ -85,6 +85,7 @@ mod tests {
     use async_trait::async_trait;
     use catalog::CatalogManagerRef;
     use common_macro::admin_fn;
+    use common_meta::procedure_executor::ExecutorContext;
     use common_meta::rpc::procedure::{
         GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
         MigrateRegionRequest, ProcedureStateResponse,
@@ -159,10 +160,10 @@ mod tests {
         fn catalog_manager(&self) -> &CatalogManagerRef {
             unreachable!()
         }
-        async fn gc_regions(&self, _: GcRegionsRequest) -> Result<GcResponse> {
+        async fn gc_regions(&self, _: &ExecutorContext, _: GcRegionsRequest) -> Result<GcResponse> {
             unreachable!()
         }
-        async fn gc_table(&self, _: GcTableRequest) -> Result<GcResponse> {
+        async fn gc_table(&self, _: &ExecutorContext, _: GcTableRequest) -> Result<GcResponse> {
             unreachable!()
         }
     }

@@ -1937,7 +1937,7 @@ mod tests {
         request.event_context = Some(PersistentEventContext {
             reason: TriggerReason::Manual,
             protocol: Some("postgres".to_string()),
-            extensions: vec!["source=admin".to_string()],
+            extensions: HashMap::from([("source".to_string(), "admin".to_string())]),
         });
 
         let pb = PbDdlTaskRequest::try_from(request).unwrap();
@@ -1947,7 +1947,7 @@ mod tests {
             PersistentEventContext {
                 reason: TriggerReason::Manual,
                 protocol: Some("postgres".to_string()),
-                extensions: vec!["source=admin".to_string()],
+                extensions: HashMap::from([("source".to_string(), "admin".to_string())]),
             }
         );
     }

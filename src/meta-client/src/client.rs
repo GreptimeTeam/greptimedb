@@ -843,17 +843,21 @@ impl MetaClient {
     }
 
     /// Manually trigger GC for specific regions.
-    pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
-        self.procedure_client()?
-            .gc_regions(&ExecutorContext::default(), request)
-            .await
+    pub async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: GcRegionsRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_regions(context, request).await
     }
 
     /// Manually trigger GC for a table (all its regions).
-    pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
-        self.procedure_client()?
-            .gc_table(&ExecutorContext::default(), request)
-            .await
+    pub async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: GcTableRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_table(context, request).await
     }
 
     /// Submit a DDL task

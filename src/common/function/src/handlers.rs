@@ -18,6 +18,7 @@ use api::v1::meta::ReconcileRequest;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
     GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
@@ -107,10 +108,18 @@ pub trait ProcedureServiceHandler: Send + Sync {
     fn catalog_manager(&self) -> &CatalogManagerRef;
 
     /// Manually trigger GC for specific regions.
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse>;
+    async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse>;
 
     /// Manually trigger GC for a table.
-    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse>;
+    async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse>;
 }
 
 /// This flow service handler is only use for flush flow for now.

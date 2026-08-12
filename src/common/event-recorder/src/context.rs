@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::ProcedureEventContext as PbProcedureEventContext;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumString};
@@ -22,8 +24,8 @@ pub struct PersistentEventContext {
     pub reason: TriggerReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extensions: HashMap<String, String>,
 }
 
 impl PersistentEventContext {
@@ -122,7 +124,10 @@ mod tests {
         let context = PersistentEventContext {
             reason: TriggerReason::AutoCreate,
             protocol: Some("postgres".to_string()),
-            extensions: vec!["source=sql".to_string(), "tenant=a".to_string()],
+            extensions: HashMap::from([
+                ("source".to_string(), "sql".to_string()),
+                ("tenant".to_string(), "a".to_string()),
+            ]),
         };
         let pb = api::v1::meta::ProcedureEventContext::from(&context);
         assert_eq!(PersistentEventContext::from(pb), context);

@@ -36,6 +36,7 @@ impl FunctionState {
         use async_trait::async_trait;
         use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
+        use common_meta::procedure_executor::ExecutorContext;
         use common_meta::rpc::procedure::{
             GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
             MigrateRegionRequest, ProcedureStateResponse,
@@ -92,7 +93,11 @@ impl FunctionState {
                 Ok(())
             }
 
-            async fn gc_regions(&self, _request: GcRegionsRequest) -> Result<GcResponse> {
+            async fn gc_regions(
+                &self,
+                _context: &ExecutorContext,
+                _request: GcRegionsRequest,
+            ) -> Result<GcResponse> {
                 Ok(GcResponse {
                     processed_regions: 1,
                     need_retry_regions: vec![],
@@ -101,7 +106,11 @@ impl FunctionState {
                 })
             }
 
-            async fn gc_table(&self, _request: GcTableRequest) -> Result<GcResponse> {
+            async fn gc_table(
+                &self,
+                _context: &ExecutorContext,
+                _request: GcTableRequest,
+            ) -> Result<GcResponse> {
                 Ok(GcResponse {
                     processed_regions: 1,
                     need_retry_regions: vec![],
