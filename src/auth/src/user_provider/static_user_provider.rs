@@ -144,6 +144,8 @@ pub mod test {
         let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
+
+        assert!(StaticUserProvider::new("cmd:user:readonyl=password").is_err());
     }
 
     #[tokio::test]
@@ -168,6 +170,7 @@ pub mod test {
             assert!(
                 lw.write_all(
                     b"root=123456
+invalid:readonyl=password
 admin=654321",
                 )
                 .is_ok()
@@ -179,5 +182,6 @@ admin=654321",
         let provider = StaticUserProvider::new(param.as_str()).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
+        test_authenticate_fails(&provider, "invalid", "password").await;
     }
 }
