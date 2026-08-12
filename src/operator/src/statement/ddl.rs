@@ -2371,6 +2371,19 @@ pub fn verify_alter(
         .context(error::BuildTableMetaSnafu { table_name })?;
 
     validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
+    // A column referenced by an entity declaration may be dropped (the
+    // read-time derivation skips the stale declaration), but must not change
+    // to a type without a stable string form.
+    for (key, value) in &new_meta.options.extra_options {
+        if parse_entity_option_key(key).is_none() {
+            continue;
+        }
+        for col in &parse_entity_columns(value) {
+            if let Some(column) = new_meta.schema.column_schema_by_name(col) {
+                ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
+            }
+        }
+    }
 
     Ok(true)
 }
@@ -2594,6 +2607,23 @@ fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> b
     )
 }
 
+fn ensure_entity_column_renders_as_string(
+    key: &str,
+    col: &str,
+    data_type: &datatypes::prelude::ConcreteDataType,
+) -> Result<()> {
+    ensure!(
+        has_stable_string_form(data_type),
+        InvalidSqlSnafu {
+            err_msg: format!(
+                "entity column `{col}` (option `{key}`) has type `{data_type}`, which cannot \
+                 render as a string",
+            ),
+        }
+    );
+    Ok(())
+}
+
 /// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
 /// against the table schema: every named column must exist (tag or field) and
 /// have a stable string form — the derivation renders id, scope and
@@ -2607,16 +2637,7 @@ fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schem
             let column = schema
                 .column_schema_by_name(col)
                 .context(ColumnNotFoundSnafu { msg: col })?;
-            ensure!(
-                has_stable_string_form(&column.data_type),
-                InvalidSqlSnafu {
-                    err_msg: format!(
-                        "entity column `{col}` (option `{key}`) has type `{}`, which cannot \
-                         render as a string",
-                        column.data_type
-                    ),
-                }
-            );
+            ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
         }
     }
     Ok(())
@@ -3555,6 +3576,43 @@ WITH ('repartition.column.hint' = ' host ')",
             common_error::ext::ErrorExt::status_code(&err),
             common_error::status_code::StatusCode::InvalidArguments
         );
+    }
+
+    #[test]
+    fn test_verify_alter_guards_entity_column_types() {
+        let expr = create_expr_from_sql(
+            "CREATE TABLE t (svc STRING, ts TIMESTAMP TIME INDEX) \
+             WITH ('greptime.semantic.entity.service.id'='svc');",
+        );
+        let table_info = Arc::new(create_table_info(&expr, vec![]).unwrap());
+        let alter = |kind| AlterTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "t".to_string(),
+            kind: Some(kind),
+        };
+
+        let modify = alter(Kind::ModifyColumnTypes(api::v1::ModifyColumnTypes {
+            modify_column_types: vec![api::v1::ModifyColumnType {
+                column_name: "svc".to_string(),
+                target_type: api::v1::ColumnDataType::Binary as i32,
+                target_type_extension: None,
+            }],
+        }));
+        let err = verify_alter(1, table_info.clone(), modify).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot render as a string"),
+            "{err}"
+        );
+
+        // Dropping a declared column stays allowed: the derivation skips the
+        // stale declaration.
+        let drop = alter(Kind::DropColumns(api::v1::DropColumns {
+            drop_columns: vec![api::v1::DropColumn {
+                name: "svc".to_string(),
+            }],
+        }));
+        assert!(verify_alter(1, table_info, drop).unwrap());
     }
 
     #[test]
