@@ -40,6 +40,13 @@ pub const UDDSKETCH_MERGE_NAME: &str = "uddsketch_merge";
 
 const MAX_BUCKETS: u32 = 1_000_000;
 
+/// Name of the scalar function that merges exactly two UDDSketch states into
+/// one. It is used internally by the flow batching incremental rewrite to merge
+/// a delta state with the existing sink state of the same group, and is
+/// registered in the function registry so that the rewritten logical plan can
+/// round-trip through the Substrait codec (the frontend resolves it by name).
+pub const UDDSKETCH_MERGE_STATE_NAME: &str = "uddsketch_merge_state";
+
 #[derive(Debug)]
 pub struct UddSketchState {
     uddsketch: UddSketch,
@@ -144,7 +151,16 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u32, f64)> {
         .downcast_ref::<Literal>()
         .map(|lit| lit.value())
     {
-        Some(ScalarValue::Float64(Some(value))) => *value,
+        Some(ScalarValue::Float64(Some(value))) => {
+            if !(1e-12..1.0).contains(value) {
+                return not_impl_err!(
+                    "{} error rate must be in [1e-12, 1.0), got {}",
+                    UDDSKETCH_STATE_NAME,
+                    value
+                );
+            }
+            *value
+        }
         _ => {
             return not_impl_err!(
                 "{} not supported for error rate: {}",
@@ -394,6 +410,62 @@ mod tests {
         } else {
             panic!("Expected binary scalar values");
         }
+    }
+
+    #[test]
+    fn test_uddsketch_merge_rejects_close_error_rate() {
+        // Error rates 0.01 and 0.0100000005 differ by 5e-10, which passes the
+        // old 1e-9 tolerance but trips the `uddsketch` dependency's assert on
+        // the reconstructed gammas. The merge must reject the state with an
+        // error instead of panicking through query execution.
+        let mut other = UddSketchState::new(10, 0.0100000005).unwrap();
+        other.uddsketch.add(1.0).unwrap();
+        let ScalarValue::Binary(Some(bytes)) = other.evaluate().unwrap() else {
+            unreachable!()
+        };
+
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let result = state.merge(&bytes);
+        assert!(
+            result.is_err(),
+            "error rates within 1e-9 of each other must be rejected, got: {result:?}"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("different parameters"),
+            "mismatch error should mention the parameters"
+        );
+    }
+
+    #[test]
+    fn test_uddsketch_merge_rejects_corrupt_state() {
+        // Corrupt bytes must produce an error, never a panic.
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let result = state.merge(b"definitely not a uddsketch state");
+        assert!(result.is_err(), "corrupt state bytes must fail loudly");
+    }
+
+    #[test]
+    fn test_uddsketch_merge_identical_params_still_merges() {
+        let mut other = UddSketchState::new(10, 0.01).unwrap();
+        other.uddsketch.add(1.0).unwrap();
+        other.uddsketch.add(2.0).unwrap();
+        let ScalarValue::Binary(Some(bytes)) = other.evaluate().unwrap() else {
+            unreachable!()
+        };
+
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        state.uddsketch.add(3.0).unwrap();
+        state.merge(&bytes).unwrap();
+
+        let ScalarValue::Binary(Some(merged_bytes)) = state.evaluate().unwrap() else {
+            unreachable!()
+        };
+        let merged = UddSketchRef::parse(&merged_bytes).unwrap();
+        assert_eq!(merged.count(), 3);
+        assert!((merged.sum() - 6.0).abs() < 1e-10);
     }
 
     #[test]
