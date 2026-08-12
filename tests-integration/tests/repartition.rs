@@ -19,6 +19,7 @@ use std::time::Duration;
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::root_source;
 use common_meta::key::table_name::TableNameKey;
+use common_meta::procedure_executor::ExecutorContext;
 use common_procedure::{ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
@@ -854,6 +855,7 @@ async fn trigger_full_gc(ticker: &GcTickerRef) {
             region_ids: None,
             full_file_listing: None,
             timeout: None,
+            executor_context: ExecutorContext::default(),
         })
         .await
         .unwrap();
