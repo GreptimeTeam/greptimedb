@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
+use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_procedure::{ProcedureContext, ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};

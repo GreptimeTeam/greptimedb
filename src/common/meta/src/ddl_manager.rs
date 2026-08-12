@@ -19,6 +19,8 @@ use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
 use api::v1::repartition::Source as PbRepartitionSource;
 use common_error::ext::BoxedError;
+#[cfg(feature = "enterprise")]
+use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_procedure::{
     BoxedProcedure, BoxedProcedureLoader, Output, ProcedureContext, ProcedureId,
     ProcedureManagerRef, ProcedureWithId, watcher,
@@ -59,7 +61,6 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
 #[cfg(feature = "enterprise")]
@@ -79,8 +80,6 @@ use crate::rpc::ddl::{
     PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
     TruncateTableTask, UndropTableTask,
 };
-#[cfg(feature = "enterprise")]
-use crate::rpc::ddl::{PersistentEventContext, TriggerReason};
 
 const MAX_REGION_ROUTE_CHANGE_RETRIES: usize = 3;
 
@@ -855,30 +854,20 @@ impl DdlManager {
 
     pub async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        tracing_context: Option<&common_telemetry::tracing_context::W3cTrace>,
+        query_context: QueryContext,
+        procedure_context: ProcedureContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let span = ctx
-            .tracing_context
-            .as_ref()
+        let span = tracing_context
             .map(TracingContext::from_w3c)
             .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
         let SubmitDdlTaskRequest {
-            query_context,
             wait,
             timeout,
             task,
-            ..
         } = request;
-        let event_context = ctx
-            .event_context
-            .clone()
-            .unwrap_or_else(|| crate::rpc::ddl::event_context_from_query_context(&query_context));
-        let procedure_context = ProcedureContext {
-            actor: ctx.actor.clone(),
-            event_context: Some(event_context),
-        };
         let ddl_options = DdlOptions { wait, timeout };
         async move {
             debug!("Submitting Ddl task: {:?}", task);
@@ -1493,8 +1482,6 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
-    #[cfg(not(feature = "enterprise"))]
-    use crate::procedure_executor::ExecutorContext;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
@@ -1753,8 +1740,10 @@ mod tests {
         ] {
             let err = ddl_manager
                 .submit_ddl_task(
-                    &ExecutorContext::default(),
-                    SubmitDdlTaskRequest::new(QueryContext::default(), task),
+                    None,
+                    QueryContext::default(),
+                    ProcedureContext::default(),
+                    SubmitDdlTaskRequest::new(task),
                 )
                 .await
                 .unwrap_err();

@@ -248,7 +248,6 @@ fn assert_procedure_event_contract(
         &schema,
         &[Row {
             values: vec![
-                Value { value_data: None },
                 ValueData::StringValue(event.procedure_id.to_string()).into(),
                 ValueData::StringValue(state.to_string()).into(),
                 ValueData::StringValue(String::new()).into(),

@@ -69,6 +69,7 @@ impl FunctionState {
 
             async fn migrate_region(
                 &self,
+                _ctx: &ExecutorContext,
                 _request: MigrateRegionRequest,
             ) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))

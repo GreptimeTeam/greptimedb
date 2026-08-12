@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-use common_event_recorder::PersistentEventContext;
-use common_procedure::{ProcedureId, ProcedureManagerRef};
+use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
+use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef};
 use common_telemetry::tracing_context::W3cTrace;
 use snafu::{OptionExt, ResultExt};
 
@@ -24,7 +24,7 @@ use crate::ddl_manager::DdlManagerRef;
 use crate::error::{
     ParseProcedureIdSnafu, ProcedureNotFoundSnafu, QueryProcedureSnafu, Result, UnsupportedSnafu,
 };
-use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::ddl::{QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
     self, GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -34,8 +34,23 @@ use crate::rpc::procedure::{
 #[derive(Debug, Clone, Default)]
 pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
+    /// Query execution data available at the frontend/standalone submission boundary.
+    ///
+    /// Only DDL serializes the full context. Migration and GC use its typed
+    /// channel to derive protocol without sending the query context itself.
+    pub query_context: Option<QueryContext>,
     pub actor: Option<String>,
-    pub event_context: Option<PersistentEventContext>,
+    /// Caller-supplied event metadata. Protocol is derived by the submission adapter.
+    pub event_input: Option<ProcedureEventInput>,
+}
+
+impl ExecutorContext {
+    pub fn with_query_context(query_context: QueryContext) -> Self {
+        Self {
+            query_context: Some(query_context),
+            ..Default::default()
+        }
+    }
 }
 
 /// The procedure executor that accepts ddl, region migration task etc.
@@ -132,7 +147,24 @@ impl ProcedureExecutor for LocalProcedureExecutor {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        self.ddl_manager.submit_ddl_task(ctx, request).await
+        let query_context = ctx.query_context.clone().context(UnsupportedSnafu {
+            operation: "submit_ddl_task without query context",
+        })?;
+        let procedure_context = ProcedureContext {
+            actor: ctx.actor.clone(),
+            event_context: ctx
+                .event_input
+                .as_ref()
+                .map(|input| PersistentEventContext::from_input(input, query_context.protocol())),
+        };
+        self.ddl_manager
+            .submit_ddl_task(
+                ctx.tracing_context.as_ref(),
+                query_context,
+                procedure_context,
+                request,
+            )
+            .await
     }
 
     async fn migrate_region(

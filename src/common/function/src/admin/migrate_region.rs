@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use common_event_recorder::TriggerReason;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::MigrateRegionRequest;
 use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
@@ -23,7 +24,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
 
-use crate::handlers::ProcedureServiceHandlerRef;
+use crate::handlers::{ProcedureServiceHandlerRef, procedure_executor_context};
 use crate::helper::cast_u64;
 
 /// The default timeout for migrate region procedure.
@@ -47,7 +48,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 )]
 pub(crate) async fn migrate_region(
     procedure_service_handler: &ProcedureServiceHandlerRef,
-    _ctx: &QueryContextRef,
+    query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     let (region_id, from_peer, to_peer, timeout) = match params.len() {
@@ -81,13 +82,18 @@ pub(crate) async fn migrate_region(
 
     match (region_id, from_peer, to_peer, timeout) {
         (Some(region_id), Some(from_peer), Some(to_peer), Some(timeout)) => {
+            let executor_context =
+                procedure_executor_context(query_ctx.clone(), TriggerReason::Manual);
             let pid = procedure_service_handler
-                .migrate_region(MigrateRegionRequest {
-                    region_id,
-                    from_peer,
-                    to_peer,
-                    timeout: Duration::from_secs(timeout),
-                })
+                .migrate_region(
+                    &executor_context,
+                    MigrateRegionRequest {
+                        region_id,
+                        from_peer,
+                        to_peer,
+                        timeout: Duration::from_secs(timeout),
+                    },
+                )
                 .await?;
 
             match pid {

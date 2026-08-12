@@ -19,22 +19,22 @@ use api::v1::meta::{
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, GcRegionsRequest,
     GcRegionsResponse, GcStats, GcTableRequest, GcTableResponse, MigrateRegionRequest,
     MigrateRegionResponse, ProcedureActor, ProcedureDetailRequest, ProcedureDetailResponse,
-    ProcedureStateResponse, QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase,
-    ReconcileRequest, ReconcileResponse, ReconcileTable, ResolveStrategy, Role,
-    procedure_service_server,
+    ProcedureEventContext as PbProcedureEventContext, ProcedureStateResponse,
+    QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
+    ReconcileResponse, ReconcileTable, ResolveStrategy, Role, procedure_service_server,
 };
+use common_event_recorder::PersistentEventContext;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
-    CreatorGrantIntent, DdlTask, PersistentEventContext, QueryContext, SubmitDdlTaskRequest,
-    TriggerReason,
+    CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
 };
 use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
 };
+use common_procedure::ProcedureContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
@@ -49,8 +49,43 @@ use crate::procedure::region_migration::manager::{
 use crate::service::GrpcResult;
 use crate::{check_leader, error, gc};
 
-fn procedure_actor_from_pb(actor: Option<ProcedureActor>) -> Option<String> {
-    actor.map(|actor| actor.username)
+struct ProcedureSubmission {
+    actor: Option<String>,
+    event_context: Option<PersistentEventContext>,
+}
+
+impl TryFrom<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for ProcedureSubmission {
+    type Error = Status;
+
+    fn try_from(
+        (actor, event_context): (Option<ProcedureActor>, Option<PbProcedureEventContext>),
+    ) -> Result<Self, Self::Error> {
+        let actor = actor
+            .map(|actor| {
+                if actor.username.is_empty() {
+                    Err(Status::invalid_argument(
+                        "Procedure actor must not be empty",
+                    ))
+                } else {
+                    Ok(actor.username)
+                }
+            })
+            .transpose()?;
+
+        Ok(Self {
+            actor,
+            event_context: event_context.map(PersistentEventContext::from),
+        })
+    }
+}
+
+impl From<ProcedureSubmission> for ProcedureContext {
+    fn from(context: ProcedureSubmission) -> Self {
+        Self {
+            actor: context.actor,
+            event_context: context.event_context,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -100,8 +135,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
         } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let actor = procedure_actor_from_pb(actor);
-        let event_context = event_context.map(PersistentEventContext::from);
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -115,18 +150,13 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let resp = self
             .ddl_manager()
             .submit_ddl_task(
-                &ExecutorContext {
-                    tracing_context: Some(header.tracing_context),
-                    actor,
-                    event_context,
-                },
+                Some(&header.tracing_context),
+                query_context,
+                procedure_context,
                 SubmitDdlTaskRequest {
-                    query_context,
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
                     task,
-                    actor: None,
-                    event_context: None,
                 },
             )
             .await
@@ -152,14 +182,9 @@ impl procedure_service_server::ProcedureService for Metasrv {
             actor,
         } = request.into_inner();
 
-        let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let executor_context = ExecutorContext {
-            tracing_context: Some(header.tracing_context),
-            actor: procedure_actor_from_pb(actor),
-            event_context: event_context
-                .map(PersistentEventContext::from)
-                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
-        };
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
         let from_peer = self
             .lookup_datanode_peer(from_peer)
             .await?
@@ -172,7 +197,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let pid = self
             .region_migration_manager()
             .submit_procedure_with_context(
-                executor_context,
+                procedure_context,
                 RegionMigrationProcedureTask {
                     region_id: region_id.into(),
                     from_peer,
@@ -295,18 +320,13 @@ impl procedure_service_server::ProcedureService for Metasrv {
             actor,
         } = request.into_inner();
 
-        let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let executor_context = ExecutorContext {
-            tracing_context: Some(header.tracing_context),
-            actor: procedure_actor_from_pb(actor),
-            event_context: event_context
-                .map(PersistentEventContext::from)
-                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
-        };
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
 
         let response = self
             .handle_gc_regions(
-                executor_context,
+                procedure_context,
                 MetaGcRegionsRequest {
                     region_ids,
                     full_file_listing,
@@ -332,18 +352,13 @@ impl procedure_service_server::ProcedureService for Metasrv {
             actor,
         } = request.into_inner();
 
-        let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let executor_context = ExecutorContext {
-            tracing_context: Some(header.tracing_context),
-            actor: procedure_actor_from_pb(actor),
-            event_context: event_context
-                .map(PersistentEventContext::from)
-                .or_else(|| Some(PersistentEventContext::new(TriggerReason::Manual))),
-        };
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
 
         let response = self
             .handle_gc_table(
-                executor_context,
+                procedure_context,
                 MetaGcTableRequest {
                     catalog_name,
                     schema_name,
@@ -422,7 +437,7 @@ impl Metasrv {
 
     async fn handle_gc_regions(
         &self,
-        executor_context: ExecutorContext,
+        procedure_context: ProcedureContext,
         request: MetaGcRegionsRequest,
     ) -> error::Result<GcResponse> {
         let region_ids: Vec<RegionId> = request
@@ -431,7 +446,7 @@ impl Metasrv {
             .map(RegionId::from_u64)
             .collect();
         self.trigger_gc_for_regions(
-            executor_context,
+            procedure_context,
             region_ids,
             request.full_file_listing,
             request.timeout,
@@ -441,7 +456,7 @@ impl Metasrv {
 
     async fn handle_gc_table(
         &self,
-        executor_context: ExecutorContext,
+        procedure_context: ProcedureContext,
         request: MetaGcTableRequest,
     ) -> error::Result<GcResponse> {
         let table_name_key = TableNameKey::new(
@@ -469,7 +484,7 @@ impl Metasrv {
 
         let region_ids: Vec<RegionId> = route.region_routes.iter().map(|r| r.region.id).collect();
         self.trigger_gc_for_regions(
-            executor_context,
+            procedure_context,
             region_ids,
             request.full_file_listing,
             request.timeout,
@@ -480,7 +495,7 @@ impl Metasrv {
     /// Triggers manual GC for specified regions and returns the GC response.
     async fn trigger_gc_for_regions(
         &self,
-        executor_context: ExecutorContext,
+        procedure_context: ProcedureContext,
         region_ids: Vec<RegionId>,
         full_file_listing: bool,
         timeout: Option<Duration>,
@@ -497,7 +512,7 @@ impl Metasrv {
                 region_ids: Some(region_ids),
                 full_file_listing: Some(full_file_listing),
                 timeout,
-                executor_context,
+                procedure_context,
             })
             .await
             .map_err(|_| {
@@ -571,14 +586,15 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
 mod tests {
     use std::time::Duration;
 
-    use api::v1::meta::{ProcedureActor, Role};
+    use api::v1::meta::{ProcedureActor, ProcedureEventContext, Role};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
         CreatorGrantIntent, DdlTask, QueryContext,
     };
+    use common_procedure::ProcedureContext;
     use tonic::metadata::{MetadataMap, MetadataValue};
 
-    use super::{Metasrv, procedure_actor_from_pb, restore_create_database_creator};
+    use super::{Metasrv, ProcedureSubmission, restore_create_database_creator};
 
     fn create_database_task() -> DdlTask {
         DdlTask::new_create_database(
@@ -717,19 +733,39 @@ mod tests {
     }
 
     #[test]
-    fn test_procedure_actor_presence_distinguishes_missing_from_empty() {
-        assert_eq!(procedure_actor_from_pb(None), None);
-        assert_eq!(
-            procedure_actor_from_pb(Some(ProcedureActor {
+    fn test_procedure_submission_rejects_empty_actor() {
+        let submission = ProcedureSubmission::try_from((
+            Some(ProcedureActor {
                 username: "alice".to_string(),
-            })),
-            Some("alice".to_string())
-        );
+            }),
+            Some(ProcedureEventContext {
+                reason: "manual".to_string(),
+                protocol: "postgres".to_string(),
+                extensions: Default::default(),
+            }),
+        ))
+        .unwrap();
+        assert_eq!(submission.actor.as_deref(), Some("alice"));
         assert_eq!(
-            procedure_actor_from_pb(Some(ProcedureActor {
-                username: String::new(),
-            })),
-            Some(String::new())
+            submission
+                .event_context
+                .as_ref()
+                .and_then(|context| context.protocol.as_deref()),
+            Some("postgres")
         );
+
+        assert!(
+            ProcedureSubmission::try_from((
+                Some(ProcedureActor {
+                    username: String::new(),
+                }),
+                None,
+            ))
+            .is_err()
+        );
+
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((None, None)).unwrap());
+        assert_eq!(procedure_context.event_context, None);
     }
 }

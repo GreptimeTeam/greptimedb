@@ -145,7 +145,11 @@ mod tests {
             Ok(())
         }
 
-        async fn migrate_region(&self, _: MigrateRegionRequest) -> Result<Option<String>> {
+        async fn migrate_region(
+            &self,
+            _: &ExecutorContext,
+            _: MigrateRegionRequest,
+        ) -> Result<Option<String>> {
             unreachable!()
         }
         async fn reconcile(&self, _: ReconcileRequest) -> Result<Option<String>> {

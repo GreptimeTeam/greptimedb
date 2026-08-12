@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_error::ext::BoxedError;
+use common_event_recorder::TriggerReason;
 use common_macro::admin_fn;
-use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::procedure::{GcRegionsRequest, GcTableRequest};
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result, TableMutationSnafu,
@@ -26,7 +26,7 @@ use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use snafu::{ResultExt, ensure};
 
-use crate::handlers::ProcedureServiceHandlerRef;
+use crate::handlers::{ProcedureServiceHandlerRef, procedure_executor_context};
 use crate::helper::cast_u64;
 
 const DEFAULT_FULL_FILE_LISTING: bool = false;
@@ -39,14 +39,15 @@ const DEFAULT_FULL_FILE_LISTING: bool = false;
 )]
 pub(crate) async fn gc_regions(
     procedure_service_handler: &ProcedureServiceHandlerRef,
-    _ctx: &QueryContextRef,
+    query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     let (region_ids, full_file_listing) = parse_gc_regions_params(params)?;
 
+    let executor_context = procedure_executor_context(query_ctx.clone(), TriggerReason::Manual);
     let resp = procedure_service_handler
         .gc_regions(
-            &ExecutorContext::default(),
+            &executor_context,
             GcRegionsRequest {
                 region_ids,
                 full_file_listing,
@@ -72,9 +73,10 @@ pub(crate) async fn gc_table(
     let (catalog_name, schema_name, table_name, full_file_listing) =
         parse_gc_table_params(params, query_ctx)?;
 
+    let executor_context = procedure_executor_context(query_ctx.clone(), TriggerReason::Manual);
     let resp = procedure_service_handler
         .gc_table(
-            &ExecutorContext::default(),
+            &executor_context,
             GcTableRequest {
                 catalog_name,
                 schema_name,
@@ -246,6 +248,9 @@ mod tests {
         assert_eq!(request.region_ids, vec![1]);
         assert!(request.full_file_listing);
         assert_eq!(request.timeout, None);
+        let context = handler.gc_regions_context.lock().unwrap().clone().unwrap();
+        assert!(context.query_context.is_some());
+        assert_eq!(context.event_input.unwrap().reason, TriggerReason::Manual);
     }
 
     #[tokio::test]
@@ -264,12 +269,17 @@ mod tests {
         assert_eq!(request.table_name, "t");
         assert!(request.full_file_listing);
         assert_eq!(request.timeout, None);
+        let context = handler.gc_table_context.lock().unwrap().clone().unwrap();
+        assert!(context.query_context.is_some());
+        assert_eq!(context.event_input.unwrap().reason, TriggerReason::Manual);
     }
 
     #[derive(Default)]
     struct MockProcedureServiceHandler {
         gc_regions_request: Mutex<Option<GcRegionsRequest>>,
         gc_table_request: Mutex<Option<GcTableRequest>>,
+        gc_regions_context: Mutex<Option<ExecutorContext>>,
+        gc_table_context: Mutex<Option<ExecutorContext>>,
     }
 
     #[async_trait]
@@ -282,7 +292,11 @@ mod tests {
             unreachable!()
         }
 
-        async fn migrate_region(&self, _request: MigrateRegionRequest) -> Result<Option<String>> {
+        async fn migrate_region(
+            &self,
+            _context: &ExecutorContext,
+            _request: MigrateRegionRequest,
+        ) -> Result<Option<String>> {
             unreachable!()
         }
 
@@ -307,18 +321,20 @@ mod tests {
 
         async fn gc_regions(
             &self,
-            _context: &ExecutorContext,
+            context: &ExecutorContext,
             request: GcRegionsRequest,
         ) -> Result<GcResponse> {
+            *self.gc_regions_context.lock().unwrap() = Some(context.clone());
             *self.gc_regions_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }
 
         async fn gc_table(
             &self,
-            _context: &ExecutorContext,
+            context: &ExecutorContext,
             request: GcTableRequest,
         ) -> Result<GcResponse> {
+            *self.gc_table_context.lock().unwrap() = Some(context.clone());
             *self.gc_table_request.lock().unwrap() = Some(request);
             Ok(GcResponse::default())
         }

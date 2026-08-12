@@ -338,7 +338,6 @@ fn assert_procedure_event_contract(
     schema.push(EVENT_CONTEXT_COLUMN.column_schema());
 
     let mut values = vec![
-        Value { value_data: None },
         ValueData::StringValue(event.procedure_id.to_string()).into(),
         ValueData::StringValue(state.to_string()).into(),
         ValueData::StringValue(String::new()).into(),

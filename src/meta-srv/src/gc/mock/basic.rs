@@ -16,9 +16,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use common_event_recorder::PersistentEventContext;
 use common_meta::peer::Peer;
-use common_meta::procedure_executor::ExecutorContext;
-use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
+use common_meta::rpc::ddl::TriggerReason;
+use common_procedure::ProcedureContext;
 use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
@@ -37,7 +38,7 @@ async fn test_parallel_process_datanodes_empty() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            ExecutorContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 
@@ -106,7 +107,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            ExecutorContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 
@@ -251,7 +252,7 @@ async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
             None,
             None,
             None,
-            ExecutorContext {
+            ProcedureContext {
                 event_context: Some(PersistentEventContext::new(TriggerReason::Manual)),
                 ..Default::default()
             },

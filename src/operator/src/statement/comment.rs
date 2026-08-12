@@ -15,7 +15,6 @@
 use api::v1::CommentOnExpr;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CommentObjectType, CommentOnTask, DdlTask, SubmitDdlTaskRequest, TriggerReason,
 };
@@ -30,7 +29,7 @@ use crate::error::{
     self, ExecuteDdlSnafu, ExternalSnafu, InvalidSqlSnafu, Result, TableMetadataManagerSnafu,
 };
 use crate::statement::StatementExecutor;
-use crate::utils::to_meta_query_context_with_trigger_reason;
+use crate::utils::to_executor_context;
 
 impl StatementExecutor {
     /// Adds a comment to a database object (table, column, or flow).
@@ -54,13 +53,11 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?;
         let cache_idents = comment_on_task.cache_idents();
 
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_ctx, TriggerReason::Manual);
-        let request =
-            SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_comment_on(comment_on_task));
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(&executor_context, request)
             .await
             .context(ExecuteDdlSnafu)?;
 
@@ -88,13 +85,11 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?;
         let cache_idents = comment_on_task.cache_idents();
 
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_ctx, TriggerReason::Manual);
-        let request =
-            SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_comment_on(comment_on_task));
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(&executor_context, request)
             .await
             .context(ExecuteDdlSnafu)?;
 

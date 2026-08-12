@@ -18,6 +18,35 @@ use api::v1::meta::ProcedureEventContext as PbProcedureEventContext;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumString};
 
+/// Event metadata supplied when a procedure is submitted.
+///
+/// Protocol is deliberately absent. The trusted submission adapter derives it
+/// from the typed query channel before serializing the protobuf request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcedureEventInput {
+    pub reason: TriggerReason,
+    pub extensions: HashMap<String, String>,
+}
+
+impl ProcedureEventInput {
+    pub fn new(reason: TriggerReason) -> Self {
+        Self {
+            reason,
+            extensions: Default::default(),
+        }
+    }
+}
+
+impl From<&ProcedureEventInput> for PbProcedureEventContext {
+    fn from(input: &ProcedureEventInput) -> Self {
+        Self {
+            reason: input.reason.as_ref().to_string(),
+            protocol: String::new(),
+            extensions: input.extensions.clone(),
+        }
+    }
+}
+
 /// Stable context recorded for a procedure event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistentEventContext {
@@ -42,6 +71,15 @@ impl PersistentEventContext {
     pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.protocol = Some(protocol.into());
         self
+    }
+
+    /// Resolves persistent event metadata from a protocol-free submission input.
+    pub fn from_input(input: &ProcedureEventInput, protocol: Option<String>) -> Self {
+        Self {
+            reason: input.reason,
+            protocol,
+            extensions: input.extensions.clone(),
+        }
     }
 }
 
@@ -131,6 +169,23 @@ mod tests {
         };
         let pb = api::v1::meta::ProcedureEventContext::from(&context);
         assert_eq!(PersistentEventContext::from(pb), context);
+    }
+
+    #[test]
+    fn test_event_input_protobuf_has_no_protocol() {
+        let input = ProcedureEventInput {
+            reason: TriggerReason::AutoCreate,
+            extensions: HashMap::from([("source".to_string(), "sql".to_string())]),
+        };
+
+        assert_eq!(
+            PbProcedureEventContext::from(&input),
+            PbProcedureEventContext {
+                reason: "auto_create".to_string(),
+                protocol: String::new(),
+                extensions: input.extensions.clone(),
+            }
+        );
     }
 
     #[test]
