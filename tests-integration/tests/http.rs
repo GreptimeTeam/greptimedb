@@ -6887,11 +6887,9 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-/// A real OTLP export must come out of `greptime_private.semantic_relationships`
-/// as the zero-configuration chain: service calls, instance part_of service,
-/// instance runs_on pod (bridged by k8s.pod.uid). Resources without
-/// service.instance.id or k8s.pod.uid must derive nothing extra — no
-/// name-based guessing.
+/// One real OTLP export must come out of `semantic_relationships` as the
+/// zero-configuration chain; resources missing an identity column derive
+/// nothing extra.
 pub async fn test_otlp_traces_v1_entity_graph(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =

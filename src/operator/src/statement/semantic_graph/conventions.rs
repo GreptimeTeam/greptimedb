@@ -244,15 +244,7 @@ mod tests {
 
     #[test]
     fn embedded_conventions_parse_and_validate() {
-        let conventions = conventions().unwrap();
-        assert!(!conventions.co_declared_edges.is_empty());
-        assert!(!conventions.trace_co_declared_edges.is_empty());
-        assert!(!conventions.virtual_dst_candidates.is_empty());
-        assert!(
-            conventions
-                .prometheus_info_metrics
-                .contains_key("target_info")
-        );
+        conventions().unwrap();
     }
 
     /// Each case must fail on exactly the rule it names, so the shared

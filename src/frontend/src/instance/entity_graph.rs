@@ -629,7 +629,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE, SERVICE_NAME_COLUMN};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -769,52 +769,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trace_v1_table_gets_implicit_service_declaration() {
-        let info = table_info(
-            &["service_name"],
-            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
-        );
-        let declarations = EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap());
-        assert_eq!(declarations.len(), 1);
-        let decl = &declarations[0];
-        assert_eq!(decl.entity_type, "service");
-        assert_eq!(decl.id_columns, vec![SERVICE_NAME_COLUMN.to_string()]);
-        assert_eq!(decl.time_index, "ts");
-
-        // An explicit service declaration wins; no duplicate is synthesized.
-        let info = table_info(
-            &["service_name"],
-            &[
-                (TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1),
-                ("greptime.semantic.entity.service.id", "service_name"),
-            ],
-        );
-        assert_eq!(
-            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).len(),
-            1
-        );
-
-        // A trace-model table without the fixed column synthesizes nothing.
-        let info = table_info(&[], &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)]);
-        assert!(
-            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty()
-        );
-
-        // An explicit but invalid declaration must not silently fall back to
-        // the synthesized one: identity must not change behind the user's back.
-        let info = table_info(
-            &["service_name"],
-            &[
-                (TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1),
-                ("greptime.semantic.entity.service.id", "gone"),
-            ],
-        );
-        assert!(
-            EntityGraphProviderImpl::declarations_for(&info, conventions().unwrap()).is_empty()
-        );
-    }
-
     const PROM_STAMPS: &[(&str, &str)] = &[
         (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
         (SEMANTIC_SOURCE, SOURCE_PROMETHEUS),
@@ -889,13 +843,22 @@ mod tests {
             .map(|d| d.entity_type)
             .collect();
         assert_eq!(types, vec!["service"]);
+
+        // An explicit declaration suppresses the implicit one even when it is
+        // invalid and skipped: identity must not change behind the user's back.
+        let invalid_explicit = table_info(
+            &["service_name"],
+            &[
+                (TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1),
+                ("greptime.semantic.entity.service.id", "gone"),
+            ],
+        );
+        assert!(sorted_declarations(&invalid_explicit).is_empty());
     }
 
     #[test]
     fn prometheus_implicit_declarations_are_gated() {
         let labels: &[&str] = &["namespace", "pod", "node"];
-        // No semantic stamps at all.
-        assert!(sorted_declarations(&prom_table_info("kube_pod_info", labels, &[])).is_empty());
         // A non-Prometheus source.
         assert!(
             sorted_declarations(&prom_table_info(

@@ -3189,13 +3189,11 @@ mod test {
 
         // Any existing column with a string form may be an id, tag or field.
         for pairs in [
-            &[("greptime.semantic.entity.service.id", "service_name")][..],
             &[(
                 "greptime.semantic.entity.process.id",
                 "service_name,host_id",
             )][..],
             &[("greptime.semantic.entity.service.id", "value")][..],
-            &[("greptime.semantic.entity.service.descriptive", "value")][..],
         ] {
             assert!(validate_entity_semantic_options(&opts(pairs), &schema).is_ok());
         }

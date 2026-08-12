@@ -3,8 +3,6 @@
 # non-standard deployments override per table with explicit
 # greptime.semantic.entity.* declarations, which always win.
 
-# Same-row co-declaration rules, open to any declaring table: a row carrying
-# both entity identities witnesses `src -rel-> dst` (provenance = attribute).
 co_declared_edges:
   - { src: service.instance, dst: host, rel: runs_on }
   - { src: process, dst: host, rel: runs_on }
@@ -14,9 +12,8 @@ co_declared_edges:
   - { src: k8s.pod, dst: k8s.workload, rel: part_of }
   - { src: service.instance, dst: k8s.pod, rel: runs_on }
 
-# Same-row co-declaration rules applied only to trace sources: the RFC ties
-# these edges to span structure (provenance = trace). The endpoints are
-# Greptime entity types derived from GenAI semantic-convention attributes.
+# Applied only to trace sources; the endpoints are Greptime entity types
+# derived from GenAI semantic-convention attributes.
 trace_co_declared_edges:
   - { src: gen_ai.agent, dst: gen_ai.model, rel: uses }
   - { src: gen_ai.agent, dst: gen_ai.tool, rel: invokes }
@@ -32,10 +29,8 @@ virtual_dst_candidates:
   - { column: span_attributes.db.name, connection_type: database }
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
-# Implicit entity declarations for greptime_trace_v1 tables, applied per
-# flattened resource-attribute column actually present — a table without
-# k8s.pod.uid declares no pod (no name-based guessing). The pod UID is the
-# bridge onto the kube-state-metrics entities below.
+# Implicit declarations for greptime_trace_v1 tables; the pod UID bridges
+# trace-side pods onto the kube-state-metrics entities below.
 otlp_trace_entities:
   - entity: service
     id: [service_name]
@@ -47,14 +42,10 @@ otlp_trace_entities:
       - resource_attributes.k8s.pod.name
       - resource_attributes.k8s.namespace.name
 
-# Implicit entity declarations for Prometheus entity-descriptor metrics
-# (kube-state-metrics label contracts and the compatibility-spec target_info),
-# keyed by table name and gated on signal_type=metric + source=prometheus.
-# Pod identity is the UID: every whitelisted pod metric carries it, OTel's
-# Kubernetes conventions recommend it, and it is what lets trace-side pods
-# (resource_attributes.k8s.pod.uid) and KSM-side pods land on one entity —
-# names survive as descriptive attributes. k8s.workload is a Greptime
-# abstraction; the owner kind is encoded in its identity.
+# Implicit declarations for Prometheus entity-descriptor metrics, keyed by
+# table name. Pod and service identities are the UIDs (names stay
+# descriptive); k8s.workload is a Greptime abstraction with the owner kind
+# encoded in its identity.
 prometheus_info_metrics:
   kube_pod_info:
     - entity: k8s.pod
@@ -114,9 +105,8 @@ prometheus_info_metrics:
         - external_name
         - load_balancer_ip
         - external_traffic_policy
-  # target_info's remaining labels are the target's resource attributes; job +
-  # instance identify the target, so the snapshot belongs to the instance, not
-  # the logical service.
+  # The remaining labels are the target's resource attributes: the snapshot
+  # belongs to the instance, not the logical service.
   target_info:
     - entity: service
       id: [job]
