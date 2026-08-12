@@ -161,3 +161,140 @@ values (now(), 'service', 'reborn', 'depends_on', 'service', 'db', 'declared', '
 select src_id from greptime_private.semantic_relationships order by src_id;
 
 drop table greptime_private.semantic_relationships_declared;
+
+-- Same-row co-declaration: a table declaring both entity types of a built-in
+-- vocabulary pair witnesses the edge on every row carrying both identities;
+-- the vocabulary fixes the direction.
+create table graph_pod_metrics (
+  ts timestamp time index,
+  instance string,
+  host string,
+  "service" string,
+  cpu double,
+  primary key (instance, host, "service")
+) with (
+  'greptime.semantic.entity.service.instance.id' = 'instance',
+  'greptime.semantic.entity.host.id' = 'host',
+  'greptime.semantic.entity.service.id' = 'service'
+);
+
+insert into graph_pod_metrics values (now(), 'cart-0', 'node-1', 'cart', 0.5);
+
+select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence
+from greptime_private.semantic_relationships
+order by rel_type, src_id;
+
+drop table graph_pod_metrics;
+
+-- Cross-table calls pairing: the client span and its child server span land in
+-- different trace tables and must still pair into one edge. A trace-model
+-- table that lost the fixed span columns is skipped instead of failing the
+-- scan.
+create table graph_traces_a (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  primary key (service_name)
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+create table graph_traces_b (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  primary key (service_name)
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+create table graph_traces_malformed (
+  ts timestamp time index,
+  note string
+) with ('table_data_model' = 'greptime_trace_v1');
+
+insert into graph_traces_a values
+  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 0);
+
+insert into graph_traces_b values
+  (now(), 't1', 's1', 'c1', 'SPAN_KIND_SERVER', 'STATUS_CODE_ERROR', 'cart', 1500000000);
+
+insert into graph_traces_malformed values (now(), 'not a trace');
+
+select src_id, dst_id, rel_type, provenance, confidence, request_count, error_count
+from greptime_private.semantic_relationships
+order by src_id;
+
+drop table graph_traces_a;
+
+drop table graph_traces_b;
+
+drop table graph_traces_malformed;
+
+-- Virtual nodes: a client span with no matching server span names its peer
+-- through span attributes; the edge carries confidence < 1.0 and the
+-- connection type.
+create table graph_traces_virtual (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  "span_attributes.peer.service" string,
+  "span_attributes.db.name" string,
+  primary key (service_name)
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+insert into graph_traces_virtual values
+  (now(), 't1', 'c1', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 250000000, 'redis', NULL),
+  (now(), 't2', 'c2', NULL, 'SPAN_KIND_CLIENT', 'STATUS_CODE_UNSET', 'frontend', 100000000, NULL, 'orders-db');
+
+-- SQLNESS PROTOCOL MYSQL
+select src_id, dst_id, rel_type, confidence, request_count, attributes
+from greptime_private.semantic_relationships
+order by dst_id;
+
+drop table graph_traces_virtual;
+
+-- Agent edges: span structure derives parent_agent calls agent, and span rows
+-- co-declaring agent+model / agent+tool witness uses / invokes.
+create table graph_agent_traces (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  agent_id string,
+  model_name string,
+  tool_name string,
+  primary key (service_name, agent_id, model_name, tool_name)
+) with (
+  'table_data_model' = 'greptime_trace_v1',
+  'append_mode' = 'true',
+  'greptime.semantic.entity.agent.id' = 'agent_id',
+  'greptime.semantic.entity.model.id' = 'model_name',
+  'greptime.semantic.entity.tool.id' = 'tool_name'
+);
+
+insert into graph_agent_traces values
+  (now(), 't1', 'p1', NULL, 'SPAN_KIND_INTERNAL', 'STATUS_CODE_UNSET', 'app', 0, 'orchestrator', NULL, NULL),
+  (now(), 't1', 'a1', 'p1', 'SPAN_KIND_INTERNAL', 'STATUS_CODE_UNSET', 'app', 2000000000, 'researcher', 'gpt-5', NULL),
+  (now(), 't1', 'a2', 'a1', 'SPAN_KIND_INTERNAL', 'STATUS_CODE_UNSET', 'app', 500000000, 'researcher', NULL, 'web_search');
+
+select src_type, src_id, dst_type, dst_id, rel_type, provenance
+from greptime_private.semantic_relationships
+order by rel_type, dst_id;
+
+drop table graph_agent_traces;

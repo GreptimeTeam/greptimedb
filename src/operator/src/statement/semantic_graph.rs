@@ -45,7 +45,9 @@ use datafusion::functions::{core as core_fns, datetime as datetime_fns, string a
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
-pub use relationships::{CallsSource, DeclaredSource, build_relationships_plan};
+pub use relationships::{
+    CallsSource, CoDeclaredSource, DeclaredSource, RelationshipSources, build_relationships_plan,
+};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY, TTL_KEY};
 
 /// Whether an existing declared-edge table still matches the canonical
@@ -513,11 +515,44 @@ const REGISTRY_COLUMNS: [&str; 10] = [
 
 const REGISTRY_VALID_COLUMN: &str = "__entity_valid";
 
-/// Projects all entity declarations of one source table with one source scan.
-///
-/// Each output field is first built as an array whose entries correspond to the
-/// table's declarations. Unnesting the arrays expands one source row into one
-/// row per declared entity without cloning the table scan under `UNION ALL`.
+/// Expands one source row into one output row per entry of `rows` with a
+/// single source scan: each output field is first built as an array whose
+/// entries correspond to the rows, then unnested. Every row is `[valid,
+/// values...]` aligned with `columns`; rows whose `valid` expression is false
+/// are dropped, and the distinct output columns are `columns`.
+fn unnest_rows(
+    df: DataFrame,
+    window_predicate: Expr,
+    valid_column: &'static str,
+    columns: &[&'static str],
+    rows: Vec<Vec<Expr>>,
+) -> DfResult<DataFrame> {
+    let mut arrays = vec![Vec::with_capacity(rows.len()); columns.len() + 1];
+    for row in rows {
+        debug_assert_eq!(row.len(), arrays.len());
+        for (array, value) in arrays.iter_mut().zip(row) {
+            array.push(value);
+        }
+    }
+    let array_names = std::iter::once(valid_column)
+        .chain(columns.iter().copied())
+        .collect::<Vec<_>>();
+    let array_projection = array_names
+        .iter()
+        .zip(arrays)
+        .map(|(name, values)| make_array(values).alias(*name))
+        .collect::<Vec<_>>();
+
+    df.filter(window_predicate)?
+        .select(array_projection)?
+        .unnest_columns(&array_names)?
+        .filter(ident(valid_column))?
+        .select(columns.iter().map(|c| ident(*c)).collect::<Vec<_>>())?
+        .distinct()
+}
+
+/// Projects all entity declarations of one source table with one source scan
+/// via [`unnest_rows`].
 fn registry_source(
     first: &EntityDeclaration,
     rest: &[EntityDeclaration],
@@ -531,7 +566,7 @@ fn registry_source(
         .gt_eq(window.source_start())
         .and(ts.lt(window.source_end()));
 
-    let mut arrays = vec![Vec::new(); REGISTRY_COLUMNS.len() + 1];
+    let mut rows = Vec::with_capacity(1 + rest.len());
     for decl in std::iter::once(first).chain(rest) {
         // CAST even a single-column id: id columns must be tags but not
         // necessarily strings, and the computed table declares entity_id
@@ -575,7 +610,7 @@ fn registry_source(
             predicate.and(ident(id).is_not_null())
         });
 
-        let row = [
+        rows.push(vec![
             valid,
             bin.clone(),
             bin.clone(),
@@ -587,27 +622,16 @@ fn registry_source(
             scope,
             descriptive,
             source_tables,
-        ];
-        for (array, value) in arrays.iter_mut().zip(row) {
-            array.push(value);
-        }
+        ]);
     }
 
-    let array_names = std::iter::once(REGISTRY_VALID_COLUMN)
-        .chain(REGISTRY_COLUMNS)
-        .collect::<Vec<_>>();
-    let array_projection = array_names
-        .iter()
-        .zip(arrays)
-        .map(|(name, values)| make_array(values).alias(*name))
-        .collect::<Vec<_>>();
-
-    df.filter(window_predicate)?
-        .select(array_projection)?
-        .unnest_columns(&array_names)?
-        .filter(ident(REGISTRY_VALID_COLUMN))?
-        .select(REGISTRY_COLUMNS.into_iter().map(ident).collect::<Vec<_>>())?
-        .distinct()
+    unnest_rows(
+        df,
+        window_predicate,
+        REGISTRY_VALID_COLUMN,
+        &REGISTRY_COLUMNS,
+        rows,
+    )
 }
 
 /// A declaring table's scan paired with the entity declarations it carries —

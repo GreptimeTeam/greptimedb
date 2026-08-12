@@ -47,9 +47,9 @@ use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    CallsSource, DeclaredSource, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    RegistrySource, build_registry_plan, build_relationships_plan,
-    declared_relationships_schema_matches,
+    CallsSource, CoDeclaredSource, DeclaredSource, EntityDeclaration, GraphQueryWindow,
+    OBSERVED_AT_COLUMN, RegistrySource, RelationshipSources, build_registry_plan,
+    build_relationships_plan, declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -73,6 +73,13 @@ pub struct EntityGraphProviderImpl {
 
 struct EntitySource {
     declarations: Vec<EntityDeclaration>,
+    is_trace: bool,
+    table: TableRef,
+}
+
+struct TraceSource {
+    service: Option<EntityDeclaration>,
+    agent: Option<EntityDeclaration>,
     table: TableRef,
 }
 
@@ -222,7 +229,7 @@ impl EntityGraphProviderImpl {
         &self,
         catalog: &str,
         query_ctx: Option<&QueryContext>,
-    ) -> Result<(Vec<EntitySource>, Vec<(EntityDeclaration, TableRef)>), BoxedError> {
+    ) -> Result<(Vec<EntitySource>, Vec<TraceSource>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
@@ -288,26 +295,34 @@ impl EntityGraphProviderImpl {
                     continue;
                 }
                 if is_trace {
-                    // TODO(entity-graph): validate the complete fixed trace-v1
-                    // schema before adding the table to calls derivation, and
-                    // skip malformed/stale tables instead of letting one poison
-                    // the whole relationship scan.
-                    match table_declarations
-                        .iter()
-                        .find(|d| d.entity_type == "service")
-                    {
-                        Some(service) => traces.push((service.clone(), table.clone())),
+                    let find = |entity_type: &str| {
+                        table_declarations
+                            .iter()
+                            .find(|d| d.entity_type == entity_type)
+                            .cloned()
+                    };
+                    let service = find("service");
+                    let agent = find("agent");
+                    if service.is_none() {
                         // No usable service identity: the table cannot
-                        // contribute calls edges (see declarations_for).
-                        None => warn!(
+                        // contribute service-calls edges (see declarations_for).
+                        warn!(
                             "Trace table `{}` has no usable service declaration; skipping calls derivation",
                             table_info.name
-                        ),
+                        );
+                    }
+                    if service.is_some() || agent.is_some() {
+                        traces.push(TraceSource {
+                            service,
+                            agent,
+                            table: table.clone(),
+                        });
                     }
                 }
                 if !table_declarations.is_empty() {
                     declarations.push(EntitySource {
                         declarations: table_declarations,
+                        is_trace,
                         table,
                     });
                 }
@@ -480,21 +495,37 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         request: ScanRequest,
         query_ctx: Option<QueryContextRef>,
     ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
-        let (_, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
-        let mut scans = Vec::with_capacity(traces.len());
-        for (service, trace) in traces {
-            scans.push(CallsSource {
-                service,
-                scan: self.read_table(trace)?,
+        let (sources, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
+        let mut calls = Vec::with_capacity(traces.len());
+        for trace in traces {
+            calls.push(CallsSource {
+                service: trace.service,
+                agent: trace.agent,
+                scan: self.read_table(trace.table)?,
+            });
+        }
+        let mut co_declared = Vec::with_capacity(sources.len());
+        for source in sources {
+            co_declared.push(CoDeclaredSource {
+                declarations: source.declarations,
+                is_trace: source.is_trace,
+                scan: self.read_table(source.table)?,
             });
         }
         let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;
         let Some(window) = Self::query_window(&request)? else {
             return Ok(None);
         };
-        let Some(plan) = build_relationships_plan(scans, declared, &window)
-            .context(error::DataFusionSnafu)
-            .map_err(BoxedError::new)?
+        let Some(plan) = build_relationships_plan(
+            RelationshipSources {
+                traces: calls,
+                co_declared,
+                declared,
+            },
+            &window,
+        )
+        .context(error::DataFusionSnafu)
+        .map_err(BoxedError::new)?
         else {
             return Ok(None);
         };
@@ -529,6 +560,10 @@ mod tests {
                 .iter()
                 .map(|c| ColumnSchema::new(*c, ConcreteDataType::string_datatype(), true)),
         );
+        assemble_table_info(column_schemas, extra)
+    }
+
+    fn assemble_table_info(column_schemas: Vec<ColumnSchema>, extra: &[(&str, &str)]) -> TableInfo {
         let schema = Arc::new(
             SchemaBuilder::try_from_columns(column_schemas)
                 .unwrap()
