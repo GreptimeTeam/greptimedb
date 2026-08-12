@@ -526,4 +526,97 @@ mod tests {
 
         assert!(primary_keys.windows(2).all(|keys| keys[0] == keys[1]));
     }
+
+    #[test]
+    fn test_compute_tsid_utf8view_with_nulls_matches_utf8() {
+        // Regression test for Utf8View tag/label columns: the whole
+        // `build_tag_arrays` -> `compute_tsid_array` -> sparse primary key path must handle
+        // `Utf8View` columns exactly like `Utf8`, including rows with null tags, instead of
+        // panicking or producing different TSIDs.
+        let namespace_values: Vec<Option<&str>> =
+            vec![Some("ns-a"), Some("ns-b"), None, Some("ns-c")];
+        let host_values: Vec<Option<&str>> = vec![Some("host-1"), None, Some("host-2"), None];
+
+        let build_batch = |data_type: DataType| {
+            let (namespace, host): (ArrayRef, ArrayRef) = match &data_type {
+                DataType::Utf8 => (
+                    Arc::new(StringArray::from(namespace_values.clone())),
+                    Arc::new(StringArray::from(host_values.clone())),
+                ),
+                DataType::Utf8View => (
+                    Arc::new(datatypes::arrow::array::StringViewArray::from(
+                        namespace_values.clone(),
+                    )),
+                    Arc::new(datatypes::arrow::array::StringViewArray::from(
+                        host_values.clone(),
+                    )),
+                ),
+                _ => unreachable!(),
+            };
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("greptime_timestamp", DataType::Int64, false),
+                Field::new("greptime_value", DataType::Float64, true),
+                Field::new("namespace", data_type.clone(), true),
+                Field::new("host", data_type, true),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(vec![1000, 1001, 1002, 1003])),
+                    Arc::new(datatypes::arrow::array::Float64Array::from(vec![
+                        1.0, 2.0, 3.0, 4.0,
+                    ])),
+                    namespace,
+                    host,
+                ],
+            )
+            .unwrap()
+        };
+
+        let tag_columns = vec![
+            TagColumnInfo {
+                name: "host".to_string(),
+                index: 3,
+                column_id: 3,
+            },
+            TagColumnInfo {
+                name: "namespace".to_string(),
+                index: 2,
+                column_id: 2,
+            },
+        ];
+
+        let utf8_batch = build_batch(DataType::Utf8);
+        let utf8view_batch = build_batch(DataType::Utf8View);
+
+        // Both representations must be accepted by `build_tag_arrays`.
+        let utf8_tag_arrays = build_tag_arrays(&utf8_batch, &tag_columns).unwrap();
+        let utf8view_tag_arrays = build_tag_arrays(&utf8view_batch, &tag_columns).unwrap();
+
+        // TSIDs must be identical across representations, including rows with null tags.
+        let utf8_tsids = compute_tsid_array(&utf8_batch, &tag_columns, &utf8_tag_arrays);
+        let utf8view_tsids =
+            compute_tsid_array(&utf8view_batch, &tag_columns, &utf8view_tag_arrays);
+        assert_eq!(utf8_tsids, utf8view_tsids);
+
+        // The full sparse primary key (TSID + tag values) must also be identical.
+        let non_tag_indices = vec![0, 1];
+        let modified_utf8 =
+            modify_batch_sparse(utf8_batch, 1025, &tag_columns, &non_tag_indices).unwrap();
+        let modified_utf8view =
+            modify_batch_sparse(utf8view_batch, 1025, &tag_columns, &non_tag_indices).unwrap();
+        let utf8_pks = modified_utf8
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let utf8view_pks = modified_utf8view
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        for row in 0..utf8_pks.len() {
+            assert_eq!(utf8_pks.value(row), utf8view_pks.value(row));
+        }
+    }
 }
