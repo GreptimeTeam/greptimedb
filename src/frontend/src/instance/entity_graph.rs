@@ -34,8 +34,8 @@ use auth::{
 use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
-    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
+    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, OBSERVED_AT_COLUMN,
+    PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -48,8 +48,8 @@ use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
     CallsSource, CoDeclaredSource, Conventions, DeclaredSource, ENTITY_TYPE_GEN_AI_AGENT,
-    ENTITY_TYPE_SERVICE, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN, RegistrySource,
-    RelationshipSources, build_registry_plan, build_relationships_plan, conventions,
+    ENTITY_TYPE_SERVICE, EntityDeclaration, GraphQueryWindow, RegistrySource, RelationshipSources,
+    build_registry_plan, build_relationships_plan, conventions,
     declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;

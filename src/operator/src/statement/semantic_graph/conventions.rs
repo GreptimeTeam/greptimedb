@@ -23,7 +23,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
-use table::requests::is_valid_entity_type;
 
 /// A same-row co-declaration rule: a source-table row carrying both entity
 /// identities witnesses `src -rel-> dst`.
@@ -72,26 +71,66 @@ pub struct Conventions {
     pub prometheus_info_metrics: BTreeMap<String, Vec<PromImplicitEntity>>,
 }
 
-/// The entity types and edge attributes the derivation code itself anchors on;
-/// the rest of the vocabulary lives in the YAML data.
+/// The built-in entity-type vocabulary. User-declared types are open-ended;
+/// the embedded conventions file must stay inside this set.
 pub const ENTITY_TYPE_SERVICE: &str = "service";
+pub const ENTITY_TYPE_SERVICE_INSTANCE: &str = "service.instance";
+pub const ENTITY_TYPE_HOST: &str = "host";
+pub const ENTITY_TYPE_PROCESS: &str = "process";
+pub const ENTITY_TYPE_K8S_POD: &str = "k8s.pod";
+pub const ENTITY_TYPE_K8S_NODE: &str = "k8s.node";
+pub const ENTITY_TYPE_K8S_CONTAINER: &str = "k8s.container";
+pub const ENTITY_TYPE_K8S_WORKLOAD: &str = "k8s.workload";
 pub const ENTITY_TYPE_GEN_AI_AGENT: &str = "gen_ai.agent";
+pub const ENTITY_TYPE_GEN_AI_MODEL: &str = "gen_ai.model";
+pub const ENTITY_TYPE_GEN_AI_TOOL: &str = "gen_ai.tool";
+
+const ENTITY_TYPES: [&str; 11] = [
+    ENTITY_TYPE_SERVICE,
+    ENTITY_TYPE_SERVICE_INSTANCE,
+    ENTITY_TYPE_HOST,
+    ENTITY_TYPE_PROCESS,
+    ENTITY_TYPE_K8S_POD,
+    ENTITY_TYPE_K8S_NODE,
+    ENTITY_TYPE_K8S_CONTAINER,
+    ENTITY_TYPE_K8S_WORKLOAD,
+    ENTITY_TYPE_GEN_AI_AGENT,
+    ENTITY_TYPE_GEN_AI_MODEL,
+    ENTITY_TYPE_GEN_AI_TOOL,
+];
+
+/// The relationship vocabulary (the RFC's rel_type table) and the edge
+/// provenances.
 pub const REL_TYPE_CALLS: &str = "calls";
+pub const REL_TYPE_RUNS_ON: &str = "runs_on";
+pub const REL_TYPE_CONTAINS: &str = "contains";
+pub const REL_TYPE_PART_OF: &str = "part_of";
+pub const REL_TYPE_USES: &str = "uses";
+pub const REL_TYPE_INVOKES: &str = "invokes";
+pub const REL_TYPE_DEPENDS_ON: &str = "depends_on";
+pub const REL_TYPE_OWNS: &str = "owns";
 pub const PROVENANCE_TRACE: &str = "trace";
 pub const PROVENANCE_ATTRIBUTE: &str = "attribute";
+pub const PROVENANCE_DECLARED: &str = "declared";
+pub const PROVENANCE_AGENT: &str = "agent";
 
-/// The closed relationship vocabulary (the RFC's rel_type table). A
-/// conventions rule naming anything else is a defect in the embedded file.
 const REL_TYPES: [&str; 8] = [
-    "calls",
-    "runs_on",
-    "contains",
-    "part_of",
-    "uses",
-    "invokes",
-    "depends_on",
-    "owns",
+    REL_TYPE_CALLS,
+    REL_TYPE_RUNS_ON,
+    REL_TYPE_CONTAINS,
+    REL_TYPE_PART_OF,
+    REL_TYPE_USES,
+    REL_TYPE_INVOKES,
+    REL_TYPE_DEPENDS_ON,
+    REL_TYPE_OWNS,
 ];
+
+/// The `connection_type` values a virtual-destination candidate may imply;
+/// the calls derivation branches on them when building edge attributes.
+pub const CONNECTION_TYPE_DATABASE: &str = "database";
+pub const CONNECTION_TYPE_VIRTUAL_NODE: &str = "virtual_node";
+
+const CONNECTION_TYPES: [&str; 2] = [CONNECTION_TYPE_DATABASE, CONNECTION_TYPE_VIRTUAL_NODE];
 
 static CONVENTIONS: LazyLock<Result<Conventions, String>> =
     LazyLock::new(|| parse(include_str!("conventions.yaml")));
@@ -117,8 +156,8 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
         .chain(&conventions.agent_edge_vocabulary)
     {
         for ty in [&rule.src, &rule.dst] {
-            if !is_valid_entity_type(ty) {
-                return Err(format!("invalid entity type `{ty}` in edge vocabulary"));
+            if !ENTITY_TYPES.contains(&ty.as_str()) {
+                return Err(format!("unknown entity type `{ty}` in edge vocabulary"));
             }
         }
         if !REL_TYPES.contains(&rule.rel.as_str()) {
@@ -137,8 +176,14 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
 
     let mut seen_columns = HashSet::new();
     for candidate in &conventions.virtual_dst_candidates {
-        if candidate.column.is_empty() || candidate.connection_type.is_empty() {
-            return Err("empty virtual destination candidate".to_string());
+        if candidate.column.is_empty() {
+            return Err("empty virtual destination column".to_string());
+        }
+        if !CONNECTION_TYPES.contains(&candidate.connection_type.as_str()) {
+            return Err(format!(
+                "unknown connection_type `{}` for virtual destination `{}`",
+                candidate.connection_type, candidate.column
+            ));
         }
         if !seen_columns.insert(&candidate.column) {
             return Err(format!(
@@ -151,9 +196,9 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
     for (table, entities) in &conventions.prometheus_info_metrics {
         let mut seen_types = HashSet::new();
         for implicit in entities {
-            if !is_valid_entity_type(&implicit.entity) {
+            if !ENTITY_TYPES.contains(&implicit.entity.as_str()) {
                 return Err(format!(
-                    "invalid entity type `{}` for info metric `{table}`",
+                    "unknown entity type `{}` for info metric `{table}`",
                     implicit.entity
                 ));
             }

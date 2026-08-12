@@ -36,13 +36,24 @@ use api::v1::{
     SemanticType,
 };
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+    CONFIDENCE_COLUMN, DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DST_ID_COLUMN,
+    DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN,
+    ENTITY_DESCRIPTIVE_COLUMN, ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN,
+    ENTITY_TYPE_COLUMN, ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN,
+    OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN, SRC_ID_COLUMN,
+    SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
 pub use conventions::{
-    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE,
-    PROVENANCE_TRACE, PromImplicitEntity, REL_TYPE_CALLS, conventions,
+    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_GEN_AI_MODEL, ENTITY_TYPE_GEN_AI_TOOL,
+    ENTITY_TYPE_HOST, ENTITY_TYPE_K8S_CONTAINER, ENTITY_TYPE_K8S_NODE, ENTITY_TYPE_K8S_POD,
+    ENTITY_TYPE_K8S_WORKLOAD, ENTITY_TYPE_PROCESS, ENTITY_TYPE_SERVICE,
+    ENTITY_TYPE_SERVICE_INSTANCE, PROVENANCE_AGENT, PROVENANCE_ATTRIBUTE, PROVENANCE_DECLARED,
+    PROVENANCE_TRACE, PromImplicitEntity, REL_TYPE_CALLS, REL_TYPE_CONTAINS, REL_TYPE_DEPENDS_ON,
+    REL_TYPE_INVOKES, REL_TYPE_OWNS, REL_TYPE_PART_OF, REL_TYPE_RUNS_ON, REL_TYPE_USES,
+    conventions,
 };
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::dataframe::DataFrame;
@@ -91,7 +102,7 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
         return false;
     }
 
-    let canonical = build_declared_relationships_expr("greptime");
+    let canonical = build_declared_relationships_expr(DEFAULT_CATALOG_NAME);
     if schema.column_schemas().len() != canonical.column_defs.len() {
         return false;
     }
@@ -115,9 +126,6 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
 /// service-graph convention.
 const BIN_NANOS: i64 = 60 * 1_000_000_000;
 
-/// Time index of the graph tables: when an observation was recorded.
-pub const OBSERVED_AT_COLUMN: &str = "observed_at";
-
 /// Default retention for the declared-edge table; expiry slides the topology window.
 const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";
 /// Environment variable overriding the declared-edge table's TTL at creation
@@ -138,14 +146,14 @@ fn declared_relationships_ttl() -> String {
 /// `provenance` and `generation_id` are in the key so a declared edge and a
 /// (future) derived edge for the same pair coexist without clobbering.
 pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
-    "src_type",
-    "src_id",
-    "rel_type",
-    "dst_type",
-    "dst_id",
-    "provenance",
-    "scope",
-    "generation_id",
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    PROVENANCE_COLUMN,
+    ENTITY_SCOPE_COLUMN,
+    GENERATION_ID_COLUMN,
 ];
 
 /// The externally visible edge identity: the primary key minus `scope` and
@@ -153,12 +161,12 @@ pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
 /// uses this identity, or assertions differing only in those two columns would
 /// surface as indistinguishable duplicate rows.
 const DECLARED_EDGE_IDENTITY_COLUMNS: [&str; 6] = [
-    "src_type",
-    "src_id",
-    "rel_type",
-    "dst_type",
-    "dst_id",
-    "provenance",
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    PROVENANCE_COLUMN,
 ];
 
 fn column(
@@ -215,32 +223,32 @@ pub fn build_declared_relationships_expr(catalog: &str) -> CreateTableExpr {
             SemanticType::Timestamp,
             false,
         ),
-        field("window_start", ColumnDataType::TimestampMillisecond),
-        field("window_end", ColumnDataType::TimestampMillisecond),
-        field("fresh_until", ColumnDataType::TimestampMillisecond),
+        field(WINDOW_START_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(WINDOW_END_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(FRESH_UNTIL_COLUMN, ColumnDataType::TimestampMillisecond),
         // Declared-only business validity. NULL valid_from = valid since the
         // declaration; NULL valid_until = valid for as long as the row exists
         // (TTL expiry retires the edge with the row).
-        field("valid_from", ColumnDataType::TimestampMillisecond),
-        field("valid_until", ColumnDataType::TimestampMillisecond),
+        field(VALID_FROM_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(VALID_UNTIL_COLUMN, ColumnDataType::TimestampMillisecond),
         // Endpoints + edge identity (all tags, in primary-key order).
-        tag("src_type"),
-        tag("src_id"),
-        tag("rel_type"),
-        tag("dst_type"),
-        tag("dst_id"),
-        tag("provenance"),
-        tag("scope"),
-        tag("generation_id"),
+        tag(SRC_TYPE_COLUMN),
+        tag(SRC_ID_COLUMN),
+        tag(REL_TYPE_COLUMN),
+        tag(DST_TYPE_COLUMN),
+        tag(DST_ID_COLUMN),
+        tag(PROVENANCE_COLUMN),
+        tag(ENTITY_SCOPE_COLUMN),
+        tag(GENERATION_ID_COLUMN),
         // Confidence + RED metrics (populated for derived edges; usually NULL here).
-        field("confidence", ColumnDataType::Float64),
-        field("request_count", ColumnDataType::Int64),
-        field("error_count", ColumnDataType::Int64),
-        field("duration_sum", ColumnDataType::Float64),
-        field("duration_count", ColumnDataType::Int64),
+        field(CONFIDENCE_COLUMN, ColumnDataType::Float64),
+        field(REQUEST_COUNT_COLUMN, ColumnDataType::Int64),
+        field(ERROR_COUNT_COLUMN, ColumnDataType::Int64),
+        field(DURATION_SUM_COLUMN, ColumnDataType::Float64),
+        field(DURATION_COUNT_COLUMN, ColumnDataType::Int64),
         // JSONB, so the union matches the computed table's json column
         // without a per-scan parse.
-        json_field("attributes"),
+        json_field(EDGE_ATTRIBUTES_COLUMN),
     ];
 
     let table_options = [(TTL_KEY.to_string(), declared_relationships_ttl())]
@@ -506,16 +514,16 @@ fn sorted_kv_expr_with(sorted_cols: &[String], nullable: bool, col: &dyn Fn(&str
 }
 
 const REGISTRY_COLUMNS: [&str; 10] = [
-    "observed_at",
-    "window_start",
-    "window_end",
-    "fresh_until",
-    "entity_type",
-    "entity_id",
-    "entity_id_attrs",
-    "scope",
-    "descriptive",
-    "source_tables",
+    OBSERVED_AT_COLUMN,
+    WINDOW_START_COLUMN,
+    WINDOW_END_COLUMN,
+    FRESH_UNTIL_COLUMN,
+    ENTITY_TYPE_COLUMN,
+    ENTITY_ID_COLUMN,
+    ENTITY_ID_ATTRS_COLUMN,
+    ENTITY_SCOPE_COLUMN,
+    ENTITY_DESCRIPTIVE_COLUMN,
+    SOURCE_TABLES_COLUMN,
 ];
 
 const REGISTRY_VALID_COLUMN: &str = "__entity_valid";

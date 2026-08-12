@@ -19,9 +19,13 @@
 //! expression helpers and the entity registry live in the parent module.
 
 use common_catalog::consts::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
-    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR,
-    TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    CONFIDENCE_COLUMN, DST_ID_COLUMN, DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_NANO_COLUMN,
+    DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_SCOPE_COLUMN, ERROR_COUNT_COLUMN,
+    FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN, OBSERVED_AT_COLUMN, PARENT_SPAN_ID_COLUMN,
+    PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
+    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR, SRC_ID_COLUMN,
+    SRC_TYPE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN, VALID_FROM_COLUMN,
+    VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::dataframe::DataFrame;
@@ -32,13 +36,13 @@ use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
 
 use crate::statement::semantic_graph::conventions::{
-    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE,
-    PROVENANCE_TRACE, REL_TYPE_CALLS,
+    CONNECTION_TYPE_DATABASE, CONNECTION_TYPE_VIRTUAL_NODE, Conventions, ENTITY_TYPE_GEN_AI_AGENT,
+    ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE, PROVENANCE_TRACE, REL_TYPE_CALLS,
 };
 use crate::statement::semantic_graph::{
-    DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    bin_interval, bin_ms, conventions, entity_id_expr, interval, null_json, parse_json_expr, qcol,
-    union_all, unnest_rows,
+    DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, bin_interval, bin_ms,
+    conventions, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
+    unnest_rows,
 };
 
 /// The embedded conventions, with a broken file surfaced as a plan error.
@@ -53,22 +57,22 @@ fn builtin() -> DfResult<&'static Conventions> {
 /// additionally stores `valid_from`/`valid_until`, which feed the validity
 /// filter and the projected window columns.)
 const RELATIONSHIP_COLUMNS: [&str; 16] = [
-    "observed_at",
-    "window_start",
-    "window_end",
-    "fresh_until",
-    "src_type",
-    "src_id",
-    "dst_type",
-    "dst_id",
-    "rel_type",
-    "provenance",
-    "confidence",
-    "request_count",
-    "error_count",
-    "duration_sum",
-    "duration_count",
-    "attributes",
+    OBSERVED_AT_COLUMN,
+    WINDOW_START_COLUMN,
+    WINDOW_END_COLUMN,
+    FRESH_UNTIL_COLUMN,
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    PROVENANCE_COLUMN,
+    CONFIDENCE_COLUMN,
+    REQUEST_COUNT_COLUMN,
+    ERROR_COUNT_COLUMN,
+    DURATION_SUM_COLUMN,
+    DURATION_COUNT_COLUMN,
+    EDGE_ATTRIBUTES_COLUMN,
 ];
 
 /// A child server span starts no earlier than 5 minutes before its client span
@@ -242,9 +246,9 @@ const DECLARED_REVISION_COLUMN: &str = "__declared_revision";
 /// above the computed table, and the physical revision time would fail them.
 fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFrame> {
     let eff_valid_from =
-        core_fns::coalesce().call(vec![ident("valid_from"), ident(OBSERVED_AT_COLUMN)]);
+        core_fns::coalesce().call(vec![ident(VALID_FROM_COLUMN), ident(OBSERVED_AT_COLUMN)]);
     let eff_valid_until =
-        core_fns::coalesce().call(vec![ident("valid_until"), window.observed_end()]);
+        core_fns::coalesce().call(vec![ident(VALID_UNTIL_COLUMN), window.observed_end()]);
 
     // As-of the queried window: a revision recorded after its end, or whose
     // validity starts after it, was not the edge's state inside the window and
@@ -264,17 +268,17 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
         // differing only in them are not merged by the storage dedup).
         .order_by(vec![
             ident(OBSERVED_AT_COLUMN).sort(false, false),
-            ident("generation_id").sort(false, false),
-            ident("scope").sort(false, false),
+            ident(GENERATION_ID_COLUMN).sort(false, false),
+            ident(ENTITY_SCOPE_COLUMN).sort(false, false),
         ])
         .build()?
         .alias(DECLARED_REVISION_COLUMN);
 
     // The as-of filter already bounds eff_valid_from below the window's end;
     // only the retirement side of the overlap remains to check.
-    let still_valid = ident("valid_until")
+    let still_valid = ident(VALID_UNTIL_COLUMN)
         .is_null()
-        .or(ident("valid_until").gt(window.observed_start()));
+        .or(ident(VALID_UNTIL_COLUMN).gt(window.observed_start()));
     // Tags come out of the storage engine dictionary-encoded; cast to plain
     // strings so the union with the derived branches type-aligns.
     let tag_utf8 = |name: &str| cast(ident(name), DataType::Utf8).alias(name);
@@ -287,21 +291,21 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
             core_fns::greatest()
                 .call(vec![eff_valid_from.clone(), window.observed_start()])
                 .alias(OBSERVED_AT_COLUMN),
-            eff_valid_from.alias("window_start"),
-            eff_valid_until.clone().alias("window_end"),
-            eff_valid_until.alias("fresh_until"),
-            tag_utf8("src_type"),
-            tag_utf8("src_id"),
-            tag_utf8("dst_type"),
-            tag_utf8("dst_id"),
-            tag_utf8("rel_type"),
-            tag_utf8("provenance"),
-            ident("confidence"),
-            ident("request_count"),
-            ident("error_count"),
-            ident("duration_sum"),
-            ident("duration_count"),
-            ident("attributes"),
+            eff_valid_from.alias(WINDOW_START_COLUMN),
+            eff_valid_until.clone().alias(WINDOW_END_COLUMN),
+            eff_valid_until.alias(FRESH_UNTIL_COLUMN),
+            tag_utf8(SRC_TYPE_COLUMN),
+            tag_utf8(SRC_ID_COLUMN),
+            tag_utf8(DST_TYPE_COLUMN),
+            tag_utf8(DST_ID_COLUMN),
+            tag_utf8(REL_TYPE_COLUMN),
+            tag_utf8(PROVENANCE_COLUMN),
+            ident(CONFIDENCE_COLUMN),
+            ident(REQUEST_COUNT_COLUMN),
+            ident(ERROR_COUNT_COLUMN),
+            ident(DURATION_SUM_COLUMN),
+            ident(DURATION_COUNT_COLUMN),
+            ident(EDGE_ATTRIBUTES_COLUMN),
         ])
 }
 
@@ -354,14 +358,14 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
     let observations = client
         .join_on(server, JoinType::Left, join_conditions)?
         .select(vec![
-            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            qcol("client", "src_id").alias("src_id"),
+            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias(OBSERVED_AT_COLUMN),
+            qcol("client", SRC_ID_COLUMN).alias(SRC_ID_COLUMN),
             core_fns::coalesce()
                 .call(vec![
-                    qcol("server", "dst_id"),
+                    qcol("server", DST_ID_COLUMN),
                     qcol("client", "virtual_dst"),
                 ])
-                .alias("dst_id"),
+                .alias(DST_ID_COLUMN),
             qcol("server", TRACE_ID_COLUMN)
                 .is_not_null()
                 .alias("paired"),
@@ -374,15 +378,19 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
         // No destination means no edge; a self-call is not an edge between
         // two distinct entities.
         .filter(
-            ident("dst_id")
+            ident(DST_ID_COLUMN)
                 .is_not_null()
-                .and(ident("src_id").not_eq(ident("dst_id"))),
+                .and(ident(SRC_ID_COLUMN).not_eq(ident(DST_ID_COLUMN))),
         )?;
 
     let paired = ident("paired");
     let df = observations
         .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
+            vec![
+                ident(OBSERVED_AT_COLUMN),
+                ident(SRC_ID_COLUMN),
+                ident(DST_ID_COLUMN),
+            ],
             vec![
                 count(lit(1))
                     .filter(paired.clone())
@@ -424,19 +432,19 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             ],
         )?
         .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit(ENTITY_TYPE_SERVICE).alias("src_type"),
-            ident("src_id"),
-            lit(ENTITY_TYPE_SERVICE).alias("dst_type"),
-            ident("dst_id"),
-            lit(REL_TYPE_CALLS).alias("rel_type"),
-            lit(PROVENANCE_TRACE).alias("provenance"),
-            real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias("confidence"),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("request_count"),
-            real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias("error_count"),
+            ident(OBSERVED_AT_COLUMN),
+            ident(OBSERVED_AT_COLUMN).alias(WINDOW_START_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(WINDOW_END_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(FRESH_UNTIL_COLUMN),
+            lit(ENTITY_TYPE_SERVICE).alias(SRC_TYPE_COLUMN),
+            ident(SRC_ID_COLUMN),
+            lit(ENTITY_TYPE_SERVICE).alias(DST_TYPE_COLUMN),
+            ident(DST_ID_COLUMN),
+            lit(REL_TYPE_CALLS).alias(REL_TYPE_COLUMN),
+            lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
+            real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias(CONFIDENCE_COLUMN),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(REQUEST_COUNT_COLUMN),
+            real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias(ERROR_COUNT_COLUMN),
             // duration sums in nanoseconds; the contract column is seconds.
             (cast(
                 real_wins(
@@ -445,9 +453,9 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                 )?,
                 DataType::Float64,
             ) / lit(1e9_f64))
-            .alias("duration_sum"),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("duration_count"),
-            real_wins(null_json(), virtual_attrs_expr()?)?.alias("attributes"),
+            .alias(DURATION_SUM_COLUMN),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(DURATION_COUNT_COLUMN),
+            real_wins(null_json(), virtual_attrs_expr()?)?.alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
 }
@@ -462,12 +470,14 @@ fn real_wins(real: Expr, r#virtual: Expr) -> DfResult<Expr> {
 /// `connection_type`.
 fn virtual_attrs_expr() -> DfResult<Expr> {
     when(
-        ident("virtual_conn").eq(lit("database")),
-        parse_json_expr(lit(r#"{"connection_type":"database"}"#)),
+        ident("virtual_conn").eq(lit(CONNECTION_TYPE_DATABASE)),
+        parse_json_expr(lit(format!(
+            r#"{{"connection_type":"{CONNECTION_TYPE_DATABASE}"}}"#
+        ))),
     )
-    .otherwise(parse_json_expr(lit(
-        r#"{"connection_type":"virtual_node"}"#,
-    )))
+    .otherwise(parse_json_expr(lit(format!(
+        r#"{{"connection_type":"{CONNECTION_TYPE_VIRTUAL_NODE}"}}"#
+    ))))
 }
 
 /// The window + span-kind + identity predicate shared by both join sides.
@@ -545,7 +555,7 @@ fn client_spans(
             ident(SPAN_ID_COLUMN),
             // The cast inside entity_id_expr also normalizes tag columns, which
             // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("src_id"),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
             virtual_dst.alias("virtual_dst"),
@@ -570,7 +580,7 @@ fn server_spans(
             ident(TRACE_TIMESTAMP_COLUMN),
             ident(TRACE_ID_COLUMN),
             ident(PARENT_SPAN_ID_COLUMN),
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("dst_id"),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
         ])
@@ -601,7 +611,7 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("src_id"),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
             ])?;
         let child = trace
             .scan
@@ -611,7 +621,7 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(PARENT_SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("dst_id"),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
                 ident(SPAN_STATUS_CODE_COLUMN),
                 ident(DURATION_NANO_COLUMN),
             ])?;
@@ -636,44 +646,48 @@ fn agent_calls_branch(
     let df = parent
         .join_on(child, JoinType::Inner, join_conditions)?
         .select(vec![
-            bin_ms(qcol("parent", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            qcol("parent", "src_id").alias("src_id"),
-            qcol("child", "dst_id").alias("dst_id"),
+            bin_ms(qcol("parent", TRACE_TIMESTAMP_COLUMN)).alias(OBSERVED_AT_COLUMN),
+            qcol("parent", SRC_ID_COLUMN).alias(SRC_ID_COLUMN),
+            qcol("child", DST_ID_COLUMN).alias(DST_ID_COLUMN),
             qcol("child", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
-            qcol("child", DURATION_NANO_COLUMN).alias("duration_nano"),
+            qcol("child", DURATION_NANO_COLUMN).alias(DURATION_NANO_COLUMN),
         ])?
         // A sub-span of the same agent is internal structure, not a call
         // between two agents.
-        .filter(ident("src_id").not_eq(ident("dst_id")))?
+        .filter(ident(SRC_ID_COLUMN).not_eq(ident(DST_ID_COLUMN)))?
         .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
             vec![
-                count(lit(1)).alias("request_count"),
+                ident(OBSERVED_AT_COLUMN),
+                ident(SRC_ID_COLUMN),
+                ident(DST_ID_COLUMN),
+            ],
+            vec![
+                count(lit(1)).alias(REQUEST_COUNT_COLUMN),
                 count(lit(1))
                     .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
                     .build()?
-                    .alias("error_count"),
-                sum(ident("duration_nano")).alias("duration_nano_sum"),
+                    .alias(ERROR_COUNT_COLUMN),
+                sum(ident(DURATION_NANO_COLUMN)).alias("duration_nano_sum"),
             ],
         )?
         .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit(ENTITY_TYPE_GEN_AI_AGENT).alias("src_type"),
-            ident("src_id"),
-            lit(ENTITY_TYPE_GEN_AI_AGENT).alias("dst_type"),
-            ident("dst_id"),
-            lit(REL_TYPE_CALLS).alias("rel_type"),
-            lit(PROVENANCE_TRACE).alias("provenance"),
-            lit(1.0_f64).alias("confidence"),
-            ident("request_count"),
-            ident("error_count"),
+            ident(OBSERVED_AT_COLUMN),
+            ident(OBSERVED_AT_COLUMN).alias(WINDOW_START_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(WINDOW_END_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(FRESH_UNTIL_COLUMN),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias(SRC_TYPE_COLUMN),
+            ident(SRC_ID_COLUMN),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias(DST_TYPE_COLUMN),
+            ident(DST_ID_COLUMN),
+            lit(REL_TYPE_CALLS).alias(REL_TYPE_COLUMN),
+            lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
+            lit(1.0_f64).alias(CONFIDENCE_COLUMN),
+            ident(REQUEST_COUNT_COLUMN),
+            ident(ERROR_COUNT_COLUMN),
             (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
-                .alias("duration_sum"),
-            ident("request_count").alias("duration_count"),
-            null_json().alias("attributes"),
+                .alias(DURATION_SUM_COLUMN),
+            ident(REQUEST_COUNT_COLUMN).alias(DURATION_COUNT_COLUMN),
+            null_json().alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
 }
