@@ -113,7 +113,11 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            maybe_concretize_json2_datatype(&mut schema, col.column_id, &read_cols);
+            if let Some(data_type) =
+                json2_read_datatype(col.column_id, &schema.data_type, &read_cols)
+            {
+                schema.data_type = data_type;
+            }
             col_schemas.push(schema);
         }
 
@@ -132,18 +136,8 @@ impl FlatProjectionMapper {
         let mut batch_schema = flat_projected_columns(metadata, &format_projection);
 
         for (column_id, data_type) in batch_schema.iter_mut() {
-            if let Some(json_type) = data_type.as_json()
-                && json_type.is_json2()
-            {
-                if let Some(concretized) = metadata
-                    .column_by_id(*column_id)
-                    .and_then(|_| read_cols.json_target_type(*column_id).cloned())
-                {
-                    *data_type = concretized;
-                } else if is_empty_json2_type(json_type) {
-                    // see `merge_scan::maybe_amend_json2_field`
-                    *data_type = ConcreteDataType::json2(JsonNativeType::Variant);
-                }
+            if let Some(updated) = json2_read_datatype(*column_id, data_type, &read_cols) {
+                *data_type = updated;
             }
         }
 
@@ -397,21 +391,25 @@ impl FlatProjectionMapper {
     }
 }
 
-fn maybe_concretize_json2_datatype(
-    schema: &mut ColumnSchema,
+fn json2_read_datatype(
     column_id: ColumnId,
+    data_type: &ConcreteDataType,
     read_cols: &ReadColumns,
-) {
-    if let Some(json_type) = schema.data_type.as_json()
-        && json_type.is_json2()
-    {
-        if let Some(concretized) = read_cols.json_target_type(column_id).cloned() {
-            schema.data_type = concretized;
-        } else if is_empty_json2_type(json_type) {
-            // see `merge_scan::maybe_amend_json2_field`
-            schema.data_type = ConcreteDataType::json2(JsonNativeType::Variant);
-        }
+) -> Option<ConcreteDataType> {
+    let json_type = data_type.as_json()?;
+    if !json_type.is_json2() {
+        return None;
     }
+
+    if let Some(concretized) = read_cols.json_target_type(column_id).cloned() {
+        return Some(concretized);
+    }
+
+    if is_empty_json2_type(json_type) {
+        return Some(ConcreteDataType::json2(JsonNativeType::Variant));
+    }
+
+    None
 }
 
 fn is_empty_json2_type(json_type: &JsonType) -> bool {
