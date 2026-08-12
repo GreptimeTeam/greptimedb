@@ -436,11 +436,12 @@ Affected Rows: 0
 
 create table kube_service_info (
   greptime_timestamp timestamp(3) time index,
+  uid string,
   namespace string,
   "service" string,
   cluster_ip string,
   greptime_value double,
-  primary key (namespace, "service", cluster_ip)
+  primary key (uid, namespace, "service", cluster_ip)
 ) with (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'prometheus'
@@ -495,7 +496,7 @@ insert into kube_pod_container_info values
 Affected Rows: 1
 
 insert into kube_service_info values
-  (now(), 'default', 'api-svc', '10.0.0.1', 1);
+  (now(), 'svc-uid-1', 'default', 'api-svc', '10.0.0.1', 1);
 
 Affected Rows: 1
 
@@ -525,7 +526,7 @@ order by entity_type, entity_id, source_tables;
 | k8s.pod          | uid-2                                                     | ["public.kube_pod_info"]           |
 | k8s.pod          | uid-2                                                     | ["public.kube_pod_owner"]          |
 | k8s.pod          | uid-3                                                     | ["public.kube_pod_info"]           |
-| k8s.service      | namespace=default,service=api-svc                         | ["public.kube_service_info"]       |
+| k8s.service      | svc-uid-1                                                 | ["public.kube_service_info"]       |
 | k8s.workload     | namespace=default,owner_kind=ReplicaSet,owner_name=api-rs | ["public.kube_pod_owner"]          |
 | service          | shop/api                                                  | ["public.target_info"]             |
 | service.instance | instance=inst-1,job=shop/api                              | ["public.target_info"]             |

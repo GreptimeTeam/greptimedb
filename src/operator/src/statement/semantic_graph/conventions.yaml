@@ -106,9 +106,10 @@ prometheus_info_metrics:
       descriptive: [image, image_id, image_spec, container_id, restart_policy]
   kube_service_info:
     - entity: k8s.service
-      id: [namespace, service]
+      id: [uid]
       descriptive:
-        - uid
+        - namespace
+        - service
         - cluster_ip
         - external_name
         - load_balancer_ip

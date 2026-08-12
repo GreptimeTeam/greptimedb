@@ -281,11 +281,12 @@ create table kube_pod_container_info (
 
 create table kube_service_info (
   greptime_timestamp timestamp(3) time index,
+  uid string,
   namespace string,
   "service" string,
   cluster_ip string,
   greptime_value double,
-  primary key (namespace, "service", cluster_ip)
+  primary key (uid, namespace, "service", cluster_ip)
 ) with (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'prometheus'
@@ -328,7 +329,7 @@ insert into kube_pod_container_info values
   (now(), 'uid-1', 'main', 'nginx:1.25', 1);
 
 insert into kube_service_info values
-  (now(), 'default', 'api-svc', '10.0.0.1', 1);
+  (now(), 'svc-uid-1', 'default', 'api-svc', '10.0.0.1', 1);
 
 insert into target_info values
   (now(), 'shop/api', 'inst-1', 'prod', 1);
