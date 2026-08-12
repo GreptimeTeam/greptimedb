@@ -35,7 +35,7 @@ use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, OBSERVED_AT_COLUMN,
-    PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN,
+    PG_CATALOG_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -48,8 +48,8 @@ use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
     CallsSource, CoDeclaredSource, Conventions, DeclaredSource, ENTITY_TYPE_GEN_AI_AGENT,
-    ENTITY_TYPE_SERVICE, EntityDeclaration, GraphQueryWindow, RegistrySource, RelationshipSources,
-    build_registry_plan, build_relationships_plan, conventions,
+    ENTITY_TYPE_SERVICE, EntityDeclaration, GraphQueryWindow, ImplicitEntity, RegistrySource,
+    RelationshipSources, build_registry_plan, build_relationships_plan, conventions,
     declared_relationships_schema_matches,
 };
 use query::QueryEngineRef;
@@ -186,39 +186,23 @@ impl EntityGraphProviderImpl {
     }
 
     /// All entity declarations of one table: the explicit options plus the
-    /// zero-configuration conventions. Trace-v1 tables created before the
-    /// ingest-side auto-stamp carry no `entity.service.id` option; synthesize it
-    /// (their schema is fixed), so their `calls` edges have endpoint entities.
-    /// An explicit declaration of a type always suppresses the synthesized
-    /// one — even when the explicit declaration is invalid and skipped:
-    /// silently falling back would change entity identity behind the user's back.
+    /// zero-configuration conventions (`otlp_trace_entities` for trace-v1
+    /// tables — including the `service` identity of tables created before the
+    /// ingest-side auto-stamp — and the Prometheus descriptor whitelist). An
+    /// explicit declaration of a type always suppresses the implicit one, even
+    /// when the explicit declaration is invalid and skipped: silently falling
+    /// back would change entity identity behind the user's back.
     fn declarations_for(
         table_info: &TableInfo,
         conventions: &Conventions,
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
-        if is_trace_v1_table(table_info)
-            && !Self::explicitly_declares(table_info, ENTITY_TYPE_SERVICE)
-            && table_info
-                .meta
-                .schema
-                .column_schema_by_name(SERVICE_NAME_COLUMN)
-                .is_some()
-            && let Some(time_index) = table_info
-                .meta
-                .schema
-                .timestamp_column()
-                .map(|c| c.name.clone())
-        {
-            declarations.push(EntityDeclaration {
-                schema: table_info.schema_name.clone(),
-                table: table_info.name.clone(),
-                time_index,
-                entity_type: ENTITY_TYPE_SERVICE.to_string(),
-                id_columns: vec![SERVICE_NAME_COLUMN.to_string()],
-                descriptive_columns: vec![],
-                scope_columns: vec![],
-            });
+        if is_trace_v1_table(table_info) {
+            Self::extend_with_implicit_entities(
+                table_info,
+                &conventions.otlp_trace_entities,
+                &mut declarations,
+            );
         }
         Self::extend_with_prometheus_conventions(table_info, conventions, &mut declarations);
         declarations
@@ -237,9 +221,7 @@ impl EntityGraphProviderImpl {
     /// gated on the ingest-stamped `signal_type=metric` + `source=prometheus`
     /// options and keyed by table name. The metric engine's physical table
     /// aggregates every logical table's columns and must not contribute a
-    /// duplicate source. Identifying columns must all exist; descriptive
-    /// columns are filtered to those present (kube-state-metrics label sets
-    /// vary across versions).
+    /// duplicate source.
     fn extend_with_prometheus_conventions(
         table_info: &TableInfo,
         conventions: &Conventions,
@@ -261,19 +243,29 @@ impl EntityGraphProviderImpl {
             );
             return;
         }
+        Self::extend_with_implicit_entities(table_info, implicit_entities, declarations);
+    }
+
+    /// Synthesizes the applicable subset of `entities` on `table_info`:
+    /// explicit declarations win, every id column must exist (no guessing),
+    /// descriptive columns are filtered to those present.
+    fn extend_with_implicit_entities(
+        table_info: &TableInfo,
+        entities: &[ImplicitEntity],
+        declarations: &mut Vec<EntityDeclaration>,
+    ) {
         let schema = &table_info.meta.schema;
         let Some(time_index) = schema.timestamp_column().map(|c| c.name.clone()) else {
             debug!(
-                "Info metric `{}` has no time index; skipping its implicit declarations",
+                "Table `{}` has no time index; skipping its implicit declarations",
                 table_info.name
             );
             return;
         };
-        for implicit in implicit_entities {
+        for implicit in entities {
             if Self::explicitly_declares(table_info, &implicit.entity) {
                 debug!(
-                    "Info metric `{}` explicitly declares `{}`; the implicit declaration is \
-                     suppressed",
+                    "Table `{}` explicitly declares `{}`; the implicit declaration is suppressed",
                     table_info.name, implicit.entity
                 );
                 continue;
@@ -284,8 +276,7 @@ impl EntityGraphProviderImpl {
                 .find(|c| schema.column_schema_by_name(c).is_none())
             {
                 debug!(
-                    "Info metric `{}` lacks the id column `{}`; skipping the implicit `{}` \
-                     declaration",
+                    "Table `{}` lacks the id column `{}`; skipping the implicit `{}` declaration",
                     table_info.name, missing, implicit.entity
                 );
                 continue;
@@ -638,7 +629,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE, SERVICE_NAME_COLUMN};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -848,11 +839,56 @@ mod tests {
         assert_eq!(declarations[0].entity_type, "k8s.node");
         assert_eq!(declarations[0].id_columns, vec!["node"]);
         assert_eq!(declarations[1].entity_type, "k8s.pod");
-        assert_eq!(declarations[1].id_columns, vec!["namespace", "pod"]);
+        assert_eq!(declarations[1].id_columns, vec!["uid"]);
         // host_ip/pod_ip/created_by_* are absent from this table; descriptive
         // shrinks to the present columns.
-        assert_eq!(declarations[1].descriptive_columns, vec!["uid", "node"]);
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec!["namespace", "pod", "node"]
+        );
         assert_eq!(declarations[1].time_index, "greptime_timestamp");
+    }
+
+    #[test]
+    fn trace_table_gets_implicit_resource_entities() {
+        let full = table_info(
+            &[
+                "service_name",
+                "resource_attributes.service.instance.id",
+                "resource_attributes.k8s.pod.uid",
+                "resource_attributes.k8s.pod.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&full);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["k8s.pod", "service", "service.instance"]);
+        assert_eq!(
+            declarations[0].id_columns,
+            vec!["resource_attributes.k8s.pod.uid"]
+        );
+        assert_eq!(
+            declarations[0].descriptive_columns,
+            vec!["resource_attributes.k8s.pod.name"]
+        );
+        assert_eq!(
+            declarations[2].id_columns,
+            vec!["service_name", "resource_attributes.service.instance.id"]
+        );
+
+        // Missing uid column: no pod entity synthesized, no name-based guess.
+        let no_uid = table_info(
+            &["service_name", "resource_attributes.k8s.pod.name"],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let types: Vec<String> = sorted_declarations(&no_uid)
+            .into_iter()
+            .map(|d| d.entity_type)
+            .collect();
+        assert_eq!(types, vec!["service"]);
     }
 
     #[test]
@@ -881,12 +917,11 @@ mod tests {
         stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
         assert!(sorted_declarations(&prom_table_info("kube_pod_info", labels, &stamps)).is_empty());
 
-        // A missing id column drops that entity, not the whole table.
-        let info = prom_table_info("kube_pod_info", &["namespace", "pod"], PROM_STAMPS);
+        // A missing id column (uid) drops that entity, not the whole table.
+        let info = prom_table_info("kube_pod_info", &["namespace", "pod", "node"], PROM_STAMPS);
         let declarations = sorted_declarations(&info);
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].entity_type, "k8s.pod");
-        assert!(declarations[0].descriptive_columns.is_empty());
+        assert_eq!(declarations[0].entity_type, "k8s.node");
     }
 
     #[test]

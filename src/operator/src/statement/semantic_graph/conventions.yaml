@@ -12,6 +12,7 @@ co_declared_edges:
   - { src: k8s.pod, dst: k8s.container, rel: contains }
   - { src: service.instance, dst: service, rel: part_of }
   - { src: k8s.pod, dst: k8s.workload, rel: part_of }
+  - { src: service.instance, dst: k8s.pod, rel: runs_on }
 
 # Same-row co-declaration rules applied only to trace sources: the RFC ties
 # these edges to span structure (provenance = trace). The endpoints are
@@ -31,18 +32,36 @@ virtual_dst_candidates:
   - { column: span_attributes.db.name, connection_type: database }
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
+# Implicit entity declarations for greptime_trace_v1 tables, applied per
+# flattened resource-attribute column actually present — a table without
+# k8s.pod.uid declares no pod (no name-based guessing). The pod UID is the
+# bridge onto the kube-state-metrics entities below.
+otlp_trace_entities:
+  - entity: service
+    id: [service_name]
+  - entity: service.instance
+    id: [service_name, resource_attributes.service.instance.id]
+  - entity: k8s.pod
+    id: [resource_attributes.k8s.pod.uid]
+    descriptive:
+      - resource_attributes.k8s.pod.name
+      - resource_attributes.k8s.namespace.name
+
 # Implicit entity declarations for Prometheus entity-descriptor metrics
 # (kube-state-metrics label contracts and the compatibility-spec target_info),
 # keyed by table name and gated on signal_type=metric + source=prometheus.
-# Kubernetes identity is name-based: only the *_info metrics carry UIDs, every
-# other metric joins by name labels (uid stays descriptive). k8s.workload is a
-# Greptime abstraction; the owner kind is encoded in its identity.
+# Pod identity is the UID: every whitelisted pod metric carries it, OTel's
+# Kubernetes conventions recommend it, and it is what lets trace-side pods
+# (resource_attributes.k8s.pod.uid) and KSM-side pods land on one entity —
+# names survive as descriptive attributes. k8s.workload is a Greptime
+# abstraction; the owner kind is encoded in its identity.
 prometheus_info_metrics:
   kube_pod_info:
     - entity: k8s.pod
-      id: [namespace, pod]
+      id: [uid]
       descriptive:
-        - uid
+        - namespace
+        - pod
         - node
         - host_ip
         - pod_ip
@@ -66,24 +85,24 @@ prometheus_info_metrics:
         - internal_ip
   kube_pod_owner:
     - entity: k8s.pod
-      id: [namespace, pod]
-      descriptive: [uid]
+      id: [uid]
+      descriptive: [namespace, pod]
     - entity: k8s.workload
       id: [namespace, owner_kind, owner_name]
       descriptive: [owner_is_controller]
   kube_pod_container_info:
     - entity: k8s.pod
-      id: [namespace, pod]
-      descriptive: [uid]
+      id: [uid]
+      descriptive: [namespace, pod]
     - entity: k8s.container
-      id: [namespace, pod, container]
+      id: [uid, container]
       descriptive: [image, image_id, image_spec, container_id]
   kube_pod_init_container_info:
     - entity: k8s.pod
-      id: [namespace, pod]
-      descriptive: [uid]
+      id: [uid]
+      descriptive: [namespace, pod]
     - entity: k8s.container
-      id: [namespace, pod, container]
+      id: [uid, container]
       descriptive: [image, image_id, image_spec, container_id, restart_policy]
   kube_service_info:
     - entity: k8s.service

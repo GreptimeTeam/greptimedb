@@ -43,10 +43,11 @@ pub struct VirtualDstCandidate {
     pub connection_type: String,
 }
 
-/// One implicit entity declaration of a whitelisted Prometheus info metric.
+/// One implicit entity declaration: of a whitelisted Prometheus info metric,
+/// or of a trace-v1 table's flattened resource attributes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PromImplicitEntity {
+pub struct ImplicitEntity {
     pub entity: String,
     /// Identifying label columns; every one must exist on the table for the
     /// declaration to apply.
@@ -68,7 +69,8 @@ pub struct Conventions {
     pub co_declared_edges: Vec<EdgeRule>,
     pub trace_co_declared_edges: Vec<EdgeRule>,
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
-    pub prometheus_info_metrics: BTreeMap<String, Vec<PromImplicitEntity>>,
+    pub otlp_trace_entities: Vec<ImplicitEntity>,
+    pub prometheus_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
 }
 
 /// The built-in entity-type vocabulary. User-declared types are open-ended;
@@ -195,7 +197,15 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
         }
     }
 
-    for (table, entities) in &conventions.prometheus_info_metrics {
+    let per_table = conventions
+        .prometheus_info_metrics
+        .iter()
+        .map(|(table, entities)| (table.as_str(), entities))
+        .chain(std::iter::once((
+            "otlp traces",
+            &conventions.otlp_trace_entities,
+        )));
+    for (table, entities) in per_table {
         let mut seen_types = HashSet::new();
         for implicit in entities {
             if !ENTITY_TYPES.contains(&implicit.entity.as_str()) {
@@ -245,32 +255,45 @@ mod tests {
         );
     }
 
+    /// Each case must fail on exactly the rule it names, so the shared
+    /// boilerplate is valid and the mutated part is inside the vocabulary.
+    fn broken(edges: &str, info_metrics: &str) -> String {
+        format!(
+            "co_declared_edges: [{edges}]\ntrace_co_declared_edges: []\n\
+             virtual_dst_candidates: []\notlp_trace_entities: []\n\
+             prometheus_info_metrics: {{{info_metrics}}}"
+        )
+    }
+
     #[test]
     fn validation_rejects_broken_conventions() {
-        // Unknown rel_type.
+        let err = |edges, info| parse(&broken(edges, info)).unwrap_err();
+
+        assert!(err("{src: host, dst: service, rel: pets}", "").contains("unknown rel_type"));
         assert!(
-            parse("co_declared_edges: [{src: a, dst: b, rel: pets}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
-                .is_err()
+            err("{src: k8s.pods, dst: k8s.node, rel: runs_on}", "").contains("unknown entity type")
         );
-        // Entity type outside the grammar.
         assert!(
-            parse("co_declared_edges: [{src: A, dst: b, rel: uses}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
-                .is_err()
+            err(
+                "{src: host, dst: service, rel: uses}, {src: host, dst: service, rel: uses}",
+                ""
+            )
+            .contains("duplicate edge rule")
         );
-        // Duplicate rule.
         assert!(
-            parse("co_declared_edges: [{src: a, dst: b, rel: uses}, {src: a, dst: b, rel: uses}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
-                .is_err()
-        );
-        // descriptive and descriptive_rest are mutually exclusive.
-        assert!(
-            parse("co_declared_edges: []\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {t: [{entity: a, id: [x], descriptive: [y], descriptive_rest: true}]}")
-                .is_err()
+            err(
+                "",
+                "t: [{entity: host, id: [x], descriptive: [y], descriptive_rest: true}]"
+            )
+            .contains("descriptive_rest")
         );
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
-            parse("co_declared_edges: [{src: a, dst: b, rel: uses, direction: down}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
-                .is_err()
+            parse(&broken(
+                "{src: host, dst: service, rel: uses, direction: down}",
+                ""
+            ))
+            .is_err()
         );
     }
 }

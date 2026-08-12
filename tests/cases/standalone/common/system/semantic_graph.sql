@@ -235,16 +235,19 @@ drop table graph_agent_traces;
 
 -- Prometheus conventions: whitelisted entity-descriptor metrics (stamped
 -- signal_type=metric + source=prometheus by the remote-write path) get
--- implicit declarations, and the co-declared vocabulary derives runs_on /
--- part_of from their rows. A non-whitelisted metric contributes nothing.
+-- implicit declarations, and the co-declared rules derive runs_on / part_of /
+-- contains from their rows. Pod identity is the UID, so every KSM descriptor
+-- lands on one entity; the empty labels kube-state-metrics emits (unscheduled
+-- pod's node, ownerless pod's owner_*) identify nothing. A non-whitelisted
+-- metric contributes nothing.
 create table kube_pod_info (
   greptime_timestamp timestamp(3) time index,
+  uid string,
   namespace string,
   pod string,
-  uid string,
   node string,
   greptime_value double,
-  primary key (namespace, pod, uid, node)
+  primary key (uid, namespace, pod, node)
 ) with (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'prometheus'
@@ -252,12 +255,37 @@ create table kube_pod_info (
 
 create table kube_pod_owner (
   greptime_timestamp timestamp(3) time index,
+  uid string,
   namespace string,
   pod string,
   owner_kind string,
   owner_name string,
   greptime_value double,
-  primary key (namespace, pod, owner_kind, owner_name)
+  primary key (uid, namespace, pod, owner_kind, owner_name)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+create table kube_pod_container_info (
+  greptime_timestamp timestamp(3) time index,
+  uid string,
+  container string,
+  image string,
+  greptime_value double,
+  primary key (uid, container, image)
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+create table kube_service_info (
+  greptime_timestamp timestamp(3) time index,
+  namespace string,
+  "service" string,
+  cluster_ip string,
+  greptime_value double,
+  primary key (namespace, "service", cluster_ip)
 ) with (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'prometheus'
@@ -286,18 +314,21 @@ create table http_requests_total (
   'greptime.semantic.source' = 'prometheus'
 );
 
--- The pending pod's empty node (kube-state-metrics emits "" for unscheduled
--- pods) identifies nothing: the pod entity appears, the ghost node and its
--- runs_on edge do not.
 insert into kube_pod_info values
-  (now(), 'default', 'api-1', 'uid-1', 'node-a', 1),
-  (now(), 'default', 'api-2', 'uid-2', 'node-a', 1),
-  (now(), 'default', 'pending-1', 'uid-3', '', 1);
+  (now(), 'uid-1', 'default', 'api-1', 'node-a', 1),
+  (now(), 'uid-2', 'default', 'api-2', 'node-a', 1),
+  (now(), 'uid-3', 'default', 'pending-1', '', 1),
+  (now(), '', 'default', 'ghost', 'node-a', 1);
 
 insert into kube_pod_owner values
-  (now(), 'default', 'api-1', 'ReplicaSet', 'api-rs', 1),
-  (now(), 'default', 'api-2', 'ReplicaSet', 'api-rs', 1),
-  (now(), 'default', 'pending-1', '', '', 1);
+  (now(), 'uid-1', 'default', 'api-1', 'ReplicaSet', 'api-rs', 1),
+  (now(), 'uid-2', 'default', 'api-2', 'ReplicaSet', 'api-rs', 1);
+
+insert into kube_pod_container_info values
+  (now(), 'uid-1', 'main', 'nginx:1.25', 1);
+
+insert into kube_service_info values
+  (now(), 'default', 'api-svc', '10.0.0.1', 1);
 
 insert into target_info values
   (now(), 'shop/api', 'inst-1', 'prod', 1);
@@ -313,11 +344,15 @@ order by entity_type, entity_id, source_tables;
 -- SQLNESS PROTOCOL MYSQL
 select src_type, src_id, dst_type, dst_id, rel_type, provenance
 from greptime_private.semantic_relationships
-order by rel_type, src_id;
+order by rel_type, src_id, dst_id;
 
 drop table kube_pod_info;
 
 drop table kube_pod_owner;
+
+drop table kube_pod_container_info;
+
+drop table kube_service_info;
 
 drop table target_info;
 
