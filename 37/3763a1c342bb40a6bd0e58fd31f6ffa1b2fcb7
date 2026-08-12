@@ -1,0 +1,20 @@
+tests-integration/tests/repartition.rs
+  s_f9f42fa04e4dc7::t_59de6d2194c0a2 858-860
+  s_f9f42fa04e4dc7::t_9a7a14dd65d2ee 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "373763a1c342bb40a6bd0e58fd31f6ffa1b2fcb7",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
