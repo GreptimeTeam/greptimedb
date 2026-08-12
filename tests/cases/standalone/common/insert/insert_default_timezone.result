@@ -52,21 +52,40 @@ SELECT * FROM test1 ORDER BY j;
 | 4 | 2025-02-01T00:01:01 |
 +---+---------------------+
 
-CREATE TABLE test3 (ts TIMESTAMP TIME INDEX, st TIMESTAMP);
+CREATE TABLE test3 (ts TIMESTAMP TIME INDEX, st TIMESTAMP, ts_ns TIMESTAMP(9));
 
 Affected Rows: 0
+
+INSERT INTO test3 (ts) VALUES ('2026-08-01 12:00:00.001');
+
+Affected Rows: 1
 
 INSERT INTO test3 (ts, st) VALUES ('2026-08-02 12:00:00.001', now());
 
 Affected Rows: 1
 
-SELECT ts FROM test3;
+INSERT INTO test3 (ts, st) SELECT '2026-08-03 12:00:00.001', now();
 
-+-------------------------+
-| ts                      |
-+-------------------------+
-| 2026-08-02T04:00:00.001 |
-+-------------------------+
+Affected Rows: 1
+
+INSERT INTO test3 (ts, st, ts_ns) VALUES (
+    '2026-08-04 12:00:00.001',
+    now(),
+    '2026-08-04 12:00:00.123456789'
+);
+
+Affected Rows: 1
+
+SELECT ts, ts_ns FROM test3 ORDER BY ts;
+
++-------------------------+-------------------------------+
+| ts                      | ts_ns                         |
++-------------------------+-------------------------------+
+| 2026-08-01T04:00:00.001 |                               |
+| 2026-08-02T04:00:00.001 |                               |
+| 2026-08-03T04:00:00.001 |                               |
+| 2026-08-04T04:00:00.001 | 2026-08-04T04:00:00.123456789 |
++-------------------------+-------------------------------+
 
 SET time_zone = 'UTC';
 

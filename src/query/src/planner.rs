@@ -861,28 +861,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_timestamp_literal_uses_query_timezone() {
+    async fn test_insert_timestamp_literals_use_query_timezone() {
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
                 .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
                 .build(),
         );
-        let stmt = QueryLanguageParser::parse_sql(
-            "INSERT INTO timestamps (ts, st) VALUES ('2026-08-02 12:00:00.001', now())",
-            &query_ctx,
-        )
-        .unwrap();
         let engine = create_timestamp_test_engine().await;
-        let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
-        let plan = plan.display_indent().to_string();
 
-        assert!(
-            plan.contains(
-                "Values: (TimestampMillisecond(1785643200001, None), \
-                 CAST(now() AS Timestamp(ms)))"
+        for (sql, expected_timestamp) in [
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 VALUES ('2026-08-02 12:00:00.001', now())",
+                1_785_643_200_001_i64,
             ),
-            "{plan}"
-        );
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-03 12:00:00.001', now()",
+                1_785_729_600_001_i64,
+            ),
+        ] {
+            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+            let plan = engine
+                .planner()
+                .plan(&stmt, query_ctx.clone())
+                .await
+                .unwrap()
+                .display_indent()
+                .to_string();
+
+            assert!(
+                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                "{plan}"
+            );
+        }
     }
 
     #[tokio::test]
