@@ -24,7 +24,7 @@
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
+| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 1). |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
 | `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable the scheduler. Disabled by default. |
