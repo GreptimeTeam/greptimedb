@@ -38,6 +38,7 @@ use crate::semantic::{
 mod translator;
 
 pub use translator::legacy_normalize_otlp_name;
+pub(crate) use translator::ucum_to_openmetrics_unit;
 use translator::{translate_label_name, translate_metric_name};
 
 /// the default column count for table writer

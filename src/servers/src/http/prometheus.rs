@@ -74,6 +74,7 @@ use crate::error::{
     NotSupportedSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
+use crate::otlp::metrics::ucum_to_openmetrics_unit;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
 use crate::prometheus_handler::{
     ParsedPromQuery, PrometheusHandlerRef, resolve_schema_from_matchers,
@@ -2042,7 +2043,7 @@ fn prometheus_metadata_from_table(table_info: &TableInfo) -> PromMetadata {
     };
     let unit = options
         .get(SEMANTIC_METRIC_UNIT)
-        .cloned()
+        .map(|unit| ucum_to_openmetrics_unit(unit))
         .unwrap_or_default();
 
     PromMetadata {
@@ -3473,10 +3474,28 @@ mod tests {
             metadata.get("http_requests_total"),
             Some(&vec![PromMetadata {
                 metric_type: "counter".to_string(),
-                unit: "By".to_string(),
+                unit: "bytes".to_string(),
                 help: String::new(),
             }])
         );
+
+        for (ucum, openmetrics) in [
+            ("1", "ratios"),
+            ("ms", "milliseconds"),
+            ("m/s", "meters_per_second"),
+            ("USD", "USD"),
+        ] {
+            let mut table_info = table_info.clone();
+            table_info
+                .meta
+                .options
+                .extra_options
+                .insert(SEMANTIC_METRIC_UNIT.to_string(), ucum.to_string());
+            assert_eq!(
+                prometheus_metadata_from_table(&table_info).unit,
+                openmetrics
+            );
+        }
 
         for (metric_type, temporality, expected) in [
             ("updown_counter", None, "gauge"),

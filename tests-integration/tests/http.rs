@@ -2741,6 +2741,28 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
+    let res = client
+        .get("/v1/prometheus/api/v1/metadata?metric=remote_write_v2_typed_total")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        serde_json::to_string_pretty(&body).unwrap(),
+        r#"{
+  "status": "success",
+  "data": {
+    "remote_write_v2_typed_total": [
+      {
+        "type": "counter",
+        "unit": "seconds",
+        "help": ""
+      }
+    ]
+  }
+}"#
+    );
+
     guard.remove_all().await;
 }
 
