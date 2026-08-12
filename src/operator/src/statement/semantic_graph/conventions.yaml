@@ -3,10 +3,9 @@
 # non-standard deployments override per table with explicit
 # greptime.semantic.entity.* declarations, which always win.
 
-# Same-row co-declaration vocabulary, open to any declaring table: a row
-# carrying both entity identities witnesses `src -rel-> dst`
-# (provenance = attribute).
-edge_vocabulary:
+# Same-row co-declaration rules, open to any declaring table: a row carrying
+# both entity identities witnesses `src -rel-> dst` (provenance = attribute).
+co_declared_edges:
   - { src: service.instance, dst: host, rel: runs_on }
   - { src: process, dst: host, rel: runs_on }
   - { src: k8s.pod, dst: k8s.node, rel: runs_on }
@@ -14,10 +13,10 @@ edge_vocabulary:
   - { src: service.instance, dst: service, rel: part_of }
   - { src: k8s.pod, dst: k8s.workload, rel: part_of }
 
-# Agent-edge vocabulary, applied only to trace sources: the RFC ties these
-# edges to span structure (provenance = trace). Entity types follow the GenAI
-# semantic-convention namespace as written.
-agent_edge_vocabulary:
+# Same-row co-declaration rules applied only to trace sources: the RFC ties
+# these edges to span structure (provenance = trace). The endpoints are
+# Greptime entity types derived from GenAI semantic-convention attributes.
+trace_co_declared_edges:
   - { src: gen_ai.agent, dst: gen_ai.model, rel: uses }
   - { src: gen_ai.agent, dst: gen_ai.tool, rel: invokes }
 
@@ -42,22 +41,65 @@ prometheus_info_metrics:
   kube_pod_info:
     - entity: k8s.pod
       id: [namespace, pod]
-      descriptive: [uid, node, host_ip, pod_ip, created_by_kind, created_by_name]
+      descriptive:
+        - uid
+        - node
+        - host_ip
+        - pod_ip
+        - created_by_kind
+        - created_by_name
+        - priority_class
+        - host_network
     - entity: k8s.node
       id: [node]
   kube_node_info:
     - entity: k8s.node
       id: [node]
-      descriptive: [kernel_version, os_image, container_runtime_version, kubelet_version]
+      descriptive:
+        - kernel_version
+        - os_image
+        - container_runtime_version
+        - kubelet_version
+        - pod_cidr
+        - provider_id
+        - system_uuid
+        - internal_ip
   kube_pod_owner:
     - entity: k8s.pod
       id: [namespace, pod]
+      descriptive: [uid]
     - entity: k8s.workload
       id: [namespace, owner_kind, owner_name]
       descriptive: [owner_is_controller]
+  kube_pod_container_info:
+    - entity: k8s.pod
+      id: [namespace, pod]
+      descriptive: [uid]
+    - entity: k8s.container
+      id: [namespace, pod, container]
+      descriptive: [image, image_id, image_spec, container_id]
+  kube_pod_init_container_info:
+    - entity: k8s.pod
+      id: [namespace, pod]
+      descriptive: [uid]
+    - entity: k8s.container
+      id: [namespace, pod, container]
+      descriptive: [image, image_id, image_spec, container_id, restart_policy]
+  kube_service_info:
+    - entity: k8s.service
+      id: [namespace, service]
+      descriptive:
+        - uid
+        - cluster_ip
+        - external_name
+        - load_balancer_ip
+        - external_traffic_policy
+  # target_info's remaining labels are the target's resource attributes; job +
+  # instance identify the target, so the snapshot belongs to the instance, not
+  # the logical service.
   target_info:
     - entity: service
       id: [job]
-      descriptive_rest: true
     - entity: service.instance
       id: [job, instance]
+      descriptive_rest: true

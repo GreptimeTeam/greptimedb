@@ -913,12 +913,14 @@ mod tests {
         assert_eq!(declarations.len(), 2);
         assert_eq!(declarations[0].entity_type, "service");
         assert_eq!(declarations[0].id_columns, vec!["job"]);
-        assert_eq!(
-            declarations[0].descriptive_columns,
-            vec!["instance", "k8s_cluster_name", "service_version"]
-        );
+        assert!(declarations[0].descriptive_columns.is_empty());
+        // The remaining labels are the target's resource attributes: they
+        // describe the instance, not the logical service.
         assert_eq!(declarations[1].entity_type, "service.instance");
         assert_eq!(declarations[1].id_columns, vec!["job", "instance"]);
-        assert!(declarations[1].descriptive_columns.is_empty());
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec!["k8s_cluster_name", "service_version"]
+        );
     }
 }

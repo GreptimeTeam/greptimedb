@@ -158,7 +158,7 @@ fn co_declared_branch(
     for source in sources {
         let find = |ty: &str| source.declarations.iter().find(|d| d.entity_type == ty);
         let mut pairs = Vec::new();
-        for rule in &vocabulary.edge_vocabulary {
+        for rule in &vocabulary.co_declared_edges {
             if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
                 pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_ATTRIBUTE));
             }
@@ -166,7 +166,7 @@ fn co_declared_branch(
         if source.is_trace {
             // Agent edges are tied to span structure by the RFC: a non-trace
             // table co-declaring these types must not fabricate invocations.
-            for rule in &vocabulary.agent_edge_vocabulary {
+            for rule in &vocabulary.trace_co_declared_edges {
                 if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
                     pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_TRACE));
                 }

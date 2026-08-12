@@ -65,8 +65,8 @@ pub struct PromImplicitEntity {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Conventions {
-    pub edge_vocabulary: Vec<EdgeRule>,
-    pub agent_edge_vocabulary: Vec<EdgeRule>,
+    pub co_declared_edges: Vec<EdgeRule>,
+    pub trace_co_declared_edges: Vec<EdgeRule>,
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
     pub prometheus_info_metrics: BTreeMap<String, Vec<PromImplicitEntity>>,
 }
@@ -81,11 +81,12 @@ pub const ENTITY_TYPE_K8S_POD: &str = "k8s.pod";
 pub const ENTITY_TYPE_K8S_NODE: &str = "k8s.node";
 pub const ENTITY_TYPE_K8S_CONTAINER: &str = "k8s.container";
 pub const ENTITY_TYPE_K8S_WORKLOAD: &str = "k8s.workload";
+pub const ENTITY_TYPE_K8S_SERVICE: &str = "k8s.service";
 pub const ENTITY_TYPE_GEN_AI_AGENT: &str = "gen_ai.agent";
 pub const ENTITY_TYPE_GEN_AI_MODEL: &str = "gen_ai.model";
 pub const ENTITY_TYPE_GEN_AI_TOOL: &str = "gen_ai.tool";
 
-const ENTITY_TYPES: [&str; 11] = [
+const ENTITY_TYPES: [&str; 12] = [
     ENTITY_TYPE_SERVICE,
     ENTITY_TYPE_SERVICE_INSTANCE,
     ENTITY_TYPE_HOST,
@@ -94,6 +95,7 @@ const ENTITY_TYPES: [&str; 11] = [
     ENTITY_TYPE_K8S_NODE,
     ENTITY_TYPE_K8S_CONTAINER,
     ENTITY_TYPE_K8S_WORKLOAD,
+    ENTITY_TYPE_K8S_SERVICE,
     ENTITY_TYPE_GEN_AI_AGENT,
     ENTITY_TYPE_GEN_AI_MODEL,
     ENTITY_TYPE_GEN_AI_TOOL,
@@ -151,9 +153,9 @@ fn parse(yaml: &str) -> Result<Conventions, String> {
 fn validate(conventions: &Conventions) -> Result<(), String> {
     let mut seen_edges = HashSet::new();
     for rule in conventions
-        .edge_vocabulary
+        .co_declared_edges
         .iter()
-        .chain(&conventions.agent_edge_vocabulary)
+        .chain(&conventions.trace_co_declared_edges)
     {
         for ty in [&rule.src, &rule.dst] {
             if !ENTITY_TYPES.contains(&ty.as_str()) {
@@ -233,8 +235,8 @@ mod tests {
     #[test]
     fn embedded_conventions_parse_and_validate() {
         let conventions = conventions().unwrap();
-        assert!(!conventions.edge_vocabulary.is_empty());
-        assert!(!conventions.agent_edge_vocabulary.is_empty());
+        assert!(!conventions.co_declared_edges.is_empty());
+        assert!(!conventions.trace_co_declared_edges.is_empty());
         assert!(!conventions.virtual_dst_candidates.is_empty());
         assert!(
             conventions
@@ -247,27 +249,27 @@ mod tests {
     fn validation_rejects_broken_conventions() {
         // Unknown rel_type.
         assert!(
-            parse("edge_vocabulary: [{src: a, dst: b, rel: pets}]\nagent_edge_vocabulary: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
+            parse("co_declared_edges: [{src: a, dst: b, rel: pets}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
                 .is_err()
         );
         // Entity type outside the grammar.
         assert!(
-            parse("edge_vocabulary: [{src: A, dst: b, rel: uses}]\nagent_edge_vocabulary: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
+            parse("co_declared_edges: [{src: A, dst: b, rel: uses}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
                 .is_err()
         );
         // Duplicate rule.
         assert!(
-            parse("edge_vocabulary: [{src: a, dst: b, rel: uses}, {src: a, dst: b, rel: uses}]\nagent_edge_vocabulary: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
+            parse("co_declared_edges: [{src: a, dst: b, rel: uses}, {src: a, dst: b, rel: uses}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
                 .is_err()
         );
         // descriptive and descriptive_rest are mutually exclusive.
         assert!(
-            parse("edge_vocabulary: []\nagent_edge_vocabulary: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {t: [{entity: a, id: [x], descriptive: [y], descriptive_rest: true}]}")
+            parse("co_declared_edges: []\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {t: [{entity: a, id: [x], descriptive: [y], descriptive_rest: true}]}")
                 .is_err()
         );
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
-            parse("edge_vocabulary: [{src: a, dst: b, rel: uses, direction: down}]\nagent_edge_vocabulary: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
+            parse("co_declared_edges: [{src: a, dst: b, rel: uses, direction: down}]\nagent_co_declared_edges: []\nvirtual_dst_candidates: []\nprometheus_info_metrics: {}")
                 .is_err()
         );
     }
