@@ -410,7 +410,6 @@ pub(crate) mod test_hooks {
         release: watch::Sender<bool>,
     }
 
-    /// The currently armed barrier, if any.
     static ACTIVE_BARRIER: Mutex<Option<ActiveBarrier>> = Mutex::new(None);
     static NEXT_BARRIER_ID: AtomicU64 = AtomicU64::new(1);
 

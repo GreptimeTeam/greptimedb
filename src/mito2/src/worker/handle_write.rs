@@ -128,7 +128,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
                 region_ctx.write_memtable().await;
                 region_ctx.write_bulk().await;
-                // Publish only after all rows (including bulk parts) are physically installed.
                 region_ctx.publish_sequence_and_entry_id();
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
@@ -140,7 +139,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         common_runtime::spawn_global(async move {
                             region_ctx.write_memtable().await;
                             region_ctx.write_bulk().await;
-                            // Publish inside the spawned task after the memtable writes.
                             region_ctx.publish_sequence_and_entry_id();
                             (region_ctx.put_num, region_ctx.delete_num)
                         })
@@ -760,7 +758,6 @@ mod tests {
     use crate::test_util::ts_ms_value;
     use crate::test_util::version_util::VersionControlBuilder;
 
-    /// Creates a bulk part with `num_rows` rows whose schema matches the builder metadata.
     fn new_bulk_part(num_rows: i64) -> BulkPart {
         let schema = Arc::new(Schema::new(vec![
             Field::new("tag_0", DataType::Utf8, true),
@@ -940,8 +937,6 @@ mod tests {
         assert!(!region_ctxs[&ok_region].is_failed());
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
 
-        // The failed region installs no rows, so its committed sequence must not
-        // advance and its waiter gets the error, while the sibling advances normally.
         for region_ctx in region_ctxs.values_mut() {
             region_ctx.write_memtable().await;
             region_ctx.write_bulk().await;
@@ -966,7 +961,6 @@ mod tests {
         assert_eq!(1, ok_rx.await.unwrap().unwrap());
     }
 
-    // Deterministically pause before bulk installation and verify publication waits.
     #[tokio::test]
     async fn test_bulk_write_sequence_not_committed_before_install_worker_level() {
         let region_id = RegionId::new(1, 1);
