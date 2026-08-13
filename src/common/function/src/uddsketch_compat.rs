@@ -185,10 +185,10 @@ impl LegacyUddSketch {
         if !quantile.is_finite() || !(0.0..=1.0).contains(&quantile) {
             return Err("invalid quantile".to_string());
         }
-        validate_current_mapping(self.alpha, self.gamma)?;
         if self.compactions >= 64 {
             return Err("legacy compaction count must be below 64".to_string());
         }
+        validate_current_mapping(self.alpha, self.gamma, self.compactions)?;
         if self.max_buckets == 0 || self.max_buckets > MAX_BUCKETS as u64 {
             return Err("legacy maximum bucket count is outside supported limits".to_string());
         }
@@ -235,22 +235,32 @@ impl LegacyUddSketch {
     }
 }
 
-fn validate_current_mapping(alpha: f64, gamma: f64) -> Result<(), String> {
+fn validate_current_mapping(
+    mut alpha: f64,
+    mut gamma: f64,
+    compactions: u32,
+) -> Result<(), String> {
     if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
         return Err("legacy current error is outside [0, 1]".to_string());
     }
-    if gamma == f64::INFINITY {
-        return (alpha == 1.0)
+    if !gamma.is_finite() || gamma <= 1.0 {
+        return (alpha == 1.0 && gamma == f64::INFINITY && compactions >= 5)
+            .then_some(())
+            .ok_or_else(|| "legacy gamma must be greater than one".to_string());
+    }
+    if alpha == 1.0 {
+        return (compactions > 0 && 1.0 - 2.0 / (gamma + 1.0) == 1.0)
             .then_some(())
             .ok_or_else(|| "legacy saturated mapping metadata is inconsistent".to_string());
     }
-    if !gamma.is_finite() || gamma <= 1.0 {
-        return Err("legacy gamma must be greater than one".to_string());
-    }
 
-    let expected_alpha = 1.0 - 2.0 / (gamma + 1.0);
-    let tolerance = 1e-9;
-    if (alpha - expected_alpha).abs() > tolerance {
+    for _ in 0..compactions {
+        alpha /= 1.0 + (1.0 - alpha * alpha).sqrt();
+        gamma = gamma.sqrt();
+    }
+    let expected_gamma = (1.0 + alpha) / (1.0 - alpha);
+    let relative_difference = (gamma - expected_gamma).abs() / expected_gamma;
+    if relative_difference > 1e-10 {
         return Err("legacy mapping metadata is inconsistent".to_string());
     }
     Ok(())
@@ -266,39 +276,9 @@ fn legacy_bucket_key_is_attainable(gamma: f64, key: LegacyBucketKey) -> bool {
         return true;
     }
 
-    let magnitude = gamma.powf(index as f64 - 1.0);
-    let lower = magnitude;
-    let upper = magnitude * gamma;
-    [
-        magnitude,
-        next_down(magnitude),
-        next_up(magnitude),
-        lower,
-        next_up(lower),
-        upper,
-        next_down(upper),
-        f64::from_bits(1),
-        f64::MAX,
-    ]
-    .into_iter()
-    .filter(|value| value.is_finite() && *value > 0.0)
-    .any(|value| (value.log(gamma).ceil() as i64) == index)
-}
-
-fn next_up(value: f64) -> f64 {
-    if value.is_nan() || value == f64::INFINITY {
-        value
-    } else if value == 0.0 {
-        f64::from_bits(1)
-    } else if value > 0.0 {
-        f64::from_bits(value.to_bits() + 1)
-    } else {
-        f64::from_bits(value.to_bits() - 1)
-    }
-}
-
-fn next_down(value: f64) -> f64 {
-    -next_up(-value)
+    let minimum = f64::from_bits(1).log(gamma).ceil() as i64;
+    let maximum = f64::MAX.log(gamma).ceil() as i64;
+    (minimum..=maximum).contains(&index)
 }
 
 fn legacy_bucket_value(alpha: f64, gamma: f64, key: LegacyBucketKey) -> Result<f64, String> {
@@ -541,6 +521,35 @@ mod tests {
 
         let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
         sketch.gamma = 2.0;
+        assert!(sketch.quantile(0.5).is_err());
+
+        let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
+        sketch.alpha = 1.0;
+        sketch.gamma = 2.0;
+        assert!(sketch.quantile(0.5).is_err());
+
+        let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
+        sketch.alpha = 1e-12;
+        sketch.gamma = 1.0 + 1e-9;
+        sketch.compactions = 0;
+        assert!(sketch.quantile(0.5).is_err());
+
+        let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
+        sketch.alpha = 1.0;
+        sketch.gamma = 1e20;
+        sketch.compactions = 0;
+        assert!(sketch.quantile(0.5).is_err());
+
+        let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
+        sketch.alpha = 1.0;
+        sketch.gamma = f64::INFINITY;
+        sketch.compactions = 1;
+        assert!(validate_current_mapping(sketch.alpha, sketch.gamma, sketch.compactions).is_err());
+
+        let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
+        sketch.alpha = 0.99999999;
+        sketch.gamma = 2.0;
+        sketch.compactions = 0;
         assert!(sketch.quantile(0.5).is_err());
 
         let mut sketch = decode_legacy_sketch(&LEGACY_STATE[..bare_len]).unwrap();
