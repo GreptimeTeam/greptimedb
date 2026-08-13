@@ -32,7 +32,6 @@ use servers::otlp::trace::SERVICE_NAME_COLUMN;
 use servers::otlp::trace::attributes::Attributes;
 use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
-use servers::query_handler::TraceIngestOutcome;
 
 use super::{
     ChunkFailureReaction, Instance, TraceChunkRetry, TraceChunkSchemaState, TraceRequestSchema,
