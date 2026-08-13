@@ -128,6 +128,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
                 region_ctx.write_memtable().await;
                 region_ctx.write_bulk().await;
+                // Publish only after all rows (including bulk parts) are
+                // physically installed, so a scan opening on the committed
+                // sequence can never bind H to invisible rows.
+                region_ctx.publish_sequence_and_entry_id();
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             } else {
@@ -138,6 +142,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         common_runtime::spawn_global(async move {
                             region_ctx.write_memtable().await;
                             region_ctx.write_bulk().await;
+                            // The spawned task owns the moved ctx, so publish
+                            // inside the task after the memtable writes.
+                            region_ctx.publish_sequence_and_entry_id();
                             (region_ctx.put_num, region_ctx.delete_num)
                         })
                     })
@@ -734,7 +741,12 @@ fn check_partition_expr_version(
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{Row, Rows};
+    use api::v1::helper::{tag_column_schema, time_index_column_schema};
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, Row, Rows};
+    use common_recordbatch::DfRecordBatch;
+    use datatypes::arrow::array::{ArrayRef, StringArray, TimestampMillisecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use futures::stream;
     use log_store::error::{
         Error as LogStoreError, IllegalStateSnafu, InvalidProviderSnafu, Result as LogStoreResult,
@@ -746,8 +758,41 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::memtable::bulk::part::BulkPart;
     use crate::request::OptionOutputTx;
+    use crate::test_util::ts_ms_value;
     use crate::test_util::version_util::VersionControlBuilder;
+
+    /// Creates a bulk part with `num_rows` rows. The schema carries the
+    /// builder metadata's columns (`tag_0` primary key + `ts` time index) so
+    /// the bulk-install conversion succeeds; `timestamp_index` points at the
+    /// `ts` column.
+    fn new_bulk_part(num_rows: i64) -> BulkPart {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let tag = Arc::new(StringArray::from_iter_values(
+            (0..num_rows).map(|value| value.to_string()),
+        )) as ArrayRef;
+        let ts = Arc::new(TimestampMillisecondArray::from(
+            (0..num_rows).collect::<Vec<_>>(),
+        )) as ArrayRef;
+        let batch = DfRecordBatch::try_new(schema, vec![tag, ts]).unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: num_rows - 1,
+            min_timestamp: 0,
+            sequence: 0,
+            timestamp_index: 1,
+            raw_data: None,
+        }
+    }
 
     /// A log store that fails to build entries for `failing_region` and fails the
     /// whole batch when `fail_append` is true.
@@ -857,8 +902,18 @@ mod tests {
         ctx.push_mutation(
             OpType::Put as i32,
             Some(Rows {
-                schema: vec![],
-                rows: vec![Row { values: vec![] }],
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    tag_column_schema("tag_0", ColumnDataType::String),
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        ts_ms_value(0),
+                        api::v1::Value {
+                            value_data: Some(ValueData::StringValue("a".to_string())),
+                        },
+                    ],
+                }],
             }),
             None,
             OptionOutputTx::from(tx),
@@ -878,8 +933,10 @@ mod tests {
 
         let mut region_ctxs = HashMap::new();
         let (ctx, failing_rx) = new_region_ctx(failing_region);
+        let failing_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(failing_region, ctx);
         let (ctx, ok_rx) = new_region_ctx(ok_region);
+        let ok_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(ok_region, ctx);
         let entry_id = region_ctxs[&ok_region].next_entry_id();
 
@@ -890,10 +947,111 @@ mod tests {
         assert!(!region_ctxs[&ok_region].is_failed());
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
 
+        // Run the memtable and publication phase the worker runs after `write_wal`.
+        // The failed region installed no rows, so its committed sequence must not
+        // advance; the successful sibling region advances normally.
+        for region_ctx in region_ctxs.values_mut() {
+            region_ctx.write_memtable().await;
+            region_ctx.write_bulk().await;
+            region_ctx.publish_sequence_and_entry_id();
+        }
+
+        assert_eq!(
+            failing_committed_sequence,
+            region_ctxs[&failing_region]
+                .version_control()
+                .committed_sequence()
+        );
+        assert_eq!(
+            ok_committed_sequence + 1,
+            region_ctxs[&ok_region]
+                .version_control()
+                .committed_sequence()
+        );
+
         // Waiters of the failed region get the error while others get the result.
         drop(region_ctxs);
         assert!(failing_rx.await.unwrap().is_err());
         assert_eq!(1, ok_rx.await.unwrap().unwrap());
+    }
+
+    // The committed sequence must not be published before the bulk part's rows
+    // are physically installed in the memtable: publication happens strictly
+    // after `write_bulk` returns. Armed with the bulk-install test barrier,
+    // this deterministically pauses the worker's memtable phase between the
+    // ordinary-memtable handling and the bulk installation and asserts the
+    // region's committed sequence is still its initial value (0) — read via
+    // the `version_control()` accessor, never through a scanner API. After the
+    // barrier is released, the committed sequence must advance to cover the
+    // bulk rows.
+    #[tokio::test]
+    async fn test_bulk_write_sequence_not_committed_before_install_worker_level() {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        assert_eq!(
+            0,
+            version_control.committed_sequence(),
+            "the builder must start at sequence 0"
+        );
+
+        let mut region_ctxs = HashMap::new();
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        // Push a 3-row bulk part without an explicit sequence, exactly like the
+        // worker's `process_bulk_requests`.
+        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None));
+        region_ctxs.insert(region_id, ctx);
+
+        // Run the WAL phase the worker runs before the memtable phase.
+        let wal = Wal::new(Arc::new(MockLogStore::default()));
+        assert!(write_wal(&wal, &mut region_ctxs).await);
+        assert!(!region_ctxs[&region_id].is_failed());
+
+        // Arm the bulk-install barrier: `write_bulk` pauses right before the
+        // parts are physically installed into the memtable.
+        let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(region_id);
+
+        // Run the worker's memtable and publication phases in the background.
+        let write_handle = tokio::spawn(async move {
+            let mut region_ctx = region_ctxs.remove(&region_id).unwrap();
+            region_ctx.write_memtable().await;
+            region_ctx.write_bulk().await;
+            region_ctx.publish_sequence_and_entry_id();
+        });
+
+        // Wait until the write paused at the barrier: deterministic, no sleeps.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            barrier.wait_until_reached(),
+        )
+        .await
+        .expect("bulk write never reached the install barrier");
+
+        // The committed sequence must not have advanced yet: publication
+        // happens strictly after the bulk part is installed.
+        assert_eq!(
+            0,
+            version_control.committed_sequence(),
+            "committed sequence leaked before the bulk part was installed"
+        );
+
+        // Release the barrier: the bulk part installs and the committed
+        // sequence advances to cover all 3 bulk rows.
+        barrier.release();
+        write_handle.await.expect("bulk write should complete");
+        assert_eq!(
+            3,
+            version_control.committed_sequence(),
+            "committed sequence must cover the installed bulk rows"
+        );
+
+        // The bulk waiter is notified with the number of installed rows.
+        assert_eq!(3, rx.await.unwrap().unwrap());
     }
 
     #[tokio::test]
