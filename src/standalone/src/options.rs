@@ -157,6 +157,7 @@ impl StandaloneOptions {
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
+            query: cloned_opts.query,
             slow_query: cloned_opts.slow_query,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
@@ -226,5 +227,14 @@ mod tests {
             &selected.event_recorder.event_types,
             &frontend_options.event_recorder.event_types,
         ));
+    }
+
+    #[test]
+    fn test_query_options_propagated_to_components() {
+        let mut options = StandaloneOptions::default();
+        options.query.parallelism = 4;
+
+        assert_eq!(options.frontend_options().query.parallelism, 4);
+        assert_eq!(options.datanode_options().query.parallelism, 4);
     }
 }

@@ -277,8 +277,8 @@ mod tests {
             panic!("expected right merge scan hash partitioning");
         };
 
-        assert_eq!(*left_count, 32);
-        assert_eq!(*right_count, 32);
+        assert_eq!(*left_count, 2);
+        assert_eq!(*right_count, 2);
         assert_eq!(
             column_names(left_exprs),
             vec![DATA_SCHEMA_TSID_COLUMN_NAME, "greptime_timestamp"]
