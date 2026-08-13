@@ -47,7 +47,6 @@ use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::procedure_executor::ProcedureExecutorRef;
 #[cfg(feature = "enterprise")]
@@ -119,10 +118,7 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::{
-    to_meta_query_context_with_origin_frontend_and_trigger_reason,
-    to_meta_query_context_with_trigger_reason,
-};
+use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -729,13 +725,11 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_trigger(task),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_trigger(task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -793,13 +787,11 @@ impl StatementExecutor {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_flow(task),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1109,14 +1101,12 @@ impl StatementExecutor {
             table_type: TableType::View,
         };
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(ctx, TriggerReason::Manual),
-            DdlTask::new_create_view(expr, view_info.clone()),
-        );
+        let executor_context = to_executor_context(ctx, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_view(expr, view_info.clone()));
 
         let resp = self
             .procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1195,13 +1185,11 @@ impl StatementExecutor {
         expr: DropFlowTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_flow(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_flow(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1230,13 +1218,11 @@ impl StatementExecutor {
         expr: DropTriggerTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_trigger(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_trigger(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1311,13 +1297,11 @@ impl StatementExecutor {
         expr: DropViewTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_view(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_view(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1780,17 +1764,13 @@ impl StatementExecutor {
             source: Some(source),
             ..Default::default()
         };
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context.clone(), TriggerReason::Manual);
-        let mut req = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_alter_table(AlterTableExpr {
-                catalog_name: request.catalog_name.clone(),
-                schema_name: request.schema_name.clone(),
-                table_name: request.table_name.clone(),
-                kind: Some(Kind::Repartition(repartition)),
-            }),
-        );
+        let executor_context = to_executor_context(query_context.clone(), TriggerReason::Manual);
+        let mut req = SubmitDdlTaskRequest::new(DdlTask::new_alter_table(AlterTableExpr {
+            catalog_name: request.catalog_name.clone(),
+            schema_name: request.schema_name.clone(),
+            table_name: request.table_name.clone(),
+            kind: Some(Kind::Repartition(repartition)),
+        }));
         req.wait = ddl_options.wait;
         req.timeout = ddl_options.timeout;
 
@@ -1806,7 +1786,7 @@ impl StatementExecutor {
 
         let response = self
             .procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1888,12 +1868,11 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
+        let executor_context = to_executor_context(query_context, trigger_reason);
 
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_alter_table(expr));
+            let req = SubmitDdlTaskRequest::new(DdlTask::new_alter_table(expr));
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1903,10 +1882,7 @@ impl StatementExecutor {
             (req, invalidate_keys)
         } else {
             // This is logical table
-            let req = SubmitDdlTaskRequest::new(
-                meta_query_context,
-                DdlTask::new_alter_logical_tables(vec![expr]),
-            );
+            let req = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(vec![expr]));
 
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
@@ -1934,7 +1910,7 @@ impl StatementExecutor {
         };
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -2025,17 +2001,19 @@ impl StatementExecutor {
             .map(|expr| expr.as_pb_partition().context(PartitionExprToPbSnafu))
             .collect::<Result<Vec<_>>>()?;
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend_and_trigger_reason(
-                query_context,
-                &self.origin_frontend_addr,
-                trigger_reason,
-            ),
-            DdlTask::new_create_table(create_table, partitions, table_info),
+        let executor_context = to_executor_context_with_origin_frontend(
+            query_context,
+            &self.origin_frontend_addr,
+            trigger_reason,
         );
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_table(
+            create_table,
+            partitions,
+            table_info,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2046,17 +2024,15 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend_and_trigger_reason(
-                query_context,
-                &self.origin_frontend_addr,
-                trigger_reason,
-            ),
-            DdlTask::new_create_logical_tables(tables_data),
+        let executor_context = to_executor_context_with_origin_frontend(
+            query_context,
+            &self.origin_frontend_addr,
+            trigger_reason,
         );
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2067,15 +2043,11 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
-        let request = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_alter_logical_tables(tables_data),
-        );
+        let executor_context = to_executor_context(query_context, trigger_reason);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2087,19 +2059,17 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_table(
-                table_name.catalog_name.clone(),
-                table_name.schema_name.clone(),
-                table_name.table_name.clone(),
-                table_id,
-                drop_if_exists,
-            ),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_table(
+            table_name.catalog_name.clone(),
+            table_name.schema_name.clone(),
+            table_name.table_name.clone(),
+            table_id,
+            drop_if_exists,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2111,13 +2081,12 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_database(catalog, schema, drop_if_exists),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request =
+            SubmitDdlTaskRequest::new(DdlTask::new_drop_database(catalog, schema, drop_if_exists));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2127,13 +2096,11 @@ impl StatementExecutor {
         alter_expr: AlterDatabaseExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_alter_database(alter_expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_database(alter_expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2145,21 +2112,17 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
-        let request = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_truncate_table(
-                table_name.catalog_name.clone(),
-                table_name.schema_name.clone(),
-                table_name.table_name.clone(),
-                table_id,
-                time_ranges,
-            ),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
+            table_name.catalog_name.clone(),
+            table_name.schema_name.clone(),
+            table_name.table_name.clone(),
+            table_id,
+            time_ranges,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2239,13 +2202,17 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_database(
+            catalog,
+            database,
+            create_if_not_exists,
+            options,
+            creator,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2876,14 +2843,10 @@ async fn execute_undrop_table(
             table_name: table_name.to_string(),
         })?;
 
-    let meta_query_context =
-        to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
-    let request = SubmitDdlTaskRequest::new(
-        meta_query_context,
-        DdlTask::new_undrop_table(dropped.table_id),
-    );
+    let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+    let request = SubmitDdlTaskRequest::new(DdlTask::new_undrop_table(dropped.table_id));
     procedure_executor
-        .submit_ddl_task(&ExecutorContext::default(), request)
+        .submit_ddl_task(executor_context, request)
         .await
         .context(error::ExecuteDdlSnafu)?;
 
@@ -2931,9 +2894,7 @@ mod test {
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
     #[cfg(feature = "enterprise")]
-    use common_meta::rpc::ddl::{
-        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
-    };
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
     #[cfg(feature = "enterprise")]
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -2951,6 +2912,7 @@ mod test {
     #[derive(Default)]
     struct RecordingProcedureExecutor {
         requests: Mutex<Vec<SubmitDdlTaskRequest>>,
+        contexts: Mutex<Vec<ExecutorContext>>,
         fail: bool,
     }
 
@@ -2959,9 +2921,10 @@ mod test {
     impl ProcedureExecutor for RecordingProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            ctx: ExecutorContext,
             request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.contexts.lock().unwrap().push(ctx);
             self.requests.lock().unwrap().push(request);
             if self.fail {
                 return common_meta::error::UnsupportedSnafu {
@@ -3078,12 +3041,10 @@ mod test {
 
         let requests = procedure.requests.lock().unwrap();
         assert!(matches!(&requests[0].task, DdlTask::UndropTable(task) if task.table_id == 42));
+        let contexts = procedure.contexts.lock().unwrap();
         assert_eq!(
-            requests[0]
-                .query_context
-                .extensions
-                .get(TRIGGER_REASON_EXTENSION_KEY),
-            Some(&TriggerReason::Manual.as_ref().to_string())
+            contexts[0].event_input.as_ref().map(|input| input.reason),
+            Some(TriggerReason::Manual)
         );
         assert_eq!(
             cache.invalidations.lock().unwrap()[0],

@@ -45,7 +45,7 @@ use base64::engine::general_purpose;
 use common_base::protocol::Channel;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-pub use common_event_recorder::{PersistentEventContext, TriggerReason};
+pub use common_event_recorder::TriggerReason;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -68,8 +68,6 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
-/// Reserved query-context extension key for the trigger reason supplied by frontend.
-pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -336,7 +334,6 @@ impl TryFrom<Task> for DdlTask {
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
-    pub query_context: QueryContext,
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
@@ -344,9 +341,8 @@ pub struct SubmitDdlTaskRequest {
 
 impl SubmitDdlTaskRequest {
     /// The default constructor for [`SubmitDdlTaskRequest`].
-    pub fn new(query_context: QueryContext, task: DdlTask) -> Self {
+    pub fn new(task: DdlTask) -> Self {
         Self {
-            query_context,
             wait: Self::default_wait(),
             timeout: Self::default_timeout(),
             task,
@@ -377,25 +373,10 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let SubmitDdlTaskRequest {
-            mut query_context,
             wait,
             timeout,
             task,
         } = request;
-
-        query_context
-            .extensions
-            .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
-        if let DdlTask::CreateDatabase(CreateDatabaseTask {
-            creator: Some(creator),
-            ..
-        }) = &task
-        {
-            query_context.extensions.insert(
-                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
-                serde_json::to_string(creator).context(error::SerdeJsonSnafu)?,
-            );
-        }
 
         let task = match task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
@@ -444,10 +425,12 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
         Ok(Self {
             header: None,
-            query_context: Some(query_context.into()),
+            query_context: None,
             timeout_secs: ddl_timeout_secs(timeout),
             wait,
             task: Some(task),
+            event_context: None,
+            actor: None,
         })
     }
 }
@@ -1668,22 +1651,6 @@ pub struct QueryContext {
     pub sst_min_sequences: HashMap<u64, u64>,
 }
 
-/// Builds event context from frontend query context metadata.
-pub fn event_context_from_query_context(query_context: &QueryContext) -> PersistentEventContext {
-    let reason = query_context
-        .extensions
-        .get(TRIGGER_REASON_EXTENSION_KEY)
-        .map(|reason| TriggerReason::from_extension(reason))
-        .unwrap_or_default();
-    let channel = Channel::from(u32::from(query_context.channel));
-    let context = PersistentEventContext::new(reason);
-    if channel == Channel::Unknown {
-        context
-    } else {
-        context.with_protocol(channel.as_ref())
-    }
-}
-
 impl QueryContext {
     /// Get the current catalog
     pub fn current_catalog(&self) -> &str {
@@ -1708,6 +1675,12 @@ impl QueryContext {
     /// Get the channel
     pub fn channel(&self) -> u8 {
         self.channel
+    }
+
+    /// Returns the protocol derived from the typed query channel.
+    pub fn protocol(&self) -> Option<String> {
+        let channel = Channel::from(u32::from(self.channel));
+        (channel != Channel::Unknown).then(|| channel.as_ref().to_string())
     }
 
     pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {
@@ -1922,10 +1895,7 @@ mod tests {
     #[test]
     fn test_undrop_table_task_pb_roundtrip() {
         let expected = UndropTableTask { table_id: 1024 };
-        let request = SubmitDdlTaskRequest::new(
-            QueryContext::default(),
-            DdlTask::UndropTable(expected.clone()),
-        );
+        let request = SubmitDdlTaskRequest::new(DdlTask::UndropTable(expected.clone()));
 
         let pb = PbDdlTaskRequest::try_from(request).unwrap();
         let pb_task = pb.task.unwrap();
@@ -1937,63 +1907,13 @@ mod tests {
     #[test]
     fn test_purge_dropped_table_task_pb_roundtrip() {
         let expected = PurgeDroppedTableTask { table_id: 1024 };
-        let request = SubmitDdlTaskRequest::new(
-            QueryContext::default(),
-            DdlTask::PurgeDroppedTable(expected.clone()),
-        );
+        let request = SubmitDdlTaskRequest::new(DdlTask::PurgeDroppedTable(expected.clone()));
 
         let pb = PbDdlTaskRequest::try_from(request).unwrap();
         let pb_task = pb.task.unwrap();
         let de = DdlTask::try_from(pb_task).unwrap();
 
         assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
-    }
-
-    #[test]
-    fn test_create_database_creator_transport_sanitizes_extension() {
-        let request = |creator| {
-            let mut query_context = QueryContext::default();
-            query_context.extensions.insert(
-                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
-                "spoofed".to_string(),
-            );
-            SubmitDdlTaskRequest::new(
-                query_context,
-                DdlTask::new_create_database(
-                    "greptime".to_string(),
-                    "test".to_string(),
-                    false,
-                    HashMap::new(),
-                    creator,
-                ),
-            )
-        };
-        let creator = CreatorGrantIntent {
-            username: "alice".to_string(),
-            created_at_ns: 42,
-        };
-
-        let mut pb = PbDdlTaskRequest::try_from(request(Some(creator.clone()))).unwrap();
-        let encoded = pb
-            .query_context
-            .as_ref()
-            .unwrap()
-            .extensions
-            .get(CREATE_DATABASE_CREATOR_EXTENSION_KEY)
-            .unwrap();
-        assert_eq!(creator, serde_json::from_str(encoded).unwrap());
-        assert!(matches!(
-            DdlTask::try_from(pb.task.take().unwrap()).unwrap(),
-            DdlTask::CreateDatabase(CreateDatabaseTask { creator: None, .. })
-        ));
-
-        let pb = PbDdlTaskRequest::try_from(request(None)).unwrap();
-        assert!(
-            !pb.query_context
-                .unwrap()
-                .extensions
-                .contains_key(CREATE_DATABASE_CREATOR_EXTENSION_KEY)
-        );
     }
 
     #[test]
@@ -2261,45 +2181,5 @@ mod tests {
     fn test_trigger_reason_deserializes_unknown_value() {
         let reason: TriggerReason = serde_json::from_str("\"future_reason\"").unwrap();
         assert_eq!(TriggerReason::Unknown, reason);
-    }
-
-    #[test]
-    fn test_event_context_serialization() {
-        let context = PersistentEventContext::new(TriggerReason::Manual).with_protocol("mysql");
-
-        assert_eq!(
-            serde_json::json!({
-                "reason": "manual",
-                "protocol": "mysql",
-            }),
-            serde_json::to_value(context).unwrap()
-        );
-
-        assert_eq!(
-            serde_json::json!({ "reason": "manual" }),
-            serde_json::to_value(PersistentEventContext::new(TriggerReason::Manual)).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_event_context_from_query_context_preserves_extensions() {
-        let mut query_context = QueryContext::default();
-        query_context.extensions.insert(
-            TRIGGER_REASON_EXTENSION_KEY.to_string(),
-            TriggerReason::AutoCreate.as_ref().to_string(),
-        );
-        query_context.channel = 4;
-
-        let event_context = event_context_from_query_context(&query_context);
-
-        assert_eq!(event_context.reason, TriggerReason::AutoCreate);
-        assert_eq!(event_context.protocol.as_deref(), Some("prometheus"));
-        assert_eq!(
-            query_context
-                .extensions
-                .get(TRIGGER_REASON_EXTENSION_KEY)
-                .map(String::as_str),
-            Some("auto_create")
-        );
     }
 }

@@ -1062,7 +1062,7 @@ mod tests {
 
     use super::*;
     use crate::error::{self, Error};
-    use crate::store::state_store::ObjectStateStore;
+    use crate::store::state_store::{ObjectStateStore, StateStore};
     use crate::test_util::InMemoryPoisonStore;
     use crate::{
         ChildSubmissionOutcome, Context, EventContext, EventTrigger, Procedure, ProcedureEvent,
@@ -1721,7 +1721,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recovery_emits_recovered_event() {
+    async fn test_recovery_loads_legacy_procedure_message() {
+        let dir = create_temp_dir("legacy_procedure_message_recovery");
+        let object_store = test_util::new_object_store(&dir);
+        let state_store = Arc::new(ObjectStateStore::new(object_store));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig {
+                parent_path: "data/".to_string(),
+                ..Default::default()
+            },
+            state_store.clone(),
+            poison_manager,
+            None,
+            None,
+        );
+        manager
+            .event_recorder_handle()
+            .install(event_recorder.clone());
+        manager.manager_ctx.start();
+        manager
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
+            .unwrap();
+
+        let procedure = ProcedureToLoad::new("legacy recovered submission");
+        let procedure_id = ProcedureId::random();
+        let key = format!("data/procedure/{procedure_id}/0000000000.step");
+        // This is the persisted JSON shape written before ProcedureMessage had `context`.
+        let legacy_message = serde_json::json!({
+            "type_name": procedure.type_name(),
+            "data": procedure.dump().unwrap(),
+            "parent_id": null,
+            "step": 0,
+        });
+        state_store
+            .put(&key, serde_json::to_vec(&legacy_message).unwrap())
+            .await
+            .unwrap();
+
+        manager.recover().await.unwrap();
+
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        wait_for_trigger(&event_recorder, EventTrigger::Recovered).await;
+        assert_eq!(
+            event_recorder.procedure_context(procedure_id),
+            Some(ProcedureContext::default())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_preserves_procedure_context() {
         let dir = create_temp_dir("recovery_submission_event");
         let object_store = test_util::new_object_store(&dir);
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
@@ -1747,6 +1803,16 @@ mod tests {
 
         let procedure = ProcedureToLoad::new("recovered submission");
         let procedure_id = ProcedureId::random();
+        let mut event_context =
+            PersistentEventContext::new(TriggerReason::AutoRebalance).with_protocol("mysql");
+        event_context.extensions.insert(
+            "source".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+        let procedure_context = ProcedureContext {
+            actor: Some("alice".to_string()),
+            event_context: Some(event_context),
+        };
         ProcedureStore::from_object_store(object_store)
             .store_procedure_with_context(
                 procedure_id,
@@ -1754,9 +1820,7 @@ mod tests {
                 procedure.type_name().to_string(),
                 procedure.dump().unwrap(),
                 None,
-                ProcedureContext::from_event_context(PersistentEventContext::new(
-                    TriggerReason::AutoRebalance,
-                )),
+                procedure_context.clone(),
             )
             .await
             .unwrap();
@@ -1773,13 +1837,8 @@ mod tests {
         wait_for_trigger(&event_recorder, EventTrigger::Recovered).await;
         assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
         assert_eq!(
-            event_recorder
-                .procedure_context(procedure_id)
-                .unwrap()
-                .event_context
-                .unwrap()
-                .reason,
-            TriggerReason::AutoRebalance
+            event_recorder.procedure_context(procedure_id),
+            Some(procedure_context)
         );
     }
 
