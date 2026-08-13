@@ -316,9 +316,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let file_sequence = region.version_control.committed_sequence() + 1;
         edit.committed_sequence = Some(file_sequence);
 
-        // For every file added through region edit, we should fill the file sequence
+        // For every file added through region edit, we should fill the file sequence.
+        // Generic region edits (direct/import/staging) assign a new destination
+        // sequence domain but cannot prove or rewrite the physical per-row sequence
+        // column. The added files are therefore atomic/untrusted: clear the
+        // `preserve_row_sequence` marker so exact sequence-range scans fail closed
+        // until the scan reaches the assigned max sequence.
         for file in &mut edit.files_to_add {
             file.sequence = NonZeroU64::new(file_sequence);
+            file.preserve_row_sequence = false;
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.

@@ -661,6 +661,7 @@ impl RegionFlushTask {
                         sst_info,
                         partition_expr.clone(),
                         pk_range,
+                        version.options.preserve_row_sequence,
                     ));
                 }
                 if hook.is_some() {
@@ -783,6 +784,7 @@ impl RegionFlushTask {
         sst_info: &SstInfo,
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
+        preserve_row_sequence: bool,
     ) -> FileMeta {
         let (primary_key_min, primary_key_max) = match primary_key_range {
             Some((min, max)) => (Some(min), Some(max)),
@@ -806,6 +808,7 @@ impl RegionFlushTask {
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
+            preserve_row_sequence,
         }
     }
 
@@ -832,6 +835,7 @@ impl RegionFlushTask {
             } else {
                 FormatType::PrimaryKey
             },
+            preserve_row_sequence: version.options.preserve_row_sequence,
             index_options: self.index_options.clone(),
             index_config: self.engine_config.index.clone(),
             inverted_index_config: self.engine_config.inverted_index.clone(),
