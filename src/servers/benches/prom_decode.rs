@@ -280,10 +280,15 @@ fn bench_prom_v1_vs_v2_decode(c: &mut Criterion) {
             });
 
             group.throughput(Throughput::Bytes(v2_bytes.len() as u64));
-            group.bench_with_input(BenchmarkId::new("v2", name), v2_bytes, |b, bytes| {
+            group.bench_with_input(BenchmarkId::new("v2_manual", name), v2_bytes, |b, bytes| {
                 b.iter(|| {
-                    let request = write_v2::Request::decode(black_box(bytes.as_slice())).unwrap();
-                    black_box(remote_write_v2::write_requests(request).unwrap());
+                    black_box(
+                        remote_write_v2::decode_uncompressed_write_requests(
+                            black_box(bytes.as_slice()),
+                            true,
+                        )
+                        .unwrap(),
+                    );
                 });
             });
         }

@@ -178,6 +178,10 @@ common-version.workspace = true
 [[bench]]
 name = "bench_prom"
 harness = false
+
+[[bench]]
+name = "prom_decode"
+harness = false
 required-features = ["testing"]
 
 [[bench]]
