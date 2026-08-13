@@ -74,12 +74,22 @@ fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNative
 ///
 /// Finite values are formatted with `ryu` (shortest round-trip), which is
 /// significantly faster than `f64::to_string()` and is the hot path when
-/// building large responses. Non-finite values (`NaN`, `+Inf`, `-Inf`) are not
-/// supported by `ryu::Buffer::format_finite`, so they keep the previous
-/// `f64::to_string()` output (`"NaN"`, `"inf"`, `"-inf"`).
+/// building large responses. ryu prints integral values with a trailing ".0"
+/// ("1.0"), but the Prometheus wire format (like std `f64::to_string()`)
+/// expects "1", so the ".0" suffix is stripped. ryu only emits ".0" for
+/// integral values (its scientific notation never ends in ".0"), so
+/// non-integral values, negative zero (`-0.0` -> `"-0"`) and extreme values
+/// (`1e30`, `f64::MAX`) are unaffected. Non-finite values (`NaN`, `+Inf`,
+/// `-Inf`) are not supported by `ryu::Buffer::format_finite`, so they keep the
+/// previous `f64::to_string()` output (`"NaN"`, `"inf"`, `"-inf"`).
 fn format_prometheus_sample_value(value: f64) -> String {
     if value.is_finite() {
-        ryu::Buffer::new().format_finite(value).to_string()
+        let mut buffer = ryu::Buffer::new();
+        let formatted = buffer.format_finite(value);
+        match formatted.strip_suffix(".0") {
+            Some(integral) => integral.to_string(),
+            None => formatted.to_string(),
+        }
     } else {
         value.to_string()
     }
@@ -608,6 +618,32 @@ mod tests {
     }
 
     #[test]
+    fn format_prometheus_sample_value_matches_prometheus_wire_format() {
+        // Integral values must not carry a fractional part ("1", not "1.0"),
+        // matching std `f64::to_string()` and the Prometheus wire format.
+        assert_eq!(format_prometheus_sample_value(1.0), "1");
+        assert_eq!(format_prometheus_sample_value(0.0), "0");
+        assert_eq!(format_prometheus_sample_value(-0.0), "-0");
+        assert_eq!(format_prometheus_sample_value(100.0), "100");
+        // Non-integral values keep the ryu shortest round-trip output.
+        assert_eq!(format_prometheus_sample_value(1.5), "1.5");
+        assert_eq!(format_prometheus_sample_value(0.1), "0.1");
+        // Extreme values keep the ryu scientific notation; integral values in
+        // scientific notation ("1e30") must not be misdetected as non-integral.
+        assert_eq!(format_prometheus_sample_value(1e21), "1e21");
+        assert_eq!(format_prometheus_sample_value(1e30), "1e30");
+        assert_eq!(format_prometheus_sample_value(1e-7), "1e-7");
+        assert_eq!(
+            format_prometheus_sample_value(f64::MAX),
+            "1.7976931348623157e308"
+        );
+        // Non-finite values keep the std `f64::to_string()` output.
+        assert_eq!(format_prometheus_sample_value(f64::NAN), "NaN");
+        assert_eq!(format_prometheus_sample_value(f64::INFINITY), "inf");
+        assert_eq!(format_prometheus_sample_value(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
     fn matrix_response_preserves_ordinary_nan_and_filters_stale_markers() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -647,7 +683,7 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert_eq!(
             series[0].values,
-            vec![(1.0, "1.0".to_string()), (2.0, "NaN".to_string())]
+            vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
         );
     }
 
@@ -695,8 +731,8 @@ mod tests {
         assert_eq!(
             series[0].values,
             vec![
-                (1.0, "0.0".to_string()),
-                (2.0, "-0.0".to_string()),
+                (1.0, "0".to_string()),
+                (2.0, "-0".to_string()),
                 (3.0, "1.25".to_string()),
                 (4.0, "1e30".to_string()),
                 (5.0, "1e-7".to_string()),
@@ -821,9 +857,9 @@ mod tests {
             vec!["a", "b", "c"]
         );
         // Vector results keep the last sample of each series.
-        assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
-        assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
-        assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
+        assert_eq!(series[0].value, Some((4.0, "4".to_string())));
+        assert_eq!(series[1].value, Some((5.0, "5".to_string())));
+        assert_eq!(series[2].value, Some((6.0, "6".to_string())));
     }
 
     #[test]
