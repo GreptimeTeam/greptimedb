@@ -1,14 +1,54 @@
-# Query regression self-hosted runners
+# Query regression runners and benchmark Job
 
-The `Query Regression` workflow uses the dedicated ARC runner scale set
-`perf-regression-8-cores`. ARC runner Pods run in the target Kubernetes cluster
-and connect outbound to GitHub. The live scale set is currently **paused**:
-`minRunners=0`, `maxRunners=0`, and no runner Pods. Do not resume it without
-explicit approval.
+The `Query Regression` workflow has two phases:
+
+1. **Build** on the trusted local ARC runner scale set `perf-regression-8-cores`
+   (a dedicated `minipc-3` node with a persistent build cache).
+2. **Benchmark** in a one-shot Kubernetes `Job` in the Alibaba Cloud ACK
+   cluster. The Job pod runs on the dedicated bulk nodepool, has no
+   GitHub/cloud/kube credentials, and is created, driven, and deleted by a
+   trusted controller step that runs on the local runner.
+
+There is **no ARC scale set in the cloud**: the ACK cluster contains no
+`gha-runner-scale-set` deployment, no runner listener, and does no
+compilation. The benchmark `Job` is created directly by the controller through
+the ACK API server.
+
+## Architecture (v1)
+
+```
+local runner (perf-regression-8-cores)              ACK cluster (bulk-ingestion-test)
++------------------------------------------------+  +---------------------------------------------+
+| build job                                      |  | one-shot Job query-regression-<run-id>-<a>  |
+|  - resolves/verifies base & candidate SHAs     |  |  - digest-pinned runtime image              |
+|  - compiles base+candidate binaries (cache)    |  |  - nodepool-id selector + taint toleration  |
+|  - uploads BASE artifact BEFORE candidate code |  |  - non-root, no SA token, no credentials    |
+|  - uploads candidate artifact separately       |  |  - waits for /payload/.ready marker         |
+|  - runs tooling tests (non-ACK, non-controller)|  |  - runs perf driver only (no tooling tests) |
+|  - exposes verified SHAs + artifact IDs        |  |  - writes reports + /work/.done, stays up   |
+| controller job                                 |  |  - results pulled via kubectl cp             |
+|  - restores trusted scripts from base commit   |  |  - Job deleted (foreground, retried) after   |
+|    into $RUNNER_TEMP (never from artifact)     |  |    collect + absence verification           |
+|  - downloads artifacts by exact ID, verifies   |  |  - nodepool autoscaling is implicit         |
+|    manifests/attestation/checkout SHAs         |  |                                             |
+|  - kubectl create Job  ────────────────────────┼─▶                                             |
+|  - kubectl cp payload + exec marker            |  |                                             |
+|  - collects/validates results, deletes Job     |  |                                             |
++------------------------------------------------+  +---------------------------------------------+
+```
+
+Nodepool scaling is **implicit only**: the Pending Job pod is the scale-up
+signal for ACK Cluster Autoscaler, and foreground deletion of the Job/pod is
+the scale-down signal. The controller never calls any nodepool
+desired-size/scale API.
+
+All candidate binaries, scripts, and cases execute **only inside the ACK Job
+pod**. The controller step on the local runner only copies them
+(`kubectl cp`) and never runs them.
 
 ## Prerequisites and trust admission
 
-Install the ARC scale set controller if it is not already installed:
+Install the local ARC scale set controller if it is not already installed:
 
 ```bash
 helm upgrade --install arc \
@@ -56,17 +96,25 @@ use UID/GID 1001, disallow privilege escalation, drop all capabilities, and use
 the RuntimeDefault seccomp profile. Keep GitHub tokens least-privilege and
 review workflow changes before admission. Where the CNI supports it, restrict
 egress to required GitHub Actions, artifact/cache, Rust/crate/toolchain, DNS,
-and image-registry endpoints; block unrelated cluster services, private ranges,
-and metadata endpoints unless a case requires them.
+image-registry, and ACK API endpoints; block unrelated cluster services,
+private ranges, and metadata endpoints unless a case requires them.
+
+### Local scale set availability
+
+The `build` and `query-regression-controller` jobs run on
+`perf-regression-8-cores`. The live scale set is **paused** (`minRunners=0`,
+`maxRunners=0`) until explicitly resumed with approval; a query-regression run
+queues until a runner Pod exists. Resuming it is a prerequisite for the
+workflow.
 
 ### Network routing prerequisite
 
 Required split routing is an **external environment-specific prerequisite**. The
 responsible network operator must route GitHub Actions, GitHub content,
-artifact/cache, crates.io, Rust toolchain, and image-registry traffic through
-the approved path rather than the VPN where applicable. Neither this repository
-nor Kubernetes configures that route. Verify it with the responsible network
-operator before any canary.
+artifact/cache, crates.io, Rust toolchain, image-registry, and the ACK API
+endpoint traffic through the approved path rather than the VPN where
+applicable. Neither this repository nor Kubernetes configures that route.
+Verify it with the responsible network operator before any canary.
 
 ## Runner image and workflow tools
 
@@ -88,13 +136,16 @@ docker push greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-qu
 ```
 
 Deploy by digest, not mutable tag, by updating both image references in
-`values-8-cores.yaml` after a rebuild. Update `RUNNER_IMAGE_DIGEST` and bump
-`RUNNER_IMAGE_EPOCH` in `query-regression.yml` at the same time. If the registry
-is private, use a dedicated read-only pull secret only as `imagePullSecrets`;
-never expose registry credentials to runner containers.
-Both digest-pinned init and runner containers use `IfNotPresent`: the immutable
-digest makes a cached image safe and avoids adding a registry dependency to every
-runner startup.
+`values-8-cores.yaml` after a rebuild. The same digest is used for the ACK
+benchmark `Job` image and is pinned in `query-regression.yml` (`JOB_IMAGE`) and
+in the trusted controller (`DEFAULT_IMAGE` in
+`query-regression-ack-controller.py`). Update all four references and bump
+`RUNNER_IMAGE_EPOCH` at the same time. If the registry is private, use a
+dedicated read-only pull secret only as `imagePullSecrets` (in the ACK cluster,
+in the namespace the Job runs in); never expose registry credentials to the
+Job container itself. Both digest-pinned init and runner containers use
+`IfNotPresent`: the immutable digest makes a cached image safe and avoids
+adding a registry dependency to every runner startup.
 
 The runner optionally imports only the non-sensitive `HTTP_PROXY`,
 `HTTPS_PROXY`, and `NO_PROXY` variables from the
@@ -103,14 +154,10 @@ the target namespace; private endpoint configuration must not be committed, and
 credentials or secrets must never be placed in a ConfigMap.
 
 Before builds, the workflow asserts UID/GID 1001 and exact image tool versions:
-`libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`, `sccache
-0.16.0`, `otelgen` commit `863a3f395d062c7322cc1de08a38774b7fdaa6c8`,
-root-owned `rustup 1.29.0`, and the image-baked
-`nightly-2026-03-21` Rust toolchain. Rustup, Cargo, and Rustc must resolve from
-`/opt/cargo/bin`; the runner cannot write `/opt/rustup` or `/opt/cargo/bin`.
-Protobuf well-known includes, including `google/protobuf/any.proto` and
-`google/protobuf/empty.proto`, are an image contract and must compile with
-`protoc`.
+`libprotoc 3.21.12`, `mold 2.30.0`, `sccache 0.16.0`, root-owned `rustup
+1.29.0`, and the image-baked `nightly-2026-03-21` Rust toolchain. Rustup,
+Cargo, and Rustc must resolve from `/opt/cargo/bin`; the runner cannot write
+`/opt/rustup` or `/opt/cargo/bin`.
 `actions-rust-lang/setup-rust-toolchain@v1` is intentionally removed. The
 workflow sets its warning-denying mold `RUSTFLAGS` directly, disables automatic
 Rustup installation, and performs no runtime toolchain downloads.
@@ -124,9 +171,9 @@ corresponding cache or image contract changes.
 
 `values-8-cores.yaml` is normal operation: `minRunners=0`, `maxRunners=1`.
 `values-paused.yaml` is the mandatory pause overlay: `minRunners=0`,
-`maxRunners=0`. The job uses group `query-regression-persistent-cache-v1`,
-`queue: max`, and `cancel-in-progress: false`; admitted jobs queue rather than
-replacing older pending jobs. During maintenance, cancel admitted queued runs as
+`maxRunners=0`. Both jobs use group `query-regression-persistent-cache-v1`,
+`queue: max`, and `cancel-in-progress: false`; admitted runs queue rather than
+replacing older pending runs. During maintenance, cancel admitted queued runs as
 well as pausing ARC. Runner Pods have `activeDeadlineSeconds=12600`.
 The runner requests 6 CPU and limits at 8 CPU to preserve `minipc-3`
 allocatable-capacity scheduling headroom; do not reset the request to 8 CPU
@@ -312,28 +359,19 @@ or another explicit `helm upgrade --install` with known-good values followed by
 `values-paused.yaml`, `--reset-values`, and `--wait`. Do not delete the PVC
 automatically; preserve it for diagnosis unless intentionally discarding cache.
 
-## Future optional phases
+## ACK benchmark Job (cloud execution)
 
-The current phase uses a digest-pinned image with sccache 0.16.0 and no shared
-cache service. Optional follow-ups are an image additionally seeded with the
-exact Rust toolchain and `cargo fetch --locked`; or an internal read/write
-sccache backend or Cargo/Git mirror. Evaluate them only if persistent PVC reuse
-is insufficient.
-
-## Cloud (ACK) scale set
-
-Perf runs execute on the Alibaba Cloud Hangzhou ACK cluster `bulk-ingestion-test`
-(`c72c097b8b2bf4fd9946d31e9d41f632f`), nodepool `bulk-ingestion-pool`
-(`npb5ff93bea3a447a698fe31ebc997ea31`). Builds still run on GitHub-hosted
-runners (see the workflow split); only the benchmark execution runs here. The
-scale set name is `perf-regression-ack`; its values are in
-`values-cloud.yaml`. The local `minipc-3` scale set remains available for the
-cold/warm canary flow described above.
+The benchmark runs in the Alibaba Cloud Hangzhou ACK cluster
+`bulk-ingestion-test` (`c72c097b8b2bf4fd9946d31e9d41f632f`) as a one-shot
+`batch/v1` `Job` created by the trusted controller. The Job pod runs on the
+dedicated bulk nodepool `bulk-ingestion-pool`
+(`npb5ff93bea3a447a698fe31ebc997ea31`). **The cloud does no compilation and
+has no ARC controller or listener.**
 
 ### Cloud prerequisites
 
 All of the following are Alibaba Cloud side configuration and must be completed
-**before** deploying the scale set:
+**before** the first controller run:
 
 1. **Node instance specs**: use enterprise dedicated instance types (c7/g7
    series, e.g. `ecs.c7.2xlarge`). Do **not** use economy (`e`), burstable
@@ -342,37 +380,246 @@ All of the following are Alibaba Cloud side configuration and must be completed
 2. **Elastic scaling and scheduling**: enable elastic scaling on the nodepool
    (Cluster Autoscaler, min 0 / max as needed), taint it with
    `dedicated=perf-regression:NoSchedule`, and apply the corresponding label.
-   The scale set values tolerate that taint and pin the runner to the nodepool
-   via `alibabacloud.com/nodepool-id`.
-3. **Egress**: the ACK cluster egress must reach GitHub (to pull jobs and
-   report results) and ACR (to pull the runner image).
-4. **ARC deployment**: install `gha-runner-scale-set-controller` and
-   `gha-runner-scale-set` in the ACK cluster with `values-cloud.yaml`. Deploy
-   commands mirror the local deployment section above; use namespace
-   `arc-runners` and the same GitHub App secret name
-   `greptimedb-arc-github-app` as locally. Follow the same paused-first
-   deployment and approval flow as the local scale set.
+   The Job tolerates that taint and pins to the nodepool via
+   `alibabacloud.com/nodepool-id`. Scaling is implicit: the Pending Job pod
+   scales the nodepool up; deleting the Job/pod scales it back down. **Never
+   call nodepool desired-size/scale APIs from the controller.**
+3. **Egress**: the local runner must reach the ACK API server; the cluster
+   must be able to pull the runner image from ACR.
+4. **Job namespace**: the controller creates Jobs in namespace `arc-runners`
+   by default (`ACK_JOB_NAMESPACE` / `--namespace` to override). The namespace
+   must exist and must be able to pull the digest-pinned image (add a
+   read-only `imagePullSecrets` if the registry is private). The namespace may
+   be reused from the retired cloud ARC deployment; the ARC Helm releases
+   themselves must be removed per the goal state.
 
-### Differences from the local minipc version
+### Controller prerequisites (local runner)
 
-- **No persistent build cache**: there is no PVC and no
-  `initialize-build-cache` initContainer; binaries are passed via GitHub
-  artifacts, so no `CARGO_*`/`RUSTUP_*`/`SCCACHE_*` variables are set.
-- **Dynamic scaling**: the runner Pod is created only when a job arrives and
-  the nodepool scales on demand, then scales back to 0 after the run
-  (`minRunners=0`, `maxRunners=1`).
-- **Cost**: the nodepool is pay-as-you-go; scaling back to 0 after the run
-  keeps cost bounded.
-- **Pausing**: use the same `values-paused.yaml` overlay convention
-  (`minRunners=0`, `maxRunners=0`) to pause the cloud scale set.
+The controller job runs on `perf-regression-8-cores` and needs:
+
+- `kubectl` installed on the runner (it is not part of the runner image).
+- A kubeconfig for the ACK cluster, provided either as the `ACK_KUBECONFIG`
+  repository secret (written to a temp file by the workflow step) or as a
+  `KUBECONFIG` environment variable/path available on the runner. The
+  kubeconfig never leaves the controller job and is never placed in the Job
+  manifest or pod.
+- Explicit RBAC for the kubeconfig identity in the ACK cluster, scoped to the
+  Job namespace (v1 uses `kubectl cp`/`exec`, so `pods/exec` is required):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: query-regression-controller
+  namespace: arc-runners
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]   # kubectl cp + exec-gated markers (v1)
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: query-regression-controller
+  namespace: arc-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: query-regression-controller
+subjects:
+  - kind: User            # or ServiceAccount/Group matching the kubeconfig identity
+    name: <kubeconfig-identity>
+    apiGroup: rbac.authorization.k8s.io
+```
+
+No nodepool, autoscaling, secret, or cluster-wide permissions are granted. Do
+not broaden these permissions.
+
+### Job manifest contract
+
+The trusted controller renders the Job manifest (see
+`query-regression-ack-controller.py`, `--dry-run` renders it without touching a
+cluster) with a fixed security contract:
+
+- **Name/labels**: deterministic `query-regression-<run-id>-<run-attempt>` with
+  `app=query-regression`, `run-id`, `run-attempt` labels; base/candidate SHAs
+  recorded as annotations. Deletion is exact-name validated against this
+  pattern.
+- **Image**: digest-pinned existing runtime image (`@sha256:...`), enforced by
+  the controller; `imagePullPolicy: IfNotPresent`. No ACR push happens in this
+  change.
+- **Scheduling**: `nodeSelector` `alibabacloud.com/nodepool-id=
+  npb5ff93bea3a447a698fe31ebc997ea31` and toleration
+  `dedicated=perf-regression:NoSchedule`.
+- **Pod hardening**: `automountServiceAccountToken: false`, non-root
+  UID/GID 1001, seccomp `RuntimeDefault`, `allowPrivilegeEscalation: false`,
+  all capabilities dropped, `restartPolicy: Never`, `backoffLimit: 0`,
+  `activeDeadlineSeconds: 10800`, bounded resources (requests 4 CPU / 12Gi /
+  20Gi ephemeral; limits 8 CPU / 16Gi / 40Gi ephemeral — the nodepool nodes
+  are 8C16G).
+- **No credentials**: the Job contains no GitHub token, cloud credential,
+  kubeconfig, or service-account token; the pod needs no egress after startup.
+  Payload is delivered with `kubectl cp` and gated by a `/payload/.ready`
+  marker written via `kubectl exec` once the transfer is verified.
+- **Perf only**: the pod entrypoint runs the performance driver and its
+  required helpers/processes; no tooling/unit tests run on ACK.
+
+### Trust boundaries
+
+- **Trusted scripts are restored from the verified base commit, never from
+  the build artifact.** The controller job checks out the verified base SHA
+  (`needs.build.outputs.verified-base-sha`) and restores
+  `query-regression-ack-controller.py`, `query-regression-summary.py`, and
+  `query-regression-pr-metadata.py` via `git show` into a fresh
+  `$RUNNER_TEMP/query-regression-trusted-scripts` directory, recording
+  `trusted-scripts-manifest.json` (source SHA + per-file sha256). The
+  controller step executes only that restored copy, and the controller
+  verifies the summary script it embeds into the payload against the
+  manifest. Candidate compilation therefore cannot replace any code that runs
+  in the credentialed controller job.
+- **The base binary is immutable before candidate code runs.** The build job
+  uploads `query-regression-base-binaries` (with `base-manifest.json`) in a
+  step that precedes "Switch source to candidate"; candidate build scripts
+  cannot overwrite it after it is in Actions. Candidate binaries/helpers ship
+  in a separate `query-regression-candidate-binaries` artifact
+  (`candidate-manifest.json`). The controller job downloads both by exact
+  artifact ID (`needs.build.outputs.{base,candidate}-artifact-id`) and
+  cross-validates: base/candidate manifest SHAs must equal the build job's
+  verified SHAs, and the candidate checkout HEAD must equal the verified
+  candidate SHA. The verified SHAs themselves come from real build job
+  outputs — never re-derived from the PR head.
+- **Candidate payload paths are symlink-free and contained.** Before copying,
+  the controller rejects every symlink in any path component from the
+  candidate checkout root down (ancestor symlinks such as
+  `candidate/tests -> outside` included) and every non-regular file
+  (FIFO/socket/device) under the candidate `tests/perf` tree, rejects a
+  symlinked driver script, and enforces that the resolved `tests/perf` and
+  driver paths stay under the resolved candidate checkout root. A candidate
+  symlink is never dereferenced.
+- **ACK runs performance regression only.** The pod entrypoint invokes the
+  perf driver and its required helpers/processes; no tooling/unit tests run
+  on ACK. The four query regression tooling tests run in the build job
+  (non-ACK, non-controller context — the same trust context as compiling the
+  candidate).
+
+### Controller flow and cleanup
+
+1. Restore trusted scripts from the verified base commit (see above) and
+   verify the manifests/attestation/checkout SHAs.
+2. Reconcile: if a Job with the exact deterministic name exists (leaked from a
+   killed controller), delete it (foreground, bounded retries), then create
+   the Job. The name embeds `run-id`/`run-attempt`, so re-runs get a fresh
+   name.
+3. Wait for the pod to be Running (bounded, default 25 min) — the Pending pod
+   is the ACK autoscaling scale-up signal.
+4. `kubectl cp` the payload (`bins/`, `repo/tests/perf` cases + driver,
+   trusted summary, generated `run.sh`), exec-verify the files, re-verify the
+   binaries' sha256 inside the pod against the base/candidate manifests, then
+   arm `/payload/.ready`.
+5. The pod runs the performance driver, writes `query-regression-work/**` and
+   `query-regression-summary.md` under `/work`, then writes
+   `/work/benchmark-status` + `/work/.done` and stays alive for a bounded
+   collection window (600 s).
+6. The controller reads the status, `kubectl cp`s the results back (mandatory:
+   missing/invalid reports or summary fail the run even if the benchmark
+   status was 0) and best-effort `kubectl logs`/`describe`, then touches
+   `/work/.collected` and deletes the exact Job with foreground cascade.
+7. Deletion uses bounded retries (default 3 attempts x 240 s) and verifies
+   the Job's absence; if deletion cannot be confirmed the workflow fails even
+   when the benchmark status was 0. On success and ordinary failure the
+   controller's `finally` path performs the deletion; on graceful cancellation
+   (SIGTERM/SIGINT) it skips optional diagnostics/collection and immediately
+   performs a short bounded exact Job deletion/absence check. Cleanup is
+   **best effort** under GitHub hard cancellation (see below).
+
+Timeout budget (one global monotonic lifecycle deadline): the controller job
+runs under a 180 min workflow timeout (10800 s). The controller lifecycle is
+150 min (9000 s) with a 15 min internal cleanup reserve, leaving a 30 min
+explicit margin (minimum documented 25 min) above the lifecycle for
+checkout, trusted-script restore, artifact download/attestation, kubeconfig
+setup, and the second-process cleanup-only step (<= 10 min). Normal phases —
+pod-ready 25 min, payload transfer + marker <= 10 min, benchmark + mandatory
+collection 80 min — clamp to `cleanup_begins` (the lifecycle deadline minus
+the reserve), so no ordinary path can consume the reserve; every
+kubectl/subprocess call and every poll/sleep is clamped to the remaining
+phase budget. A normal-phase operation whose budget is exhausted raises
+instead of degrading to a 1-second cluster call: before any preflight job
+lookup, leaked-job reconcile deletion, or Job creation the controller asserts
+a positive normal-phase budget, so no Job is ever created or reconciled after
+`cleanup_begins`. Deletion is the only operation allowed inside the reserve
+and clamps to the hard deadline. The pod's own `activeDeadlineSeconds` (3 h)
+is reached only if the controller dies.
+
+Second-process cleanup: an `if: always()` step runs the same trusted
+controller script with `--cleanup-only` after the controller step. It uses the
+deterministic `query-regression-<run-id>-<run-attempt>` name (identical
+exact-name validation) and deletes only that exact Job, so a controller step
+that failed or was terminated without running its `finally` still gets a
+second cleanup process. Under GitHub hard cancellation (run cancelled /
+runner SIGKILL) no further steps or jobs execute; see "Leaked Job recovery".
+
+Artifacts and comments are unchanged: `query-regression-report` and
+`query-regression-comment` artifacts (including `query-regression-pr.json`
+consumed by the trusted comment workflow) are uploaded from the controller job.
+
+### Leaked Job recovery
+
+Cleanup is **best effort** under GitHub hard cancellation: when a run is
+cancelled or the runner is SIGKILLed, the controller's signal handler and any
+further steps/jobs do not run, so the Job may outlive the run. The concurrency
+group prevents overlapping runs, but a leaked Job/pod would keep the nodepool
+scaled. Recovery is deterministic because the Job name is exact:
+
+```bash
+kubectl -n arc-runners delete job query-regression-<run-id>-<run-attempt> \
+  --cascade=foreground --wait=true
+```
+
+The name is visible in the run's step log (`created job ...`) and on the pod
+via `kubectl get pods -l app=query-regression`. Deleting the pod/job is the
+scale-down signal. The residual gap for full automation is an **independent
+reaper** (a scheduled/triggered process outside the workflow, or manual
+cleanup by an operator) that deletes any `query-regression-*` Job older than
+the lifecycle budget; the deterministic name pattern is the reaper's exact
+match key. Do not use a broad `kubectl delete job -l app=query-regression`
+without the same exact-name validation in the reaper.
 
 ### Notes
 
 - Perf runs are serialized by the same concurrency group as the local scale
-  set.
-- Base and candidate must run on same-spec nodes. The `nodeSelector` pins
-  runners to the same nodepool; if stricter co-location is ever required, add a
-  `podAffinity` — this is currently only a note, not a configuration change.
+  set, so benchmark Jobs never overlap on the nodepool.
+- Base and candidate run on same-spec nodes because the `nodeSelector` pins
+  the Job to the same nodepool.
 - All ACK nodepool/quota changes are write operations and require approval by
   the responsible owner before execution. This document only records the
   ready-state configuration.
+
+## Future hardening (not in v1)
+
+- Replace `kubectl cp`/exec-gated markers with an init container that pulls a
+  signed payload from object storage and a finalizer/sidecar that uploads
+  results, dropping `pods/exec` from the RBAC.
+- Sign the payload bundle and verify signatures in the pod before execution.
+- Move the kubeconfig out of the runner into a short-lived token exchange.
+- Replace the local ARC build runner with a trusted non-ARC build controller if
+  ARC is ever decommissioned.
+
+## Retired: cloud ARC scale set
+
+The former ACK ARC scale set (`perf-regression-ack`,
+`.github/runner-scale-sets/query-regression/values-cloud.yaml`) is **retired**
+and the values file is removed. Do not reintroduce an ARC deployment in the
+ACK cluster: the benchmark runs as a one-shot `Job` created by the trusted
+controller, and the goal state has no ARC controller/listener in the cloud.
