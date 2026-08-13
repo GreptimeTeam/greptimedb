@@ -3196,28 +3196,61 @@ async fn test_exact_ee_schema_plan_retains_binary_state_column() {
         "the state column must stay BINARY through schema matching"
     );
 
-    // 2. Incremental rewrite: OSS cannot merge a raw `uddsketch_state`
-    //    aggregate (the enterprise state view adds the merge op), so the
-    //    rewrite honestly reports the EE-like plan as unsafe and disables
-    //    incremental instead of running it as an unfiltered full snapshot.
-    //    The retained BINARY state column must not crash the analyzer.
+    // 2. Incremental rewrite: the exact EE-like `uddsketch_state` aggregate is
+    //    recognized as mergeable, so `prepare_plan_for_incremental` returns a
+    //    rewritten DML that merges the delta state with the existing sink
+    //    state via `uddsketch_merge_state`. The rewrite must keep the real
+    //    BINARY state column in its output, and incremental mode must stay
+    //    enabled instead of the pre-#8863 refuse-and-disable fallback. The
+    //    retained BINARY state column must not crash the analyzer.
     {
         let mut state = task.state.write().unwrap();
         state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
     }
-    let incremental = task
+    let rewritten = task
         .prepare_plan_for_incremental(&info.plan)
         .await
         .unwrap_or_else(|err| {
             panic!("incremental rewrite must not error on the EE-like plan: {err:?}")
-        });
+        })
+        .expect("the EE-like uddsketch_state plan must be incrementally rewritable");
+    let LogicalPlan::Dml(rewritten_dml) = &rewritten else {
+        panic!("expected rewritten DML plan, got {rewritten:?}");
+    };
+    let rewritten_text = format!("{}", rewritten.display_indent());
     assert!(
-        incremental.is_none(),
-        "uddsketch_state is not an OSS-mergeable aggregate; the rewrite must refuse"
+        rewritten_text.contains("uddsketch_merge_state"),
+        "rewritten plan must merge the delta and sink states via uddsketch_merge_state: \
+         {rewritten_text}"
     );
     assert!(
-        task.state.read().unwrap().is_incremental_disabled(),
-        "unsupported EE-like aggregate must permanently disable incremental"
+        rewritten_dml
+            .input
+            .expressions()
+            .iter()
+            .any(|expr| format!("{expr:?}").contains("uddsketch_merge_state")),
+        "the rewritten merge projection must contain a uddsketch_merge_state call, got: {:?}",
+        rewritten_dml.input.expressions()
+    );
+    let rewritten_fields = rewritten_dml.input.schema().fields();
+    let rewritten_names = rewritten_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["state", "window", "update_at"],
+        rewritten_names,
+        "the rewritten merge plan must keep the real state column, the window group key, \
+         and the update_at pass-through"
+    );
+    assert_eq!(
+        CDT::binary_datatype(),
+        CDT::from_arrow_type(rewritten_fields[0].data_type()),
+        "the state column must stay BINARY through the incremental rewrite"
+    );
+    assert!(
+        !task.state.read().unwrap().is_incremental_disabled(),
+        "the EE-like uddsketch_state plan must remain incremental-enabled"
     );
 
     // 3. Final stamped DML: the epoch literal is appended and the real state
