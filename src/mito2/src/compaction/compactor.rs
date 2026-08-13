@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZero;
+use std::num::{NonZero, NonZeroU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -404,6 +404,22 @@ pub trait SstMerger: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DefaultSstMerger;
 
+/// Computes the maximum sequence bound of the output of merging `inputs`.
+///
+/// Returns `None` if any input's sequence bound is unknown (`None`): a partial
+/// max over the known inputs would launder the unknown file's rows into a
+/// trusted sequence bound, letting exact sequence-range scans silently skip or
+/// wrongly filter rows from that file. Only when every input bound is known is
+/// the `max` computed.
+fn max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.meta_ref().sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
 #[async_trait::async_trait]
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
@@ -439,12 +455,17 @@ impl SstMerger for DefaultSstMerger {
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let max_sequence = output
-            .inputs
-            .iter()
-            .map(|f| f.meta_ref().sequence)
-            .max()
-            .flatten();
+        let max_sequence = max_input_sequence(&output.inputs);
+        // The compaction output can only preserve per-row sequences when the
+        // region option is enabled AND every input file carries the
+        // preserved-sequence marker. Otherwise a legacy (unmarked) input would
+        // be laundered into a trusted output and exact sequence-range scans
+        // would silently skip or wrongly filter its normalized sequences.
+        let output_preserves_sequence = compaction_region.region_options.preserve_row_sequence
+            && output
+                .inputs
+                .iter()
+                .all(|f| f.meta_ref().preserve_row_sequence);
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -474,6 +495,7 @@ impl SstMerger for DefaultSstMerger {
                     } else {
                         FormatType::PrimaryKey
                     },
+                    preserve_row_sequence: output_preserves_sequence,
                     index_options,
                     index_config,
                     inverted_index_config,
@@ -527,6 +549,7 @@ impl SstMerger for DefaultSstMerger {
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,
+                    preserve_row_sequence: output_preserves_sequence,
                 }
             })
             .collect::<Vec<_>>();
@@ -789,6 +812,33 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[test]
+    fn test_max_input_sequence() {
+        let meta_with = |sequence| FileMeta {
+            sequence,
+            ..dummy_file_meta()
+        };
+
+        // All inputs with known bounds yield their max.
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(3))),
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(NonZeroU64::new(5))),
+        ];
+        assert_eq!(NonZeroU64::new(9), max_input_sequence(&inputs));
+
+        // A single unknown bound poisons the whole output: the known inputs'
+        // max must not be laundered onto the merged output.
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(None)),
+        ];
+        assert_eq!(None, max_input_sequence(&inputs));
+
+        // No inputs at all yield `None`.
+        assert_eq!(None, max_input_sequence(&[]));
     }
 
     /// Build a minimal [`CompactionRegion`] suitable for tests where the

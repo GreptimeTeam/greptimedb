@@ -136,8 +136,8 @@ use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu,
-    SnapshotFenceStaleSnafu,
+    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
+    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -148,7 +148,7 @@ use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
 };
-use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
@@ -1059,36 +1059,97 @@ impl EngineInner {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
         }
 
-        if let Some(given_seq) = request.memtable_min_sequence {
-            let min_readable_seq = version.flushed_sequence;
-            ensure!(
-                given_seq >= min_readable_seq,
-                IncrementalQueryStaleSnafu {
-                    region_id,
-                    given_seq,
-                    min_readable_seq,
-                }
-            );
-        }
+        // Shared capability check used identically by the engine (fence
+        // relaxation) and the reader (row-level filtering) — see
+        // `read::scan_region::exact_sequence_range`. Only Flow's explicit
+        // `sequence_range` mode requests exactness; historical `memtable_only`
+        // scans never set `exact_sequence_range` and therefore keep every fence
+        // below regardless of region options.
+        let exact_sequence_range = exact_sequence_range(&request, &version);
 
-        if let Some(given_seq) = request.memtable_max_sequence
-            && !request.skip_sst_files
-        {
-            // Explicit snapshot fences that include SST reads are enforceable
-            // only while the requested upper bound is not older than the
-            // region's flushed frontier. If H has already been flushed into SST,
-            // mito cannot apply a memtable-only sequence upper bound to that
-            // SST scan, so fail and let Flow rebind the fenced repair instead
-            // of reading rows beyond H.
-            let min_enforceable_seq = version.flushed_sequence;
-            ensure!(
-                given_seq >= min_enforceable_seq,
-                SnapshotFenceStaleSnafu {
-                    region_id,
-                    given_seq,
-                    min_enforceable_seq,
+        if request.exact_sequence_range {
+            // Exact `sequence_range` mode: when the capability is available the
+            // requested (C, H] delta is enforced row-level on memtables and every
+            // SST, so the lower/upper fences can be relaxed. When it is not, we
+            // must fail with a structured stale/unsupported error so Flow falls
+            // back instead of silently reading an approximate superset.
+            if exact_sequence_range.is_none() {
+                if let Some(given_seq) = request.memtable_min_sequence {
+                    let min_readable_seq = version.flushed_sequence;
+                    ensure!(
+                        given_seq >= min_readable_seq,
+                        IncrementalQueryStaleSnafu {
+                            region_id,
+                            given_seq,
+                            min_readable_seq,
+                        }
+                    );
                 }
-            );
+
+                if let Some(given_seq) = request.memtable_max_sequence {
+                    let min_enforceable_seq = version.flushed_sequence;
+                    ensure!(
+                        given_seq >= min_enforceable_seq,
+                        SnapshotFenceStaleSnafu {
+                            region_id,
+                            given_seq,
+                            min_enforceable_seq,
+                        }
+                    );
+                }
+
+                // Both bounds are enforceable against the flushed frontier, yet the
+                // region cannot serve an exact row-level delta (preserve option off,
+                // or a file without the preserved-sequence marker). Main semantics
+                // would silently return rows outside (C, H], so fail instead.
+                return SequenceRangeUnsupportedSnafu {
+                    region_id,
+                    min_seq: request.memtable_min_sequence.unwrap_or_default(),
+                    max_seq: request.memtable_max_sequence.unwrap_or_default(),
+                    reason: if version.options.preserve_row_sequence {
+                        "region has files without preserved per-row sequences".to_string()
+                    } else {
+                        "region does not preserve per-row sequences (preserve_row_sequence is off)"
+                            .to_string()
+                    },
+                }
+                .fail();
+            }
+        } else {
+            // Non-exact mode (including historical `memtable_only` scans): keep
+            // main's fences exactly as-is. The preserve option never relaxes them
+            // because `exact_sequence_range` is the only explicit exact intent.
+            if let Some(given_seq) = request.memtable_min_sequence {
+                let min_readable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_readable_seq,
+                    IncrementalQueryStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_readable_seq,
+                    }
+                );
+            }
+
+            if let Some(given_seq) = request.memtable_max_sequence
+                && !request.skip_sst_files
+            {
+                // Explicit snapshot fences that include SST reads are enforceable
+                // only while the requested upper bound is not older than the
+                // region's flushed frontier. If H has already been flushed into SST,
+                // mito cannot apply a memtable-only sequence upper bound to that
+                // SST scan, so fail and let Flow rebind the fenced repair instead
+                // of reading rows beyond H.
+                let min_enforceable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_enforceable_seq,
+                    SnapshotFenceStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_enforceable_seq,
+                    }
+                );
+            }
         }
 
         // Get cache.
