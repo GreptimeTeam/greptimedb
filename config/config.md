@@ -671,6 +671,7 @@
 | `flow.batching_mode.experimental_frontend_scan_timeout` | String | `30s` | Flow wait for available frontend timeout,<br/>if failed to find available frontend after frontend_scan_timeout elapsed, return error<br/>which prevent flownode from starting |
 | `flow.batching_mode.experimental_max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
+| `flow.batching_mode.experimental_max_queries_per_tick` | Integer | `1` | Maximum number of independent short-range child queries executed serially<br/>within one flow tick. 1 (default) keeps the current single-query behavior;<br/>N > 1 splits one tick into up to N child queries, each scoped to at most one<br/>time-window-sized dirty window. Subsequent child queries continue only for<br/>scoped dirty-window work; unfiltered full-snapshot and incremental-delta<br/>queries execute at most once per tick. 0 is treated as 1. |
 | `flow.batching_mode.experimental_enable_incremental_read` | Bool | `false` | Whether to enable experimental flow incremental source reads.<br/>When disabled, batching flows always execute full-snapshot queries.<br/>Can be overridden per flow with WITH (experimental_enable_incremental_read = 'true'). |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
 | `flow.batching_mode.frontend_tls` | -- | -- | -- |

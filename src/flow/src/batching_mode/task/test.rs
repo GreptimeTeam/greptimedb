@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
@@ -2561,5 +2562,773 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
     assert_eq!(
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(5)
+    );
+}
+
+// --- Phase 0 batching scheduling tests ---
+
+use crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError;
+
+fn phase0_batch_opts(max_queries_per_tick: usize) -> Arc<BatchingModeOptions> {
+    Arc::new(BatchingModeOptions {
+        experimental_max_queries_per_tick: max_queries_per_tick,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn test_experimental_max_queries_per_tick_defaults_to_one() {
+    assert_eq!(
+        BatchingModeOptions::default().experimental_max_queries_per_tick,
+        1
+    );
+    // `0` must be treated as `1` defensively.
+    let opts = BatchingModeOptions {
+        experimental_max_queries_per_tick: 0,
+        ..Default::default()
+    };
+    assert_eq!(opts.experimental_max_queries_per_tick, 0);
+}
+
+/// Shared counters for [`Phase0CountingHandler`].
+#[derive(Clone)]
+struct Phase0Counters {
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+    call_count: Arc<AtomicUsize>,
+    scheduled_time_extensions: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Phase0Counters {
+    fn new() -> Self {
+        Self {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::new(AtomicUsize::new(0)),
+            call_count: Arc::new(AtomicUsize::new(0)),
+            scheduled_time_extensions: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    fn scheduled_time_extensions(&self) -> Vec<String> {
+        self.scheduled_time_extensions.lock().unwrap().clone()
+    }
+}
+
+/// Mock frontend handler that counts calls, tracks max in-flight concurrency,
+/// records the `FLOW_SCHEDULED_TIME_MILLIS` extension observed on each call,
+/// and can fail on a chosen call index.
+struct Phase0CountingHandler {
+    counters: Phase0Counters,
+    fail_on_call: Option<usize>,
+}
+
+impl Phase0CountingHandler {
+    fn new(counters: Phase0Counters) -> Self {
+        Self {
+            counters,
+            fail_on_call: None,
+        }
+    }
+
+    fn failing_on(mut self, call: usize) -> Self {
+        self.fail_on_call = Some(call);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for Phase0CountingHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let call = self.counters.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_on_call == Some(call) {
+            return Err(BoxedError::new(MockError::new(StatusCode::Internal)));
+        }
+        let cur = self.counters.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.counters.max_in_flight.fetch_max(cur, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let _ = self.counters.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if let Some(v) = ctx.extension(FLOW_SCHEDULED_TIME_MILLIS) {
+            self.counters
+                .scheduled_time_extensions
+                .lock()
+                .unwrap()
+                .push(v.to_string());
+        }
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+/// Creates a `date_bin` time-window task whose sink table is registered, keeping
+/// the shutdown sender alive so `is_shutdown_signaled()` stays false during a
+/// tick.
+async fn new_phase0_time_window_task(
+    sink_table: &str,
+    batch_opts: Arc<BatchingModeOptions>,
+) -> (
+    BatchingTask,
+    QueryEngineRef,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan_query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
+                      FROM numbers_with_ts GROUP BY time_window, number";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), plan_query, true)
+        .await
+        .unwrap();
+    let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+        &plan,
+        query_engine.engine_state().catalog_manager().clone(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let time_window_expr = time_window_expr
+        .map(|expr| {
+            TimeWindowExpr::from_expr(
+                &expr,
+                &column_name,
+                &df_schema,
+                &query_engine.engine_state().session_state(),
+            )
+        })
+        .transpose()
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: plan_query,
+        plan: plan.clone(),
+        time_window_expr,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table.to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx,
+        batch_opts,
+        flow_eval_interval: None,
+        eval_schedule: None,
+    })
+    .unwrap();
+
+    (task, query_engine, shutdown_tx)
+}
+
+fn add_three_dirty_windows(task: &BatchingTask) {
+    let mut state = task.state.write().unwrap();
+    for i in 0..3 {
+        state.dirty_time_windows.add_window(
+            Timestamp::new_second(i * 5),
+            Some(Timestamp::new_second((i + 1) * 5)),
+        );
+    }
+}
+
+/// N=3: one tick executes three child queries serially (max in-flight 1) and
+/// consumes all three window-sized chunks.
+#[tokio::test]
+async fn test_phase0_tick_executes_three_child_queries_serially_and_drains_three_windows() {
+    let sink_table = "phase0_twe_sink_serial";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(3)).await;
+    register_twe_sink(&query_engine, sink_table, 9301);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((3, _)))),
+        "tick should aggregate 3 rows across 3 child queries, got {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        counters.call_count(),
+        3,
+        "tick should execute exactly 3 child queries"
+    );
+    assert_eq!(
+        counters.max_in_flight(),
+        1,
+        "child queries must run serially under one execution_lock"
+    );
+    assert!(
+        task.state.read().unwrap().dirty_time_windows.is_empty(),
+        "tick should drain all three dirty windows"
+    );
+}
+
+/// N=3 with only one dirty window: the tick executes one child then exits
+/// successfully instead of running empty child queries.
+#[tokio::test]
+async fn test_phase0_tick_stops_early_when_dirty_windows_exhausted() {
+    let sink_table = "phase0_twe_sink_early_stop";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(3)).await;
+    register_twe_sink(&query_engine, sink_table, 9302);
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((1, _)))),
+        "tick should report the single successful child, got {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        counters.call_count(),
+        1,
+        "tick must stop early once no dirty windows remain"
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+/// Failure on child 2: child 1 stays consumed, child 2 is restored, child 3
+/// never starts, and the tick returns the error immediately.
+#[tokio::test]
+async fn test_phase0_tick_failure_on_second_child_restores_only_that_child() {
+    let sink_table = "phase0_twe_sink_fail_second";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(3)).await;
+    register_twe_sink(&query_engine, sink_table, 9303);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()).failing_on(2));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        outcome.result.is_err(),
+        "tick must return the child-2 error, got {:?}",
+        outcome.result
+    );
+    assert_eq!(counters.call_count(), 2, "child 3 must never start");
+    let state = task.state.read().unwrap();
+    // Child 1's [0s, 5s) window stays consumed; child 2's [5s, 10s) is
+    // restored; child 3's [10s, 15s) was never consumed.
+    assert_eq!(state.dirty_time_windows.len(), 2);
+    assert_eq!(
+        state.dirty_time_windows.window_size(),
+        std::time::Duration::from_secs(10),
+        "only the failed child's window (5s) plus the unstarted one (5s) should remain dirty"
+    );
+}
+
+/// One scheduled tick retains the same `FLOW_SCHEDULED_TIME_MILLIS` value for
+/// all child queries, and removes it afterwards.
+#[tokio::test]
+async fn test_phase0_scheduled_tick_retains_same_scheduled_time_for_all_children() {
+    let sink_table = "phase0_twe_sink_scheduled";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(3)).await;
+    register_twe_sink(&query_engine, sink_table, 9304);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let scheduled_time_secs = 1_700_000_000_i64;
+    let expected_extension = (scheduled_time_secs * 1000).to_string();
+    let outcome = task
+        .execute_once_serialized_at_scheduled_time(
+            &query_engine,
+            &frontend_client,
+            scheduled_time_secs,
+        )
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((3, _)))),
+        "scheduled tick should run three child queries, got {:?}",
+        outcome.result
+    );
+    assert_eq!(counters.call_count(), 3);
+    assert_eq!(
+        counters.scheduled_time_extensions(),
+        vec![
+            expected_extension.clone(),
+            expected_extension.clone(),
+            expected_extension
+        ],
+        "all child queries in one scheduled tick must observe the same scheduled time"
+    );
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None,
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into query_ctx after the tick"
+    );
+}
+
+/// N=1 must keep the current merged-range behavior: one query covering the
+/// whole merged 3-window range, not a forced one-window chunk.
+#[tokio::test]
+async fn test_phase0_n1_keeps_single_merged_query_behavior() {
+    let sink_table = "phase0_twe_sink_n1";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(1)).await;
+    register_twe_sink(&query_engine, sink_table, 9305);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((1, _)))),
+        "N=1 tick should execute exactly one query, got {:?}",
+        outcome.result
+    );
+    assert_eq!(counters.call_count(), 1, "N=1 must run exactly one query");
+    let filter = match outcome.new_query {
+        Some(PlanInfo {
+            dirty_restore: DirtyRestore::Scoped(filter),
+            ..
+        }) => filter,
+        _ => panic!("expected scoped restore info for the N=1 query"),
+    };
+    assert_eq!(
+        filter.time_ranges,
+        vec![(Timestamp::new_second(0), Timestamp::new_second(15))],
+        "N=1 must keep the merged 3-window range behavior, not force one-window chunks"
+    );
+    assert!(
+        task.state.read().unwrap().dirty_time_windows.is_empty(),
+        "N=1 single query should drain the whole merged range"
+    );
+}
+
+/// Mock frontend handler that re-marks the flow dirty on every call,
+/// simulating concurrent ingest arriving mid-tick. This guarantees a buggy tick
+/// would have dirty work available to generate a second/third child query.
+struct ReMarkDirtyPhase0Handler {
+    counters: Phase0Counters,
+    task: BatchingTask,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for ReMarkDirtyPhase0Handler {
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        self.counters.call_count.fetch_add(1, Ordering::SeqCst);
+        self.task
+            .mark_all_windows_as_dirty()
+            .map_err(BoxedError::new)?;
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+/// Mock frontend handler that blocks the first `block_calls` frontend calls
+/// until the test releases them, signaling each blocked call's start through a
+/// channel. Used to prove the whole-tick `execution_lock` is held across child
+/// queries.
+struct HandshakePhase0Handler {
+    counters: Phase0Counters,
+    call_started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    block_calls: usize,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for HandshakePhase0Handler {
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let call = self.counters.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if call <= self.block_calls {
+            let _ = self.call_started.send(());
+            let mut release = self.release.lock().await;
+            release.recv().await;
+        }
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+/// Waits until the tick's next child query signals that it entered its
+/// frontend call (bounded by a timeout for safety).
+async fn wait_for_child_start(rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("tick should start a child query")
+        .expect("channel should not close");
+}
+
+/// Mock frontend handler for the competitor execution. Signals on every
+/// frontend call so the test can prove the competitor never reaches the
+/// frontend while the tick holds `execution_lock`.
+struct CompetitorProbeHandler {
+    frontend_started: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for CompetitorProbeHandler {
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let _ = self.frontend_started.send(());
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+/// Waits until the competitor signals that it is about to attempt the
+/// serialized execution path (bounded by a timeout for safety). The signal is
+/// sent as the competitor's last action before `lock().await`, so receiving it
+/// proves the competitor attempted progress while the tick owns the lock.
+async fn wait_for_competitor_ready(rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("competitor should signal readiness before attempting the serialized path")
+        .expect("channel should not close");
+}
+
+/// N=3 with an unfiltered full-snapshot child (eval-interval SQL without a
+/// usable time-window expression) must execute exactly ONE frontend query per
+/// tick and return success, instead of repeating the full-range query.
+#[tokio::test]
+async fn test_phase0_tick_unfiltered_full_executes_exactly_once() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx.clone(),
+        query_engine.clone(),
+        "SELECT number, ts FROM numbers_with_ts",
+        true,
+    )
+    .await
+    .unwrap();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query: "SELECT number, ts FROM numbers_with_ts",
+        plan,
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx,
+        batch_opts: phase0_batch_opts(3),
+        flow_eval_interval: Some(Duration::from_secs(60)),
+        eval_schedule: None,
+    })
+    .unwrap();
+    task.state.write().unwrap().dirty_time_windows.set_dirty();
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((1, _)))),
+        "unfiltered full tick should return success with one executed query, got {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        counters.call_count(),
+        1,
+        "unfiltered full query must execute exactly once per tick"
+    );
+}
+
+/// N=3 with an incremental-delta child must execute exactly ONE frontend query
+/// per tick even when concurrent ingest re-marks dirty mid-tick; the tick must
+/// not repeat the delta query.
+#[tokio::test]
+async fn test_phase0_tick_incremental_delta_executes_exactly_once() {
+    let sink_table = "phase0_twe_sink_incr_once";
+    let batch_opts = Arc::new(BatchingModeOptions {
+        experimental_max_queries_per_tick: 3,
+        experimental_enable_incremental_read: true,
+        ..Default::default()
+    });
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, batch_opts).await;
+    register_twe_sink(&query_engine, sink_table, 9401);
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1, 10)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(ReMarkDirtyPhase0Handler {
+        counters: counters.clone(),
+        task: task.clone(),
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((1, _)))),
+        "incremental delta tick should return success with one executed query, got {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        counters.call_count(),
+        1,
+        "incremental delta query must execute exactly once per tick"
+    );
+}
+
+/// The Phase 0 continuation predicate must allow further children only for
+/// scoped dirty-window work, and stop after unfiltered/incremental work.
+#[test]
+fn test_phase0_coverage_continuation_classification() {
+    assert!(coverage_allows_phase0_continuation(
+        &QueryCoverage::ScopedBaseRepair
+    ));
+    assert!(coverage_allows_phase0_continuation(
+        &QueryCoverage::FencedRepairChunk {
+            high: BTreeMap::new()
+        }
+    ));
+    assert!(!coverage_allows_phase0_continuation(
+        &QueryCoverage::UnfilteredFull
+    ));
+    assert!(!coverage_allows_phase0_continuation(
+        &QueryCoverage::IncrementalDelta
+    ));
+}
+
+/// A concurrent manual/serialized execution cannot enter between child 1 and
+/// child 2 (or child 2 and child 3) while the N>1 tick holds `execution_lock`
+/// for the whole tick.
+///
+/// Determinism: the competitor signals readiness as its LAST action before
+/// calling the serialized execution (i.e. immediately before `lock().await`).
+/// The test waits for that signal, then yields the scheduler (no sleeps) so the
+/// competitor polls through to `lock().await` and queues behind the tick's
+/// hold (tokio Mutex is FIFO). While the tick owns the lock, the competitor
+/// cannot be finished and cannot start a frontend query; only after the tick
+/// releases the lock does the competitor proceed to completion.
+#[tokio::test]
+async fn test_phase0_tick_holds_execution_lock_between_children() {
+    let sink_table = "phase0_twe_sink_lock";
+    let (task, query_engine, _shutdown_tx) =
+        new_phase0_time_window_task(sink_table, phase0_batch_opts(3)).await;
+    register_twe_sink(&query_engine, sink_table, 9402);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let (call_started_tx, mut call_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(HandshakePhase0Handler {
+        counters: counters.clone(),
+        call_started: call_started_tx,
+        release: tokio::sync::Mutex::new(release_rx),
+        block_calls: 3,
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    // Competitor uses its own frontend client whose handler signals on any
+    // frontend call, proving the competitor cannot start a query mid-tick.
+    let (competitor_frontend_tx, mut competitor_frontend_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let competitor_handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(CompetitorProbeHandler {
+            frontend_started: competitor_frontend_tx,
+        });
+    let competitor_frontend = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&competitor_handler),
+        QueryOptions::default(),
+    ));
+
+    let tick_task = tokio::spawn({
+        let task = task.clone();
+        let query_engine = query_engine.clone();
+        let frontend_client = frontend_client.clone();
+        async move {
+            task.execute_tick_serialized_with_outcome(&query_engine, &frontend_client, None)
+                .await
+        }
+    });
+
+    // Child 1 is now inside its frontend call while the tick holds
+    // `execution_lock` for the whole tick.
+    wait_for_child_start(&mut call_started_rx).await;
+
+    // Competitor: signal readiness immediately before the serialized call, so
+    // the test can prove it attempted progress while the tick owns the lock.
+    let (competitor_ready_tx, mut competitor_ready_rx) = tokio::sync::mpsc::unbounded_channel();
+    let competitor = tokio::spawn({
+        let task = task.clone();
+        let query_engine = query_engine.clone();
+        let competitor_frontend = competitor_frontend.clone();
+        async move {
+            let _ = competitor_ready_tx.send(());
+            task.execute_once_serialized(&query_engine, &competitor_frontend, None)
+                .await
+        }
+    });
+    wait_for_competitor_ready(&mut competitor_ready_rx).await;
+    // Let the competitor poll through to `execution_lock.lock().await` and
+    // queue behind the tick's hold (tokio Mutex is FIFO). Pure yields, no
+    // sleeps, so there is no time-based race.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert!(
+        !competitor.is_finished(),
+        "competitor must be blocked on execution_lock while the tick holds it"
+    );
+    assert!(
+        competitor_frontend_rx.try_recv().is_err(),
+        "competitor must not start a frontend query while the tick holds the lock"
+    );
+
+    // Release child 1; the tick proceeds to child 2 while still holding the
+    // lock, so the competitor is still blocked between children.
+    let _ = release_tx.send(());
+    wait_for_child_start(&mut call_started_rx).await;
+    assert!(
+        !competitor.is_finished(),
+        "competitor must still be blocked between child 1 and child 2"
+    );
+    assert!(
+        competitor_frontend_rx.try_recv().is_err(),
+        "competitor must not start a frontend query between child 1 and child 2"
+    );
+
+    // Release child 2; child 3 starts, lock still held.
+    let _ = release_tx.send(());
+    wait_for_child_start(&mut call_started_rx).await;
+    assert!(
+        !competitor.is_finished(),
+        "competitor must still be blocked between child 2 and child 3"
+    );
+    assert!(
+        competitor_frontend_rx.try_recv().is_err(),
+        "competitor must not start a frontend query between child 2 and child 3"
+    );
+
+    // Release child 3; the tick completes and releases the lock.
+    let _ = release_tx.send(());
+    let tick_outcome = tokio::time::timeout(Duration::from_secs(1), tick_task)
+        .await
+        .expect("tick should finish")
+        .expect("tick task should not panic");
+    assert!(
+        matches!(tick_outcome.result, Ok(Some((3, _)))),
+        "tick should execute three scoped children, got {:?}",
+        tick_outcome.result
+    );
+    assert_eq!(counters.call_count(), 3);
+
+    // With the lock released, the competitor proceeds: it acquires the lock,
+    // finds no dirty windows left (the tick drained them), and completes with
+    // no frontend query.
+    let competitor_result = tokio::time::timeout(Duration::from_secs(1), competitor)
+        .await
+        .expect("competitor should finish after the tick releases the lock")
+        .expect("competitor task should not panic");
+    assert!(matches!(competitor_result, Ok(None)));
+    assert!(
+        competitor_frontend_rx.try_recv().is_err(),
+        "competitor ran only after the tick drained all dirty windows, so no frontend query"
     );
 }

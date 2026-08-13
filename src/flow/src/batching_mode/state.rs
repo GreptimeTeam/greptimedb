@@ -619,17 +619,29 @@ impl DirtyTimeWindows {
             expire_lower_bound.map(|t| t.to_iso8601_string()),
             window_size
         );
-        self.merge_dirty_time_windows(window_size, expire_lower_bound)?;
 
-        if self.windows.len() > window_cnt {
-            let first_time_window = self.windows.first_key_value();
-            let last_time_window = self.windows.last_key_value();
+        // Merge/expiry, selection/splitting, alignment, and expression
+        // construction all run on a staged clone of the live windows. The live
+        // `self.windows` is committed only after the complete `FilterExprInfo`
+        // has been built successfully, so an `Err` at any point leaves the
+        // dirty-window map exactly unchanged (including its key/value
+        // representation).
+        let merged_windows = Self::merge_dirty_time_windows_staged(
+            &self.windows,
+            window_size,
+            self.time_window_merge_threshold,
+            expire_lower_bound,
+        )?;
+
+        if merged_windows.len() > window_cnt {
+            let first_time_window = merged_windows.first_key_value();
+            let last_time_window = merged_windows.last_key_value();
 
             if let Some(task_ctx) = task_ctx {
                 debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
-                    self.windows.len(),
+                    merged_windows.len(),
                     window_cnt,
                     task_ctx.config.time_window_expr,
                     task_ctx.config.expire_after,
@@ -641,7 +653,7 @@ impl DirtyTimeWindows {
                 debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
-                    self.windows.len(),
+                    merged_windows.len(),
                     window_cnt,
                     first_time_window,
                     last_time_window
@@ -653,9 +665,11 @@ impl DirtyTimeWindows {
         let max_time_range = window_size * window_cnt as i32;
 
         let mut to_be_query = BTreeMap::new();
-        let mut new_windows = self.windows.clone();
+        // Staged remainder: starts as the merged map; consumed ranges/splits
+        // are removed/inserted here and only committed on success.
+        let mut new_windows = merged_windows.clone();
         let mut cur_time_range = chrono::Duration::zero();
-        for (idx, (start, end)) in self.windows.iter().enumerate() {
+        for (idx, (start, end)) in merged_windows.iter().enumerate() {
             let first_end = start
                 .add_duration(window_size.to_std().unwrap())
                 .context(TimeSnafu)?;
@@ -682,8 +696,12 @@ impl DirtyTimeWindows {
                 // too large a window, split it
                 // split at window_size * times
                 let surplus = max_time_range - cur_time_range;
-                if surplus.num_seconds() <= window_size.num_seconds() {
-                    // Skip splitting if surplus is smaller than window_size
+                if surplus.num_seconds() < window_size.num_seconds() {
+                    // Skip splitting if surplus is smaller than window_size.
+                    // An exactly window-sized surplus (`surplus == window_size`)
+                    // must proceed so that `max_window_cnt=1` consumes exactly
+                    // one aligned window-sized chunk and leaves the remainder
+                    // dirty, instead of stalling on the merged range.
                     break;
                 }
                 let times = surplus.num_seconds() / window_size.num_seconds();
@@ -702,11 +720,15 @@ impl DirtyTimeWindows {
             }
         }
 
-        self.windows = new_windows;
-
-        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
-            .with_label_values(&[flow_id.to_string().as_str()])
-            .observe(to_be_query.len() as f64);
+        // No eligible windows after merge/expiry: keep the existing successful
+        // semantics. The merge/expiry cleanup IS committed (expired windows are
+        // dropped, close windows are coalesced) even though no query is
+        // generated; this mirrors the pre-transactional behavior. An `Err` from
+        // this point onward still never mutates `self.windows`.
+        if to_be_query.is_empty() {
+            self.windows = new_windows;
+            return Ok(None);
+        }
 
         let full_time_range = to_be_query
             .iter()
@@ -718,12 +740,9 @@ impl DirtyTimeWindows {
                 }
             })
             .num_seconds() as f64;
-        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE
-            .with_label_values(&[flow_id.to_string().as_str()])
-            .observe(full_time_range);
 
         let stalled_time_range =
-            self.windows
+            new_windows
                 .iter()
                 .fold(chrono::Duration::zero(), |acc, (start, end)| {
                     if let Some(end) = end {
@@ -732,10 +751,6 @@ impl DirtyTimeWindows {
                         acc + window_size
                     }
                 });
-
-        METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE
-            .with_label_values(&[flow_id.to_string().as_str()])
-            .observe(stalled_time_range.num_seconds() as f64);
 
         let std_window_size = window_size.to_std().map_err(|e| {
             InternalSnafu {
@@ -777,6 +792,20 @@ impl DirtyTimeWindows {
             expr_lst.push(expr);
         }
         let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
+
+        // All fallible construction succeeded: commit the staged remainder now.
+        self.windows = new_windows;
+
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(time_ranges.len() as f64);
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(full_time_range);
+        METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(stalled_time_range.num_seconds() as f64);
+
         let ret = expr.map(|expr| FilterExprInfo {
             expr,
             col_name: col_name.to_string(),
@@ -819,8 +848,29 @@ impl DirtyTimeWindows {
         window_size: chrono::Duration,
         expire_lower_bound: Option<Timestamp>,
     ) -> Result<(), Error> {
-        if self.windows.is_empty() {
-            return Ok(());
+        self.windows = Self::merge_dirty_time_windows_staged(
+            &self.windows,
+            window_size,
+            self.time_window_merge_threshold,
+            expire_lower_bound,
+        )?;
+        Ok(())
+    }
+
+    /// Pure merge/expiry of `windows` — does not mutate `self`. Returns the
+    /// merged/clipped map, or `Err` on timestamp arithmetic overflow with the
+    /// input unchanged.
+    ///
+    /// `gen_filter_exprs` stages its merge through this function so an `Err`
+    /// leaves the live `self.windows` exactly unchanged (transactional).
+    pub(crate) fn merge_dirty_time_windows_staged(
+        windows: &BTreeMap<Timestamp, Option<Timestamp>>,
+        window_size: chrono::Duration,
+        time_window_merge_threshold: usize,
+        expire_lower_bound: Option<Timestamp>,
+    ) -> Result<BTreeMap<Timestamp, Option<Timestamp>>, Error> {
+        if windows.is_empty() {
+            return Ok(BTreeMap::new());
         }
 
         let mut new_windows = BTreeMap::new();
@@ -834,7 +884,7 @@ impl DirtyTimeWindows {
 
         // previous time window
         let mut prev_tw = None;
-        for (mut lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+        for (mut lower_bound, upper_bound) in windows.clone() {
             // filter out expired time window
             if let Some(expire_lower_bound) = expire_lower_bound {
                 match upper_bound {
@@ -874,7 +924,7 @@ impl DirtyTimeWindows {
 
             if lower_bound
                 .sub(&prev_upper)
-                .map(|dist| dist <= window_size * self.time_window_merge_threshold as i32)
+                .map(|dist| dist <= window_size * time_window_merge_threshold as i32)
                 .unwrap_or(false)
             {
                 // Union the two windows: the current window may be contained
@@ -890,9 +940,7 @@ impl DirtyTimeWindows {
             new_windows.insert(prev_tw.0, prev_tw.1);
         }
 
-        self.windows = new_windows;
-
-        Ok(())
+        Ok(new_windows)
     }
 }
 
@@ -1264,6 +1312,195 @@ mod test {
                 .unwrap();
             assert_eq!(expected, dirty.windows);
         }
+    }
+
+    /// `gen_filter_exprs` with `window_cnt = 1` must consume exactly one
+    /// window-sized chunk per call from a merged multi-window range. Regression
+    /// test for the exact-fit split stall: when the remaining surplus equals
+    /// exactly `window_size`, the split must still happen so the merged range
+    /// drains one chunk at a time instead of stalling forever.
+    #[test]
+    fn test_gen_filter_exprs_window_cnt_one_consumes_one_window_chunk_per_call() {
+        let window_size = chrono::Duration::seconds(5);
+        let mut dirty = DirtyTimeWindows::default();
+        // Three adjacent one-window dirty ranges merge into a single
+        // 3-window range [0s, 15s) before filtering.
+        for i in 0..3 {
+            dirty.add_window(
+                Timestamp::new_second(i * 5),
+                Some(Timestamp::new_second((i + 1) * 5)),
+            );
+        }
+        assert_eq!(dirty.len(), 3);
+
+        let first = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("first call should consume one window-sized chunk");
+        assert_eq!(
+            first.time_ranges,
+            vec![(Timestamp::new_second(0), Timestamp::new_second(5))]
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([(Timestamp::new_second(5), Some(Timestamp::new_second(15)))])
+        );
+
+        let second = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("second call should consume the next window-sized chunk");
+        assert_eq!(
+            second.time_ranges,
+            vec![(Timestamp::new_second(5), Timestamp::new_second(10))]
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))])
+        );
+
+        let third = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("third call should consume the last window-sized chunk");
+        assert_eq!(
+            third.time_ranges,
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+        );
+        assert!(dirty.windows.is_empty());
+
+        assert!(
+            dirty
+                .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+                .unwrap()
+                .is_none(),
+            "fully drained dirty windows should produce no filter"
+        );
+    }
+
+    /// `gen_filter_exprs` must not commit ANY mutation — including the
+    /// merge/expiry step — until the complete filter has been constructed.
+    /// This test starts with three separately represented, mergeable windows
+    /// (so merge would collapse them), then induces a deterministic
+    /// post-merge construction error via a `task_ctx` with no time-window
+    /// expression. The live `dirty.windows` must remain exactly equal to the
+    /// original map.
+    #[tokio::test]
+    async fn test_gen_filter_exprs_construction_failure_leaves_windows_unchanged() {
+        let window_size = chrono::Duration::seconds(5);
+        let mut dirty = DirtyTimeWindows::default();
+        // Three adjacent one-window dirty ranges are mergeable into one
+        // [0s, 15s) range; they stay separately represented until merge runs.
+        dirty.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        dirty.add_window(Timestamp::new_second(5), Some(Timestamp::new_second(10)));
+        dirty.add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+        assert_eq!(
+            dirty.windows.len(),
+            3,
+            "precondition: three separate windows"
+        );
+        let original_windows = dirty.windows.clone();
+
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(crate::batching_mode::task::TaskArgs {
+            flow_id: 1,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "unused_sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: std::sync::Arc::new(crate::batching_mode::BatchingModeOptions::default()),
+            flow_eval_interval: None,
+            eval_schedule: None,
+        })
+        .unwrap();
+
+        // Merge collapses the three windows into one [0s, 15s) range, which is
+        // selected (and split into a staged remainder) before construction; the
+        // missing time-window expression then fails the alignment step.
+        let result = dirty.gen_filter_exprs("ts", None, window_size, 1, 0, Some(&task));
+
+        assert!(
+            matches!(result, Err(Error::Unexpected { .. })),
+            "missing time-window expression must fail construction, got {result:?}"
+        );
+        assert_eq!(
+            dirty.windows, original_windows,
+            "failed filter construction must not mutate dirty windows (merge included)"
+        );
+        // Prove the merge step WOULD have changed the map, so the equality above
+        // is not vacuous: three separate entries vs one merged entry.
+        assert_eq!(original_windows.len(), 3);
+        let merged = DirtyTimeWindows::merge_dirty_time_windows_staged(
+            &original_windows,
+            window_size,
+            dirty.time_window_merge_threshold,
+            None,
+        )
+        .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged,
+            BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))])
+        );
+    }
+
+    /// On `Ok(None)` (no eligible windows after merge/expiry) the merge/expiry
+    /// cleanup commits, matching pre-transactional behavior: expired windows
+    /// are dropped even though no query runs. The committed map must come from
+    /// the staged merge and must not touch configuration fields.
+    #[test]
+    fn test_gen_filter_exprs_none_commits_merge_expiry_cleanup() {
+        let window_size = chrono::Duration::seconds(5);
+        let mut dirty = DirtyTimeWindows::default();
+        // A bounded range ending at or before the expire bound is fully
+        // expired: [0s, 5s) with expire bound 20s is dropped.
+        dirty.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        let max_filter_before = dirty.max_filter_num_per_query;
+        let merge_threshold_before = dirty.time_window_merge_threshold;
+
+        let result = dirty.gen_filter_exprs(
+            "ts",
+            Some(Timestamp::new_second(20)),
+            window_size,
+            1,
+            0,
+            None,
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "fully expired windows should produce no query, got {result:?}"
+        );
+        assert!(
+            dirty.windows.is_empty(),
+            "expired windows must be cleaned up"
+        );
+
+        // Configuration fields untouched by the transactional path.
+        assert_eq!(dirty.max_filter_num_per_query, max_filter_before);
+        assert_eq!(dirty.time_window_merge_threshold, merge_threshold_before);
     }
 
     #[tokio::test]
