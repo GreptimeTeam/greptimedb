@@ -83,7 +83,7 @@ log-query.workspace = true
 loki-proto.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
-mysql_common = "0.34"
+mysql_common = "0.38"
 notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
@@ -157,7 +157,7 @@ common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
 moka.workspace = true
-mysql_async = { version = "0.35", default-features = false, features = [
+mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
 permutation = "0.4"
