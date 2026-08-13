@@ -41,6 +41,7 @@ use datafusion::logical_expr::{
     BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
     ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
 };
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
@@ -49,6 +50,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
+use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
@@ -59,8 +61,9 @@ use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use promql::extension_plan::{
-    Absent, EmptyMetric, HistogramFold, InstantManipulate, Millisecond, RangeManipulate,
-    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn, build_special_time_expr,
+    Absent, EmptyMetric, HistogramFold, HistogramFoldOperation, InstantManipulate, Millisecond,
+    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    build_special_time_expr,
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
@@ -118,6 +121,8 @@ const SCALAR_FUNCTION: &str = "scalar";
 const SPECIAL_ABSENT_FUNCTION: &str = "absent";
 /// `histogram_quantile` function in PromQL
 const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
+/// `histogram_fraction` function in PromQL
+const SPECIAL_HISTOGRAM_FRACTION: &str = "histogram_fraction";
 /// `vector` function in PromQL
 const SPECIAL_VECTOR_FUNCTION: &str = "vector";
 /// `le` column for conventional histogram.
@@ -2074,8 +2079,10 @@ impl PromPlanner {
         let Call { func, args } = call_expr;
         // some special functions that are not expression but a plan
         match func.name {
-            SPECIAL_HISTOGRAM_QUANTILE => {
-                return self.create_histogram_plan(args, query_engine_state).await;
+            SPECIAL_HISTOGRAM_QUANTILE | SPECIAL_HISTOGRAM_FRACTION => {
+                return self
+                    .create_histogram_plan(func.name, args, query_engine_state)
+                    .await;
             }
             SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
             SCALAR_FUNCTION => return self.create_scalar_plan(args, query_engine_state).await,
@@ -3563,9 +3570,6 @@ impl PromPlanner {
             "histogram_stdvar" => {
                 ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramStdvar::scalar_udf()))
             }
-            "histogram_fraction" => {
-                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramFraction::scalar_udf()))
-            }
             "time" => {
                 exprs.push(build_special_time_expr(
                     self.ctx.time_index_column.as_ref().unwrap(),
@@ -4683,9 +4687,6 @@ impl PromPlanner {
     }
 
     /// Try to build a [f64] from [PromExpr].
-    #[deprecated(
-        note = "use `Self::get_param_as_literal_expr` instead. This is only for `create_histogram_plan`"
-    )]
     fn try_build_float_literal(expr: &PromExpr) -> Option<f64> {
         match expr {
             PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
@@ -4693,8 +4694,21 @@ impl PromPlanner {
             PromExpr::Unary(UnaryExpr { expr, .. }) => {
                 Self::try_build_float_literal(expr).map(|f| -f)
             }
+            PromExpr::Binary(_) => {
+                let expr = Self::try_build_literal_expr(expr)?;
+                let simplifier = ExprSimplifier::new(SimplifyContext::default());
+                let expr = simplifier.coerce(expr, &DFSchema::empty()).ok()?;
+                let DfExpr::Literal(value, _) = simplifier.simplify(expr).ok()? else {
+                    return None;
+                };
+                let ScalarValue::Float64(Some(value)) =
+                    value.cast_to(&ArrowDataType::Float64).ok()?
+                else {
+                    return None;
+                };
+                Some(value)
+            }
             PromExpr::StringLiteral(_)
-            | PromExpr::Binary(_)
             | PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
             | PromExpr::Call(_)
@@ -4704,41 +4718,66 @@ impl PromPlanner {
         }
     }
 
-    /// Create a [SPECIAL_HISTOGRAM_QUANTILE] plan.
+    /// Create a classic, native, or mixed histogram helper plan.
     async fn create_histogram_plan(
         &mut self,
+        function_name: &str,
         args: &PromFunctionArgs,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        if args.args.len() != 2 {
-            return FunctionInvalidArgumentSnafu {
-                fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
+        let invalid_argument = || FunctionInvalidArgumentSnafu {
+            fn_name: function_name.to_string(),
+        };
+        let (function, input) = match (function_name, args.args.as_slice()) {
+            (SPECIAL_HISTOGRAM_QUANTILE, [quantile, input]) => (
+                HistogramFoldOperation::Quantile(
+                    Self::try_build_float_literal(quantile)
+                        .with_context(invalid_argument)?
+                        .into(),
+                ),
+                input.as_ref().clone(),
+            ),
+            (SPECIAL_HISTOGRAM_FRACTION, [lower, upper, input]) => (
+                HistogramFoldOperation::Fraction {
+                    lower: Self::try_build_float_literal(lower)
+                        .with_context(invalid_argument)?
+                        .into(),
+                    upper: Self::try_build_float_literal(upper)
+                        .with_context(invalid_argument)?
+                        .into(),
+                },
+                input.as_ref().clone(),
+            ),
+            _ => {
+                return FunctionInvalidArgumentSnafu {
+                    fn_name: function_name.to_string(),
+                }
+                .fail();
             }
-            .fail();
-        }
-        #[allow(deprecated)]
-        let phi = Self::try_build_float_literal(&args.args[0]).with_context(|| {
-            FunctionInvalidArgumentSnafu {
-                fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
-            }
-        })?;
+        };
 
-        let input = args.args[1].as_ref().clone();
         let input_plan = self.prom_expr_to_plan(&input, query_engine_state).await?;
-        // `histogram_quantile` folds buckets across `le`, so `__tsid` (which includes `le`) is not
-        // a stable series identifier anymore. Also, HistogramFold infers label columns from the
-        // input schema and must not treat `__tsid` as a label column.
+        // Histogram helpers fold buckets across `le`, so `__tsid` (which includes `le`) is not a
+        // stable series identifier anymore. HistogramFold must not treat it as a label column.
         let input_plan = self.strip_tsid_column(input_plan)?;
         self.ctx.use_tsid = false;
 
-        if let Some(histogram_field) =
+        if let Some((float_field, histogram_field)) =
             Self::alternative_sample_columns(input_plan.schema(), &self.ctx.field_columns)
-                .map(|(_, histogram)| histogram.to_string())
+                .map(|(float, histogram)| (float.to_string(), histogram.to_string()))
         {
+            if self.ctx.has_le_tag() {
+                return self.create_mixed_histogram_plan(
+                    function,
+                    input_plan,
+                    float_field,
+                    histogram_field,
+                );
+            }
             self.ctx.field_columns = vec![histogram_field];
         }
         if self.all_field_columns_are_native_histograms(input_plan.schema()) {
-            return self.create_native_histogram_quantile_plan(phi, input_plan);
+            return self.create_native_histogram_plan(function, input_plan);
         }
 
         if !self.ctx.has_le_tag() {
@@ -4764,51 +4803,68 @@ impl PromPlanner {
             .field_columns
             .first()
             .with_context(|| FunctionInvalidArgumentSnafu {
-                fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
+                fn_name: function.function_name().to_string(),
             })?
             .clone();
         // remove le column from tag columns
         self.ctx.tag_columns.retain(|col| col != LE_COLUMN_NAME);
 
+        let fold = HistogramFold::new_with_operation(
+            LE_COLUMN_NAME.to_string(),
+            field_column,
+            time_index_column,
+            function,
+            None,
+            input_plan,
+        )
+        .context(DataFusionPlanningSnafu)?;
         Ok(LogicalPlan::Extension(Extension {
-            node: Arc::new(
-                HistogramFold::new(
-                    LE_COLUMN_NAME.to_string(),
-                    field_column,
-                    time_index_column,
-                    phi,
-                    input_plan,
-                )
-                .context(DataFusionPlanningSnafu)?,
-            ),
+            node: Arc::new(fold),
         }))
     }
 
-    fn create_native_histogram_quantile_plan(
+    fn create_native_histogram_expr(
+        &self,
+        function: HistogramFoldOperation,
+        field_column: &str,
+    ) -> DfExpr {
+        let field = DfExpr::Column(Column::from_name(field_column));
+        let (func, args) = match function {
+            HistogramFoldOperation::Quantile(quantile) => (
+                Arc::new(NativeHistogramQuantile::scalar_udf_with_collector(
+                    self.promql_annotations.clone(),
+                )),
+                vec![field, lit(f64::from(quantile))],
+            ),
+            HistogramFoldOperation::Fraction { lower, upper } => (
+                Arc::new(NativeHistogramFraction::scalar_udf_with_collector(
+                    self.promql_annotations.clone(),
+                )),
+                vec![field, lit(f64::from(lower)), lit(f64::from(upper))],
+            ),
+        };
+        DfExpr::ScalarFunction(ScalarFunction { func, args })
+    }
+
+    fn create_native_histogram_plan(
         &mut self,
-        phi: f64,
+        function: HistogramFoldOperation,
         input_plan: LogicalPlan,
     ) -> Result<LogicalPlan> {
         ensure!(
             self.ctx.field_columns.len() == 1,
             MultiFieldsNotSupportedSnafu {
-                operator: SPECIAL_HISTOGRAM_QUANTILE
+                operator: function.function_name()
             },
         );
 
         let field_column = self.ctx.field_columns[0].clone();
-        let quantile_expr = DfExpr::ScalarFunction(ScalarFunction {
-            func: Arc::new(NativeHistogramQuantile::scalar_udf()),
-            args: vec![
-                DfExpr::Column(Column::from_name(field_column)),
-                DfExpr::Literal(ScalarValue::Float64(Some(phi)), None),
-            ],
-        });
-        let display_name = quantile_expr.schema_name().to_string();
+        let function_expr = self.create_native_histogram_expr(function, &field_column);
+        let display_name = function_expr.schema_name().to_string();
         self.ctx.field_columns = vec![display_name.clone()];
 
         let project_exprs = std::iter::once(self.create_time_index_column_expr()?)
-            .chain(std::iter::once(quantile_expr.alias(display_name)))
+            .chain(std::iter::once(function_expr.alias(display_name)))
             .chain(self.create_tag_column_exprs()?)
             .collect::<Vec<_>>();
 
@@ -4819,6 +4875,68 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)
+    }
+
+    fn create_mixed_histogram_plan(
+        &mut self,
+        function: HistogramFoldOperation,
+        input_plan: LogicalPlan,
+        float_field: String,
+        histogram_field: String,
+    ) -> Result<LogicalPlan> {
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
+        let tag_columns = self.ctx.tag_columns.clone();
+        let folded = HistogramFold::new_with_operation(
+            LE_COLUMN_NAME.to_string(),
+            float_field.clone(),
+            time_index_column.clone(),
+            function,
+            Some(histogram_field.clone()),
+            input_plan,
+        )
+        .context(DataFusionPlanningSnafu)?;
+        let record_collision = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(NativeHistogramDrop::warning_bool_false_udf(
+                "vector contains a mix of classic and native histograms".to_string(),
+                self.promql_annotations.clone(),
+            )),
+            args: vec![col(&float_field), col(&histogram_field)],
+        });
+        let keep = when(
+            col(&float_field)
+                .is_not_null()
+                .and(col(&histogram_field).is_not_null()),
+            record_collision,
+        )
+        .otherwise(lit(true))
+        .context(DataFusionPlanningSnafu)?;
+
+        let native_expr = self.create_native_histogram_expr(function, &histogram_field);
+        let output_field = native_expr.schema_name().to_string();
+        let value = DfExpr::ScalarFunction(ScalarFunction {
+            func: coalesce(),
+            args: vec![col(&float_field), native_expr],
+        });
+        self.ctx.field_columns = vec![output_field.clone()];
+        LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+            node: Arc::new(folded),
+        }))
+        .filter(keep)
+        .context(DataFusionPlanningSnafu)?
+        .project(
+            std::iter::once(col(&time_index_column))
+                .chain(std::iter::once(value.alias(output_field)))
+                .chain(tag_columns.iter().map(col)),
+        )
+        .context(DataFusionPlanningSnafu)?
+        .build()
+        .context(DataFusionPlanningSnafu)
     }
 
     /// Create a [SPECIAL_VECTOR_FUNCTION] plan
@@ -5019,8 +5137,9 @@ impl PromPlanner {
                 }
             }
             PromExpr::Paren(ParenExpr { expr }) => Self::try_build_literal_expr(expr),
-            // TODO(ruihang): support Unary operator
-            PromExpr::Unary(UnaryExpr { expr, .. }) => Self::try_build_literal_expr(expr),
+            PromExpr::Unary(UnaryExpr { expr, .. }) => Some(DfExpr::Negative(Box::new(
+                Self::try_build_literal_expr(expr)?,
+            ))),
             PromExpr::Binary(PromBinaryExpr {
                 lhs,
                 rhs,
@@ -6904,6 +7023,7 @@ mod test {
         name: &str,
         table_id: u32,
         tag: &str,
+        le: Option<&str>,
         value: DirectOrValue,
     ) -> table::TableRef {
         let value_type = match &value {
@@ -6912,12 +7032,20 @@ mod test {
             DirectOrValue::NativeHistogram(_) => native_histogram_value_type().clone(),
             DirectOrValue::Utf8(_) => ConcreteDataType::string_datatype(),
         };
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                "tag".to_string(),
+        let tag_count = 1 + usize::from(le.is_some());
+        let mut columns = vec![ColumnSchema::new(
+            "tag".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        )];
+        if le.is_some() {
+            columns.push(ColumnSchema::new(
+                LE_COLUMN_NAME.to_string(),
                 ConcreteDataType::string_datatype(),
                 false,
-            ),
+            ));
+        }
+        columns.extend([
             ColumnSchema::new(
                 "ts".to_string(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -6925,16 +7053,17 @@ mod test {
             )
             .with_time_index(true),
             ColumnSchema::new("v".to_string(), value_type, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.arrow_schema().clone(),
-            vec![
-                Arc::new(StringArray::from(vec![tag])) as Arc<dyn Array>,
-                Arc::new(TimestampMillisecondArray::from(vec![1_000])),
-                value.array(),
-            ],
-        )
-        .unwrap();
+        ]);
+        let schema = Arc::new(Schema::new(columns));
+        let mut arrays = vec![Arc::new(StringArray::from(vec![tag])) as Arc<dyn Array>];
+        if let Some(le) = le {
+            arrays.push(Arc::new(StringArray::from(vec![le])));
+        }
+        arrays.extend([
+            Arc::new(TimestampMillisecondArray::from(vec![1_000])) as Arc<dyn Array>,
+            value.array(),
+        ]);
+        let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
         let backing = GreptimeMemTable::new_with_catalog(
             name,
             GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
@@ -6942,11 +7071,12 @@ mod test {
             DEFAULT_CATALOG_NAME.to_string(),
             DEFAULT_SCHEMA_NAME.to_string(),
         );
+        let value_index = tag_count + 1;
         let meta = TableMetaBuilder::empty()
             .schema(schema)
-            .primary_key_indices(vec![0])
-            .value_indices(vec![2])
-            .next_column_id(3)
+            .primary_key_indices((0..tag_count).collect())
+            .value_indices(vec![value_index])
+            .next_column_id((value_index + 1) as u32)
             .build()
             .unwrap();
         let info = Arc::new(
@@ -6967,21 +7097,37 @@ mod test {
     fn operator_table_provider() -> DfTableSourceProvider {
         let catalog = MemoryCatalogManager::with_default_setup();
         let tables = [
-            operator_metric_table("lf", 2_001, "a", DirectOrValue::Float64(2.0)),
+            operator_metric_table("lf", 2_001, "a", None, DirectOrValue::Float64(2.0)),
             operator_metric_table(
                 "lh",
                 2_002,
                 "b",
+                None,
                 DirectOrValue::NativeHistogram(direct_or_histogram()),
             ),
-            operator_metric_table("rf", 2_003, "b", DirectOrValue::Float64(3.0)),
+            operator_metric_table("rf", 2_003, "b", None, DirectOrValue::Float64(3.0)),
             operator_metric_table(
                 "rh",
                 2_004,
                 "a",
+                None,
                 DirectOrValue::NativeHistogram(direct_or_histogram()),
             ),
-            operator_metric_table("fallback", 2_005, "c", DirectOrValue::Float64(7.0)),
+            operator_metric_table("fallback", 2_005, "c", None, DirectOrValue::Float64(7.0)),
+            operator_metric_table(
+                "bad_classic",
+                2_006,
+                "d",
+                Some("broken"),
+                DirectOrValue::Float64(1.0),
+            ),
+            operator_metric_table(
+                "bad_native",
+                2_007,
+                "d",
+                None,
+                DirectOrValue::NativeHistogram(direct_or_histogram()),
+            ),
         ];
         for table in tables {
             let info = table.table_info();
@@ -7622,6 +7768,11 @@ mod test {
                 false,
             ),
             ColumnSchema::new(
+                LE_COLUMN_NAME.to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
                 "timestamp".to_string(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
@@ -7636,8 +7787,8 @@ mod test {
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
-            .primary_key_indices(vec![0])
-            .value_indices(vec![2])
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -7809,6 +7960,122 @@ mod test {
 
         DfTableSourceProvider::new(
             catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    fn classic_and_native_histogram_table_provider(
+        native_tag: &str,
+        native_le: Option<&str>,
+        native_histogram: NativeHistogram,
+    ) -> DfTableSourceProvider {
+        let table_name = "mixed_histogram";
+        let catalog = MemoryCatalogManager::with_default_setup();
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "tag".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                LE_COLUMN_NAME.to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                greptime_native_histogram().to_string(),
+                native_histogram_value_type().clone(),
+                true,
+            ),
+            ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3, 4])
+            .next_column_id(5)
+            .build()
+            .unwrap();
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .name(table_name)
+                .meta(table_meta)
+                .build()
+                .unwrap(),
+        );
+        let batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "classic", "classic", native_tag, "classic", "classic", native_tag,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("1"),
+                    Some("+Inf"),
+                    native_le,
+                    Some("1"),
+                    Some("+Inf"),
+                    native_le,
+                ])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_000, 1_000, 1_000, 2_000, 2_000, 2_000,
+                ])),
+                build_histogram_array(&[
+                    None,
+                    None,
+                    Some(native_histogram.clone()),
+                    None,
+                    None,
+                    Some(native_histogram),
+                ]),
+                Arc::new(Float64Array::from(vec![
+                    Some(2.0),
+                    Some(4.0),
+                    None,
+                    Some(2.0),
+                    Some(4.0),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            table_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, batch),
+            2_200,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let table = Arc::new(Table::new(
+            table_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                table_id: 2_200,
+                table,
+            })
+            .unwrap();
+
+        DfTableSourceProvider::new(
+            catalog,
             false,
             QueryContext::arc(),
             DummyDecoder::arc(),
@@ -10091,7 +10358,7 @@ mod test {
         let plan = native_histogram_plan("histogram_count(some_metric)").await;
 
         assert!(plan.contains("prom_native_histogram_count"), "{plan}");
-        assert!(!plan.contains("PromHistogramFold"), "{plan}");
+        assert!(!plan.contains("HistogramFold:"), "{plan}");
     }
 
     #[tokio::test]
@@ -10102,6 +10369,7 @@ mod test {
             "stale_histogram",
             2_100,
             "a",
+            None,
             DirectOrValue::NativeHistogram(stale),
         );
         let catalog = MemoryCatalogManager::with_default_setup();
@@ -10211,7 +10479,8 @@ mod test {
         let plan = native_histogram_plan("histogram_quantile(0.9, some_metric)").await;
 
         assert!(plan.contains("prom_native_histogram_quantile"), "{plan}");
-        assert!(!plan.contains("PromHistogramFold"), "{plan}");
+        assert!(!plan.contains("HistogramFold:"), "{plan}");
+        assert!(plan.contains("some_metric.le"), "{plan}");
         // The phi literal is threaded into the native quantile UDF as its second argument.
         assert!(plan.contains("Float64(0.9)"), "{plan}");
         // The empty-values filter drops NULL quantile results so the output is empty
@@ -10237,6 +10506,183 @@ mod test {
             "{plan}"
         );
         assert!(!plan.contains("EmptyRelation"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn mixed_histogram_helpers_execute_classic_and_native_samples() {
+        let state = build_query_engine_state();
+        for (query, expected) in [
+            (
+                "histogram_quantile(0.5, mixed_histogram)",
+                vec![("classic", 1.0), ("native", 0.0)],
+            ),
+            (
+                "histogram_fraction(-Inf, +Inf, mixed_histogram)",
+                vec![("classic", 1.0), ("native", 1.0)],
+            ),
+        ] {
+            let plan = PromPlanner::stmt_to_plan(
+                classic_and_native_histogram_table_provider("native", None, direct_or_histogram()),
+                &operator_eval_stmt(query),
+                &state,
+            )
+            .await
+            .unwrap();
+            let plan_text = plan.display_indent_schema().to_string();
+            assert!(plan_text.contains("HistogramFold:"), "{plan_text}");
+            assert!(plan_text.contains("prom_native_histogram_"), "{plan_text}");
+            let value_field = plan
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.data_type() == &ArrowDataType::Float64)
+                .unwrap()
+                .name()
+                .clone();
+
+            let (_, batches) = execute(plan, &state).await;
+            let mut actual = batches
+                .iter()
+                .flat_map(|batch| {
+                    let tags = batch
+                        .column_by_name("tag")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    let values = batch
+                        .column_by_name(&value_field)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    (0..batch.num_rows()).map(|row| (tags.value(row), values.value(row)))
+                })
+                .collect::<Vec<_>>();
+            actual.sort_by_key(|(tag, _)| *tag);
+            assert_eq!(actual, expected, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_histogram_helpers_report_annotations() {
+        let state = build_query_engine_state();
+        let mut native_histogram = direct_or_histogram();
+        native_histogram.count = 2.0;
+        native_histogram.sum = f64::NAN;
+        for (native_tag, expected_rows, expected_warnings, expected_infos) in [
+            (
+                "classic",
+                0,
+                vec!["vector contains a mix of classic and native histograms"],
+                vec![],
+            ),
+            (
+                "native",
+                2,
+                vec![],
+                vec!["input to histogram_quantile has NaN observations, result is skewed higher"],
+            ),
+        ] {
+            let collector = PromqlAnnotationCollector::default();
+            let plan = PromPlanner::stmt_to_plan_with_annotations(
+                classic_and_native_histogram_table_provider(
+                    native_tag,
+                    None,
+                    native_histogram.clone(),
+                ),
+                &operator_eval_stmt("histogram_quantile(0.5, mixed_histogram)"),
+                &state,
+                Some(collector.clone()),
+            )
+            .await
+            .unwrap();
+
+            let (_, batches) = execute(plan, &state).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows
+            );
+            let mut warnings = vec![];
+            let mut infos = vec![];
+            collector.append_to(&mut warnings, &mut infos);
+            assert_eq!(warnings, expected_warnings);
+            assert_eq!(infos, expected_infos);
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_histogram_helper_preserves_native_le_and_scans_once() {
+        let state = build_query_engine_state();
+        let mut stmt = operator_eval_stmt("histogram_quantile(0.5, mixed_histogram)");
+        stmt.end = UNIX_EPOCH.checked_add(Duration::from_secs(2)).unwrap();
+        let plan = PromPlanner::stmt_to_plan(
+            classic_and_native_histogram_table_provider(
+                "classic",
+                Some("native"),
+                direct_or_histogram(),
+            ),
+            &stmt,
+            &state,
+        )
+        .await
+        .unwrap();
+        let plan_text = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_text.matches("TableScan: mixed_histogram").count(),
+            1,
+            "{plan_text}"
+        );
+
+        let value_field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.data_type() == &ArrowDataType::Float64)
+            .unwrap()
+            .name()
+            .clone();
+        let (_, batches) = execute(plan, &state).await;
+        let mut actual = batches
+            .iter()
+            .flat_map(|batch| {
+                let le = batch
+                    .column_by_name(LE_COLUMN_NAME)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let timestamps = batch
+                    .column_by_name("timestamp")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let values = batch
+                    .column_by_name(&value_field)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (0..batch.num_rows()).map(|row| {
+                    (
+                        timestamps.value(row),
+                        (!le.is_null(row)).then(|| le.value(row).to_string()),
+                        values.value(row),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        actual.sort_by(|lhs, rhs| (lhs.0, &lhs.1).cmp(&(rhs.0, &rhs.1)));
+        assert_eq!(
+            actual,
+            vec![
+                (1_000, None, 1.0),
+                (1_000, Some("native".to_string()), 0.0),
+                (2_000, None, 1.0),
+                (2_000, Some("native".to_string()), 0.0),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -10461,7 +10907,7 @@ mod test {
                 "prom_native_histogram_stdvar",
             ),
             (
-                "histogram_fraction(0, 1, some_metric)",
+                "histogram_fraction(-2 + 1, 2 / 2, some_metric)",
                 "prom_native_histogram_fraction",
             ),
         ];
@@ -10469,6 +10915,9 @@ mod test {
         for (query, expected_udf) in cases {
             let plan = native_histogram_plan(query).await;
             assert!(plan.contains(expected_udf), "{query}\n{plan}");
+            if query.starts_with("histogram_fraction") {
+                assert!(plan.contains("Float64(-1)"), "{query}\n{plan}");
+            }
         }
     }
 
@@ -12317,6 +12766,37 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             sample_kinds.sort_unstable();
             assert_eq!(sample_kinds, vec![(false, true), (true, false)]);
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_classic_bucket_does_not_drop_native_histogram() {
+        let state = build_query_engine_state();
+        let collector = PromqlAnnotationCollector::default();
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            operator_table_provider(),
+            &operator_eval_stmt("histogram_quantile(0.5, bad_classic or bad_native)"),
+            &state,
+            Some(collector.clone()),
+        )
+        .await
+        .unwrap();
+        let value_field = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.data_type() == &ArrowDataType::Float64)
+            .unwrap()
+            .name()
+            .clone();
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        assert_eq!(values(&batches, &value_field), vec![0.0]);
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty());
+        assert!(infos.is_empty());
     }
 
     #[tokio::test]

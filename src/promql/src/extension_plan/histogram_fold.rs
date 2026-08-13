@@ -78,9 +78,40 @@ pub struct HistogramFold {
     ts_column: String,
     input: LogicalPlan,
     field_column: String,
-    quantile: OrderedF64,
+    /// Native histogram companion column for a mixed classic/native input.
+    histogram_column: Option<String>,
+    operation: HistogramFoldOperation,
     output_schema: DFSchemaRef,
     unfix: Option<UnfixIndices>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd)]
+pub enum HistogramFoldOperation {
+    Quantile(OrderedF64),
+    Fraction {
+        lower: OrderedF64,
+        upper: OrderedF64,
+    },
+}
+
+impl HistogramFoldOperation {
+    pub const fn function_name(self) -> &'static str {
+        match self {
+            Self::Quantile(_) => "histogram_quantile",
+            Self::Fraction { .. } => "histogram_fraction",
+        }
+    }
+}
+
+impl std::fmt::Display for HistogramFoldOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quantile(quantile) => write!(f, "quantile={quantile}"),
+            Self::Fraction { lower, upper } => {
+                write!(f, "fraction=[{lower}, {upper}]")
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -137,6 +168,21 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
             return Some(vec![indices]);
         }
 
+        if let Some(histogram_column) = &self.histogram_column {
+            let mut necessary_indices = output_columns.to_vec();
+            for column in [
+                &self.le_column,
+                &self.ts_column,
+                &self.field_column,
+                histogram_column,
+            ] {
+                necessary_indices.push(input_schema.index_of_column_by_name(None, column)?);
+            }
+            necessary_indices.sort_unstable();
+            necessary_indices.dedup();
+            return Some(vec![necessary_indices]);
+        }
+
         let mut necessary_indices = output_columns
             .iter()
             .map(|&output_column| {
@@ -156,9 +202,13 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "HistogramFold: le={}, field={}, quantile={}",
-            self.le_column, self.field_column, self.quantile
-        )
+            "HistogramFold: le={}, field={}",
+            self.le_column, self.field_column
+        )?;
+        if let Some(histogram) = &self.histogram_column {
+            write!(f, ", histogram={histogram}")?;
+        }
+        write!(f, ", {}", self.operation)
     }
 
     fn with_exprs_and_inputs(
@@ -194,7 +244,8 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
                 ts_column,
                 input,
                 field_column,
-                quantile: self.quantile,
+                histogram_column: None,
+                operation: self.operation,
                 output_schema,
                 unfix: None,
             })
@@ -204,7 +255,8 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
                 ts_column: self.ts_column.clone(),
                 input,
                 field_column: self.field_column.clone(),
-                quantile: self.quantile,
+                histogram_column: self.histogram_column.clone(),
+                operation: self.operation,
                 output_schema: self.output_schema.clone(),
                 unfix: None,
             })
@@ -220,15 +272,41 @@ impl HistogramFold {
         quantile: f64,
         input: LogicalPlan,
     ) -> DataFusionResult<Self> {
+        Self::new_with_operation(
+            le_column,
+            field_column,
+            ts_column,
+            HistogramFoldOperation::Quantile(quantile.into()),
+            None,
+            input,
+        )
+    }
+
+    pub fn new_with_operation(
+        le_column: String,
+        field_column: String,
+        ts_column: String,
+        operation: HistogramFoldOperation,
+        histogram_column: Option<String>,
+        input: LogicalPlan,
+    ) -> DataFusionResult<Self> {
         let input_schema = input.schema();
         Self::check_schema(input_schema, &le_column, &field_column, &ts_column)?;
-        let output_schema = Self::convert_schema(input_schema, &le_column)?;
+        if let Some(histogram_column) = &histogram_column {
+            Self::check_column(input_schema, histogram_column)?;
+        }
+        let output_schema = if histogram_column.is_some() {
+            input_schema.clone()
+        } else {
+            Self::convert_schema(input_schema, &le_column)?
+        };
         Ok(Self {
             le_column,
             ts_column,
             input,
             field_column,
-            quantile: quantile.into(),
+            histogram_column,
+            operation,
             output_schema,
             unfix: None,
         })
@@ -244,23 +322,22 @@ impl HistogramFold {
         field_column: &str,
         ts_column: &str,
     ) -> DataFusionResult<()> {
-        let check_column = |col| {
-            if !input_schema.has_column_with_unqualified_name(col) {
-                Err(DataFusionError::SchemaError(
-                    Box::new(datafusion::common::SchemaError::FieldNotFound {
-                        field: Box::new(Column::new(None::<String>, col)),
-                        valid_fields: input_schema.columns(),
-                    }),
-                    Box::new(None),
-                ))
-            } else {
-                Ok(())
-            }
-        };
+        Self::check_column(input_schema, le_column)?;
+        Self::check_column(input_schema, ts_column)?;
+        Self::check_column(input_schema, field_column)
+    }
 
-        check_column(le_column)?;
-        check_column(ts_column)?;
-        check_column(field_column)
+    fn check_column(input_schema: &DFSchemaRef, column: &str) -> DataFusionResult<()> {
+        if !input_schema.has_column_with_unqualified_name(column) {
+            return Err(DataFusionError::SchemaError(
+                Box::new(datafusion::common::SchemaError::FieldNotFound {
+                    field: Box::new(Column::new(None::<String>, column)),
+                    valid_fields: input_schema.columns(),
+                }),
+                Box::new(None),
+            ));
+        }
+        Ok(())
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -272,6 +349,10 @@ impl HistogramFold {
         let field_column_index = input_schema
             .index_of_column_by_name(None, &self.field_column)
             .unwrap();
+        let histogram_column_index = self
+            .histogram_column
+            .as_ref()
+            .map(|column| input_schema.index_of_column_by_name(None, column).unwrap());
         let ts_column_index = input_schema
             .index_of_column_by_name(None, &self.ts_column)
             .unwrap();
@@ -282,7 +363,11 @@ impl HistogramFold {
             .iter()
             .enumerate()
             .filter_map(|(idx, field)| {
-                if idx == le_column_index || idx == field_column_index || idx == ts_column_index {
+                if idx == le_column_index
+                    || idx == field_column_index
+                    || Some(idx) == histogram_column_index
+                    || idx == ts_column_index
+                {
                     None
                 } else {
                     Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
@@ -309,11 +394,12 @@ impl HistogramFold {
         Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
+            histogram_column_index,
             ts_column_index,
             input: exec_input,
             tag_columns,
             partition_exprs,
-            quantile: self.quantile.into(),
+            operation: self.operation,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
@@ -343,18 +429,28 @@ impl HistogramFold {
         )?))
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
+        if self.histogram_column.is_some() {
+            return Err(DataFusionError::NotImplemented(
+                "mixed HistogramFold is frontend-only".to_string(),
+            ));
+        }
+        let HistogramFoldOperation::Quantile(quantile) = self.operation else {
+            return Err(DataFusionError::NotImplemented(
+                "HistogramFold fraction is frontend-only".to_string(),
+            ));
+        };
         let le_column_idx = serialize_column_index(self.input.schema(), &self.le_column);
         let ts_column_idx = serialize_column_index(self.input.schema(), &self.ts_column);
         let field_column_idx = serialize_column_index(self.input.schema(), &self.field_column);
 
-        pb::HistogramFold {
+        Ok(pb::HistogramFold {
             le_column_idx,
             ts_column_idx,
             field_column_idx,
-            quantile: self.quantile.into(),
+            quantile: quantile.into(),
         }
-        .encode_to_vec()
+        .encode_to_vec())
     }
 
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
@@ -375,7 +471,8 @@ impl HistogramFold {
             ts_column: String::new(),
             input: placeholder_plan,
             field_column: String::new(),
-            quantile: pb_histogram_fold.quantile.into(),
+            histogram_column: None,
+            operation: HistogramFoldOperation::Quantile(pb_histogram_fold.quantile.into()),
             output_schema: Arc::new(DFSchema::empty()),
             unfix: Some(unfix),
         })
@@ -401,7 +498,11 @@ impl PartialOrd for HistogramFold {
             Some(core::cmp::Ordering::Equal) => {}
             ord => return ord,
         }
-        self.quantile.partial_cmp(&other.quantile)
+        match self.histogram_column.partial_cmp(&other.histogram_column) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.operation.partial_cmp(&other.operation)
     }
 }
 
@@ -413,11 +514,13 @@ pub struct HistogramFoldExec {
     output_schema: SchemaRef,
     /// Index for field column in the schema of input.
     field_column_index: usize,
+    /// Index for the native histogram companion column on mixed inputs.
+    histogram_column_index: Option<usize>,
     ts_column_index: usize,
     /// Tag columns are all columns except `le`, `field` and `ts` columns.
     tag_columns: Vec<Arc<dyn PhysicalExpr>>,
     partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
-    quantile: f64,
+    operation: HistogramFoldOperation,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 }
@@ -448,21 +551,23 @@ impl ExecutionPlan for HistogramFoldExec {
             )),
             options: None,
         });
-        // add le ASC
-        cols.push(PhysicalSortRequirement {
-            expr: Arc::new(PhyCast::new(
-                Arc::new(PhyColumn::new(
-                    self.input.schema().field(self.le_column_index).name(),
-                    self.le_column_index,
+        if self.histogram_column_index.is_none() {
+            // add le ASC
+            cols.push(PhysicalSortRequirement {
+                expr: Arc::new(PhyCast::new(
+                    Arc::new(PhyColumn::new(
+                        self.input.schema().field(self.le_column_index).name(),
+                        self.le_column_index,
+                    )),
+                    DataType::Float64,
+                    None,
                 )),
-                DataType::Float64,
-                None,
-            )),
-            options: Some(SortOptions {
-                descending: false,  // +INF in the last
-                nulls_first: false, // not nullable
-            }),
-        });
+                options: Some(SortOptions {
+                    descending: false,  // +INF in the last
+                    nulls_first: false, // not nullable
+                }),
+            });
+        }
 
         // Safety: `cols` is not empty
         let requirement = LexRequirement::new(cols).unwrap();
@@ -475,7 +580,7 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true; self.children().len()]
+        vec![self.histogram_column_index.is_none(); self.children().len()]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -505,9 +610,10 @@ impl ExecutionPlan for HistogramFoldExec {
             ts_column_index: self.ts_column_index,
             tag_columns: self.tag_columns.clone(),
             partition_exprs: self.partition_exprs.clone(),
-            quantile: self.quantile,
+            operation: self.operation,
             output_schema: self.output_schema.clone(),
             field_column_index: self.field_column_index,
+            histogram_column_index: self.histogram_column_index,
             properties,
         }))
     }
@@ -526,25 +632,31 @@ impl ExecutionPlan for HistogramFoldExec {
         let mut normal_indices = (0..input.schema().fields().len()).collect::<HashSet<_>>();
         normal_indices.remove(&self.field_column_index);
         normal_indices.remove(&self.le_column_index);
+        if let Some(histogram_column_index) = self.histogram_column_index {
+            normal_indices.remove(&histogram_column_index);
+        }
+        let mode = if self.histogram_column_index.is_some() {
+            FoldMode::Safe
+        } else {
+            FoldMode::Optimistic
+        };
         Ok(Box::pin(HistogramFoldStream {
             le_column_index: self.le_column_index,
             field_column_index: self.field_column_index,
-            quantile: self.quantile,
+            histogram_column_index: self.histogram_column_index,
+            operation: self.operation,
             normal_indices: normal_indices.into_iter().collect(),
             bucket_size: None,
             input_buffer: vec![],
             input,
             output_schema,
             input_schema: self.input.schema(),
-            mode: FoldMode::Optimistic,
+            mode,
             safe_group: None,
             metric: baseline_metric,
             batch_size,
             input_buffered_rows: 0,
-            output_buffer: HistogramFoldStream::empty_output_buffer(
-                &self.output_schema,
-                self.le_column_index,
-            )?,
+            output_buffer: HistogramFoldStream::empty_output_buffer(&self.input.schema())?,
             output_buffered_rows: 0,
         }))
     }
@@ -574,9 +686,13 @@ impl DisplayAs for HistogramFoldExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "HistogramFoldExec: le=@{}, field=@{}, quantile={}",
-                    self.le_column_index, self.field_column_index, self.quantile
-                )
+                    "HistogramFoldExec: le=@{}, field=@{}",
+                    self.le_column_index, self.field_column_index
+                )?;
+                if let Some(histogram) = self.histogram_column_index {
+                    write!(f, ", histogram=@{histogram}")?;
+                }
+                write!(f, ", {}", self.operation)
             }
         }
     }
@@ -592,7 +708,8 @@ pub struct HistogramFoldStream {
     // internal states
     le_column_index: usize,
     field_column_index: usize,
-    quantile: f64,
+    histogram_column_index: Option<usize>,
+    operation: HistogramFoldOperation,
     /// Columns need not folding. This indices is based on input schema
     normal_indices: Vec<usize>,
     bucket_size: Option<usize>,
@@ -619,6 +736,7 @@ struct SafeGroup {
     tag_values: Vec<Value>,
     buckets: Vec<f64>,
     counters: Vec<f64>,
+    native_samples: Vec<(Value, Value)>,
 }
 
 impl RecordBatchStream for HistogramFoldStream {
@@ -686,25 +804,16 @@ impl HistogramFoldStream {
         self.maybe_take_output()
     }
 
-    /// Generate a group of empty [MutableVector]s from the output schema.
-    ///
-    /// For simplicity, this method will insert a placeholder for `le`. So that
-    /// the output buffers has the same schema with input. This placeholder needs
-    /// to be removed before returning the output batch.
+    /// Generate input-aligned output builders. Classic-only output drops `le` later.
     pub fn empty_output_buffer(
         schema: &SchemaRef,
-        le_column_index: usize,
     ) -> DataFusionResult<Vec<Box<dyn MutableVector>>> {
-        let mut builders = Vec::with_capacity(schema.fields().len() + 1);
+        let mut builders = Vec::with_capacity(schema.fields().len());
         for field in schema.fields() {
             let concrete_datatype = ConcreteDataType::try_from(field.data_type()).unwrap();
             let mutable_vector = concrete_datatype.create_mutable_vector(0);
             builders.push(mutable_vector);
         }
-        builders.insert(
-            le_column_index,
-            ConcreteDataType::float64_datatype().create_mutable_vector(0),
-        );
 
         Ok(builders)
     }
@@ -803,7 +912,7 @@ impl HistogramFoldStream {
                 counters.push(counter);
             }
             // ignore invalid data
-            let result = Self::evaluate_row(self.quantile, &bucket, &counters).unwrap_or(f64::NAN);
+            let result = Self::evaluate_row(self.operation, &bucket, &counters).unwrap_or(f64::NAN);
             self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
             cursor += bucket_num;
             remaining_rows -= bucket_num;
@@ -903,27 +1012,85 @@ impl HistogramFoldStream {
         self.output_buffered_rows += 1;
     }
 
-    fn finalize_safe_group(&mut self) -> DataFusionResult<()> {
-        if let Some(group) = self.safe_group.take() {
-            if group.tag_values.is_empty() {
-                return Ok(());
-            }
-
-            let has_inf = group
-                .buckets
-                .last()
-                .map(|v| v.is_infinite() && v.is_sign_positive())
-                .unwrap_or(false);
-            let result = if group.buckets.len() < 2 || !has_inf {
-                f64::NAN
-            } else {
-                Self::evaluate_row(self.quantile, &group.buckets, &group.counters)
-                    .unwrap_or(f64::NAN)
-            };
-            let mut tag_value_refs = Vec::with_capacity(group.tag_values.len());
-            tag_value_refs.extend(group.tag_values.iter().map(|v| v.as_value_ref()));
-            self.push_output_row(&tag_value_refs, result);
+    fn push_mixed_output_row(
+        &mut self,
+        tag_values: &[Value],
+        le: &Value,
+        result: Option<f64>,
+        histogram: &Value,
+    ) {
+        let histogram_column_index = self.histogram_column_index.unwrap();
+        for (idx, value) in self.normal_indices.iter().zip(tag_values) {
+            self.output_buffer[*idx].push_value_ref(&value.as_value_ref());
         }
+        self.output_buffer[self.le_column_index].push_value_ref(&le.as_value_ref());
+        self.output_buffer[self.field_column_index]
+            .push_value_ref(&result.map_or(ValueRef::Null, ValueRef::from));
+        self.output_buffer[histogram_column_index].push_value_ref(&histogram.as_value_ref());
+        self.output_buffered_rows += 1;
+    }
+
+    fn finalize_safe_group(&mut self) -> DataFusionResult<()> {
+        let Some(group) = self.safe_group.take() else {
+            return Ok(());
+        };
+        if group.tag_values.is_empty() {
+            return Ok(());
+        }
+
+        if self.histogram_column_index.is_some() {
+            let classic_result = if group.buckets.is_empty() {
+                None
+            } else {
+                let mut buckets = group
+                    .buckets
+                    .into_iter()
+                    .zip(group.counters)
+                    .collect::<Vec<_>>();
+                buckets.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+                let (bounds, counters): (Vec<_>, Vec<_>) = buckets.into_iter().unzip();
+                let has_inf = bounds
+                    .last()
+                    .is_some_and(|value| value.is_infinite() && value.is_sign_positive());
+                Some(if has_inf {
+                    Self::evaluate_row(self.operation, &bounds, &counters).unwrap_or(f64::NAN)
+                } else {
+                    f64::NAN
+                })
+            };
+            let has_null_native = group.native_samples.iter().any(|(le, _)| le.is_null());
+            for (le, histogram) in group.native_samples.iter().filter(|(le, _)| !le.is_null()) {
+                self.push_mixed_output_row(&group.tag_values, le, None, histogram);
+            }
+            for (le, histogram) in group.native_samples.iter().filter(|(le, _)| le.is_null()) {
+                self.push_mixed_output_row(&group.tag_values, le, classic_result, histogram);
+            }
+            if !has_null_native && let Some(result) = classic_result {
+                self.push_mixed_output_row(
+                    &group.tag_values,
+                    &Value::Null,
+                    Some(result),
+                    &Value::Null,
+                );
+            }
+            return Ok(());
+        }
+
+        let has_inf = group
+            .buckets
+            .last()
+            .is_some_and(|value| value.is_infinite() && value.is_sign_positive());
+        let result = if has_inf {
+            Self::evaluate_row(self.operation, &group.buckets, &group.counters).unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        };
+        let tag_value_refs = group
+            .tag_values
+            .iter()
+            .map(Value::as_value_ref)
+            .collect::<Vec<_>>();
+        self.push_output_row(&tag_value_refs, result);
         Ok(())
     }
 
@@ -955,6 +1122,7 @@ impl HistogramFoldStream {
                     tag_values: tag_values_buf.iter().cloned().map(Value::from).collect(),
                     buckets: Vec::new(),
                     counters: Vec::new(),
+                    native_samples: Vec::new(),
                 });
             }
 
@@ -962,17 +1130,26 @@ impl HistogramFoldStream {
                 continue;
             };
 
+            let mixed = self.histogram_column_index.is_some();
             let bucket = string_array_value_at_index(le_array, row)
-                .and_then(|value| value.parse::<f64>().ok())
-                .unwrap_or(f64::NAN);
-            let counter = if field_array.is_valid(row) {
-                field_array.value(row)
-            } else {
-                f64::NAN
-            };
-
-            group.buckets.push(bucket);
-            group.counters.push(counter);
+                .and_then(|value| value.parse::<f64>().ok());
+            if !mixed || field_array.is_valid(row) && bucket.is_some() {
+                let counter = if field_array.is_valid(row) {
+                    field_array.value(row)
+                } else {
+                    f64::NAN
+                };
+                group.buckets.push(bucket.unwrap_or(f64::NAN));
+                group.counters.push(counter);
+            }
+            if let Some(histogram_column_index) = self.histogram_column_index {
+                let histogram = vectors[histogram_column_index].get(row);
+                if !histogram.is_null() {
+                    group
+                        .native_samples
+                        .push((vectors[self.le_column_index].get(row), histogram));
+                }
+            }
         }
 
         Ok(())
@@ -998,14 +1175,15 @@ impl HistogramFoldStream {
             return Ok(None);
         }
 
-        let mut output_buf = Self::empty_output_buffer(&self.output_schema, self.le_column_index)?;
+        let mut output_buf = Self::empty_output_buffer(&self.input_schema)?;
         std::mem::swap(&mut self.output_buffer, &mut output_buf);
         let mut columns = Vec::with_capacity(output_buf.len());
         for builder in output_buf.iter_mut() {
             columns.push(builder.to_vector().to_arrow_array());
         }
-        // remove the placeholder column for `le`
-        columns.remove(self.le_column_index);
+        if self.histogram_column_index.is_none() {
+            columns.remove(self.le_column_index);
+        }
 
         self.output_buffered_rows = 0;
         RecordBatch::try_new(self.output_schema.clone(), columns)
@@ -1040,12 +1218,18 @@ impl HistogramFoldStream {
     }
 
     /// Evaluate the field column and return the result
-    fn evaluate_row(quantile: f64, bucket: &[f64], counter: &[f64]) -> DataFusionResult<f64> {
+    fn evaluate_row(
+        operation: HistogramFoldOperation,
+        bucket: &[f64],
+        counter: &[f64],
+    ) -> DataFusionResult<f64> {
         // check bucket
-        if bucket.len() <= 1 {
+        if bucket.is_empty()
+            || matches!(operation, HistogramFoldOperation::Quantile(_)) && bucket.len() == 1
+        {
             return Ok(f64::NAN);
         }
-        if bucket.last().unwrap().is_finite() {
+        if bucket.last() != Some(&f64::INFINITY) {
             return Err(DataFusionError::Execution(
                 "last bucket should be +Inf".to_string(),
             ));
@@ -1055,39 +1239,55 @@ impl HistogramFoldStream {
                 "bucket and counter should have the same length".to_string(),
             ));
         }
-        // check quantile
-        if quantile < 0.0 {
-            return Ok(f64::NEG_INFINITY);
-        } else if quantile > 1.0 {
-            return Ok(f64::INFINITY);
-        } else if quantile.is_nan() {
-            return Ok(f64::NAN);
+        if let HistogramFoldOperation::Quantile(quantile) = operation {
+            let quantile = f64::from(quantile);
+            if quantile < 0.0 {
+                return Ok(f64::NEG_INFINITY);
+            } else if quantile > 1.0 {
+                return Ok(f64::INFINITY);
+            } else if quantile.is_nan() {
+                return Ok(f64::NAN);
+            }
         }
 
         // check input value
         if !bucket.windows(2).all(|w| w[0] <= w[1]) {
             return Ok(f64::NAN);
         }
-        let counter = {
-            let needs_fix =
-                counter.iter().any(|v| !v.is_finite()) || !counter.windows(2).all(|w| w[0] <= w[1]);
-            if !needs_fix {
-                Cow::Borrowed(counter)
-            } else {
-                let mut fixed = Vec::with_capacity(counter.len());
-                let mut prev = 0.0;
-                for (idx, &v) in counter.iter().enumerate() {
-                    let mut val = if v.is_finite() { v } else { prev };
-                    if idx > 0 && val < prev {
-                        val = prev;
+        let counter = match operation {
+            HistogramFoldOperation::Quantile(_) => {
+                let needs_fix = counter.iter().any(|v| !v.is_finite())
+                    || !counter.windows(2).all(|w| w[0] <= w[1]);
+                if !needs_fix {
+                    Cow::Borrowed(counter)
+                } else {
+                    let mut fixed = Vec::with_capacity(counter.len());
+                    let mut prev = 0.0;
+                    for (idx, &v) in counter.iter().enumerate() {
+                        let mut val = if v.is_finite() { v } else { prev };
+                        if idx > 0 && val < prev {
+                            val = prev;
+                        }
+                        fixed.push(val);
+                        prev = val;
                     }
-                    fixed.push(val);
-                    prev = val;
+                    Cow::Owned(fixed)
                 }
-                Cow::Owned(fixed)
             }
+            HistogramFoldOperation::Fraction { .. } => Cow::Borrowed(counter),
         };
 
+        Ok(match operation {
+            HistogramFoldOperation::Quantile(quantile) => {
+                Self::evaluate_quantile(quantile.into(), bucket, &counter)
+            }
+            HistogramFoldOperation::Fraction { lower, upper } => {
+                Self::evaluate_fraction(lower.into(), upper.into(), bucket, &counter)
+            }
+        })
+    }
+
+    fn evaluate_quantile(quantile: f64, bucket: &[f64], counter: &[f64]) -> f64 {
         let total = *counter.last().unwrap();
         let expected_pos = total * quantile;
         let mut fit_bucket_pos = 0;
@@ -1095,7 +1295,7 @@ impl HistogramFoldStream {
             fit_bucket_pos += 1;
         }
         if fit_bucket_pos >= bucket.len() - 1 {
-            Ok(bucket[bucket.len() - 2])
+            bucket[bucket.len() - 2]
         } else {
             let upper_bound = bucket[fit_bucket_pos];
             let upper_count = counter[fit_bucket_pos];
@@ -1106,12 +1306,99 @@ impl HistogramFoldStream {
                 lower_count = counter[fit_bucket_pos - 1];
             }
             if (upper_count - lower_count).abs() < 1e-10 {
-                return Ok(f64::NAN);
+                return f64::NAN;
             }
-            Ok(lower_bound
+            lower_bound
                 + (upper_bound - lower_bound) / (upper_count - lower_count)
-                    * (expected_pos - lower_count))
+                    * (expected_pos - lower_count)
         }
+    }
+
+    fn evaluate_fraction(lower: f64, upper: f64, bucket: &[f64], counter: &[f64]) -> f64 {
+        let coalesced = bucket
+            .windows(2)
+            .any(|bounds| bounds[0] == bounds[1])
+            .then(|| {
+                let mut bounds = Vec::with_capacity(bucket.len());
+                let mut counts = Vec::with_capacity(counter.len());
+                for (&bound, &count) in bucket.iter().zip(counter) {
+                    if bounds.last() == Some(&bound) {
+                        *counts.last_mut().unwrap() += count;
+                    } else {
+                        bounds.push(bound);
+                        counts.push(count);
+                    }
+                }
+                (bounds, counts)
+            });
+        let (bucket, counter) = match &coalesced {
+            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
+            None => (bucket, counter),
+        };
+        let total = *counter.last().unwrap();
+        if total == 0.0 || lower.is_nan() || upper.is_nan() {
+            return f64::NAN;
+        }
+        if lower >= upper {
+            return 0.0;
+        }
+
+        let mut rank = 0.0;
+        let mut lower_rank = 0.0;
+        let mut upper_rank = 0.0;
+        let mut lower_set = false;
+        let mut upper_set = false;
+        let mut lower_bound = if bucket[0] > 0.0 {
+            0.0
+        } else {
+            f64::NEG_INFINITY
+        };
+
+        for (idx, (&upper_bound, &upper_count)) in bucket.iter().zip(counter).enumerate() {
+            if idx > 0 {
+                lower_bound = bucket[idx - 1];
+            }
+            let interpolate = |value: f64| {
+                if lower_bound == f64::NEG_INFINITY {
+                    upper_count
+                } else {
+                    rank + (upper_count - rank) * (value - lower_bound)
+                        / (upper_bound - lower_bound)
+                }
+            };
+
+            if !lower_set && lower_bound >= lower {
+                lower_rank = rank;
+                lower_set = true;
+            }
+            if !upper_set && lower_bound >= upper {
+                upper_rank = rank;
+                upper_set = true;
+            }
+            if lower_set && upper_set {
+                break;
+            }
+            if !lower_set && lower_bound < lower && upper_bound > lower {
+                lower_rank = interpolate(lower);
+                lower_set = true;
+            }
+            if !upper_set && lower_bound < upper && upper_bound > upper {
+                upper_rank = interpolate(upper);
+                upper_set = true;
+            }
+            if lower_set && upper_set {
+                break;
+            }
+            rank = upper_count;
+        }
+
+        if !lower_set || lower_rank > total {
+            lower_rank = total;
+        }
+        if !upper_set || upper_rank > total {
+            upper_rank = total;
+        }
+        (upper_rank - lower_rank) / total
     }
 }
 
@@ -1210,6 +1497,20 @@ mod test {
         quantile: f64,
         ts_column_index: usize,
     ) -> Arc<HistogramFoldExec> {
+        build_fold_exec_from_batches_with_operation(
+            batches,
+            schema,
+            HistogramFoldOperation::Quantile(quantile.into()),
+            ts_column_index,
+        )
+    }
+
+    fn build_fold_exec_from_batches_with_operation(
+        batches: Vec<RecordBatch>,
+        schema: SchemaRef,
+        operation: HistogramFoldOperation,
+        ts_column_index: usize,
+    ) -> Arc<HistogramFoldExec> {
         let input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[batches], schema.clone(), None).unwrap(),
         )));
@@ -1226,7 +1527,8 @@ mod test {
         Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
-            quantile,
+            histogram_column_index: None,
+            operation,
             ts_column_index,
             input,
             output_schema,
@@ -1301,7 +1603,8 @@ mod test {
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
-            quantile: 0.4,
+            histogram_column_index: None,
+            operation: HistogramFoldOperation::Quantile(0.4.into()),
             ts_column_index: 0,
             input: memory_exec,
             output_schema,
@@ -1738,8 +2041,12 @@ mod test {
         ];
 
         for case in cases {
-            let actual =
-                HistogramFoldStream::evaluate_row(case.quantile, &bucket, &case.counters).unwrap();
+            let actual = HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Quantile(case.quantile.into()),
+                &bucket,
+                &case.counters,
+            )
+            .unwrap();
             assert_eq!(
                 format!("{actual}"),
                 format!("{}", case.expected),
@@ -1753,7 +2060,12 @@ mod test {
     fn evaluate_out_of_order_input() {
         let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY];
         let counters = [5.0, 4.0, 3.0, 2.0, 1.0, 0.0];
-        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &bucket,
+            &counters,
+        )
+        .unwrap();
         assert_eq!(0.0, result);
     }
 
@@ -1761,7 +2073,11 @@ mod test {
     fn evaluate_wrong_bucket() {
         let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY, 5.0];
         let counters = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters);
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &bucket,
+            &counters,
+        );
         assert!(result.is_err());
     }
 
@@ -1769,7 +2085,12 @@ mod test {
     fn evaluate_small_fraction() {
         let bucket = [0.0, 2.0, 4.0, 6.0, f64::INFINITY];
         let counters = [0.0, 1.0 / 300.0, 2.0 / 300.0, 0.01, 0.01];
-        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &bucket,
+            &counters,
+        )
+        .unwrap();
         assert_eq!(3.0, result);
     }
 
@@ -1777,7 +2098,12 @@ mod test {
     fn evaluate_non_monotonic_counter() {
         let bucket = [0.0, 1.0, 2.0, 3.0, f64::INFINITY];
         let counters = [0.1, 0.2, 0.4, 0.17, 0.5];
-        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &bucket,
+            &counters,
+        )
+        .unwrap();
         assert!((result - 1.25).abs() < 1e-10, "{result}");
     }
 
@@ -1785,8 +2111,94 @@ mod test {
     fn evaluate_nan_counter() {
         let bucket = [0.0, 1.0, 2.0, 3.0, f64::INFINITY];
         let counters = [f64::NAN, 1.0, 2.0, 3.0, 3.0];
-        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &bucket,
+            &counters,
+        )
+        .unwrap();
         assert!((result - 1.5).abs() < 1e-10, "{result}");
+    }
+
+    #[test]
+    fn evaluate_classic_histogram_fraction() {
+        let buckets = [1.0, 2.0, f64::INFINITY];
+        let counters = [2.0, 4.0, 4.0];
+        let fraction = |lower, upper| {
+            HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Fraction {
+                    lower: OrderedF64::from(lower),
+                    upper: OrderedF64::from(upper),
+                },
+                &buckets,
+                &counters,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(fraction(0.0, 1.0), 0.5);
+        assert_eq!(fraction(f64::NEG_INFINITY, f64::INFINITY), 1.0);
+        assert_eq!(fraction(2.0, 1.0), 0.0);
+
+        assert_eq!(
+            HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Fraction {
+                    lower: 0.0.into(),
+                    upper: 1.0.into(),
+                },
+                &[1.0, 1.0, f64::INFINITY],
+                &[1.0, 2.0, 4.0],
+            )
+            .unwrap(),
+            0.75
+        );
+
+        assert_eq!(
+            HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Fraction {
+                    lower: f64::NEG_INFINITY.into(),
+                    upper: f64::INFINITY.into(),
+                },
+                &[f64::INFINITY],
+                &[4.0],
+            )
+            .unwrap(),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn fraction_handles_single_inf_bucket_after_safe_fallback() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b"])),
+                Arc::new(StringArray::from(vec!["1", "+Inf", "+Inf"])),
+                Arc::new(Float64Array::from(vec![2.0, 4.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let fold = build_fold_exec_from_batches_with_operation(
+            vec![batch],
+            schema,
+            HistogramFoldOperation::Fraction {
+                lower: f64::NEG_INFINITY.into(),
+                upper: f64::INFINITY.into(),
+            },
+            0,
+        );
+
+        let batches =
+            datafusion::physical_plan::collect(fold, SessionContext::default().task_ctx())
+                .await
+                .unwrap();
+        let values = batches[0].column(1).as_primitive::<Float64Type>();
+        assert_eq!(values.values(), &[1.0, 1.0]);
     }
 
     fn build_empty_relation(schema: &Arc<Schema>) -> LogicalPlan {
@@ -1812,8 +2224,21 @@ mod test {
             input_plan.clone(),
         )
         .unwrap();
+        let fraction_node = HistogramFold::new_with_operation(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            HistogramFoldOperation::Fraction {
+                lower: 0.0.into(),
+                upper: 1.0.into(),
+            },
+            None,
+            input_plan.clone(),
+        )
+        .unwrap();
+        assert!(fraction_node.serialize().is_err());
 
-        let bytes = plan_node.serialize();
+        let bytes = plan_node.serialize().unwrap();
 
         let histogram_fold = HistogramFold::deserialize(&bytes).unwrap();
         // need fix
@@ -1824,7 +2249,10 @@ mod test {
         assert_eq!(histogram_fold.le_column, "le");
         assert_eq!(histogram_fold.ts_column, "ts");
         assert_eq!(histogram_fold.field_column, "val");
-        assert_eq!(histogram_fold.quantile, OrderedF64::from(0.8));
+        assert_eq!(
+            histogram_fold.operation,
+            HistogramFoldOperation::Quantile(OrderedF64::from(0.8))
+        );
         assert_eq!(histogram_fold.output_schema.fields().len(), 2);
         assert_eq!(histogram_fold.output_schema.field(0).name(), "ts");
         assert_eq!(histogram_fold.output_schema.field(1).name(), "val");

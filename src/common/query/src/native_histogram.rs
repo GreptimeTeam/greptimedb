@@ -215,6 +215,15 @@ struct Bucket {
     boundary_rule: BoundaryRule,
 }
 
+/// Additional information produced while estimating a native histogram quantile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeHistogramQuantileInfo {
+    /// NaN observations made the estimated quantile skew higher.
+    NaNSkew,
+    /// The requested quantile fell beyond all populated buckets because of NaN observations.
+    NaNResult,
+}
+
 /// Query-time representation of a Prometheus native histogram.
 ///
 /// Bucket counts are absolute `f64` values even when the persisted payload used
@@ -635,19 +644,26 @@ impl NativeHistogram {
     /// Returns negative or positive infinity outside `[0, 1]`, and `NaN` when
     /// the quantile cannot be estimated.
     pub fn quantile(&self, q: f64) -> f64 {
+        self.quantile_with_info(q).0
+    }
+
+    /// Estimates the value at quantile `q` and reports the effect of NaN observations.
+    pub fn quantile_with_info(&self, q: f64) -> (f64, Option<NativeHistogramQuantileInfo>) {
         if q < 0.0 {
-            return f64::NEG_INFINITY;
+            return (f64::NEG_INFINITY, None);
         }
         if q > 1.0 {
-            return f64::INFINITY;
+            return (f64::INFINITY, None);
         }
         if self.count == 0.0 || q.is_nan() {
-            return f64::NAN;
+            return (f64::NAN, None);
         }
 
         let Some(mut buckets) = self.all_buckets() else {
-            return f64::NAN;
+            return (f64::NAN, None);
         };
+        let bucket_total = buckets.iter().map(|bucket| bucket.count).sum::<f64>();
+        let has_nan_observations = self.sum.is_nan() && bucket_total < self.count;
         let rank = q * self.count;
         let mut count = 0.0;
         for bucket in &mut buckets {
@@ -668,42 +684,66 @@ impl NativeHistogram {
             } else if self.uses_custom_buckets() {
                 if bucket.lower == f64::NEG_INFINITY {
                     if bucket.upper <= 0.0 {
-                        return bucket.upper;
+                        return (bucket.upper, None);
                     }
                     bucket.lower = 0.0;
                 } else if bucket.upper == f64::INFINITY {
-                    return bucket.lower;
+                    return (bucket.lower, None);
                 }
             }
 
             let rank_in_bucket = rank - (count - bucket.count);
             let fraction = rank_in_bucket / bucket.count;
+            let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
             if self.uses_custom_buckets() || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
-                return bucket.lower + (bucket.upper - bucket.lower) * fraction;
+                return (
+                    bucket.lower + (bucket.upper - bucket.lower) * fraction,
+                    info,
+                );
             }
 
             let log_lower = bucket.lower.abs().log2();
             let log_upper = bucket.upper.abs().log2();
             if bucket.lower > 0.0 {
-                return 2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction);
+                return (
+                    2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction),
+                    info,
+                );
             }
-            return -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction));
+            return (
+                -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction)),
+                info,
+            );
         }
 
-        f64::NAN
+        let info = if self.sum.is_nan() && count < self.count {
+            Some(if count < rank {
+                NativeHistogramQuantileInfo::NaNResult
+            } else {
+                NativeHistogramQuantileInfo::NaNSkew
+            })
+        } else {
+            None
+        };
+        (f64::NAN, info)
     }
 
     /// Estimates the fraction of observations between `lower` and `upper`.
     pub fn fraction(&self, lower: f64, upper: f64) -> f64 {
+        self.fraction_with_info(lower, upper).0
+    }
+
+    /// Estimates a fraction and reports whether NaN observations were excluded.
+    pub fn fraction_with_info(&self, lower: f64, upper: f64) -> (f64, bool) {
         if self.count == 0.0 || lower.is_nan() || upper.is_nan() {
-            return f64::NAN;
+            return (f64::NAN, false);
         }
         if lower >= upper {
-            return 0.0;
+            return (0.0, false);
         }
 
         let Some(mut buckets) = self.all_buckets() else {
-            return f64::NAN;
+            return (f64::NAN, false);
         };
         let count = if self.sum.is_nan() {
             buckets.iter().map(|bucket| bucket.count).sum()
@@ -759,7 +799,10 @@ impl NativeHistogram {
             upper_rank = count;
         }
 
-        (upper_rank - lower_rank) / self.count
+        (
+            (upper_rank - lower_rank) / self.count,
+            self.sum.is_nan() && count < self.count,
+        )
     }
 
     /// Converts populated buckets to `(boundary rule, lower, upper, count)` strings.
@@ -2141,7 +2184,41 @@ mod tests {
         histogram.count = 10.0;
         histogram.sum = f64::NAN;
 
-        assert_eq!(histogram.fraction(f64::NEG_INFINITY, f64::INFINITY), 0.8);
+        assert_eq!(
+            histogram.fraction_with_info(f64::NEG_INFINITY, f64::INFINITY),
+            (0.8, true)
+        );
+    }
+
+    #[test]
+    fn quantile_reports_nan_observation_effect() {
+        let mut histogram = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![8.0],
+        );
+        histogram.count = 10.0;
+        histogram.sum = f64::NAN;
+
+        let (skewed, info) = histogram.quantile_with_info(0.5);
+        assert!(skewed.is_finite());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNSkew));
+
+        let (nan, info) = histogram.quantile_with_info(0.9);
+        assert!(nan.is_nan());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNResult));
+
+        histogram.count = 8.0;
+        assert_eq!(histogram.quantile_with_info(0.5).1, None);
+
+        histogram.count = 3.0;
+        histogram.positive_spans.clear();
+        histogram.positive_buckets.clear();
+        let (nan, info) = histogram.quantile_with_info(0.0);
+        assert!(nan.is_nan());
+        assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNSkew));
     }
 
     #[test]
