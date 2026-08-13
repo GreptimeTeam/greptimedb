@@ -2462,6 +2462,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-version",
+ "criterion 0.7.0",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
