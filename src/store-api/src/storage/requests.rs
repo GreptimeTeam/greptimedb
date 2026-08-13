@@ -129,6 +129,15 @@ pub struct ScanRequest {
     pub skip_sst_files: bool,
     /// Whether to bind the effective snapshot upper bound when opening the scan.
     pub snapshot_on_scan: bool,
+    /// Explicit intent to read an exact row-level sequence delta `(min, max]`
+    /// across memtables and all SST files (Flow's `sequence_range` incremental
+    /// mode). The engine performs exact row-level filtering only when the region
+    /// preserves per-row sequences and every participating SST file is trusted;
+    /// otherwise it returns a structured stale/unsupported error so the caller
+    /// falls back instead of silently approximating.
+    ///
+    /// Historical `memtable_only` reads must never set this flag.
+    pub exact_sequence_range: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint for KNN vector search. When set, the scan should use
@@ -223,6 +232,9 @@ impl Display for ScanRequest {
                 self.snapshot_on_scan
             )?;
         }
+        if self.exact_sequence_range {
+            write!(f, "{}exact_sequence_range: true", delimiter.as_str())?;
+        }
         if self.preserve_pk_dictionary_encoding {
             write!(
                 f,
@@ -312,11 +324,12 @@ mod tests {
 
         let request = ScanRequest {
             snapshot_on_scan: true,
+            exact_sequence_range: true,
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { snapshot_on_scan: true }"
+            "ScanRequest { snapshot_on_scan: true, exact_sequence_range: true }"
         );
 
         let request = ScanRequest {

@@ -118,6 +118,19 @@ pub struct RegionOptions {
     /// the configured size; zero disables both limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_buffer_size: Option<ReadableSize>,
+    /// Whether to preserve per-row sequence numbers through flush and compaction.
+    ///
+    /// Only meaningful for append-only tables (`append_mode = true`): when enabled,
+    /// every row keeps its exact sequence number in memtables, flushed SSTs and
+    /// compacted SSTs, and scans with an exact `(checkpoint, upper_bound]` sequence
+    /// range can filter SST rows row-level instead of falling back to file-level
+    /// sequence metadata.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserve_row_sequence: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl RegionOptions {
@@ -147,6 +160,14 @@ impl RegionOptions {
                     reason: format!(
                         "max_row_group_row_count must be in (0, {MAX_ROW_GROUP_ROW_COUNT_LIMIT}], got {row_count}",
                     ),
+                }
+            );
+        }
+        if self.preserve_row_sequence {
+            ensure!(
+                self.append_mode,
+                InvalidRegionOptionsSnafu {
+                    reason: "preserve_row_sequence is only supported for append-only tables (append_mode must be true)",
                 }
             );
         }
@@ -286,6 +307,7 @@ impl RegionOptions {
             max_row_group_row_count: options.max_row_group_row_count,
             primary_key_encoding,
             write_buffer_size: options.write_buffer_size,
+            preserve_row_sequence: options.preserve_row_sequence,
         };
         opts.validate()?;
 
@@ -400,6 +422,8 @@ struct RegionOptionsWithoutEnum {
     sst_format: Option<FormatType>,
     #[serde_as(as = "NoneAsEmptyString")]
     max_row_group_row_count: Option<usize>,
+    #[serde_as(as = "DisplayFromStr")]
+    preserve_row_sequence: bool,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -415,6 +439,7 @@ impl Default for RegionOptionsWithoutEnum {
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
             max_row_group_row_count: options.max_row_group_row_count,
+            preserve_row_sequence: options.preserve_row_sequence,
         }
     }
 }
@@ -969,8 +994,32 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: None,
+            preserve_row_sequence: false,
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_preserve_row_sequence() {
+        // Option requires append mode.
+        let map = make_map(&[("append_mode", "false"), ("preserve_row_sequence", "true")]);
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(err.to_string().contains("preserve_row_sequence"));
+
+        let map = make_map(&[("append_mode", "true"), ("preserve_row_sequence", "true")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert!(options.append_mode);
+        assert!(options.preserve_row_sequence);
+
+        // Default is false and disabled keeps main behavior.
+        let map = make_map(&[("append_mode", "true")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert!(!options.preserve_row_sequence);
+
+        let map = make_map(&[]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(RegionOptions::default(), options);
     }
 
     #[test]
@@ -1002,6 +1051,7 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
+            preserve_row_sequence: false,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -1069,8 +1119,27 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: None,
+            preserve_row_sequence: false,
         };
         assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_region_options_serde_preserve_row_sequence_roundtrip() {
+        let options = RegionOptions {
+            append_mode: true,
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&options).unwrap();
+        assert!(json.contains("preserve_row_sequence"));
+        let got: RegionOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(options, got);
+
+        // Old manifests without the key default to false.
+        let old_json = r#"{"append_mode": true}"#;
+        let got: RegionOptions = serde_json::from_str(old_json).unwrap();
+        assert!(!got.preserve_row_sequence);
     }
 
     #[test]
