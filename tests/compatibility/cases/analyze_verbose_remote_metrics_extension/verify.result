@@ -17,6 +17,7 @@ EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_ex
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
