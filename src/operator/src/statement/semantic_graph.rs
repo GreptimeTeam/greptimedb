@@ -471,37 +471,32 @@ fn json_quote(value: &str) -> String {
     serde_json::Value::from(value).to_string()
 }
 
-/// Wraps a column reference in `replace` calls so its runtime value is
-/// JSON-escaped (`\` then `"`); NULL becomes `''` so one NULL column does not
-/// invalidate the whole JSON text (descriptive columns are nullable).
-fn json_escaped_value_expr(column: &str) -> Expr {
-    let escaped_backslash =
-        string_fns::replace().call(vec![cast_string_or_empty(column), lit("\\"), lit("\\\\")]);
-    string_fns::replace().call(vec![escaped_backslash, lit("\""), lit("\\\"")])
-}
+/// The `json_object` UDF, resolved like [`PARSE_JSON_UDF`]. It assembles the
+/// JSONB binary directly from the value columns, so runtime values need no JSON
+/// text escaping — control characters included.
+static JSON_OBJECT_UDF: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
+    Arc::new(
+        FUNCTION_REGISTRY
+            .get_function("json_object")
+            .expect("json_object must be registered")
+            .provide(FunctionContext::default()),
+    )
+});
 
-/// Builds a JSONB object from `columns` by concatenating a JSON text and parsing
-/// it — GreptimeDB has no struct→json function. Keys are JSON-escaped in Rust;
-/// values are JSON-escaped at runtime via [`json_escaped_value_expr`].
-///
-/// TODO(entity-graph): replace the text round-trip with a UDF that assembles
-/// JSONB directly from the value columns (`jsonb::ObjectBuilder`, keys baked
-/// in), dropping the escaping helpers and the per-row parse cost.
+/// Builds a JSONB object with one entry per column: key = the column name,
+/// value = the column rendered as a string, NULL coalesced to `""` so one NULL
+/// column does not null the entry (descriptive columns are nullable). Keys come
+/// out sorted — JSONB objects are key-ordered regardless of input order.
 fn json_object_expr(columns: &[String]) -> Expr {
     if columns.is_empty() {
         return parse_json_expr(lit("{}"));
     }
-    let mut parts = vec![lit("{")];
-    for (i, column) in columns.iter().enumerate() {
-        if i > 0 {
-            parts.push(lit(","));
-        }
-        parts.push(lit(format!("{}:\"", json_quote(column))));
-        parts.push(json_escaped_value_expr(column));
-        parts.push(lit("\""));
+    let mut args = Vec::with_capacity(columns.len() * 2);
+    for column in columns {
+        args.push(lit(column.as_str()));
+        args.push(cast_string_or_empty(column));
     }
-    parts.push(lit("}"));
-    parse_json_expr(concat_expr(parts))
+    cast(JSON_OBJECT_UDF.call(args), DataType::Binary)
 }
 
 /// Renders pre-sorted columns as a `k=v,k=v` concatenation. `nullable`
@@ -599,9 +594,7 @@ fn registry_source(
         let entity_id_attrs = if decl.id_columns.len() == 1 {
             null_json()
         } else {
-            let mut cols = decl.id_columns.clone();
-            cols.sort();
-            json_object_expr(&cols)
+            json_object_expr(&decl.id_columns)
         };
 
         let scope = match decl.scope_columns.as_slice() {
@@ -799,7 +792,7 @@ mod tests {
                 Arc::new(StringArray::from(vec!["cart", "cart", "cart"])),
                 Arc::new(Int64Array::from(vec![42, 42, 42])),
                 Arc::new(StringArray::from(vec![
-                    Some(r#"we"ird\host"#),
+                    Some("we\"ird\\\nhost"),
                     None,
                     Some("h2"),
                 ])),
@@ -912,7 +905,8 @@ mod tests {
         rows.sort();
 
         // Composite id -> sorted `k=v,k=v` plus a JSON object of the id columns;
-        // descriptive JSON escapes `\` and `"` in runtime values, NULL -> "".
+        // descriptive JSON keeps `\`, `"` and control characters intact in
+        // runtime values, NULL -> "".
         assert_eq!(
             rows,
             vec![
@@ -929,7 +923,7 @@ mod tests {
                 (
                     "pid=42,service_name=cart".to_string(),
                     Some(r#"{"pid":"42","service_name":"cart"}"#.to_string()),
-                    Some(r#"{"host":"we\"ird\\host"}"#.to_string()),
+                    Some(r#"{"host":"we\"ird\\\nhost"}"#.to_string()),
                 ),
             ]
         );
@@ -955,7 +949,7 @@ mod tests {
         let batches = collect(&ctx, plan).await;
         let mut scopes: Vec<String> = batches.iter().flat_map(|b| strings(b, 7)).collect();
         scopes.sort();
-        assert_eq!(scopes, vec!["", "h2", r#"we"ird\host"#]);
+        assert_eq!(scopes, vec!["", "h2", "we\"ird\\\nhost"]);
 
         // Multiple scope columns: sorted `k=v,k=v`.
         let mut multi = decl("service", &["service_name"]);
@@ -978,7 +972,7 @@ mod tests {
             vec![
                 "host=,pid=42",
                 "host=h2,pid=42",
-                r#"host=we"ird\host,pid=42"#
+                "host=we\"ird\\\nhost,pid=42"
             ]
         );
     }
