@@ -32,6 +32,8 @@ use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::{DataType, Float64Type};
 use uddsketch::{BatchWorkspace, UddSketch};
 
+use crate::uddsketch_compat;
+
 pub const UDDSKETCH_STATE_NAME: &str = "uddsketch_state";
 
 pub const UDDSKETCH_MERGE_NAME: &str = "uddsketch_merge";
@@ -97,7 +99,7 @@ impl UddSketchState {
     }
 
     fn merge(&mut self, raw: &[u8]) -> DfResult<()> {
-        let uddsketch = UddSketch::decode(raw).map_err(|e| {
+        let uddsketch = uddsketch_compat::decode(raw).map_err(|e| {
             common_telemetry::trace!("Failed to deserialize UDDSketch: {}", e);
             DataFusionError::Plan("Failed to deserialize UDDSketch from binary".to_string())
         })?;
@@ -282,6 +284,37 @@ mod tests {
         } else {
             panic!("Expected binary scalar value");
         }
+    }
+
+    #[test]
+    fn test_uddsketch_state_merges_legacy_state() {
+        let mut state = UddSketchState::new(128, 0.01).unwrap();
+
+        state.merge(uddsketch_compat::LEGACY_STATE).unwrap();
+
+        let ScalarValue::Binary(Some(encoded)) = state.evaluate().unwrap() else {
+            panic!("Expected binary scalar value");
+        };
+        let sketch = UddSketchRef::parse(&encoded).unwrap();
+        assert_eq!(sketch.count(), 4);
+        assert_eq!(sketch.sum(), 1.0);
+        assert_eq!(sketch.quantile(0.5).unwrap(), Some(0.9900000000000001));
+    }
+
+    #[test]
+    fn test_uddsketch_state_merges_compacted_legacy_state() {
+        let mut legacy_state = uddsketch_compat::COMPACTED_LEGACY_SKETCH.to_vec();
+        legacy_state.extend_from_slice(&0.01_f64.to_le_bytes());
+        let mut state = UddSketchState::new(7, 0.01).unwrap();
+
+        state.merge(&legacy_state).unwrap();
+
+        let ScalarValue::Binary(Some(encoded)) = state.evaluate().unwrap() else {
+            panic!("Expected binary scalar value");
+        };
+        let sketch = UddSketchRef::parse(&encoded).unwrap();
+        assert_eq!(sketch.count(), 201);
+        assert_eq!(sketch.times_compacted(), 12);
     }
 
     #[test]

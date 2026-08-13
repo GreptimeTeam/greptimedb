@@ -22,10 +22,10 @@ use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use uddsketch::UddSketchRef;
 
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
+use crate::uddsketch_compat;
 
 const NAME: &str = "uddsketch_calc";
 
@@ -114,8 +114,8 @@ impl Function for UddSketchCalcFunction {
             let sketch_bytes = sketch_opt.unwrap();
             let perc = perc_opt.unwrap();
 
-            let sketch = match UddSketchRef::parse(sketch_bytes) {
-                Ok(s) => s,
+            let value = match uddsketch_compat::quantile(sketch_bytes, perc) {
+                Ok(value) => value,
                 Err(e) => {
                     common_telemetry::trace!("Failed to parse UDDSketch: {}", e);
                     builder.append_null();
@@ -123,9 +123,9 @@ impl Function for UddSketchCalcFunction {
                 }
             };
 
-            match sketch.quantile(perc) {
-                Ok(Some(value)) => builder.append_value(value),
-                Ok(None) | Err(_) => builder.append_null(),
+            match value {
+                Some(value) => builder.append_value(value),
+                None => builder.append_null(),
             }
         }
 
@@ -192,6 +192,34 @@ mod tests {
         assert!((result.value(1) - expected_p90).abs() < 1e-10);
         // Test p95
         assert!((result.value(2) - expected_p95).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_uddsketch_calc_function_reads_legacy_state() {
+        let function = UddSketchCalcFunction::default();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(vec![0.5]))),
+            ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(vec![
+                uddsketch_compat::LEGACY_STATE,
+            ]))),
+        ];
+
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<Float64Type>();
+        assert_eq!(result.len(), 1);
+        assert!(!result.is_null(0));
+        assert_eq!(result.value(0), 0.9900000000000001);
     }
 
     #[test]
