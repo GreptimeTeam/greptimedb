@@ -465,15 +465,14 @@ fn null_json() -> Expr {
     lit(ScalarValue::Binary(None))
 }
 
-/// Renders a compile-time-known string as JSON text (quoted, fully escaped —
-/// including control characters, unlike the runtime value escaping).
+/// Renders a compile-time-known string as JSON text (quoted, fully escaped).
 fn json_quote(value: &str) -> String {
     serde_json::Value::from(value).to_string()
 }
 
 /// The `json_object` UDF, resolved like [`PARSE_JSON_UDF`]. It assembles the
-/// JSONB binary directly from the value columns, so runtime values need no JSON
-/// text escaping — control characters included.
+/// JSONB binary directly from the value columns, so runtime values need no
+/// JSON text escaping.
 static JSON_OBJECT_UDF: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
     Arc::new(
         FUNCTION_REGISTRY

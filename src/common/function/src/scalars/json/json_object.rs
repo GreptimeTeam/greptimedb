@@ -29,6 +29,7 @@ const NAME: &str = "json_object";
 /// arguments, like MySQL's `JSON_OBJECT`. Values are written into the binary
 /// directly, so they need no JSON text escaping. Keys must be non-NULL strings;
 /// values may be strings, numbers, booleans, or NULL (rendered as JSON null).
+/// A duplicate key keeps the last value.
 #[derive(Clone, Debug)]
 pub(crate) struct JsonObjectFunction {
     signature: Signature,
@@ -80,33 +81,24 @@ impl ValueColumn {
     }
 
     fn value(&self, row: usize) -> jsonb::Value<'_> {
-        fn get<'a, A: Array>(
-            array: &'a A,
-            row: usize,
-            value: impl Fn(&'a A, usize) -> jsonb::Value<'a>,
-        ) -> jsonb::Value<'a> {
-            if array.is_valid(row) {
-                value(array, row)
-            } else {
-                jsonb::Value::Null
-            }
+        let array = match self {
+            ValueColumn::Null => return jsonb::Value::Null,
+            ValueColumn::Bool(array)
+            | ValueColumn::Int(array)
+            | ValueColumn::UInt(array)
+            | ValueColumn::Float(array)
+            | ValueColumn::String(array) => array,
+        };
+        if !array.is_valid(row) {
+            return jsonb::Value::Null;
         }
-
         match self {
-            ValueColumn::Null => jsonb::Value::Null,
-            ValueColumn::Bool(array) => get(array.as_boolean(), row, |a, i| a.value(i).into()),
-            ValueColumn::Int(array) => get(array.as_primitive::<Int64Type>(), row, |a, i| {
-                a.value(i).into()
-            }),
-            ValueColumn::UInt(array) => get(array.as_primitive::<UInt64Type>(), row, |a, i| {
-                a.value(i).into()
-            }),
-            ValueColumn::Float(array) => get(array.as_primitive::<Float64Type>(), row, |a, i| {
-                a.value(i).into()
-            }),
-            ValueColumn::String(array) => {
-                get(array.as_string_view(), row, |a, i| a.value(i).into())
-            }
+            ValueColumn::Null => unreachable!(),
+            ValueColumn::Bool(array) => array.as_boolean().value(row).into(),
+            ValueColumn::Int(array) => array.as_primitive::<Int64Type>().value(row).into(),
+            ValueColumn::UInt(array) => array.as_primitive::<UInt64Type>().value(row).into(),
+            ValueColumn::Float(array) => array.as_primitive::<Float64Type>().value(row).into(),
+            ValueColumn::String(array) => array.as_string_view().value(row).into(),
         }
     }
 }
@@ -222,29 +214,22 @@ mod tests {
                 ColumnarValue::Array(Arc::new(Int64Array::from(vec![42, 7]))),
                 key("up"),
                 ColumnarValue::Scalar(datafusion_common::ScalarValue::Boolean(Some(true))),
+                key("v"),
+                ColumnarValue::Array(Arc::new(NullArray::new(2))),
             ],
             2,
         )
         .unwrap();
         // Keys come out sorted (JSONB objects are key-ordered); the raw control
-        // character survives as a proper JSON escape; a NULL value is JSON null.
+        // character survives as a proper JSON escape; NULL values (typed or
+        // Null-typed) are JSON null.
         assert_eq!(
             texts,
             vec![
-                r#"{"host":"we\"ird\\\nhost","pid":42,"up":true}"#,
-                r#"{"host":null,"pid":7,"up":true}"#,
+                r#"{"host":"we\"ird\\\nhost","pid":42,"up":true,"v":null}"#,
+                r#"{"host":null,"pid":7,"up":true,"v":null}"#,
             ]
         );
-    }
-
-    #[test]
-    fn null_typed_value_renders_as_json_null() {
-        let texts = invoke(
-            vec![key("v"), ColumnarValue::Array(Arc::new(NullArray::new(1)))],
-            1,
-        )
-        .unwrap();
-        assert_eq!(texts, vec![r#"{"v":null}"#]);
     }
 
     #[test]
