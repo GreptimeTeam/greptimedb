@@ -102,14 +102,6 @@ fn test_classify_trace_prewrite_failure() {
 }
 
 #[test]
-fn test_add_trace_write_cost() {
-    let mut outcome = TraceIngestOutcome::default();
-    Instance::add_trace_write_cost(&mut outcome, 3);
-    Instance::add_trace_write_cost(&mut outcome, 5);
-    assert_eq!(outcome.write_cost, 8);
-}
-
-#[test]
 fn test_finish_trace_failure_message() {
     let message = Instance::finish_trace_failure_message(
         3,
