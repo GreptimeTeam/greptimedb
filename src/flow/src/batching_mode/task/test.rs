@@ -31,14 +31,15 @@ use datatypes::vectors::{
 };
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
-    QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SCHEDULED_TIME_MILLIS, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
 use table::test_util::MemTable;
 
 use super::*;
+use crate::batching_mode::IncrementalMode;
 use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
     FlowCheckpointDecision, FlowQueryFallbackReason,
@@ -1727,6 +1728,39 @@ async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
             .iter()
             .any(|(key, _)| *key == FLOW_INCREMENTAL_AFTER_SEQS)
     );
+}
+
+// `sequence_range` must flow into the emitted extensions only with a
+// checkpoint map present, requesting exact filtering across memtables and all
+// SSTs; the default mode keeps emitting `memtable_only`.
+#[tokio::test]
+async fn test_build_flow_query_extensions_sequence_range_mode() {
+    let (task, _) = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: true,
+            incremental_mode: IncrementalMode::SequenceRange,
+            ..Default::default()
+        }),
+    )
+    .await
+    .into_task_and_plan();
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_MODE,
+        FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string()
+    )));
+    assert!(extensions.contains(&(
+        FLOW_INCREMENTAL_AFTER_SEQS,
+        serde_json::json!({"1": 10}).to_string(),
+    )));
 }
 
 #[tokio::test]

@@ -26,7 +26,8 @@ use catalog::CatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::{
-    FlowType, INTERNAL_EVAL_SCHEDULE_KEY, effective_eval_schedule_from_flow_info,
+    FlowType, INTERNAL_EVAL_SCHEDULE_KEY, INTERNAL_INCREMENTAL_MODE_KEY,
+    effective_eval_schedule_from_flow_info,
 };
 use common_meta::error::Result as MetaResult;
 use common_meta::key::flow::FlowMetadataManager;
@@ -663,6 +664,24 @@ impl SrcTableToFlow {
     }
 }
 
+/// The streaming engine ignores `flow_options`, so injected incremental intent
+/// must surface as an internal error rather than be silently dropped.
+fn validate_flow_options_for_engine(
+    flow_type: FlowType,
+    flow_options: &HashMap<String, String>,
+) -> Result<(), Error> {
+    if flow_type == FlowType::Streaming && flow_options.contains_key(INTERNAL_INCREMENTAL_MODE_KEY)
+    {
+        return InternalSnafu {
+            reason: format!(
+                "internal flow option '{INTERNAL_INCREMENTAL_MODE_KEY}' is only valid for batching flows"
+            ),
+        }
+        .fail();
+    }
+    Ok(())
+}
+
 impl FlowEngine for FlowDualEngine {
     async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let flow_type = args
@@ -681,6 +700,8 @@ impl FlowEngine for FlowDualEngine {
                 .fail();
             }
         };
+
+        validate_flow_options_for_engine(flow_type, &args.flow_options)?;
 
         let flow_id = args.flow_id;
         let src_table_ids = args.source_table_ids.clone();
@@ -1164,9 +1185,11 @@ impl StreamingEngine {
 mod tests {
     use std::collections::HashMap;
 
-    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+    use common_meta::ddl::create_flow::{
+        FlowType, INTERNAL_EVAL_SCHEDULE_KEY, INTERNAL_INCREMENTAL_MODE_KEY,
+    };
 
-    use super::decode_internal_eval_schedule;
+    use super::{decode_internal_eval_schedule, validate_flow_options_for_engine};
     use crate::error::Error;
 
     #[test]
@@ -1184,5 +1207,27 @@ mod tests {
                 if reason.contains("Invalid internal eval schedule payload")
         ));
         assert!(!flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
+    }
+
+    #[test]
+    fn test_internal_incremental_mode_guard_rejects_streaming_accepts_batching() {
+        let mut stream_options = HashMap::new();
+        stream_options.insert(
+            INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+            "sequence_range".to_string(),
+        );
+        let err =
+            validate_flow_options_for_engine(FlowType::Streaming, &stream_options).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Internal { reason, .. } if reason.contains(INTERNAL_INCREMENTAL_MODE_KEY)
+        ));
+
+        let mut batch_options = HashMap::new();
+        batch_options.insert(
+            INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+            "sequence_range".to_string(),
+        );
+        validate_flow_options_for_engine(FlowType::Batching, &batch_options).unwrap();
     }
 }
