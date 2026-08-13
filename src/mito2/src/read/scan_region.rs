@@ -2389,7 +2389,7 @@ mod tests {
 
         assert_ne!(int_fingerprint, string_fingerprint);
         assert_eq!(
-            Some(&Some(int_target)),
+            Some(&Some(ConcreteDataType::json2(int_target))),
             int_fingerprint.read_column_types().get(2)
         );
     }
