@@ -12,12 +12,80 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
+use common_time::timestamp::TimeUnit;
+use serde::{Deserialize, Serialize};
+
+use crate::Error;
+use crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS;
 use crate::batching_mode::state::CheckpointMode;
+use crate::error::UnexpectedSnafu;
 
 pub(super) const CHECKPOINT_DECISION_ADVANCE: &str = "advance";
 pub(super) const CHECKPOINT_DECISION_FALLBACK: &str = "fallback";
 pub(super) const CHECKPOINT_DECISION_CONTINUE_REPAIR: &str = "continue_repair";
 pub(super) const CHECKPOINT_REASON_NONE: &str = "none";
+
+/// Version of the private on-disk checkpoint record format. Bump when the
+/// serialized shape changes; old versions are rejected on load (backfill).
+pub(super) const CHECKPOINT_RECORD_FORMAT_VERSION: u32 = 1;
+
+/// The private, versioned checkpoint record stored in the sink table's BINARY
+/// state column of the singleton sentinel row.
+///
+/// `serde_json` is used on purpose: it is an existing flow dependency, and the
+/// `BTreeMap` key order makes the encoding deterministic for a given value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CheckpointRecord {
+    /// Record format version; must equal [`CHECKPOINT_RECORD_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// Epoch of the persisted checkpoint. Rows stamped with a larger epoch are
+    /// newer than this record and invalidate it (crash between state write and
+    /// checkpoint write).
+    pub epoch: u64,
+    /// Region id -> last consumed watermark sequence map. Must be non-empty to
+    /// be trusted.
+    pub checkpoints: BTreeMap<u64, u64>,
+}
+
+/// Encode a checkpoint record deterministically.
+pub(super) fn encode_checkpoint_record(record: &CheckpointRecord) -> Result<Vec<u8>, Error> {
+    serde_json::to_vec(record).map_err(|err| {
+        UnexpectedSnafu {
+            reason: err.to_string(),
+        }
+        .build()
+    })
+}
+
+/// Decode a checkpoint record, rejecting unknown format versions.
+pub(super) fn decode_checkpoint_record(bytes: &[u8]) -> Result<Option<CheckpointRecord>, Error> {
+    let record: CheckpointRecord = match serde_json::from_slice(bytes) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    if record.format_version != CHECKPOINT_RECORD_FORMAT_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
+/// Convert the millisecond sentinel window timestamp to the sink window
+/// column's native time unit.
+///
+/// A nanosecond sentinel at year 9999 would overflow `i64`, so the nanosecond
+/// representation is clamped to the largest representable value; every
+/// practical source timestamp is far below it. Second/microsecond conversions
+/// are exact.
+pub(super) fn checkpoint_sentinel_ts_in_unit(unit: TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Second => CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS / 1000,
+        TimeUnit::Millisecond => CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS,
+        TimeUnit::Microsecond => CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS * 1000,
+        TimeUnit::Nanosecond => i64::MAX,
+    }
+}
 
 /// Why the task fell back to full snapshot mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +116,11 @@ pub(super) enum FlowQueryFallbackReason {
     /// Incremental mode has been permanently disabled for this Flow
     /// (e.g. because the query shape is not incrementally safe).
     IncrementalDisabled,
+    /// The sink state rows were written but the singleton checkpoint row could
+    /// not be persisted (write failure or ambiguous result). The runtime
+    /// resets to full snapshot so a later cycle rebuilds and re-persists the
+    /// checkpoint instead of claiming persistence it does not have.
+    CheckpointPersistFailure,
 }
 
 impl FlowQueryFallbackReason {
@@ -61,6 +134,7 @@ impl FlowQueryFallbackReason {
             Self::IncrementalQueryFailure => "incremental_query_failure",
             Self::QueryFailure => "query_failure",
             Self::IncrementalDisabled => "incremental_disabled",
+            Self::CheckpointPersistFailure => "checkpoint_persist_failure",
         }
     }
 }
@@ -149,5 +223,66 @@ pub(super) fn checkpoint_mode_label(mode: CheckpointMode) -> &'static str {
     match mode {
         CheckpointMode::FullSnapshot => "full_snapshot",
         CheckpointMode::Incremental => "incremental",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_time::timestamp::TimeUnit;
+
+    use super::*;
+    use crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS;
+
+    #[test]
+    fn test_checkpoint_record_roundtrip_and_version_rejection() {
+        let record = CheckpointRecord {
+            format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+            epoch: 42,
+            checkpoints: BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]),
+        };
+        let encoded = encode_checkpoint_record(&record).unwrap();
+        assert_eq!(
+            record,
+            decode_checkpoint_record(&encoded)
+                .unwrap()
+                .expect("roundtrip")
+        );
+
+        // Deterministic encoding: same value -> same bytes.
+        assert_eq!(encoded, encode_checkpoint_record(&record).unwrap());
+
+        // Garbage bytes are not a decodable record.
+        assert!(decode_checkpoint_record(b"not-a-record").unwrap().is_none());
+
+        // Unknown format versions are rejected (future compat guard).
+        let mut json = serde_json::to_value(&record).unwrap();
+        json["format_version"] = serde_json::json!(2);
+        let bytes = serde_json::to_vec(&json).unwrap();
+        assert!(decode_checkpoint_record(&bytes).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_sentinel_ts_in_unit_conversion() {
+        let sentinel = CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS;
+        assert_eq!(
+            sentinel / 1000,
+            checkpoint_sentinel_ts_in_unit(TimeUnit::Second)
+        );
+        assert_eq!(
+            sentinel,
+            checkpoint_sentinel_ts_in_unit(TimeUnit::Millisecond)
+        );
+        assert_eq!(
+            sentinel * 1000,
+            checkpoint_sentinel_ts_in_unit(TimeUnit::Microsecond)
+        );
+        // A year-9999 nanosecond sentinel would overflow i64, so the
+        // nanosecond representation is clamped to the largest representable
+        // value. The exact clamped value is a storage detail; the assertion
+        // pins that it stays representable and far above any real timestamp.
+        assert_eq!(
+            i64::MAX,
+            checkpoint_sentinel_ts_in_unit(TimeUnit::Nanosecond)
+        );
     }
 }

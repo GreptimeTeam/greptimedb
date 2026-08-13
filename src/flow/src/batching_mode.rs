@@ -30,6 +30,32 @@ mod task;
 mod time_window;
 pub(crate) mod utils;
 
+/// Reserved internal epoch column name stamped on every emitted sink state row
+/// when checkpoint persistence is active.
+///
+/// The enterprise state schema/view adds this column to the sink table; OSS
+/// plan generation strips it from the schema-matching view and fills it with
+/// the current epoch literal, and OSS restart/recovery reads it to validate
+/// checkpoint trust. Ordinary flows (whose sinks never contain this column)
+/// are byte-for-byte unaffected.
+pub const INTERNAL_FLOW_EPOCH_COL_NAME: &str = "__greptime_internal_flow_epoch";
+
+/// Sentinel window timestamp (in milliseconds: 9999-12-31T23:59:59.999Z) used
+/// to mark the singleton checkpoint row in the sink table's window/time-index
+/// column.
+///
+/// This value is a private convention between the flow runtime and the
+/// internal producer of the sink state schema (the enterprise state schema/
+/// view). It is NOT safe by construction: the flow's own query may bin source
+/// timestamps with an arbitrary `date_bin(stride, origin)` lattice, so the
+/// internal producer MUST validate at CREATE time that the sentinel cannot
+/// collide with any real window for the exact flow `date_bin` (stride and
+/// origin). The OSS runtime never auto-creates the sentinel row; it only
+/// reads/writes it when the sink schema already contains the reserved epoch
+/// column, and ordinary flows (without that column) are byte-for-byte
+/// unaffected.
+pub const CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS: i64 = 253_402_300_799_999;
+
 /// Incremental read mode for a batching flow, selected only through the
 /// reserved internal flow option
 /// [`common_meta::ddl::create_flow::INTERNAL_INCREMENTAL_MODE_KEY`].

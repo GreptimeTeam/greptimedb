@@ -20,16 +20,23 @@ use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
+use common_recordbatch::RecordBatches;
+use common_recordbatch::util::collect_batches;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::datasource::DefaultTableSource;
+use datafusion::functions_aggregate::expr_fn::{count, max};
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::quote_identifier;
-use datafusion_common::{DFSchemaRef, TableReference};
-use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp, col, lit};
+use datafusion_common::{Column, DFSchema, DFSchemaRef, ScalarValue, TableReference};
+use datafusion_expr::logical_plan::{EmptyRelation, TableScan};
+use datafusion_expr::{DmlStatement, Expr, LogicalPlan, LogicalPlanBuilder, WriteOp, col, lit};
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
+use datatypes::value::Value;
+use datatypes::vectors::Helper;
 use query::QueryEngineRef;
 use query::options::FLOW_INCREMENTAL_MODE;
 use query::query_engine::DefaultSerializer;
@@ -43,12 +50,17 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
 
-use crate::batching_mode::BatchingModeOptions;
-use crate::batching_mode::checkpoint::checkpoint_mode_label;
+use crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL;
+use crate::batching_mode::checkpoint::{
+    CHECKPOINT_RECORD_FORMAT_VERSION, CheckpointRecord, FlowCheckpointDecision,
+    FlowQueryFallbackReason, checkpoint_mode_label, checkpoint_sentinel_ts_in_unit,
+    decode_checkpoint_record, encode_checkpoint_record,
+};
 use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_scheduled_times};
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::state::{
-    CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState, to_df_literal,
+    CheckpointMode, CheckpointPersistence, DirtyTimeWindows, FilterExprInfo, TaskState,
+    to_df_literal,
 };
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
@@ -56,10 +68,11 @@ use crate::batching_mode::utils::{
     AddFilterRewriter, ColumnMatcherRewriter, df_plan_to_sql, gen_plan_with_matching_schema,
     get_table_info_df_schema, sql_to_df_plan,
 };
+use crate::batching_mode::{BatchingModeOptions, INTERNAL_FLOW_EPOCH_COL_NAME, IncrementalMode};
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
-    DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, SubstraitEncodeLogicalPlanSnafu,
-    UnexpectedSnafu,
+    DatafusionSnafu, DatatypesSnafu, ExternalSnafu, InvalidQuerySnafu,
+    SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
@@ -235,6 +248,67 @@ struct ExecuteOnceOutcome {
     result: Result<Option<(usize, Duration)>, Error>,
 }
 
+/// True when `data_type` is a plain integer type (signed or unsigned).
+fn is_integer_type(data_type: &ConcreteDataType) -> bool {
+    matches!(
+        data_type,
+        ConcreteDataType::Int8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::Int64(_)
+            | ConcreteDataType::UInt8(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::UInt64(_)
+    )
+}
+
+/// Returns a copy of the sink schema without the reserved internal epoch column
+/// and the primary-key indices remapped onto the stripped schema.
+///
+/// Plan generation matches flow output against this stripped view; the epoch
+/// column is stamped separately by checkpoint persistence
+/// ([`BatchingTask::stamp_epoch_into_plan`]). The real query-produced BINARY
+/// state column (e.g. the UDDSketch state of an exact EE-like flow) is NOT
+/// stripped: it is ordinary flow output and must survive schema matching,
+/// incremental rewrite, and the final DML insert.
+fn strip_internal_epoch_column(
+    schema: &Schema,
+    primary_key_indices: &[usize],
+) -> (Schema, Vec<usize>) {
+    let mut column_schemas = Vec::with_capacity(schema.column_schemas().len());
+    let mut new_primary_key_indices = Vec::new();
+    for (idx, column) in schema.column_schemas().iter().enumerate() {
+        if column.name == INTERNAL_FLOW_EPOCH_COL_NAME {
+            continue;
+        }
+        let new_idx = column_schemas.len();
+        column_schemas.push(column.clone());
+        if primary_key_indices.contains(&idx) {
+            new_primary_key_indices.push(new_idx);
+        }
+    }
+    (Schema::new(column_schemas), new_primary_key_indices)
+}
+
+/// Builds the sentinel window literal in the given timestamp column's native
+/// unit. Errors when the column is not a timestamp.
+fn checkpoint_sentinel_scalar(
+    column: &datatypes::schema::ColumnSchema,
+) -> Result<ScalarValue, Error> {
+    let ts_type = column
+        .data_type
+        .as_timestamp()
+        .with_context(|| UnexpectedSnafu {
+            reason: format!(
+                "Expected timestamp column for checkpoint sentinel, found {}",
+                column.data_type
+            ),
+        })?;
+    let sentinel = checkpoint_sentinel_ts_in_unit(ts_type.unit());
+    to_df_literal(Timestamp::new(sentinel, ts_type.unit()))
+}
+
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -380,13 +454,18 @@ impl BatchingTask {
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
         let primary_key_indices = table_meta.primary_key_indices.clone();
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
+        // The reserved internal epoch column is not produced by the flow query;
+        // it is stamped separately when checkpoint persistence is active, so it
+        // is excluded from schema matching. The real BINARY state column stays.
+        let (effective_schema, effective_pk_indices) =
+            strip_internal_epoch_column(&table_meta.schema, &primary_key_indices);
 
         gen_plan_with_matching_schema(
             &self.config.query,
             query_ctx,
             engine.clone(),
-            table_meta.schema.clone(),
-            &primary_key_indices,
+            Arc::new(effective_schema),
+            &effective_pk_indices,
             merge_mode_last_non_null,
         )
         .await
@@ -486,12 +565,19 @@ impl BatchingTask {
         let merge_mode_last_non_null =
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
         let primary_key_indices = table_meta.primary_key_indices.clone();
+        // The reserved internal epoch column is stamped onto every emitted row
+        // separately (see `stamp_epoch_into_plan`), so plan generation matches
+        // flow output against the sink schema without it. The real
+        // query-produced BINARY state column stays in the matched schema.
+        let (effective_schema, effective_pk_indices) =
+            strip_internal_epoch_column(&table_meta.schema, &primary_key_indices);
+        let effective_schema = Arc::new(effective_schema);
 
         let new_query = self
             .gen_query_with_time_window(
                 engine.clone(),
-                &table.table_info().meta.schema,
-                &primary_key_indices,
+                &effective_schema,
+                &effective_pk_indices,
                 merge_mode_last_non_null,
                 max_window_cnt,
             )
@@ -628,6 +714,11 @@ impl BatchingTask {
             return Ok(None);
         }
         let plan = incremental_plan.unwrap_or_else(|| plan.clone());
+
+        // Stamp the current cycle epoch onto every emitted state row when
+        // checkpoint persistence is active. The epoch is decided here, once
+        // per cycle, and reused for the checkpoint row write after success.
+        let (plan, cycle_epoch) = self.stamp_epoch_into_plan(plan).await?;
 
         let extensions = self
             .build_flow_query_extensions(incremental_safe, coverage.is_incremental_delta())
@@ -779,9 +870,57 @@ impl BatchingTask {
         METRIC_FLOW_ROWS
             .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
             .inc_by(affected_rows as _);
+        // Checkpoint persistence: apply the single authoritative checkpoint
+        // transition first, then persist the singleton checkpoint row only when
+        // the actual decision advanced checkpoints, using the resulting
+        // `state.checkpoints()` snapshot. The whole cycle runs under
+        // `execution_lock`, so no other execution interleaves with the write.
+        // If the write succeeds, advance the durable epoch; if it fails, reset
+        // to full snapshot and restore the executed plan's consumed dirty work
+        // so the next cycle re-runs a full repair/backfill and can write a
+        // replacement checkpoint. Dirty notifications arriving around the
+        // transition are never erased.
         let decision = {
             let mut state = self.state.write().unwrap();
-            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
+            let decision = Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage);
+            let persist = cycle_epoch
+                .filter(|_| {
+                    matches!(
+                        decision,
+                        FlowCheckpointDecision::AdvancedFromFullSnapshot { .. }
+                            | FlowCheckpointDecision::AdvancedIncremental { .. }
+                    )
+                })
+                .map(|epoch| (epoch, state.checkpoints().clone(), state.checkpoint_mode()));
+            (decision, persist)
+        };
+        let decision = match decision.1 {
+            Some((epoch, map_to_persist, previous_mode)) => {
+                match self
+                    .write_checkpoint_row(frontend_client, epoch, &map_to_persist)
+                    .await
+                {
+                    Ok(()) => {
+                        let mut state = self.state.write().unwrap();
+                        state.advance_persisted_epoch(epoch);
+                        decision.0
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Flow {flow_id} failed to persist checkpoint row, falling back to full snapshot and re-scheduling dirty work: {err:?}"
+                        );
+                        let mut state = self.state.write().unwrap();
+                        state.mark_full_snapshot();
+                        drop(state);
+                        self.restore_dirty_windows(dirty_restore);
+                        FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode,
+                            reason: FlowQueryFallbackReason::CheckpointPersistFailure,
+                        }
+                    }
+                }
+            }
+            None => decision.0,
         };
         Self::record_checkpoint_decision(flow_id, decision);
 
@@ -1509,6 +1648,512 @@ impl BatchingTask {
 
         Ok(Some(info))
     }
+
+    /// Stamp the current cycle epoch onto every emitted sink state row when
+    /// checkpoint persistence is active. Returns the stamped plan and the epoch
+    /// used for this cycle (`None` when persistence is inactive or the plan is
+    /// not a DML insert).
+    ///
+    /// Rows stamped with an epoch newer than the last durable record
+    /// invalidate that record on restart (crash between state write and
+    /// checkpoint write), which is exactly the backfill trigger we want.
+    async fn stamp_epoch_into_plan(
+        &self,
+        plan: LogicalPlan,
+    ) -> Result<(LogicalPlan, Option<u64>), Error> {
+        let persistence = self.state.read().unwrap().checkpoint_persistence().cloned();
+        let Some(persistence) = persistence else {
+            return Ok((plan, None));
+        };
+        let LogicalPlan::Dml(dml) = &plan else {
+            return Ok((plan, None));
+        };
+        let epoch = self.state.read().unwrap().next_persist_epoch();
+        let inner = dml.input.as_ref().clone();
+        let mut exprs = inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| Expr::Column(Column::new_unqualified(field.name())))
+            .collect::<Vec<_>>();
+        exprs.push(lit(ScalarValue::UInt64(Some(epoch))).alias(&persistence.epoch_col_name));
+        let stamped = LogicalPlanBuilder::from(inner)
+            .project(exprs)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to stamp flow epoch column onto state rows".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build epoch-stamped state row plan".to_string(),
+            })?;
+        let stamped = LogicalPlan::Dml(DmlStatement::new(
+            dml.table_name.clone(),
+            dml.target.clone(),
+            dml.op.clone(),
+            Arc::new(stamped),
+        ));
+        Ok((stamped, Some(epoch)))
+    }
+
+    /// Upsert the singleton checkpoint row through the frontend write
+    /// machinery: one row whose window/time-index column is the sentinel, epoch
+    /// column is the cycle epoch, and the BINARY state column holds the encoded
+    /// versioned checkpoint record. Other sink columns are left to defaults.
+    async fn write_checkpoint_row(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+        epoch: u64,
+        checkpoints: &BTreeMap<u64, u64>,
+    ) -> Result<(), Error> {
+        let persistence = self
+            .state
+            .read()
+            .unwrap()
+            .checkpoint_persistence()
+            .cloned()
+            .with_context(|| UnexpectedSnafu {
+                reason: "checkpoint persistence is not active".to_string(),
+            })?;
+        let record = CheckpointRecord {
+            format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+            epoch,
+            checkpoints: checkpoints.clone(),
+        };
+        let encoded = encode_checkpoint_record(&record)?;
+
+        let (table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        let sink_schema = table.table_info().meta.schema.clone();
+        let window_col = sink_schema
+            .column_schema_by_name(&persistence.window_col_name)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Sink table lost checkpoint window column {}",
+                    persistence.window_col_name
+                ),
+            })?;
+
+        let mut exprs = vec![
+            lit(checkpoint_sentinel_scalar(window_col)?).alias(&persistence.window_col_name),
+            lit(ScalarValue::UInt64(Some(epoch))).alias(&persistence.epoch_col_name),
+            lit(ScalarValue::Binary(Some(encoded))).alias(&persistence.state_col_name),
+        ];
+        // Keep the auto-created update_at column fresh on the checkpoint row
+        // when the sink has one; any other sink column is filled with its
+        // default (or NULL) by the insert machinery.
+        if let Some(update_at) = sink_schema.column_schema_by_name(AUTO_CREATED_UPDATE_AT_TS_COL)
+            && update_at.data_type.is_timestamp()
+        {
+            exprs.push(datafusion::prelude::now().alias(AUTO_CREATED_UPDATE_AT_TS_COL));
+        }
+        let empty = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: true,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        let row_plan = LogicalPlanBuilder::from(empty)
+            .project(exprs)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build checkpoint row plan".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to finalize checkpoint row plan".to_string(),
+            })?;
+
+        let insert_to = TableName {
+            catalog_name: self.config.sink_table_name[0].clone(),
+            schema_name: self.config.sink_table_name[1].clone(),
+            table_name: self.config.sink_table_name[2].clone(),
+        };
+        let req = encode_insert_plan_request(insert_to, &row_plan)?;
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        let mut peer_desc = None;
+        frontend_client
+            .query_with_terminal_metrics(catalog, schema, req, &[], &HashMap::new(), &mut peer_desc)
+            .await?;
+        debug!(
+            "Flow {} persisted checkpoint row with epoch {} and {} regions",
+            self.config.flow_id,
+            epoch,
+            checkpoints.len()
+        );
+        Ok(())
+    }
+
+    /// Detect whether checkpoint persistence applies to this task and, if so,
+    /// restore the durable checkpoint from the sink table before the first run.
+    ///
+    /// Detection/load errors are warnings: the task starts from full snapshot
+    /// and later cycles rebuild the checkpoint from scratch.
+    pub(crate) async fn try_enable_checkpoint_persistence(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+    ) {
+        let persistence = match self.detect_checkpoint_persistence().await {
+            Ok(persistence) => persistence,
+            Err(err) => {
+                warn!(
+                    "Flow {} failed to detect checkpoint persistence, starting from full snapshot: {err:?}",
+                    self.config.flow_id
+                );
+                return;
+            }
+        };
+        let restored = match &persistence {
+            Some(persistence) => {
+                self.state
+                    .write()
+                    .unwrap()
+                    .set_checkpoint_persistence(Some(persistence.clone()));
+                match self
+                    .read_checkpoint_state(frontend_client, persistence)
+                    .await
+                {
+                    Ok(restored) => restored,
+                    Err(err) => {
+                        warn!(
+                            "Flow {} failed to load checkpoint state, starting from full snapshot: {err:?}",
+                            self.config.flow_id
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut state = self.state.write().unwrap();
+        if let Some((epoch, checkpoints)) = restored {
+            state.seed_checkpoints_from_record(epoch, checkpoints);
+            info!(
+                "Flow {} restored incremental checkpoints from sink table at epoch {}",
+                self.config.flow_id, epoch
+            );
+        } else {
+            info!(
+                "Flow {} found no trustworthy checkpoint record; starting from full snapshot",
+                self.config.flow_id
+            );
+        }
+    }
+
+    /// Resolve the checkpoint persistence layout. Activated only when the
+    /// batching mode is `SequenceRange` and the sink schema contains the
+    /// reserved internal epoch column plus exactly one BINARY state column.
+    async fn detect_checkpoint_persistence(&self) -> Result<Option<CheckpointPersistence>, Error> {
+        if self.config.batch_opts.incremental_mode != IncrementalMode::SequenceRange {
+            return Ok(None);
+        }
+        let (table, _) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        let schema = table.table_info().meta.schema.clone();
+        let epoch_col = match schema.column_schema_by_name(INTERNAL_FLOW_EPOCH_COL_NAME) {
+            Some(column) => column,
+            None => return Ok(None),
+        };
+        if !is_integer_type(&epoch_col.data_type) {
+            debug!(
+                "Flow {} checkpoint epoch column {} has non-integer type {:?}; persistence inactive",
+                self.config.flow_id, epoch_col.name, epoch_col.data_type
+            );
+            return Ok(None);
+        }
+        let state_cols = schema
+            .column_schemas()
+            .iter()
+            .filter(|column| column.data_type == ConcreteDataType::binary_datatype())
+            .collect::<Vec<_>>();
+        if state_cols.len() != 1 {
+            return Ok(None);
+        }
+        let Some(ts_idx) = schema.timestamp_index() else {
+            return Ok(None);
+        };
+        let window_col = &schema.column_schemas()[ts_idx];
+        Ok(Some(CheckpointPersistence {
+            epoch_col_name: INTERNAL_FLOW_EPOCH_COL_NAME.to_string(),
+            state_col_name: state_cols[0].name.clone(),
+            window_col_name: window_col.name.clone(),
+        }))
+    }
+
+    /// Read the singleton sentinel checkpoint row and the maximum non-sentinel
+    /// epoch from the sink table and return a trusted record.
+    ///
+    /// The reads are executed through the frontend client (as `Query::LogicalPlan`
+    /// requests) rather than the local query engine, so the sink table is
+    /// resolved from DistTable-backed catalog metadata on the frontend.
+    ///
+    /// Trust requires exactly one sentinel row, a decodable v1 record with a
+    /// non-empty checkpoint map, and `max_non_sentinel_epoch <= record.epoch`.
+    /// NULL epoch rows (pre-upgrade data) make the state untrusted unless
+    /// there are no state rows at all.
+    async fn read_checkpoint_state(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+        persistence: &CheckpointPersistence,
+    ) -> Result<Option<(u64, BTreeMap<u64, u64>)>, Error> {
+        let (table, df_schema) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
+        let sink_schema = table.table_info().meta.schema.clone();
+        let window_col = sink_schema
+            .column_schema_by_name(&persistence.window_col_name)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Sink table lost checkpoint window column {}",
+                    persistence.window_col_name
+                ),
+            })?;
+        let sentinel = checkpoint_sentinel_scalar(window_col)?;
+        // The sentinel query projects the window column too, because the
+        // sentinel filter is applied as a logical Filter node on top of the
+        // scan (the local test engine's MemTable does not apply scan filters).
+        let sentinel_plan = sink_scan_plan(
+            &self.config.sink_table_name,
+            table.clone(),
+            &df_schema,
+            &[
+                persistence.window_col_name.clone(),
+                persistence.epoch_col_name.clone(),
+                persistence.state_col_name.clone(),
+            ],
+        )?;
+        let sentinel_plan = LogicalPlanBuilder::from(sentinel_plan)
+            .filter(col(&persistence.window_col_name).eq(lit(sentinel.clone())))
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build checkpoint sentinel row scan".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to finalize checkpoint sentinel row scan".to_string(),
+            })?;
+        let sentinel_batches = self
+            .execute_sink_scan(frontend_client, sentinel_plan)
+            .await?;
+        let mut sentinel_states = Vec::new();
+        for batch in sentinel_batches.iter() {
+            let state_vector =
+                Helper::try_into_vector(batch.column(2)).with_context(|_| DatatypesSnafu {
+                    extra: "Failed to convert sentinel row state column".to_string(),
+                })?;
+            for row in 0..batch.num_rows() {
+                let state_bytes = state_vector
+                    .get_ref(row)
+                    .try_into_binary()
+                    .with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert sentinel row state".to_string(),
+                    })?
+                    .map(|bytes| bytes.to_vec());
+                sentinel_states.push(state_bytes);
+            }
+        }
+        if sentinel_states.len() > 1 {
+            debug!(
+                "Flow {} found {} sentinel checkpoint rows, untrusted",
+                self.config.flow_id,
+                sentinel_states.len()
+            );
+            return Ok(None);
+        }
+
+        // Maximum non-sentinel epoch plus row counts to detect NULL epochs.
+        let non_sentinel_predicate = col(&persistence.window_col_name)
+            .is_null()
+            .or(col(&persistence.window_col_name).not_eq(lit(sentinel)));
+        let epoch_col_name = persistence.epoch_col_name.clone();
+        let scan = sink_scan_plan(
+            &self.config.sink_table_name,
+            table,
+            &df_schema,
+            &[persistence.window_col_name.clone(), epoch_col_name.clone()],
+        )?;
+        let agg_plan = LogicalPlanBuilder::from(scan)
+            .filter(non_sentinel_predicate)
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to build non-sentinel epoch aggregation".to_string(),
+            })?
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    count(col(&epoch_col_name)).alias("non_null_epoch_cnt"),
+                    count(lit(1_i64)).alias("total_cnt"),
+                    max(col(&epoch_col_name)).alias("max_epoch"),
+                ],
+            )
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to aggregate non-sentinel epochs".to_string(),
+            })?
+            .build()
+            .with_context(|_| DatafusionSnafu {
+                context: "Failed to finalize non-sentinel epoch aggregation".to_string(),
+            })?;
+        let agg_batches = self.execute_sink_scan(frontend_client, agg_plan).await?;
+        let (total_cnt, non_null_cnt, max_epoch) = match agg_batches.iter().next() {
+            Some(batch) => {
+                let non_null_cnt_vector =
+                    Helper::try_into_vector(batch.column(0)).with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert non-null epoch count column".to_string(),
+                    })?;
+                let total_cnt_vector =
+                    Helper::try_into_vector(batch.column(1)).with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert state row count column".to_string(),
+                    })?;
+                let max_epoch_vector =
+                    Helper::try_into_vector(batch.column(2)).with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert max epoch column".to_string(),
+                    })?;
+                let non_null_cnt = non_null_cnt_vector
+                    .get_ref(0)
+                    .try_into_i64()
+                    .with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert non-null epoch count".to_string(),
+                    })?
+                    .unwrap_or(0);
+                let total_cnt = total_cnt_vector
+                    .get_ref(0)
+                    .try_into_i64()
+                    .with_context(|_| DatatypesSnafu {
+                        extra: "Failed to convert state row count".to_string(),
+                    })?
+                    .unwrap_or(0);
+                let max_epoch = value_as_u64(Value::from(max_epoch_vector.get_ref(0)));
+                (total_cnt, non_null_cnt, max_epoch)
+            }
+            None => (0, 0, None),
+        };
+
+        // NULL epoch rows (pre-upgrade state data) are untrusted unless there
+        // is no state data at all.
+        if total_cnt > 0 && non_null_cnt != total_cnt {
+            debug!(
+                "Flow {} has {} state rows with NULL epochs, checkpoint untrusted",
+                self.config.flow_id,
+                total_cnt - non_null_cnt
+            );
+            return Ok(None);
+        }
+
+        let [state_bytes] = sentinel_states.as_slice() else {
+            return Ok(None);
+        };
+        let Some(state_bytes) = state_bytes.as_ref() else {
+            debug!(
+                "Flow {} sentinel row has NULL state, untrusted",
+                self.config.flow_id
+            );
+            return Ok(None);
+        };
+        let Some(record) = decode_checkpoint_record(state_bytes)? else {
+            debug!(
+                "Flow {} sentinel row is not a decodable v1 record, untrusted",
+                self.config.flow_id
+            );
+            return Ok(None);
+        };
+        if record.checkpoints.is_empty() {
+            debug!(
+                "Flow {} checkpoint record has an empty map, untrusted",
+                self.config.flow_id
+            );
+            return Ok(None);
+        }
+        if let Some(max_epoch) = max_epoch
+            && max_epoch > record.epoch
+        {
+            debug!(
+                "Flow {} state rows newer than checkpoint record ({} > {}), untrusted",
+                self.config.flow_id, max_epoch, record.epoch
+            );
+            return Ok(None);
+        }
+        Ok(Some((record.epoch, record.checkpoints)))
+    }
+
+    /// Execute a sink scan plan through the frontend client and collect the
+    /// returned record batches.
+    ///
+    /// The plan is transported as a `Query::LogicalPlan` request (not executed
+    /// on the local query engine) so restore works with DistTable-backed
+    /// catalog metadata: the frontend resolves the sink table and executes.
+    async fn execute_sink_scan(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+        plan: LogicalPlan,
+    ) -> Result<RecordBatches, Error> {
+        let message = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .context(SubstraitEncodeLogicalPlanSnafu)?;
+        let req = api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+        };
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        let mut peer_desc = None;
+        let output = frontend_client
+            .query_with_terminal_metrics(catalog, schema, req, &[], &HashMap::new(), &mut peer_desc)
+            .await?;
+        let batches = match output.output.data {
+            common_query::OutputData::RecordBatches(batches) => batches,
+            common_query::OutputData::Stream(stream) => collect_batches(stream)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?,
+            common_query::OutputData::AffectedRows(_) => {
+                return UnexpectedSnafu {
+                    reason: "Unexpected affected-rows output from sink scan".to_string(),
+                }
+                .fail();
+            }
+        };
+        Ok(batches)
+    }
+}
+
+/// Build a table scan over the sink table with the given column projection.
+fn sink_scan_plan(
+    sink_table_name: &[String; 3],
+    table: table::TableRef,
+    df_schema: &DFSchema,
+    projection: &[String],
+) -> Result<LogicalPlan, Error> {
+    let table_ref = TableReference::Full {
+        catalog: sink_table_name[0].clone().into(),
+        schema: sink_table_name[1].clone().into(),
+        table: sink_table_name[2].clone().into(),
+    };
+    let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let projection = projection
+        .iter()
+        .map(|name| {
+            df_schema
+                .index_of_column(&Column::from_name(name.clone()))
+                .with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to resolve sink column {name} for checkpoint scan"),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let scan = TableScan::try_new(table_ref, table_source, Some(projection), vec![], None)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to build sink scan for checkpoint".to_string(),
+        })?;
+    Ok(LogicalPlan::TableScan(scan))
+}
+
+/// Extracts a `u64` from an integer-typed value (signed or unsigned).
+fn value_as_u64(value: Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().map(|value| value as u64))
 }
 
 #[cfg(test)]

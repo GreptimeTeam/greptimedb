@@ -729,6 +729,13 @@ impl BatchingEngine {
         // CREATE FLOW time instead of surfacing them later in the execution loop.
         task.check_or_create_sink_table(&engine, &frontend).await?;
         task.validate_sink_table_schema(&engine).await?;
+        // Restore the durable checkpoint from the sink table (when persistence
+        // applies) before the first run, so incremental extensions emit `(C,H]`
+        // from the restored checkpoint map. Restore scans run through the
+        // frontend (not the local query engine) so DistTable-backed catalog
+        // metadata resolves on the frontend. Load errors are warnings: the task
+        // starts from full snapshot and later cycles rebuild the checkpoint.
+        task.try_enable_checkpoint_persistence(&frontend).await;
 
         let (start_tx, start_rx) = oneshot::channel();
 

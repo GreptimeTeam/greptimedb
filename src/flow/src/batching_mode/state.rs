@@ -60,6 +60,15 @@ pub struct TaskState {
     /// Set when the flow's query shape is deterministically incompatible
     /// with incremental execution (e.g. unsupported aggregate expressions).
     incremental_disabled: bool,
+    /// Checkpoint persistence layout, activated only when the batching mode is
+    /// `SequenceRange` and the sink schema contains the reserved internal epoch
+    /// column plus a unique BINARY state column. `None` keeps the task
+    /// byte-for-byte identical to an ordinary flow.
+    pub(crate) checkpoint_persistence: Option<CheckpointPersistence>,
+    /// Epoch of the last durably persisted checkpoint record. Advanced only
+    /// after the singleton checkpoint row write succeeds; rows stamped with a
+    /// larger epoch invalidate the durable record on restart.
+    persisted_epoch: u64,
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
@@ -87,6 +96,8 @@ impl TaskState {
             pending_fenced_repair: None,
             checkpoints: Default::default(),
             incremental_disabled: false,
+            checkpoint_persistence: None,
+            persisted_epoch: 0,
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
@@ -129,6 +140,46 @@ impl TaskState {
 
     pub fn checkpoints(&self) -> &BTreeMap<u64, u64> {
         &self.checkpoints
+    }
+
+    /// Returns the resolved checkpoint persistence layout, if activated.
+    pub fn checkpoint_persistence(&self) -> Option<&CheckpointPersistence> {
+        self.checkpoint_persistence.as_ref()
+    }
+
+    /// Epoch of the last durably persisted checkpoint record (0 = none).
+    pub fn persisted_epoch(&self) -> u64 {
+        self.persisted_epoch
+    }
+
+    /// The epoch the current cycle must stamp onto emitted state rows and, on
+    /// a successful checkpoint write, persist. One past the last durable epoch
+    /// so rows from an unpersisted cycle always invalidate the older record.
+    pub fn next_persist_epoch(&self) -> u64 {
+        self.persisted_epoch.saturating_add(1)
+    }
+
+    /// Record a successfully persisted checkpoint epoch. Called only after the
+    /// singleton checkpoint row write succeeds; never before it.
+    pub fn advance_persisted_epoch(&mut self, epoch: u64) {
+        self.persisted_epoch = self.persisted_epoch.max(epoch);
+    }
+
+    /// Activate or deactivate checkpoint persistence for this task.
+    pub fn set_checkpoint_persistence(&mut self, persistence: Option<CheckpointPersistence>) {
+        self.checkpoint_persistence = persistence;
+    }
+
+    /// Seed the task from a trusted restored checkpoint record: replace the
+    /// in-memory checkpoint map, pin the durable epoch, and enter Incremental
+    /// mode (unless incremental is permanently disabled).
+    pub fn seed_checkpoints_from_record(&mut self, epoch: u64, checkpoints: BTreeMap<u64, u64>) {
+        self.persisted_epoch = epoch;
+        self.checkpoints = checkpoints;
+        self.pending_fenced_repair = None;
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
     }
 
     /// Returns the in-progress fenced repair, if the task is repairing dirty
@@ -916,6 +967,23 @@ enum ExecState {
 pub enum CheckpointMode {
     FullSnapshot,
     Incremental,
+}
+
+/// Column layout of the sink table required for checkpoint persistence.
+///
+/// Resolved once at task creation when the batching mode is `SequenceRange`
+/// and the sink schema contains the reserved internal epoch column plus a
+/// unique BINARY state column. The window column is the sink time-index column
+/// whose sentinel value marks the singleton checkpoint row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointPersistence {
+    /// Name of the reserved internal epoch column
+    /// ([`crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME`]).
+    pub epoch_col_name: String,
+    /// Name of the sink BINARY column storing the encoded checkpoint record.
+    pub state_col_name: String,
+    /// Name of the sink window/time-index column used for the sentinel row.
+    pub window_col_name: String,
 }
 
 /// Dirty windows that must be repaired under a frozen full-snapshot watermark.

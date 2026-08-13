@@ -25,7 +25,8 @@ use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use datatypes::data_type::ConcreteDataType as CDT;
-use datatypes::schema::ColumnSchema;
+use datatypes::prelude::{MutableVector, ScalarVectorBuilder};
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
 };
@@ -36,15 +37,18 @@ use query::options::{
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use substrait::DFLogicalSubstraitConvertor;
 use table::test_util::MemTable;
 
 use super::*;
 use crate::batching_mode::IncrementalMode;
 use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
-    FlowCheckpointDecision, FlowQueryFallbackReason,
+    CHECKPOINT_RECORD_FORMAT_VERSION, CheckpointRecord, FlowCheckpointDecision,
+    FlowQueryFallbackReason, decode_checkpoint_record, encode_checkpoint_record,
 };
-use crate::batching_mode::state::CheckpointMode;
+use crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError;
+use crate::batching_mode::state::{CheckpointMode, CheckpointPersistence};
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
 
@@ -2595,5 +2599,1025 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
     assert_eq!(
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(5)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint persistence: record codec, activation, restore, stamping, and
+// checkpoint row writes.
+// ---------------------------------------------------------------------------
+
+/// The exact EE-like sink schema: a real query-produced BINARY state column, a
+/// timestamp time-index window column, an auto update_at column, and the
+/// reserved internal epoch column added by the enterprise state schema/view.
+fn persistence_sink_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::uint64_datatype(),
+            true,
+        ),
+    ]))
+}
+
+/// A persistence-sink row: `(window ms, epoch, state)`.
+type SinkRow = (Option<i64>, Option<u64>, Option<Vec<u8>>);
+
+/// Builds a record batch for `persistence_sink_schema`.
+fn persistence_sink_recordbatch(rows: Vec<SinkRow>) -> RecordBatch {
+    let schema = persistence_sink_schema();
+    let mut states = datatypes::vectors::BinaryVectorBuilder::with_capacity(rows.len());
+    let mut windows =
+        datatypes::vectors::TimestampMillisecondVectorBuilder::with_capacity(rows.len());
+    let mut epochs = datatypes::vectors::UInt64VectorBuilder::with_capacity(rows.len());
+    let mut update_at =
+        datatypes::vectors::TimestampMillisecondVectorBuilder::with_capacity(rows.len());
+    for (window, epoch, state) in rows {
+        states.push(state.as_deref());
+        windows.push(window.map(datatypes::timestamp::TimestampMillisecond::new));
+        epochs.push(epoch);
+        update_at.push(Some(datatypes::timestamp::TimestampMillisecond::new(0)));
+    }
+    RecordBatch::new(
+        schema,
+        vec![
+            states.to_vector(),
+            windows.to_vector(),
+            update_at.to_vector(),
+            epochs.to_vector(),
+        ],
+    )
+    .unwrap()
+}
+
+fn register_persistence_sink(
+    query_engine: &QueryEngineRef,
+    table_name: &str,
+    rows: Vec<SinkRow>,
+    table_id: u32,
+) {
+    let batch = persistence_sink_recordbatch(rows);
+    let table = MemTable::table(table_name, batch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
+fn sequence_range_batch_opts() -> Arc<BatchingModeOptions> {
+    Arc::new(BatchingModeOptions {
+        experimental_enable_incremental_read: true,
+        incremental_mode: IncrementalMode::SequenceRange,
+        ..Default::default()
+    })
+}
+
+async fn new_sequence_range_test_task(sink_table: &str) -> TestTaskParts {
+    new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+        sequence_range_batch_opts(),
+    )
+    .await
+}
+
+/// Builds a task for an exact EE-like time-window aggregate query (a real
+/// BINARY UDDSketch `state` output plus a `date_bin` window) with
+/// `SequenceRange` batch options, ready for an EE-like sink registration.
+async fn new_ee_sequence_range_task(sink_table: &str, query: &str) -> TestTaskParts {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+        &plan,
+        query_engine.engine_state().catalog_manager().clone(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let time_window_expr = time_window_expr.map(|expr| {
+        TimeWindowExpr::from_expr(
+            &expr,
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    });
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query,
+        plan: plan.clone(),
+        time_window_expr,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table.to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: sequence_range_batch_opts(),
+        flow_eval_interval: None,
+        eval_schedule: None,
+    })
+    .unwrap();
+    TestTaskParts {
+        task,
+        query_engine,
+        plan,
+    }
+}
+
+fn test_persistence() -> CheckpointPersistence {
+    CheckpointPersistence {
+        epoch_col_name: crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME.to_string(),
+        state_col_name: "state".to_string(),
+        window_col_name: "window".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn test_detect_checkpoint_persistence_requires_sequence_range_and_epoch_column() {
+    let sink_table = "persistence_detect_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    // Sink with the epoch + BINARY state columns.
+    register_persistence_sink(&query_engine, sink_table, vec![], 9100);
+
+    let persistence = task
+        .detect_checkpoint_persistence()
+        .await
+        .unwrap()
+        .expect("sequence range + epoch column should activate persistence");
+    assert_eq!(test_persistence(), persistence);
+
+    // MemtableOnly mode never activates persistence.
+    let sink_table = "persistence_detect_memtable_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+        incremental_batch_opts(),
+    )
+    .await;
+    register_persistence_sink(&query_engine, sink_table, vec![], 9101);
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "MemtableOnly must not activate persistence"
+    );
+
+    // A sink without the reserved epoch column never activates persistence.
+    let sink_table = "persistence_detect_plain_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_auto_created_aggregate_sink(&query_engine, sink_table);
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "sink without epoch column must not activate persistence"
+    );
+}
+
+/// Builds a DataFusion session state able to decode sink/source scans: the
+/// engine's session state (which carries all flow functions) plus a catalog
+/// list that resolves tables through the engine's catalog manager. The engine's
+/// bare `session_state()` has an empty catalog list, so scans cannot be
+/// resolved from it directly.
+fn decode_session_state(query_engine: &QueryEngineRef) -> datafusion::execution::SessionState {
+    let catalog_list: Arc<dyn datafusion::catalog::CatalogProviderList> =
+        Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
+            query_engine.engine_state().catalog_manager().clone(),
+        ));
+    datafusion::execution::SessionStateBuilder::new_from_existing(
+        query_engine.engine_state().session_state(),
+    )
+    .with_catalog_list(catalog_list)
+    .build()
+}
+
+/// A frontend handler that decodes and executes `Query::LogicalPlan` requests
+/// against the test query engine (MemTable catalog) and records every request.
+/// Used to prove that checkpoint restore scans travel through the frontend
+/// transport instead of the local `QueryEngine::execute` path.
+struct CaptureLogicalPlanHandler {
+    query_engine: QueryEngineRef,
+    captured: Arc<std::sync::Mutex<Vec<api::v1::QueryRequest>>>,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for CaptureLogicalPlanHandler {
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let api::v1::greptime_request::Request::Query(q) = &query else {
+            return Ok(Output::new_with_affected_rows(0));
+        };
+        self.captured.lock().unwrap().push(q.clone());
+        let Some(api::v1::query_request::Query::LogicalPlan(bytes)) = &q.query else {
+            return Ok(Output::new_with_affected_rows(0));
+        };
+        let session_state = decode_session_state(&self.query_engine);
+        let plan = DFLogicalSubstraitConvertor {}
+            .decode(bytes::Bytes::from(bytes.clone()), session_state)
+            .await
+            .map_err(BoxedError::new)?;
+        let output = self
+            .query_engine
+            .execute(plan, ctx)
+            .await
+            .map_err(BoxedError::new)?;
+        Ok(output)
+    }
+}
+
+/// Captured `Query::LogicalPlan` requests plus the handler handle.
+type RestoreFrontendClient = (
+    Arc<FrontendClient>,
+    Arc<std::sync::Mutex<Vec<api::v1::QueryRequest>>>,
+    Arc<dyn GrpcQueryHandlerWithBoxedError>,
+);
+
+/// Builds a frontend client whose handler executes decoded LogicalPlan
+/// requests against `query_engine`, plus the captured request log. The handler
+/// `Arc` is returned too so the client's weak handle stays alive for the
+/// whole test.
+fn restore_frontend_client(query_engine: &QueryEngineRef) -> RestoreFrontendClient {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(CaptureLogicalPlanHandler {
+        query_engine: query_engine.clone(),
+        captured: captured.clone(),
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+    (frontend_client, captured, handler)
+}
+
+#[tokio::test]
+async fn test_restore_via_frontend_sends_logical_plans_and_seeds_incremental() {
+    let sink_table = "persistence_restore_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 3,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![
+            (Some(1_000), Some(3), None),
+            (Some(2_000), Some(3), None),
+            (
+                Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS),
+                Some(3),
+                Some(encoded),
+            ),
+        ],
+        9102,
+    );
+
+    let (frontend_client, captured, _handler) = restore_frontend_client(&query_engine);
+    task.try_enable_checkpoint_persistence(&frontend_client)
+        .await;
+
+    // Both restore scans (sentinel row + non-sentinel epoch aggregation) were
+    // sent as LogicalPlan requests through the frontend client.
+    let requests = captured.lock().unwrap();
+    assert_eq!(2, requests.len(), "expected two restore scan requests");
+    for request in requests.iter() {
+        assert!(
+            matches!(
+                request.query,
+                Some(api::v1::query_request::Query::LogicalPlan(_))
+            ),
+            "restore scans must be transported as Query::LogicalPlan, got {request:?}"
+        );
+    }
+    drop(requests);
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+    assert_eq!(state.persisted_epoch(), 3);
+    assert_eq!(Some(&test_persistence()), state.checkpoint_persistence());
+}
+
+/// Runs one untrusted-restore scenario through the frontend transport and
+/// asserts the task falls back to full snapshot with persistence still armed.
+async fn assert_restore_falls_back(table_name: &str, table_id: u32, rows: Vec<SinkRow>) {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(table_name).await;
+    register_persistence_sink(&query_engine, table_name, rows, table_id);
+
+    let (frontend_client, _captured, _handler) = restore_frontend_client(&query_engine);
+    task.try_enable_checkpoint_persistence(&frontend_client)
+        .await;
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.persisted_epoch(), 0);
+    assert!(state.checkpoints().is_empty());
+    // Persistence stays armed so later cycles can persist fresh checkpoints.
+    assert!(state.checkpoint_persistence().is_some());
+}
+
+/// Consolidates the missing / corrupt / empty-map / multiple-sentinel /
+/// newer-row-epoch / NULL-epoch restore fallbacks. Every case must leave the
+/// task in full snapshot with no trusted checkpoint.
+#[tokio::test]
+async fn test_restore_falls_back_on_untrusted_records() {
+    let sentinel = Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS);
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 3,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+
+    // Missing sentinel row.
+    assert_restore_falls_back(
+        "persistence_no_sentinel",
+        9103,
+        vec![(Some(1_000), Some(2), None)],
+    )
+    .await;
+    // Sentinel row with undecodable state bytes.
+    assert_restore_falls_back(
+        "persistence_corrupt_record",
+        9104,
+        vec![(sentinel, Some(2), Some(b"garbage".to_vec()))],
+    )
+    .await;
+    // Sentinel row holding a valid v1 record with an empty checkpoint map.
+    let empty_record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 2,
+        checkpoints: BTreeMap::new(),
+    };
+    let empty_encoded = encode_checkpoint_record(&empty_record).unwrap();
+    assert_restore_falls_back(
+        "persistence_empty_map",
+        9105,
+        vec![(sentinel, Some(2), Some(empty_encoded))],
+    )
+    .await;
+    // State rows stamped with epoch 5 are newer than the record's epoch 3:
+    // crash between state write and checkpoint write.
+    assert_restore_falls_back(
+        "persistence_newer_rows",
+        9106,
+        vec![
+            (Some(1_000), Some(5), None),
+            (sentinel, Some(3), Some(encoded.clone())),
+        ],
+    )
+    .await;
+    // Pre-upgrade rows with NULL epochs are untrusted.
+    assert_restore_falls_back(
+        "persistence_null_epoch_rows",
+        9107,
+        vec![
+            (Some(1_000), None, None),
+            (sentinel, Some(3), Some(encoded.clone())),
+        ],
+    )
+    .await;
+    // Two sentinel rows make the record ambiguous.
+    assert_restore_falls_back(
+        "persistence_multi_sentinel",
+        9109,
+        vec![
+            (sentinel, Some(3), Some(encoded.clone())),
+            (sentinel, Some(3), Some(encoded)),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_restore_accepts_record_without_state_data() {
+    // NULL epochs are acceptable when there is no non-sentinel state data.
+    let sink_table = "persistence_no_state_data";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 7,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(
+            Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS),
+            None,
+            Some(encoded),
+        )],
+        9108,
+    );
+    let (frontend_client, _captured, _handler) = restore_frontend_client(&query_engine);
+    task.try_enable_checkpoint_persistence(&frontend_client)
+        .await;
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    assert_eq!(state.persisted_epoch(), 7);
+}
+
+#[tokio::test]
+async fn test_stamp_epoch_into_plan_is_noop_when_inactive() {
+    let TestTaskParts { task, plan, .. } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+
+    let (stamped, epoch) = task.stamp_epoch_into_plan(plan.clone()).await.unwrap();
+    assert_eq!(epoch, None);
+    assert_eq!(
+        stamped, plan,
+        "ordinary flow plan must be byte-for-byte unchanged"
+    );
+}
+
+#[tokio::test]
+async fn test_stamp_epoch_into_plan_appends_epoch_literal() {
+    let sink_table = "auto_created_aggregate_sink";
+    let query = "SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_auto_created_aggregate_sink(&query_engine, sink_table);
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+
+    let ctx = task.state.read().unwrap().query_ctx.clone();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let (sink_table, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table.to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        table_source,
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+
+    let (stamped, epoch) = task.stamp_epoch_into_plan(dml_plan).await.unwrap();
+    assert_eq!(epoch, Some(1), "first cycle stamps epoch 1");
+
+    let LogicalPlan::Dml(dml) = &stamped else {
+        panic!("expected DML plan");
+    };
+    let fields = dml.input.schema().fields();
+    assert_eq!(
+        crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+        fields.last().unwrap().name(),
+        "epoch column must be appended as the last output field"
+    );
+    let exprs = dml.input.expressions();
+    let last = exprs.last().expect("epoch projection expr");
+    assert!(
+        format!("{last:?}").contains("UInt64(1)"),
+        "epoch column must be stamped with the current epoch literal, got {last:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_exact_ee_schema_plan_retains_binary_state_column() {
+    // Exact EE-like flow: the query itself produces the BINARY UDDSketch
+    // `state` column plus the `date_bin` window. The sink is
+    // `[state BINARY, window TIMESTAMP time-index, update_at TIMESTAMP,
+    //  epoch integer]`. The real state column must survive schema matching,
+    // the incremental rewrite analysis, and the final stamped DML.
+    let sink_table = "persistence_ee_sink";
+    let query = "SELECT uddsketch_state(128, 0.01, CAST(number AS DOUBLE)) AS state, \
+        date_bin(INTERVAL '5 second', ts) AS window FROM greptime.public.numbers_with_ts GROUP BY window";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_ee_sequence_range_task(sink_table, query).await;
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(Some(0), Some(1), None)],
+        9110,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+
+    // 1. Schema match: plan generation succeeds and the real BINARY `state`
+    //    column is retained (only the epoch column is stripped from matching).
+    let info = task
+        .gen_insert_plan_unlocked(&query_engine, None)
+        .await
+        .unwrap_or_else(|err| panic!("EE-like schema must not break plan generation, got: {err:?}"))
+        .expect("dirty windows must produce a plan");
+    let LogicalPlan::Dml(dml) = &info.plan else {
+        panic!("expected DML insert plan, got {:?}", info.plan);
+    };
+    let matched_fields = dml.input.schema().fields();
+    let matched_names = matched_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["state", "window", "update_at"],
+        matched_names,
+        "schema matching must keep the real state column and append update_at; \
+         the epoch column is stamped later"
+    );
+    assert_eq!(
+        CDT::binary_datatype(),
+        CDT::from_arrow_type(matched_fields[0].data_type()),
+        "the state column must stay BINARY through schema matching"
+    );
+
+    // 2. Incremental rewrite: OSS cannot merge a raw `uddsketch_state`
+    //    aggregate (the enterprise state view adds the merge op), so the
+    //    rewrite honestly reports the EE-like plan as unsafe and disables
+    //    incremental instead of running it as an unfiltered full snapshot.
+    //    The retained BINARY state column must not crash the analyzer.
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    }
+    let incremental = task
+        .prepare_plan_for_incremental(&info.plan)
+        .await
+        .unwrap_or_else(|err| {
+            panic!("incremental rewrite must not error on the EE-like plan: {err:?}")
+        });
+    assert!(
+        incremental.is_none(),
+        "uddsketch_state is not an OSS-mergeable aggregate; the rewrite must refuse"
+    );
+    assert!(
+        task.state.read().unwrap().is_incremental_disabled(),
+        "unsupported EE-like aggregate must permanently disable incremental"
+    );
+
+    // 3. Final stamped DML: the epoch literal is appended and the real state
+    //    column keeps its exact name in the insert.
+    let (stamped, epoch) = task.stamp_epoch_into_plan(info.plan).await.unwrap();
+    assert_eq!(Some(1), epoch, "first cycle stamps epoch 1");
+    let LogicalPlan::Dml(stamped_dml) = &stamped else {
+        panic!("expected stamped DML plan");
+    };
+    let stamped_names = stamped_dml
+        .input
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            "state",
+            "window",
+            "update_at",
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME
+        ],
+        stamped_names,
+        "final DML must carry the real state column and the stamped epoch column"
+    );
+}
+
+/// A frontend handler that captures the insert request and returns success.
+struct CaptureInsertHandler {
+    captured: Arc<std::sync::Mutex<Option<api::v1::QueryRequest>>>,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for CaptureInsertHandler {
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        if let api::v1::greptime_request::Request::Query(q) = &query {
+            *self.captured.lock().unwrap() = Some(q.clone());
+        }
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+#[tokio::test]
+async fn test_write_checkpoint_row_sends_singleton_sentinel_row() {
+    let sink_table = "persistence_write_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(Some(0), Some(1), None)],
+        9111,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(CaptureInsertHandler {
+        captured: captured.clone(),
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let checkpoints = BTreeMap::from([(1_u64, 11_u64)]);
+    task.write_checkpoint_row(&frontend_client, 7, &checkpoints)
+        .await
+        .expect("checkpoint row write should succeed");
+
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler captured the request");
+    let api::v1::query_request::Query::InsertIntoPlan(insert) =
+        captured.query.expect("insert plan")
+    else {
+        panic!("expected InsertIntoPlan");
+    };
+    assert_eq!(
+        "persistence_write_sink",
+        insert.table_name.as_ref().unwrap().table_name
+    );
+
+    let session_state = query_engine.engine_state().session_state();
+    let plan = DFLogicalSubstraitConvertor {}
+        .decode(bytes::Bytes::from(insert.logical_plan), session_state)
+        .await
+        .unwrap();
+    let LogicalPlan::Projection(projection) = &plan else {
+        panic!("expected projection over empty relation, got {plan:?}");
+    };
+    // window + epoch + state + auto update_at.
+    assert_eq!(4, projection.expr.len());
+
+    // window column -> sentinel timestamp
+    let window_expr = &projection.expr[0];
+    let window_sql = format!("{window_expr:?}");
+    assert!(
+        window_sql
+            .contains(&crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS.to_string()),
+        "sentinel window literal expected, got {window_sql}"
+    );
+    // epoch column -> 7
+    let epoch_expr = &projection.expr[1];
+    assert!(
+        format!("{epoch_expr:?}").contains("UInt64(7)"),
+        "epoch literal expected, got {epoch_expr:?}"
+    );
+    // state column -> the encoded v1 record bytes must appear verbatim.
+    let expected = encode_checkpoint_record(&CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 7,
+        checkpoints,
+    })
+    .unwrap();
+    let decoded = decode_checkpoint_record(&expected).unwrap().unwrap();
+    assert_eq!(7, decoded.epoch);
+    assert_eq!(BTreeMap::from([(1_u64, 11_u64)]), decoded.checkpoints);
+    let state_bytes = match &projection.expr[2] {
+        Expr::Alias(alias) => match alias.expr.as_ref() {
+            Expr::Literal(ScalarValue::Binary(Some(bytes)), _) => bytes,
+            other => panic!("expected binary literal for state column, got {other:?}"),
+        },
+        other => panic!("expected alias for state column, got {other:?}"),
+    };
+    assert_eq!(
+        &expected, state_bytes,
+        "checkpoint record bytes must be stored verbatim"
+    );
+}
+
+/// A frontend handler that always fails.
+struct FailInsertHandler;
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for FailInsertHandler {
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        Err(BoxedError::new(MockError::new(StatusCode::Internal)))
+    }
+}
+
+#[tokio::test]
+async fn test_checkpoint_row_write_failure_is_reported() {
+    let sink_table = "persistence_write_fail_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(Some(0), Some(1), None)],
+        9112,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(FailInsertHandler);
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let err = task
+        .write_checkpoint_row(&frontend_client, 7, &BTreeMap::from([(1_u64, 11_u64)]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::External { .. }), "{err}");
+}
+
+/// A minimal record-batch stream that reports region watermarks through its
+/// terminal metrics handle immediately (it produces no rows). Lets the flow
+/// execution path see a full watermark proof without consuming a real query.
+struct WatermarkOnlyStream {
+    schema: datatypes::schema::SchemaRef,
+    watermarks: Vec<(u64, Option<u64>)>,
+}
+
+impl futures::Stream for WatermarkOnlyStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(None)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(0))
+    }
+}
+
+impl common_recordbatch::RecordBatchStream for WatermarkOnlyStream {
+    fn name(&self) -> &str {
+        "WatermarkOnlyStream"
+    }
+
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        Some(RecordBatchMetrics {
+            region_watermarks: self
+                .watermarks
+                .iter()
+                .map(|(region_id, watermark)| RegionWatermarkEntry {
+                    region_id: *region_id,
+                    watermark: *watermark,
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+
+/// Walks a decoded logical plan looking for the checkpoint row's
+/// `EmptyRelation` root (state-row inserts are scan-based and never contain
+/// one).
+fn contains_empty_relation(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    let _ = plan.apply(|node| {
+        if matches!(node, LogicalPlan::EmptyRelation(_)) {
+            found = true;
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    });
+    found
+}
+
+/// A frontend handler for the checkpoint persist-failure cycle: state-row
+/// inserts return terminal watermarks; the first checkpoint-row write fails,
+/// later checkpoint writes succeed.
+struct PersistFailOnceHandler {
+    query_engine: QueryEngineRef,
+    checkpoint_write_calls: std::sync::atomic::AtomicUsize,
+    checkpoint_write_attempts: Arc<std::sync::Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for PersistFailOnceHandler {
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::InsertIntoPlan(insert)),
+            ..
+        }) = query
+        else {
+            return Ok(Output::new_with_affected_rows(0));
+        };
+        // Best-effort decode to classify the request. The singleton
+        // checkpoint-row write is a Projection over EmptyRelation and always
+        // decodes; the state-row insert carries flow-only UDAFs (e.g.
+        // `uddsketch_state`) that the test session state cannot resolve from
+        // substrait anchors, so a decode failure is treated as a state row.
+        let convertor = DFLogicalSubstraitConvertor {};
+        let is_checkpoint_row = match convertor
+            .decode(
+                bytes::Bytes::from(insert.logical_plan),
+                decode_session_state(&self.query_engine),
+            )
+            .await
+        {
+            Ok(plan) => contains_empty_relation(&plan),
+            Err(_) => false,
+        };
+        if is_checkpoint_row {
+            // Singleton checkpoint row write.
+            *self.checkpoint_write_attempts.lock().unwrap() += 1;
+            let call = self
+                .checkpoint_write_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Err(BoxedError::new(MockError::new(StatusCode::Internal)));
+            }
+            return Ok(Output::new_with_affected_rows(1));
+        }
+        // State-row insert: prove full coverage with terminal watermarks.
+        Ok(Output::new_with_stream(Box::pin(WatermarkOnlyStream {
+            schema: Arc::new(Schema::new(vec![])),
+            watermarks: vec![(1, Some(10)), (2, Some(20))],
+        })))
+    }
+}
+
+#[tokio::test]
+async fn test_checkpoint_persist_failure_schedules_backfill_and_replacement_checkpoint() {
+    let sink_table = "persistence_exec_sink";
+    let query = "SELECT uddsketch_state(128, 0.01, CAST(number AS DOUBLE)) AS state, \
+        date_bin(INTERVAL '5 second', ts) AS window FROM greptime.public.numbers_with_ts GROUP BY window";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_ee_sequence_range_task(sink_table, query).await;
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(Some(0), Some(1), None)],
+        9113,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+
+    let checkpoint_write_attempts = Arc::new(std::sync::Mutex::new(0));
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(PersistFailOnceHandler {
+        query_engine: query_engine.clone(),
+        checkpoint_write_calls: std::sync::atomic::AtomicUsize::new(0),
+        checkpoint_write_attempts: checkpoint_write_attempts.clone(),
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    // Cycle 1: the state insert advances checkpoints, but the checkpoint row
+    // write fails. The task must fall back to full snapshot, keep the consumed
+    // dirty work pending, and not advance the durable epoch.
+    let outcome = task
+        .execute_once_serialized(&query_engine, &frontend_client, None)
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "state insert should succeed, got: {outcome:?}"
+    );
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoint_mode(),
+            CheckpointMode::FullSnapshot,
+            "a failed checkpoint write must reset to full snapshot"
+        );
+        assert_eq!(
+            state.persisted_epoch(),
+            0,
+            "a failed checkpoint write must not advance the durable epoch"
+        );
+        assert!(
+            !state.dirty_time_windows.is_empty(),
+            "the executed plan's consumed dirty work must be restored"
+        );
+    }
+
+    // Cycle 2: the restored dirty work drives a full repair/backfill; the
+    // replacement checkpoint row write succeeds and the durable epoch advances.
+    let outcome = task
+        .execute_once_serialized(&query_engine, &frontend_client, None)
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "repair cycle should succeed, got: {outcome:?}"
+    );
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoint_mode(),
+            CheckpointMode::Incremental,
+            "the replacement checkpoint write must restore incremental mode"
+        );
+        assert_eq!(
+            state.persisted_epoch(),
+            1,
+            "the replacement checkpoint must advance the durable epoch"
+        );
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+    assert_eq!(
+        2,
+        *checkpoint_write_attempts.lock().unwrap(),
+        "one failed checkpoint write followed by one replacement write"
     );
 }
