@@ -25,6 +25,7 @@
 //! including filter pushdown into the source table scans. See
 //! `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 
+mod conventions;
 mod relationships;
 
 use std::sync::{Arc, LazyLock};
@@ -35,10 +36,25 @@ use api::v1::{
     SemanticType,
 };
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+    CONFIDENCE_COLUMN, DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DST_ID_COLUMN,
+    DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN,
+    ENTITY_DESCRIPTIVE_COLUMN, ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN,
+    ENTITY_TYPE_COLUMN, ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN,
+    OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SOURCE_TABLES_COLUMN, SRC_ID_COLUMN,
+    SRC_TYPE_COLUMN, VALID_FROM_COLUMN, VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
+pub use conventions::{
+    Conventions, ENTITY_TYPE_GEN_AI_AGENT, ENTITY_TYPE_GEN_AI_MODEL, ENTITY_TYPE_GEN_AI_TOOL,
+    ENTITY_TYPE_HOST, ENTITY_TYPE_K8S_CONTAINER, ENTITY_TYPE_K8S_NODE, ENTITY_TYPE_K8S_POD,
+    ENTITY_TYPE_K8S_WORKLOAD, ENTITY_TYPE_PROCESS, ENTITY_TYPE_SERVICE,
+    ENTITY_TYPE_SERVICE_INSTANCE, ImplicitEntity, PROVENANCE_AGENT, PROVENANCE_ATTRIBUTE,
+    PROVENANCE_DECLARED, PROVENANCE_TRACE, REL_TYPE_CALLS, REL_TYPE_CONTAINS, REL_TYPE_DEPENDS_ON,
+    REL_TYPE_INVOKES, REL_TYPE_OWNS, REL_TYPE_PART_OF, REL_TYPE_RUNS_ON, REL_TYPE_USES,
+    conventions,
+};
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
@@ -86,7 +102,7 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
         return false;
     }
 
-    let canonical = build_declared_relationships_expr("greptime");
+    let canonical = build_declared_relationships_expr(DEFAULT_CATALOG_NAME);
     if schema.column_schemas().len() != canonical.column_defs.len() {
         return false;
     }
@@ -110,9 +126,6 @@ pub fn declared_relationships_schema_matches(table_info: &table::metadata::Table
 /// service-graph convention.
 const BIN_NANOS: i64 = 60 * 1_000_000_000;
 
-/// Time index of the graph tables: when an observation was recorded.
-pub const OBSERVED_AT_COLUMN: &str = "observed_at";
-
 /// Default retention for the declared-edge table; expiry slides the topology window.
 const DEFAULT_DECLARED_RELATIONSHIPS_TTL: &str = "90d";
 /// Environment variable overriding the declared-edge table's TTL at creation
@@ -133,14 +146,14 @@ fn declared_relationships_ttl() -> String {
 /// `provenance` and `generation_id` are in the key so a declared edge and a
 /// (future) derived edge for the same pair coexist without clobbering.
 pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
-    "src_type",
-    "src_id",
-    "rel_type",
-    "dst_type",
-    "dst_id",
-    "provenance",
-    "scope",
-    "generation_id",
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    PROVENANCE_COLUMN,
+    ENTITY_SCOPE_COLUMN,
+    GENERATION_ID_COLUMN,
 ];
 
 /// The externally visible edge identity: the primary key minus `scope` and
@@ -148,12 +161,12 @@ pub const DECLARED_PRIMARY_KEY_COLUMNS: [&str; 8] = [
 /// uses this identity, or assertions differing only in those two columns would
 /// surface as indistinguishable duplicate rows.
 const DECLARED_EDGE_IDENTITY_COLUMNS: [&str; 6] = [
-    "src_type",
-    "src_id",
-    "rel_type",
-    "dst_type",
-    "dst_id",
-    "provenance",
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    PROVENANCE_COLUMN,
 ];
 
 fn column(
@@ -210,32 +223,32 @@ pub fn build_declared_relationships_expr(catalog: &str) -> CreateTableExpr {
             SemanticType::Timestamp,
             false,
         ),
-        field("window_start", ColumnDataType::TimestampMillisecond),
-        field("window_end", ColumnDataType::TimestampMillisecond),
-        field("fresh_until", ColumnDataType::TimestampMillisecond),
+        field(WINDOW_START_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(WINDOW_END_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(FRESH_UNTIL_COLUMN, ColumnDataType::TimestampMillisecond),
         // Declared-only business validity. NULL valid_from = valid since the
         // declaration; NULL valid_until = valid for as long as the row exists
         // (TTL expiry retires the edge with the row).
-        field("valid_from", ColumnDataType::TimestampMillisecond),
-        field("valid_until", ColumnDataType::TimestampMillisecond),
+        field(VALID_FROM_COLUMN, ColumnDataType::TimestampMillisecond),
+        field(VALID_UNTIL_COLUMN, ColumnDataType::TimestampMillisecond),
         // Endpoints + edge identity (all tags, in primary-key order).
-        tag("src_type"),
-        tag("src_id"),
-        tag("rel_type"),
-        tag("dst_type"),
-        tag("dst_id"),
-        tag("provenance"),
-        tag("scope"),
-        tag("generation_id"),
+        tag(SRC_TYPE_COLUMN),
+        tag(SRC_ID_COLUMN),
+        tag(REL_TYPE_COLUMN),
+        tag(DST_TYPE_COLUMN),
+        tag(DST_ID_COLUMN),
+        tag(PROVENANCE_COLUMN),
+        tag(ENTITY_SCOPE_COLUMN),
+        tag(GENERATION_ID_COLUMN),
         // Confidence + RED metrics (populated for derived edges; usually NULL here).
-        field("confidence", ColumnDataType::Float64),
-        field("request_count", ColumnDataType::Int64),
-        field("error_count", ColumnDataType::Int64),
-        field("duration_sum", ColumnDataType::Float64),
-        field("duration_count", ColumnDataType::Int64),
+        field(CONFIDENCE_COLUMN, ColumnDataType::Float64),
+        field(REQUEST_COUNT_COLUMN, ColumnDataType::Int64),
+        field(ERROR_COUNT_COLUMN, ColumnDataType::Int64),
+        field(DURATION_SUM_COLUMN, ColumnDataType::Float64),
+        field(DURATION_COUNT_COLUMN, ColumnDataType::Int64),
         // JSONB, so the union matches the computed table's json column
         // without a per-scan parse.
-        json_field("attributes"),
+        json_field(EDGE_ATTRIBUTES_COLUMN),
     ];
 
     let table_options = [(TTL_KEY.to_string(), declared_relationships_ttl())]
@@ -408,6 +421,16 @@ fn cast_string_or_empty(column: &str) -> Expr {
 /// a single column, the sorted `k=v,k=v` rendering for a composite. `col`
 /// constructs the column reference (unqualified for registry branches,
 /// join-side-qualified for the calls derivation).
+/// A row identifies an entity only when every identity component is present
+/// and non-empty: kube-state-metrics descriptors emit empty-string labels (an
+/// unscheduled pod's `node`, an owner-less pod's `owner_*`), and an empty
+/// string is never a meaningful entity id.
+pub(crate) fn identifies(column: &str) -> Expr {
+    ident(column)
+        .is_not_null()
+        .and(cast(ident(column), DataType::Utf8).not_eq(lit("")))
+}
+
 fn entity_id_expr(id_columns: &[String], col: &dyn Fn(&str) -> Expr) -> Expr {
     if let [id] = id_columns {
         cast(col(id), DataType::Utf8)
@@ -501,16 +524,16 @@ fn sorted_kv_expr_with(sorted_cols: &[String], nullable: bool, col: &dyn Fn(&str
 }
 
 const REGISTRY_COLUMNS: [&str; 10] = [
-    "observed_at",
-    "window_start",
-    "window_end",
-    "fresh_until",
-    "entity_type",
-    "entity_id",
-    "entity_id_attrs",
-    "scope",
-    "descriptive",
-    "source_tables",
+    OBSERVED_AT_COLUMN,
+    WINDOW_START_COLUMN,
+    WINDOW_END_COLUMN,
+    FRESH_UNTIL_COLUMN,
+    ENTITY_TYPE_COLUMN,
+    ENTITY_ID_COLUMN,
+    ENTITY_ID_ATTRS_COLUMN,
+    ENTITY_SCOPE_COLUMN,
+    ENTITY_DESCRIPTIVE_COLUMN,
+    SOURCE_TABLES_COLUMN,
 ];
 
 const REGISTRY_VALID_COLUMN: &str = "__entity_valid";
@@ -568,10 +591,10 @@ fn registry_source(
 
     let mut rows = Vec::with_capacity(1 + rest.len());
     for decl in std::iter::once(first).chain(rest) {
-        // CAST even a single-column id: id columns must be tags but not
-        // necessarily strings, and the computed table declares entity_id
-        // STRING. Composite ids additionally carry a JSON object of the id
-        // columns in entity_id_attrs.
+        // CAST even a single-column id: id columns need not be strings, and
+        // the computed table declares entity_id STRING. Composite ids
+        // additionally carry a JSON object of the id columns in
+        // entity_id_attrs.
         let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
         let entity_id_attrs = if decl.id_columns.len() == 1 {
             null_json()
@@ -603,12 +626,12 @@ fn registry_source(
             json_quote(&format!("{}.{}", decl.schema, decl.table))
         )));
 
-        // Tag columns may still be nullable; a NULL identity component
-        // identifies nothing. Keep this predicate per declaration so a NULL
-        // identity for one entity does not remove other entities on the row.
-        let valid = decl.id_columns.iter().fold(lit(true), |predicate, id| {
-            predicate.and(ident(id).is_not_null())
-        });
+        // Keep this predicate per declaration so an absent identity for one
+        // entity does not remove other entities on the row.
+        let valid = decl
+            .id_columns
+            .iter()
+            .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
 
         rows.push(vec![
             valid,
@@ -961,8 +984,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_skips_null_identity_rows() {
-        let ctx = metric_table_ctx();
+    async fn registry_skips_absent_identity_rows() {
+        // NULL identifies nothing, and so does a kube-state-metrics-style
+        // empty label (an unscheduled pod's `node` arrives as "").
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("h2"), None, Some("")])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "app_latency",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
         let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
             vec![RegistrySource {
@@ -974,9 +1020,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let batches = collect(&ctx, plan).await;
-        let mut ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
-        ids.sort();
-        assert_eq!(ids, vec!["h2", r#"we"ird\host"#]);
+        let ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
+        assert_eq!(ids, vec!["h2"]);
     }
 
     #[tokio::test]

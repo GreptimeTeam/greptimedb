@@ -19,9 +19,13 @@
 //! expression helpers and the entity registry live in the parent module.
 
 use common_catalog::consts::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
-    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR,
-    TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    CONFIDENCE_COLUMN, DST_ID_COLUMN, DST_TYPE_COLUMN, DURATION_COUNT_COLUMN, DURATION_NANO_COLUMN,
+    DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_SCOPE_COLUMN, ERROR_COUNT_COLUMN,
+    FRESH_UNTIL_COLUMN, GENERATION_ID_COLUMN, OBSERVED_AT_COLUMN, PARENT_SPAN_ID_COLUMN,
+    PROVENANCE_COLUMN, REL_TYPE_COLUMN, REQUEST_COUNT_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
+    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR, SRC_ID_COLUMN,
+    SRC_TYPE_COLUMN, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN, VALID_FROM_COLUMN,
+    VALID_UNTIL_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::dataframe::DataFrame;
@@ -31,11 +35,20 @@ use datafusion::functions_window::expr_fn::row_number;
 use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, ident, lit, when};
 
+use crate::statement::semantic_graph::conventions::{
+    CONNECTION_TYPE_DATABASE, CONNECTION_TYPE_VIRTUAL_NODE, Conventions, ENTITY_TYPE_GEN_AI_AGENT,
+    ENTITY_TYPE_SERVICE, PROVENANCE_ATTRIBUTE, PROVENANCE_TRACE, REL_TYPE_CALLS,
+};
 use crate::statement::semantic_graph::{
-    DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, OBSERVED_AT_COLUMN,
-    bin_interval, bin_ms, entity_id_expr, interval, null_json, parse_json_expr, qcol, union_all,
+    DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, bin_interval, bin_ms,
+    conventions, entity_id_expr, identifies, interval, null_json, parse_json_expr, qcol, union_all,
     unnest_rows,
 };
+
+/// The embedded conventions, with a broken file surfaced as a plan error.
+fn builtin() -> DfResult<&'static Conventions> {
+    conventions().map_err(datafusion_common::DataFusionError::Internal)
+}
 
 /// The projected columns of `semantic_relationships`, in order. Every derived
 /// branch and the declared-edge branch must project exactly these so the
@@ -44,22 +57,22 @@ use crate::statement::semantic_graph::{
 /// additionally stores `valid_from`/`valid_until`, which feed the validity
 /// filter and the projected window columns.)
 const RELATIONSHIP_COLUMNS: [&str; 16] = [
-    "observed_at",
-    "window_start",
-    "window_end",
-    "fresh_until",
-    "src_type",
-    "src_id",
-    "dst_type",
-    "dst_id",
-    "rel_type",
-    "provenance",
-    "confidence",
-    "request_count",
-    "error_count",
-    "duration_sum",
-    "duration_count",
-    "attributes",
+    OBSERVED_AT_COLUMN,
+    WINDOW_START_COLUMN,
+    WINDOW_END_COLUMN,
+    FRESH_UNTIL_COLUMN,
+    SRC_TYPE_COLUMN,
+    SRC_ID_COLUMN,
+    DST_TYPE_COLUMN,
+    DST_ID_COLUMN,
+    REL_TYPE_COLUMN,
+    PROVENANCE_COLUMN,
+    CONFIDENCE_COLUMN,
+    REQUEST_COUNT_COLUMN,
+    ERROR_COUNT_COLUMN,
+    DURATION_SUM_COLUMN,
+    DURATION_COUNT_COLUMN,
+    EDGE_ATTRIBUTES_COLUMN,
 ];
 
 /// A child server span starts no earlier than 5 minutes before its client span
@@ -129,25 +142,6 @@ pub fn build_relationships_plan(
         .transpose()
 }
 
-/// The same-row co-declaration vocabulary open to any declaring table: a row
-/// carrying both identities witnesses the edge, and the built-in direction is
-/// `src -> dst`. Rows are `(src_type, dst_type, rel_type)`.
-const ATTRIBUTE_EDGE_VOCABULARY: [(&str, &str, &str); 6] = [
-    ("service.instance", "host", "runs_on"),
-    ("process", "host", "runs_on"),
-    ("k8s.pod", "k8s.node", "runs_on"),
-    ("k8s.pod", "k8s.container", "contains"),
-    ("service.instance", "service", "part_of"),
-    ("k8s.pod", "k8s.workload", "part_of"),
-];
-
-/// The agent-edge vocabulary, applied only to trace sources: the RFC derives
-/// `agent uses model` / `agent invokes tool` from span structure (an LLM- or
-/// tool-call span carries both identities), so a non-trace table co-declaring
-/// these types must not fabricate invocations.
-const AGENT_EDGE_VOCABULARY: [(&str, &str, &str); 2] =
-    [("agent", "model", "uses"), ("agent", "tool", "invokes")];
-
 const CO_DECLARED_VALID_COLUMN: &str = "__edge_valid";
 
 /// The same-row co-declared branch: for each source table, every vocabulary
@@ -159,19 +153,22 @@ fn co_declared_branch(
     sources: Vec<CoDeclaredSource>,
     window: &GraphQueryWindow,
 ) -> DfResult<Option<DataFrame>> {
+    let vocabulary = builtin()?;
     let mut union_df: Option<DataFrame> = None;
     for source in sources {
         let find = |ty: &str| source.declarations.iter().find(|d| d.entity_type == ty);
         let mut pairs = Vec::new();
-        for (src_type, dst_type, rel_type) in ATTRIBUTE_EDGE_VOCABULARY {
-            if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
-                pairs.push((src, dst, rel_type, "attribute"));
+        for rule in &vocabulary.co_declared_edges {
+            if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
+                pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_ATTRIBUTE));
             }
         }
         if source.is_trace {
-            for (src_type, dst_type, rel_type) in AGENT_EDGE_VOCABULARY {
-                if let (Some(src), Some(dst)) = (find(src_type), find(dst_type)) {
-                    pairs.push((src, dst, rel_type, "trace"));
+            // Agent edges are tied to span structure by the RFC: a non-trace
+            // table co-declaring these types must not fabricate invocations.
+            for rule in &vocabulary.trace_co_declared_edges {
+                if let (Some(src), Some(dst)) = (find(&rule.src), find(&rule.dst)) {
+                    pairs.push((src, dst, rule.rel.as_str(), PROVENANCE_TRACE));
                 }
             }
         }
@@ -195,9 +192,7 @@ fn co_declared_branch(
                     .id_columns
                     .iter()
                     .chain(&dst.id_columns)
-                    .fold(lit(true), |predicate, id| {
-                        predicate.and(ident(id).is_not_null())
-                    });
+                    .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
                 vec![
                     valid,
                     bin.clone(),
@@ -249,9 +244,9 @@ const DECLARED_REVISION_COLUMN: &str = "__declared_revision";
 /// above the computed table, and the physical revision time would fail them.
 fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFrame> {
     let eff_valid_from =
-        core_fns::coalesce().call(vec![ident("valid_from"), ident(OBSERVED_AT_COLUMN)]);
+        core_fns::coalesce().call(vec![ident(VALID_FROM_COLUMN), ident(OBSERVED_AT_COLUMN)]);
     let eff_valid_until =
-        core_fns::coalesce().call(vec![ident("valid_until"), window.observed_end()]);
+        core_fns::coalesce().call(vec![ident(VALID_UNTIL_COLUMN), window.observed_end()]);
 
     // As-of the queried window: a revision recorded after its end, or whose
     // validity starts after it, was not the edge's state inside the window and
@@ -271,17 +266,17 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
         // differing only in them are not merged by the storage dedup).
         .order_by(vec![
             ident(OBSERVED_AT_COLUMN).sort(false, false),
-            ident("generation_id").sort(false, false),
-            ident("scope").sort(false, false),
+            ident(GENERATION_ID_COLUMN).sort(false, false),
+            ident(ENTITY_SCOPE_COLUMN).sort(false, false),
         ])
         .build()?
         .alias(DECLARED_REVISION_COLUMN);
 
     // The as-of filter already bounds eff_valid_from below the window's end;
     // only the retirement side of the overlap remains to check.
-    let still_valid = ident("valid_until")
+    let still_valid = ident(VALID_UNTIL_COLUMN)
         .is_null()
-        .or(ident("valid_until").gt(window.observed_start()));
+        .or(ident(VALID_UNTIL_COLUMN).gt(window.observed_start()));
     // Tags come out of the storage engine dictionary-encoded; cast to plain
     // strings so the union with the derived branches type-aligns.
     let tag_utf8 = |name: &str| cast(ident(name), DataType::Utf8).alias(name);
@@ -294,38 +289,23 @@ fn declared_edges(scan: DataFrame, window: &GraphQueryWindow) -> DfResult<DataFr
             core_fns::greatest()
                 .call(vec![eff_valid_from.clone(), window.observed_start()])
                 .alias(OBSERVED_AT_COLUMN),
-            eff_valid_from.alias("window_start"),
-            eff_valid_until.clone().alias("window_end"),
-            eff_valid_until.alias("fresh_until"),
-            tag_utf8("src_type"),
-            tag_utf8("src_id"),
-            tag_utf8("dst_type"),
-            tag_utf8("dst_id"),
-            tag_utf8("rel_type"),
-            tag_utf8("provenance"),
-            ident("confidence"),
-            ident("request_count"),
-            ident("error_count"),
-            ident("duration_sum"),
-            ident("duration_count"),
-            ident("attributes"),
+            eff_valid_from.alias(WINDOW_START_COLUMN),
+            eff_valid_until.clone().alias(WINDOW_END_COLUMN),
+            eff_valid_until.alias(FRESH_UNTIL_COLUMN),
+            tag_utf8(SRC_TYPE_COLUMN),
+            tag_utf8(SRC_ID_COLUMN),
+            tag_utf8(DST_TYPE_COLUMN),
+            tag_utf8(DST_ID_COLUMN),
+            tag_utf8(REL_TYPE_COLUMN),
+            tag_utf8(PROVENANCE_COLUMN),
+            ident(CONFIDENCE_COLUMN),
+            ident(REQUEST_COUNT_COLUMN),
+            ident(ERROR_COUNT_COLUMN),
+            ident(DURATION_SUM_COLUMN),
+            ident(DURATION_COUNT_COLUMN),
+            ident(EDGE_ATTRIBUTES_COLUMN),
         ])
 }
-
-/// Span-attribute columns naming an uninstrumented peer, in precedence order,
-/// each with the `connection_type` its match implies: current OTel names
-/// first (`service.peer.name` and `db.namespace` replaced the deprecated
-/// `peer.service` and `db.name` in semconv 1.39/1.26, kept for existing
-/// telemetry), the bare network endpoint last. Attribute columns are dynamic
-/// in `greptime_trace_v1` (created on first use), so only columns present in
-/// a table's schema participate.
-const VIRTUAL_DST_CANDIDATES: [(&str, &str); 5] = [
-    ("span_attributes.service.peer.name", "virtual_node"),
-    ("span_attributes.peer.service", "virtual_node"),
-    ("span_attributes.db.namespace", "database"),
-    ("span_attributes.db.name", "database"),
-    ("span_attributes.server.address", "virtual_node"),
-];
 
 /// Confidence of a virtual-node edge: the peer was named by a client-side
 /// attribute, not witnessed by a server span (the RFC requires `< 1.0`).
@@ -342,7 +322,8 @@ const VIRTUAL_NODE_CONFIDENCE: f64 = 0.5;
 /// usable `service` declaration.
 ///
 /// A client with no matching server span is an edge to a **virtual node**
-/// named by [`VIRTUAL_DST_CANDIDATES`], with the client's own status/duration
+/// named by the conventions' virtual-destination candidates, with the
+/// client's own status/duration
 /// and `confidence < 1.0`. Real pairs win: when a window's edge key holds any
 /// pair, the edge reports only the pair population (the RFC pins RED metrics
 /// to observed span pairs) and the unmatched clients are suppressed, so one
@@ -375,14 +356,14 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
     let observations = client
         .join_on(server, JoinType::Left, join_conditions)?
         .select(vec![
-            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            qcol("client", "src_id").alias("src_id"),
+            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias(OBSERVED_AT_COLUMN),
+            qcol("client", SRC_ID_COLUMN).alias(SRC_ID_COLUMN),
             core_fns::coalesce()
                 .call(vec![
-                    qcol("server", "dst_id"),
+                    qcol("server", DST_ID_COLUMN),
                     qcol("client", "virtual_dst"),
                 ])
-                .alias("dst_id"),
+                .alias(DST_ID_COLUMN),
             qcol("server", TRACE_ID_COLUMN)
                 .is_not_null()
                 .alias("paired"),
@@ -395,15 +376,19 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
         // No destination means no edge; a self-call is not an edge between
         // two distinct entities.
         .filter(
-            ident("dst_id")
+            ident(DST_ID_COLUMN)
                 .is_not_null()
-                .and(ident("src_id").not_eq(ident("dst_id"))),
+                .and(ident(SRC_ID_COLUMN).not_eq(ident(DST_ID_COLUMN))),
         )?;
 
     let paired = ident("paired");
     let df = observations
         .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
+            vec![
+                ident(OBSERVED_AT_COLUMN),
+                ident(SRC_ID_COLUMN),
+                ident(DST_ID_COLUMN),
+            ],
             vec![
                 count(lit(1))
                     .filter(paired.clone())
@@ -445,19 +430,19 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
             ],
         )?
         .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("service").alias("src_type"),
-            ident("src_id"),
-            lit("service").alias("dst_type"),
-            ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
-            real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias("confidence"),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("request_count"),
-            real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias("error_count"),
+            ident(OBSERVED_AT_COLUMN),
+            ident(OBSERVED_AT_COLUMN).alias(WINDOW_START_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(WINDOW_END_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(FRESH_UNTIL_COLUMN),
+            lit(ENTITY_TYPE_SERVICE).alias(SRC_TYPE_COLUMN),
+            ident(SRC_ID_COLUMN),
+            lit(ENTITY_TYPE_SERVICE).alias(DST_TYPE_COLUMN),
+            ident(DST_ID_COLUMN),
+            lit(REL_TYPE_CALLS).alias(REL_TYPE_COLUMN),
+            lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
+            real_wins(lit(1.0_f64), lit(VIRTUAL_NODE_CONFIDENCE))?.alias(CONFIDENCE_COLUMN),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(REQUEST_COUNT_COLUMN),
+            real_wins(ident("pair_errors"), ident("unmatched_errors"))?.alias(ERROR_COUNT_COLUMN),
             // duration sums in nanoseconds; the contract column is seconds.
             (cast(
                 real_wins(
@@ -466,9 +451,9 @@ fn calls_branch(traces: &[CallsSource], window: &GraphQueryWindow) -> DfResult<O
                 )?,
                 DataType::Float64,
             ) / lit(1e9_f64))
-            .alias("duration_sum"),
-            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias("duration_count"),
-            real_wins(null_json(), virtual_attrs_expr()?)?.alias("attributes"),
+            .alias(DURATION_SUM_COLUMN),
+            real_wins(ident("pair_count"), ident("unmatched_count"))?.alias(DURATION_COUNT_COLUMN),
+            real_wins(null_json(), virtual_attrs_expr()?)?.alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
 }
@@ -483,12 +468,14 @@ fn real_wins(real: Expr, r#virtual: Expr) -> DfResult<Expr> {
 /// `connection_type`.
 fn virtual_attrs_expr() -> DfResult<Expr> {
     when(
-        ident("virtual_conn").eq(lit("database")),
-        parse_json_expr(lit(r#"{"connection_type":"database"}"#)),
+        ident("virtual_conn").eq(lit(CONNECTION_TYPE_DATABASE)),
+        parse_json_expr(lit(format!(
+            r#"{{"connection_type":"{CONNECTION_TYPE_DATABASE}"}}"#
+        ))),
     )
-    .otherwise(parse_json_expr(lit(
-        r#"{"connection_type":"virtual_node"}"#,
-    )))
+    .otherwise(parse_json_expr(lit(format!(
+        r#"{{"connection_type":"{CONNECTION_TYPE_VIRTUAL_NODE}"}}"#
+    ))))
 }
 
 /// The window + span-kind + identity predicate shared by both join sides.
@@ -506,9 +493,9 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
             .gt_eq(window.source_start() - interval(CHILD_SPAN_EARLY_NANOS))
             .and(ts.lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)))
     };
-    // A NULL identity component identifies nothing, on either endpoint.
+    // An absent identity component identifies nothing, on either endpoint.
     for id in &service.id_columns {
-        predicate = predicate.and(ident(id).is_not_null());
+        predicate = predicate.and(identifies(id));
     }
     predicate
 }
@@ -524,16 +511,22 @@ fn client_spans(
     scan: &DataFrame,
     window: &GraphQueryWindow,
 ) -> DfResult<DataFrame> {
-    // NULLIF('') lets an empty value fall through to the next candidate.
+    // Attribute columns are dynamic in `greptime_trace_v1` (created on first
+    // use), so only candidate columns present in the table's schema
+    // participate. NULLIF('') lets an empty value fall through to the next
+    // candidate.
     let present: Vec<(Expr, &str)> = {
         let schema = scan.schema();
-        VIRTUAL_DST_CANDIDATES
+        builtin()?
+            .virtual_dst_candidates
             .iter()
-            .filter(|(column, _)| schema.has_column_with_unqualified_name(column))
-            .map(|(column, conn)| {
-                let value =
-                    core_fns::nullif().call(vec![cast(ident(*column), DataType::Utf8), lit("")]);
-                (value, *conn)
+            .filter(|candidate| schema.has_column_with_unqualified_name(&candidate.column))
+            .map(|candidate| {
+                let value = core_fns::nullif().call(vec![
+                    cast(ident(&candidate.column), DataType::Utf8),
+                    lit(""),
+                ]);
+                (value, candidate.connection_type.as_str())
             })
             .collect()
     };
@@ -560,7 +553,7 @@ fn client_spans(
             ident(SPAN_ID_COLUMN),
             // The cast inside entity_id_expr also normalizes tag columns, which
             // come out of the storage engine dictionary-encoded.
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("src_id"),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
             virtual_dst.alias("virtual_dst"),
@@ -585,7 +578,7 @@ fn server_spans(
             ident(TRACE_TIMESTAMP_COLUMN),
             ident(TRACE_ID_COLUMN),
             ident(PARENT_SPAN_ID_COLUMN),
-            entity_id_expr(&service.id_columns, &|c| ident(c)).alias("dst_id"),
+            entity_id_expr(&service.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
             ident(SPAN_STATUS_CODE_COLUMN),
             ident(DURATION_NANO_COLUMN),
         ])
@@ -616,7 +609,7 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("src_id"),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(SRC_ID_COLUMN),
             ])?;
         let child = trace
             .scan
@@ -626,7 +619,7 @@ fn agent_calls_branch(
                 ident(TRACE_TIMESTAMP_COLUMN),
                 ident(TRACE_ID_COLUMN),
                 ident(PARENT_SPAN_ID_COLUMN),
-                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias("dst_id"),
+                entity_id_expr(&agent.id_columns, &|c| ident(c)).alias(DST_ID_COLUMN),
                 ident(SPAN_STATUS_CODE_COLUMN),
                 ident(DURATION_NANO_COLUMN),
             ])?;
@@ -651,44 +644,48 @@ fn agent_calls_branch(
     let df = parent
         .join_on(child, JoinType::Inner, join_conditions)?
         .select(vec![
-            bin_ms(qcol("parent", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            qcol("parent", "src_id").alias("src_id"),
-            qcol("child", "dst_id").alias("dst_id"),
+            bin_ms(qcol("parent", TRACE_TIMESTAMP_COLUMN)).alias(OBSERVED_AT_COLUMN),
+            qcol("parent", SRC_ID_COLUMN).alias(SRC_ID_COLUMN),
+            qcol("child", DST_ID_COLUMN).alias(DST_ID_COLUMN),
             qcol("child", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
-            qcol("child", DURATION_NANO_COLUMN).alias("duration_nano"),
+            qcol("child", DURATION_NANO_COLUMN).alias(DURATION_NANO_COLUMN),
         ])?
         // A sub-span of the same agent is internal structure, not a call
         // between two agents.
-        .filter(ident("src_id").not_eq(ident("dst_id")))?
+        .filter(ident(SRC_ID_COLUMN).not_eq(ident(DST_ID_COLUMN)))?
         .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
             vec![
-                count(lit(1)).alias("request_count"),
+                ident(OBSERVED_AT_COLUMN),
+                ident(SRC_ID_COLUMN),
+                ident(DST_ID_COLUMN),
+            ],
+            vec![
+                count(lit(1)).alias(REQUEST_COUNT_COLUMN),
                 count(lit(1))
                     .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
                     .build()?
-                    .alias("error_count"),
-                sum(ident("duration_nano")).alias("duration_nano_sum"),
+                    .alias(ERROR_COUNT_COLUMN),
+                sum(ident(DURATION_NANO_COLUMN)).alias("duration_nano_sum"),
             ],
         )?
         .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("agent").alias("src_type"),
-            ident("src_id"),
-            lit("agent").alias("dst_type"),
-            ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
-            lit(1.0_f64).alias("confidence"),
-            ident("request_count"),
-            ident("error_count"),
+            ident(OBSERVED_AT_COLUMN),
+            ident(OBSERVED_AT_COLUMN).alias(WINDOW_START_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(WINDOW_END_COLUMN),
+            (ident(OBSERVED_AT_COLUMN) + bin_interval()).alias(FRESH_UNTIL_COLUMN),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias(SRC_TYPE_COLUMN),
+            ident(SRC_ID_COLUMN),
+            lit(ENTITY_TYPE_GEN_AI_AGENT).alias(DST_TYPE_COLUMN),
+            ident(DST_ID_COLUMN),
+            lit(REL_TYPE_CALLS).alias(REL_TYPE_COLUMN),
+            lit(PROVENANCE_TRACE).alias(PROVENANCE_COLUMN),
+            lit(1.0_f64).alias(CONFIDENCE_COLUMN),
+            ident(REQUEST_COUNT_COLUMN),
+            ident(ERROR_COUNT_COLUMN),
             (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
-                .alias("duration_sum"),
-            ident("request_count").alias("duration_count"),
-            null_json().alias("attributes"),
+                .alias(DURATION_SUM_COLUMN),
+            ident(REQUEST_COUNT_COLUMN).alias(DURATION_COUNT_COLUMN),
+            null_json().alias(EDGE_ATTRIBUTES_COLUMN),
         ])?;
     Ok(Some(df))
 }
@@ -1173,7 +1170,7 @@ mod tests {
             RelationshipSources {
                 traces: vec![CallsSource {
                     service: None,
-                    agent: Some(co_decl("agent", &["agent_id"])),
+                    agent: Some(co_decl("gen_ai.agent", &["agent_id"])),
                     scan,
                 }],
                 co_declared: vec![],
@@ -1190,9 +1187,9 @@ mod tests {
         // no service declaration.
         assert_eq!(total, 1);
         let batch = &batches[0];
-        assert_eq!(strings(batch, 4), vec!["agent"]);
+        assert_eq!(strings(batch, 4), vec!["gen_ai.agent"]);
         assert_eq!(strings(batch, 5), vec!["orchestrator"]);
-        assert_eq!(strings(batch, 6), vec!["agent"]);
+        assert_eq!(strings(batch, 6), vec!["gen_ai.agent"]);
         assert_eq!(strings(batch, 7), vec!["researcher"]);
         assert_eq!(strings(batch, 8), vec!["calls"]);
         assert_eq!(strings(batch, 9), vec!["trace"]);
@@ -1229,7 +1226,7 @@ mod tests {
             RelationshipSources {
                 traces: vec![CallsSource {
                     service: None,
-                    agent: Some(co_decl("agent", &["agent_id"])),
+                    agent: Some(co_decl("gen_ai.agent", &["agent_id"])),
                     scan,
                 }],
                 co_declared: vec![],
@@ -1444,9 +1441,9 @@ mod tests {
         let ctx = co_declared_ctx();
         let declarations = || {
             vec![
-                co_decl("agent", &["agent_id"]),
-                co_decl("model", &["model_name"]),
-                co_decl("tool", &["tool_name"]),
+                co_decl("gen_ai.agent", &["agent_id"]),
+                co_decl("gen_ai.model", &["model_name"]),
+                co_decl("gen_ai.tool", &["tool_name"]),
             ]
         };
         // A non-trace table co-declaring agent/model/tool must not fabricate
@@ -1462,17 +1459,17 @@ mod tests {
             rows,
             vec![
                 (
-                    "agent".to_string(),
+                    "gen_ai.agent".to_string(),
                     "agent-1".to_string(),
-                    "model".to_string(),
+                    "gen_ai.model".to_string(),
                     "gpt".to_string(),
                     "uses".to_string(),
                     "trace".to_string(),
                 ),
                 (
-                    "agent".to_string(),
+                    "gen_ai.agent".to_string(),
                     "agent-1".to_string(),
-                    "tool".to_string(),
+                    "gen_ai.tool".to_string(),
                     "search".to_string(),
                     "invokes".to_string(),
                     "trace".to_string(),

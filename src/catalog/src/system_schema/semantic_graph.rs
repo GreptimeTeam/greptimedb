@@ -35,9 +35,14 @@
 use std::sync::{Arc, LazyLock, Weak};
 
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID,
+    CONFIDENCE_COLUMN, DEFAULT_PRIVATE_SCHEMA_NAME, DST_ID_COLUMN, DST_TYPE_COLUMN,
+    DURATION_COUNT_COLUMN, DURATION_SUM_COLUMN, EDGE_ATTRIBUTES_COLUMN, ENTITY_DESCRIPTIVE_COLUMN,
+    ENTITY_ID_ATTRS_COLUMN, ENTITY_ID_COLUMN, ENTITY_SCOPE_COLUMN, ENTITY_TYPE_COLUMN,
+    ERROR_COUNT_COLUMN, FRESH_UNTIL_COLUMN, OBSERVED_AT_COLUMN, PROVENANCE_COLUMN, REL_TYPE_COLUMN,
+    REQUEST_COUNT_COLUMN, SEMANTIC_ENTITIES_TABLE_ID,
     SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES, SEMANTIC_RELATIONSHIPS_TABLE_ID,
-    SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS,
+    SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS, SOURCE_TABLES_COLUMN,
+    SRC_ID_COLUMN, SRC_TYPE_COLUMN, WINDOW_END_COLUMN, WINDOW_START_COLUMN,
 };
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
@@ -190,16 +195,16 @@ fn json() -> ConcreteDataType {
 /// - `source_tables` — JSON array of the telemetry tables that contributed this entity.
 static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
-        ColumnSchema::new("window_start", ts(), true),
-        ColumnSchema::new("window_end", ts(), true),
-        ColumnSchema::new("fresh_until", ts(), true),
-        ColumnSchema::new("entity_type", string(), false),
-        ColumnSchema::new("entity_id", string(), false),
-        ColumnSchema::new("entity_id_attrs", json(), true),
-        ColumnSchema::new("scope", string(), true),
-        ColumnSchema::new("descriptive", json(), true),
-        ColumnSchema::new("source_tables", json(), true),
+        ColumnSchema::new(OBSERVED_AT_COLUMN, ts(), false).with_time_index(true),
+        ColumnSchema::new(WINDOW_START_COLUMN, ts(), true),
+        ColumnSchema::new(WINDOW_END_COLUMN, ts(), true),
+        ColumnSchema::new(FRESH_UNTIL_COLUMN, ts(), true),
+        ColumnSchema::new(ENTITY_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(ENTITY_ID_COLUMN, string(), false),
+        ColumnSchema::new(ENTITY_ID_ATTRS_COLUMN, json(), true),
+        ColumnSchema::new(ENTITY_SCOPE_COLUMN, string(), true),
+        ColumnSchema::new(ENTITY_DESCRIPTIVE_COLUMN, json(), true),
+        ColumnSchema::new(SOURCE_TABLES_COLUMN, json(), true),
     ]))
 });
 
@@ -232,22 +237,38 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   `db.system`, `peer.service`.
 static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
-        ColumnSchema::new("window_start", ts(), true),
-        ColumnSchema::new("window_end", ts(), true),
-        ColumnSchema::new("fresh_until", ts(), true),
-        ColumnSchema::new("src_type", string(), false),
-        ColumnSchema::new("src_id", string(), false),
-        ColumnSchema::new("dst_type", string(), false),
-        ColumnSchema::new("dst_id", string(), false),
-        ColumnSchema::new("rel_type", string(), false),
-        ColumnSchema::new("provenance", string(), false),
-        ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("duration_sum", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("duration_count", ConcreteDataType::int64_datatype(), true),
-        ColumnSchema::new("attributes", json(), true),
+        ColumnSchema::new(OBSERVED_AT_COLUMN, ts(), false).with_time_index(true),
+        ColumnSchema::new(WINDOW_START_COLUMN, ts(), true),
+        ColumnSchema::new(WINDOW_END_COLUMN, ts(), true),
+        ColumnSchema::new(FRESH_UNTIL_COLUMN, ts(), true),
+        ColumnSchema::new(SRC_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(SRC_ID_COLUMN, string(), false),
+        ColumnSchema::new(DST_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(DST_ID_COLUMN, string(), false),
+        ColumnSchema::new(REL_TYPE_COLUMN, string(), false),
+        ColumnSchema::new(PROVENANCE_COLUMN, string(), false),
+        ColumnSchema::new(
+            CONFIDENCE_COLUMN,
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            REQUEST_COUNT_COLUMN,
+            ConcreteDataType::int64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(ERROR_COUNT_COLUMN, ConcreteDataType::int64_datatype(), true),
+        ColumnSchema::new(
+            DURATION_SUM_COLUMN,
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            DURATION_COUNT_COLUMN,
+            ConcreteDataType::int64_datatype(),
+            true,
+        ),
+        ColumnSchema::new(EDGE_ATTRIBUTES_COLUMN, json(), true),
     ]))
 });
 

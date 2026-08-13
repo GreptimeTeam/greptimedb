@@ -209,9 +209,9 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 /// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
 /// sentinel, plus `mixed` for the keys where one long-lived table can
 /// legitimately see multiple values. Entity keys ([`is_entity_option_key`]) take a
-/// comma-separated column-name list (each token non-empty); the "id columns must
-/// be tag columns" invariant is enforced later against the table schema at DDL
-/// time, not here. Keys that are neither whitelisted nor a well-formed entity key
+/// comma-separated column-name list (each token non-empty); column existence and
+/// the stable-string-form rule for entity columns are enforced later against
+/// the table schema at DDL time, not here. Keys that are neither whitelisted nor a well-formed entity key
 /// are rejected.
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
     if is_entity_option_key(key) {

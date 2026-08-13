@@ -69,7 +69,9 @@ prost.workspace = true
 prost-types = { workspace = true, optional = true }
 query.workspace = true
 regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true

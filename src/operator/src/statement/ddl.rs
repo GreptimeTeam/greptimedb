@@ -99,8 +99,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
-    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
+    TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -109,12 +109,12 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidEntitySemanticOptionSnafu, InvalidPartitionRuleSnafu,
-    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
+    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -2371,6 +2371,19 @@ pub fn verify_alter(
         .context(error::BuildTableMetaSnafu { table_name })?;
 
     validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
+    // A column referenced by an entity declaration may be dropped (the
+    // read-time derivation skips the stale declaration), but must not change
+    // to a type without a stable string form.
+    for (key, value) in &new_meta.options.extra_options {
+        if parse_entity_option_key(key).is_none() {
+            continue;
+        }
+        for col in &parse_entity_columns(value) {
+            if let Some(column) = new_meta.schema.column_schema_by_name(col) {
+                ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
+            }
+        }
+    }
 
     Ok(true)
 }
@@ -2429,11 +2442,7 @@ pub fn create_table_info(
         &create_table.time_index,
     )?;
 
-    validate_entity_semantic_options(
-        &table_options,
-        &column_name_to_index_map,
-        &primary_key_indices,
-    )?;
+    validate_entity_semantic_options(&table_options, &schema)?;
 
     let meta = TableMeta {
         schema,
@@ -2581,32 +2590,54 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist, and `id` columns must
-/// additionally be tag (primary-key) columns so entity identity stays indexable
-/// and joinable. See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
-fn validate_entity_semantic_options(
-    table_options: &TableOptions,
-    column_name_to_index_map: &HashMap<String, usize>,
-    primary_key_indices: &[usize],
+/// Whether `CAST(column AS Utf8)` yields a stable entity-id string — the
+/// binary-backed and nested types do not, and without the DDL check the
+/// failure would surface only when the graph is scanned.
+fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> bool {
+    use datatypes::prelude::ConcreteDataType;
+    !matches!(
+        data_type,
+        ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Null(_)
+    )
+}
+
+fn ensure_entity_column_renders_as_string(
+    key: &str,
+    col: &str,
+    data_type: &datatypes::prelude::ConcreteDataType,
 ) -> Result<()> {
+    ensure!(
+        has_stable_string_form(data_type),
+        InvalidSqlSnafu {
+            err_msg: format!(
+                "entity column `{col}` (option `{key}`) has type `{data_type}`, which cannot \
+                 render as a string",
+            ),
+        }
+    );
+    Ok(())
+}
+
+/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
+/// against the table schema: every named column must exist (tag or field) and
+/// have a stable string form — the derivation renders id, scope and
+/// descriptive values as strings.
+fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
     for (key, value) in &table_options.extra_options {
-        let Some((_, role)) = parse_entity_option_key(key) else {
+        if parse_entity_option_key(key).is_none() {
             continue;
         };
-        let is_id_role = role == EntityRole::Id;
         for col in &parse_entity_columns(value) {
-            let idx = column_name_to_index_map
-                .get(col)
+            let column = schema
+                .column_schema_by_name(col)
                 .context(ColumnNotFoundSnafu { msg: col })?;
-            ensure!(
-                !is_id_role || primary_key_indices.contains(idx),
-                InvalidEntitySemanticOptionSnafu {
-                    reason: format!(
-                        "entity id column `{col}` (option `{key}`) must be a tag/primary-key column"
-                    ),
-                }
-            );
+            ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
         }
     }
     Ok(())
@@ -3142,13 +3173,12 @@ mod test {
 
     #[test]
     fn test_validate_entity_semantic_options() {
-        let col_map = HashMap::from([
-            ("service_name".to_string(), 0usize),
-            ("host_id".to_string(), 1usize),
-            ("value".to_string(), 2usize),
+        let schema = Schema::new(vec![
+            ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
         ]);
-        // service_name (0) and host_id (1) are tags; value (2) is a field.
-        let pk = vec![0usize, 1usize];
         let opts = |pairs: &[(&str, &str)]| TableOptions {
             extra_options: pairs
                 .iter()
@@ -3157,39 +3187,30 @@ mod test {
             ..Default::default()
         };
 
-        // id on a tag column, composite id on tags, and descriptive on a field
-        // column are all accepted.
+        // Any existing column with a string form may be an id, tag or field.
         for pairs in [
-            &[("greptime.semantic.entity.service.id", "service_name")][..],
             &[(
                 "greptime.semantic.entity.process.id",
                 "service_name,host_id",
             )][..],
-            &[("greptime.semantic.entity.service.descriptive", "value")][..],
+            &[("greptime.semantic.entity.service.id", "value")][..],
         ] {
-            assert!(validate_entity_semantic_options(&opts(pairs), &col_map, &pk).is_ok());
+            assert!(validate_entity_semantic_options(&opts(pairs), &schema).is_ok());
         }
 
-        // id pointing at a field column is rejected.
-        let err = validate_entity_semantic_options(
-            &opts(&[("greptime.semantic.entity.service.id", "value")]),
-            &col_map,
-            &pk,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            error::Error::InvalidEntitySemanticOption { .. }
-        ));
-
-        // id pointing at a missing column is rejected.
-        let err = validate_entity_semantic_options(
+        let missing = validate_entity_semantic_options(
             &opts(&[("greptime.semantic.entity.service.id", "nope")]),
-            &col_map,
-            &pk,
+            &schema,
         )
         .unwrap_err();
-        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
+        assert!(matches!(missing, error::Error::ColumnNotFound { .. }));
+
+        let binary_id = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "payload")]),
+            &schema,
+        )
+        .unwrap_err();
+        assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
     }
 
     #[test]
@@ -3553,6 +3574,43 @@ WITH ('repartition.column.hint' = ' host ')",
             common_error::ext::ErrorExt::status_code(&err),
             common_error::status_code::StatusCode::InvalidArguments
         );
+    }
+
+    #[test]
+    fn test_verify_alter_guards_entity_column_types() {
+        let expr = create_expr_from_sql(
+            "CREATE TABLE t (svc STRING, ts TIMESTAMP TIME INDEX) \
+             WITH ('greptime.semantic.entity.service.id'='svc');",
+        );
+        let table_info = Arc::new(create_table_info(&expr, vec![]).unwrap());
+        let alter = |kind| AlterTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "t".to_string(),
+            kind: Some(kind),
+        };
+
+        let modify = alter(Kind::ModifyColumnTypes(api::v1::ModifyColumnTypes {
+            modify_column_types: vec![api::v1::ModifyColumnType {
+                column_name: "svc".to_string(),
+                target_type: api::v1::ColumnDataType::Binary as i32,
+                target_type_extension: None,
+            }],
+        }));
+        let err = verify_alter(1, table_info.clone(), modify).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot render as a string"),
+            "{err}"
+        );
+
+        // Dropping a declared column stays allowed: the derivation skips the
+        // stale declaration.
+        let drop = alter(Kind::DropColumns(api::v1::DropColumns {
+            drop_columns: vec![api::v1::DropColumn {
+                name: "svc".to_string(),
+            }],
+        }));
+        assert!(verify_alter(1, table_info, drop).unwrap());
     }
 
     #[test]

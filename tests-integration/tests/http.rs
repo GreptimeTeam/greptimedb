@@ -161,6 +161,7 @@ macro_rules! http_tests {
                 test_otlp_metric_translation_strategies,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
+                test_otlp_traces_v1_entity_graph,
                 test_otlp_logs,
                 test_loki_pb_logs,
                 test_loki_pb_logs_with_pipeline,
@@ -6879,6 +6880,86 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
         "otlp_traces_with_gzip",
         &client,
         "select * from opentelemetry_traces;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// One real OTLP export must come out of `semantic_relationships` as the
+/// zero-configuration chain; resources missing an identity column derive
+/// nothing extra.
+pub async fn test_otlp_traces_v1_entity_graph(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_traces_entity_graph").await;
+    let client = TestClient::new(app).await;
+
+    let span = |trace_id: &str, span_id: &str, parent: &str, kind: u32| {
+        json!({
+            "traceId": trace_id,
+            "spanId": span_id,
+            "parentSpanId": parent,
+            "name": "op",
+            "kind": kind,
+            "startTimeUnixNano": "1736480942444376000",
+            "endTimeUnixNano": "1736480942444499000",
+            "attributes": [],
+            "status": { "message": "", "code": 0 }
+        })
+    };
+    let resource_spans = |attributes: Vec<Value>, spans: Vec<Value>| {
+        json!({
+            "resource": { "attributes": attributes },
+            "scopeSpans": [{ "scope": { "name": "graph-tests" }, "spans": spans }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        })
+    };
+
+    // frontend: full identity (instance id + pod uid); cart: bare service —
+    // no instance entity; batch: instance id but no pod uid — no runs_on.
+    let req: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [
+            resource_spans(
+                vec![
+                    make_string_attr("service.name", "frontend"),
+                    make_string_attr("service.instance.id", "inst-1"),
+                    make_string_attr("k8s.pod.uid", "uid-9"),
+                    make_string_attr("k8s.pod.name", "api-1"),
+                    make_string_attr("k8s.namespace.name", "default"),
+                ],
+                vec![span("c05d7a4ec8e1f231f02ed6e8da8655b4", "d24f921c75f68e23", "", 3)],
+            ),
+            resource_spans(
+                vec![make_string_attr("service.name", "cart")],
+                vec![span(
+                    "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "9630f2916e2f7909",
+                    "d24f921c75f68e23",
+                    2,
+                )],
+            ),
+            resource_spans(
+                vec![
+                    make_string_attr("service.name", "batch"),
+                    make_string_attr("service.instance.id", "binst-1"),
+                ],
+                vec![span("cc9e0991a2e63d274984bd44ee669203", "8f847259b0f6e1ab", "", 1)],
+            ),
+        ]
+    }))
+    .unwrap();
+    let res = send_trace_v1_req(&client, "graph_traces", req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","resource_attributes.service.instance.id=binst-1,service_name=batch","service","batch","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","service","frontend","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","k8s.pod","uid-9","runs_on"]]"#;
+    validate_data(
+        "otlp_traces_entity_graph",
+        &client,
+        "select src_type, src_id, dst_type, dst_id, rel_type \
+         from greptime_private.semantic_relationships \
+         where observed_at >= '2025-01-01 00:00:00' order by rel_type, src_id;",
         expected,
     )
     .await;
