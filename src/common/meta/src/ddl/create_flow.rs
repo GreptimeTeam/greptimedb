@@ -21,6 +21,7 @@ use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -32,7 +33,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_name::TableName;
@@ -222,7 +223,7 @@ impl CreateFlowProcedure {
                 .prev_flow_info_value
                 .as_ref()
                 .map(|v| v.get_inner_ref()),
-        );
+        )?;
 
         self.data.state = if self.data.is_pending() {
             self.data.peers.clear();
@@ -465,6 +466,14 @@ pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType
 /// The flow option key for creating pending flow metadata when source tables do not exist.
 pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 
+/// Internal transient key used to pass the typed `EVAL OFFSET` (whole seconds)
+/// from the operator to meta through `CreateFlowExpr.flow_options`. Inserted by
+/// the operator only after user option validation; parsed and stripped by
+/// `CreateFlowTask::try_from`. Must never be accepted as a user-provided option
+/// and must never be persisted into `FlowInfoValue.options` or be visible in
+/// user runtime options / SHOW CREATE.
+pub const INTERNAL_EVAL_OFFSET_KEY: &str = "__greptime_internal_eval_offset_secs";
+
 /// Internal transient key used to pass the serialized `FlowScheduleConfig` from
 /// meta to flownode through `CreateRequest.flow_options`. This key must never
 /// be accepted as a user-provided option and must never be persisted into
@@ -515,6 +524,35 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         .fail();
     }
 
+    // Reject internal transport keys (never accepted from user input).
+    for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
+        if flow_task.flow_options.contains_key(key) {
+            return UnexpectedSnafu {
+                err_msg: format!("flow option '{key}' is reserved for internal use"),
+            }
+            .fail();
+        }
+    }
+
+    // EVAL OFFSET semantics: only legal with EVAL INTERVAL and must be in
+    // `[0, eval_interval_secs)`. Never modulo-normalized.
+    if let Some(offset_secs) = flow_task.eval_offset_secs {
+        let Some(eval_interval_secs) = flow_task.eval_interval_secs else {
+            return UnexpectedSnafu {
+                err_msg: "EVAL OFFSET requires EVAL INTERVAL to be specified".to_string(),
+            }
+            .fail();
+        };
+        if !(0..eval_interval_secs).contains(&offset_secs) {
+            return UnexpectedSnafu {
+                err_msg: format!(
+                    "EVAL OFFSET must be in range [0, EVAL INTERVAL), got {offset_secs} seconds with EVAL INTERVAL {eval_interval_secs} seconds"
+                ),
+            }
+            .fail();
+        }
+    }
+
     for key in flow_task.flow_options.keys() {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
@@ -538,12 +576,16 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
 
 /// Computes the ceiling of `time` to the next schedule boundary aligned with `anchor + k * interval`.
 /// All values are Unix timestamps in seconds.
-fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
+///
+/// Fallible: if the next boundary after `time` does not fit in `i64`, an
+/// explicit error is returned instead of clamping to a non-phase value such as
+/// `i64::MAX`.
+pub(crate) fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> Result<i64> {
     if interval <= 0 {
-        return time;
+        return Ok(time);
     }
     if time <= anchor {
-        return anchor;
+        return Ok(anchor);
     }
 
     let diff = i128::from(time) - i128::from(anchor);
@@ -551,7 +593,41 @@ fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
     let k = (diff + interval - 1) / interval;
     let boundary = i128::from(anchor) + k * interval;
 
-    boundary.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    i64::try_from(boundary).map_err(|_| {
+        UnexpectedSnafu {
+            err_msg: format!(
+                "Cannot align time {time} to the next `anchor + k * interval` boundary (anchor={anchor}, interval={interval}): result {boundary} does not fit in i64"
+            ),
+        }
+        .build()
+    })
+}
+
+/// Rounds a `Utc` instant up to the next whole second (Unix seconds), with
+/// nanosecond precision.
+///
+/// `timestamp()` / `timestamp_millis()` floor the sub-second fraction; using
+/// them unchanged could produce a `start_secs` in the past relative to the
+/// exact prepare instant, which would make the very first evaluation due before
+/// the flow finished being prepared. Uses checked arithmetic so an instant at
+/// the very end of the `i64` second range yields an explicit error instead of
+/// wrapping.
+pub(crate) fn ceil_to_whole_sec(now: DateTime<Utc>) -> Result<i64> {
+    ceil_whole_sec_from_parts(now.timestamp(), now.timestamp_subsec_nanos() != 0)
+}
+
+/// Pure ceiling computation factored out of [`ceil_to_whole_sec`] so the
+/// overflow path is testable: `chrono::DateTime<Utc>` cannot represent
+/// instants near `i64::MAX` seconds, but the arithmetic below guards it anyway.
+pub(crate) fn ceil_whole_sec_from_parts(secs: i64, has_fraction: bool) -> Result<i64> {
+    if !has_fraction {
+        return Ok(secs);
+    }
+    secs.checked_add(1).context(error::UnexpectedSnafu {
+        err_msg: format!(
+            "Cannot round instant at second {secs} up to the next whole second: timestamp overflow"
+        ),
+    })
 }
 
 /// Returns the effective typed schedule config for flow metadata.
@@ -561,26 +637,31 @@ fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
 /// and defaults. This avoids recovery-time wall-clock drift.
 pub fn effective_eval_schedule_from_flow_info(
     flow_info: &FlowInfoValue,
-) -> Option<FlowScheduleConfig> {
+) -> Result<Option<FlowScheduleConfig>> {
     if let Some(schedule) = &flow_info.eval_schedule {
-        return Some(schedule.clone());
+        return Ok(Some(schedule.clone()));
     }
 
-    let eval_interval_secs = flow_info.eval_interval_secs?;
+    let Some(eval_interval_secs) = flow_info.eval_interval_secs else {
+        return Ok(None);
+    };
     if eval_interval_secs <= 0 {
-        return None;
+        return Ok(None);
     }
 
+    // Round the created_time up to the next whole second (same helper as new
+    // flow resolution) before aligning to the epoch-anchored boundary.
+    let created_ceil = ceil_to_whole_sec(flow_info.created_time)?;
     let start_secs = ceil_to_boundary(
-        flow_info.created_time.timestamp(),
+        created_ceil,
         FlowScheduleConfig::DEFAULT_ANCHOR_SECS,
         eval_interval_secs,
-    );
+    )?;
 
-    Some(FlowScheduleConfig::default_with_start(
+    Ok(Some(FlowScheduleConfig::default_with_start(
         start_secs,
         eval_interval_secs,
-    ))
+    )))
 }
 
 /// Resolve `FlowScheduleConfig` into `task.eval_schedule`.
@@ -591,58 +672,79 @@ pub fn effective_eval_schedule_from_flow_info(
 /// The function is idempotent: if `task.eval_schedule` is already `Some`,
 /// it returns immediately (important for procedure retry / dump-restore).
 ///
-/// Schedule configuration is NOT read from `task.flow_options` (those keys are
-/// no longer user-facing options). For new flows, pure defaults are computed.
-/// For OR REPLACE, the previous typed config is preserved when interval+anchor
-/// are unchanged; otherwise defaults are recomputed.
+/// The schedule phase (anchor) is the `EVAL OFFSET` value: boundaries are
+/// `offset + k * interval` (Unix epoch seconds), independent of timezone/DST.
+/// An omitted offset means zero. It is NOT anchored to create time and does
+/// not drift. Schedule configuration is NOT read from `task.flow_options`
+/// (those keys are no longer user-facing options).
+///
+/// For OR REPLACE, the previous typed config is preserved when interval+offset
+/// are unchanged; otherwise the schedule is recomputed.
+///
+/// Fallible: if the next phase boundary cannot fit in `i64` (extremely far
+/// future), an explicit error is returned and flow creation fails instead of
+/// silently clamping to a non-phase timestamp.
 pub(crate) fn resolve_schedule_defaults_into_task(
     task: &mut CreateFlowTask,
     prev_flow_info: Option<&FlowInfoValue>,
-) {
+) -> Result<()> {
     // Idempotent: if already computed, skip recomputation.
     if task.eval_schedule.is_some() {
-        return;
+        return Ok(());
     }
 
     let Some(eval_interval_secs) = task.eval_interval_secs else {
-        return;
+        return Ok(());
     };
     if eval_interval_secs <= 0 {
-        return;
+        return Ok(());
     }
 
-    let anchor_secs = FlowScheduleConfig::DEFAULT_ANCHOR_SECS;
+    // EVAL OFFSET defines the epoch phase: `anchor + k * interval`.
+    let anchor_secs = task.eval_offset_secs.unwrap_or(0);
+
+    // Defense: `validate_flow_options` (called before this in `on_prepare`)
+    // already rejects out-of-range offsets; guard here to never schedule on a
+    // garbage anchor.
+    if !(0..eval_interval_secs).contains(&anchor_secs) {
+        return Ok(());
+    }
 
     // For OR REPLACE: if interval+anchor unchanged, preserve the entire
     // existing typed config so start / policy / limits are stable.
     if task.or_replace
         && let Some(prev) = prev_flow_info
-        && let Some(old_sched) = effective_eval_schedule_from_flow_info(prev)
+        && let Some(old_sched) = effective_eval_schedule_from_flow_info(prev)?
     {
         let old_interval = prev.eval_interval_secs.unwrap_or(0);
         if old_interval == eval_interval_secs && old_sched.anchor_secs == anchor_secs {
             task.eval_schedule = Some(old_sched);
-            return;
+            return Ok(());
         }
     }
 
     // --- Compute start ---
-    let start_secs =
-        // New flow, or OR REPLACE with changed interval/anchor: start at the next
-        // aligned boundary after prepare time. The value is written into
-        // task.eval_schedule once so procedure retry does not recompute it.
-        ceil_to_boundary(chrono::Utc::now().timestamp(), anchor_secs, eval_interval_secs);
+    // New flow, or OR REPLACE with changed interval/offset: start at the next
+    // aligned boundary strictly after the exact prepare instant, rounded up to
+    // the next whole second so the first boundary is never in the past. The
+    // value is written into task.eval_schedule once so procedure retry does not
+    // recompute it.
+    let prepare_secs = ceil_to_whole_sec(chrono::Utc::now())?;
+    let start_secs = ceil_to_boundary(prepare_secs, anchor_secs, eval_interval_secs)?;
 
-    task.eval_schedule = Some(FlowScheduleConfig::default_with_start(
+    task.eval_schedule = Some(FlowScheduleConfig::with_anchor(
+        anchor_secs,
         start_secs,
         eval_interval_secs,
     ));
+    Ok(())
 }
 
 fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
     let mut options = options.clone();
     options.remove(DEFER_ON_MISSING_SOURCE_KEY);
     options.remove(INTERNAL_EVAL_SCHEDULE_KEY);
+    options.remove(INTERNAL_EVAL_OFFSET_KEY);
     options
 }
 
@@ -772,14 +874,16 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
         let sql = value.task.sql.clone();
         let eval_schedule = value.task.eval_schedule.clone();
 
-        // Start with a clean options map. The transient schedule payload is
-        // only for the meta→flownode CreateRequest boundary and must not be
-        // persisted in FlowInfoValue.options.
+        // Start with a clean options map. The transient schedule/offset payloads
+        // are only for the meta→flownode / frontend→meta boundaries and must not
+        // be persisted in FlowInfoValue.options.
         let mut options: HashMap<String, String> = value
             .task
             .flow_options
             .iter()
-            .filter(|(k, _)| k.as_str() != INTERNAL_EVAL_SCHEDULE_KEY)
+            .filter(|(k, _)| {
+                k.as_str() != INTERNAL_EVAL_SCHEDULE_KEY && k.as_str() != INTERNAL_EVAL_OFFSET_KEY
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 

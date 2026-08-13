@@ -43,6 +43,7 @@ use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
     FlowCheckpointDecision, FlowQueryFallbackReason,
 };
+use crate::batching_mode::eval_schedule::{FlowMissedTickPolicy, FlowScheduleConfig};
 use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
@@ -140,6 +141,78 @@ async fn test_incremental_read_is_disabled_by_default() {
     .task;
 
     assert!(task.state.read().unwrap().is_incremental_disabled());
+}
+
+#[tokio::test]
+async fn test_non_aggregate_scheduled_sql_honors_eval_offset_phase() {
+    // A non-aggregate SQL flow with `EVAL INTERVAL` runs as an explicit
+    // full-query flow on the batching scheduler. The typed schedule must reach
+    // the task config unchanged and the offset must not be silently ignored:
+    // due scheduled times follow the `anchor + k * interval` phase.
+    let query = "SELECT number, ts FROM numbers_with_ts";
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+
+    let schedule = EvalSchedule::from_config(
+        Some(3600),
+        Some(&FlowScheduleConfig {
+            anchor_secs: 120, // `EVAL OFFSET '2 minutes'`
+            start_secs: 3720, // 120 + 1 * 3600
+            missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+            catchup_max_runs: 3,
+            catchup_max_lag_secs: 3600,
+        }),
+    )
+    .unwrap()
+    .unwrap();
+
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query,
+        plan,
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            "scheduled_non_aggr_sink".to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: Arc::new(BatchingModeOptions::default()),
+        flow_eval_interval: Some(Duration::from_secs(3600)),
+        eval_schedule: Some(schedule),
+    })
+    .unwrap();
+
+    // The offset anchor survives into the task config: it is not dropped.
+    let stored = task.config.eval_schedule.as_ref().unwrap();
+    assert_eq!(stored.anchor_secs, 120);
+    assert_eq!(stored.start_secs, 3720);
+    assert_eq!(stored.interval_secs, 3600);
+
+    // Due-time selection proves the offset is honored: the first due time is
+    // on the `:02` phase (120 + k * 3600), never 0 or 3600.
+    let due = select_due_scheduled_times(stored, 0, 3720).unwrap();
+    assert_eq!(due.scheduled_times_secs, vec![3720]);
+    for t in &due.scheduled_times_secs {
+        assert_eq!((t - 120) % 3600, 0);
+    }
+    let due = select_due_scheduled_times(stored, 3720, 7320).unwrap();
+    assert_eq!(due.scheduled_times_secs, vec![7320]);
+    for t in &due.scheduled_times_secs {
+        assert_eq!((t - 120) % 3600, 0);
+    }
 }
 
 #[tokio::test]
@@ -762,6 +835,113 @@ async fn test_scheduled_time_now_is_bound_to_selected_attempt() {
         .clone()
         .expect("frontend handler should capture generated SQL");
     assert!(!sent_sql.is_empty());
+}
+
+/// The scheduled-loop logical-time arithmetic must never clamp, wrap, or
+/// panic near the `i64` boundaries: unrepresentable values are explicit
+/// errors, representable values are exact.
+#[test]
+fn test_scheduled_loop_arithmetic_near_i64_boundary() {
+    // --- initial_schedule_cursor: exact difference, never saturated ---
+    // Ordinary schedule: cursor is exactly one interval before start.
+    assert_eq!(initial_schedule_cursor(3720, 3600).unwrap(), 120);
+    // Near i64::MAX: the exact difference, no clamping to i64::MAX.
+    assert_eq!(
+        initial_schedule_cursor(i64::MAX, 3600).unwrap(),
+        i64::MAX - 3600
+    );
+    // start == i64::MIN cannot go one interval earlier: explicit error, never
+    // a saturated cursor equal to start that would silently skip the first
+    // scheduled tick.
+    assert!(initial_schedule_cursor(i64::MIN, 3600).is_err());
+    // start just above i64::MIN: the exact i64::MIN cursor is representable.
+    assert_eq!(
+        initial_schedule_cursor(i64::MIN + 3600, 3600).unwrap(),
+        i64::MIN
+    );
+
+    // --- scheduled_time_millis: exact product, never saturated ---
+    assert_eq!(
+        scheduled_time_millis(1_700_000_000).unwrap(),
+        1_700_000_000_000
+    );
+    // Largest seconds value whose millisecond product still fits in i64.
+    let max_secs = i64::MAX / 1000;
+    assert_eq!(scheduled_time_millis(max_secs).unwrap(), max_secs * 1000);
+    // One more second overflows: explicit error, never a saturated i64::MAX.
+    let err = scheduled_time_millis(max_secs + 1).unwrap_err();
+    assert!(err.to_string().contains("milliseconds"), "{err}");
+    assert!(scheduled_time_millis(i64::MAX).is_err());
+
+    // --- sleep_delta_secs: no i64 subtraction overflow, no wrap ---
+    // The widest representable gap (i64::MIN..=i64::MAX) is exactly u64::MAX;
+    // subtracting in i64 would panic in debug and wrap in release, so the
+    // i128 path must return the exact u64 value.
+    assert_eq!(
+        sleep_delta_secs(i64::MAX, i64::MIN).unwrap(),
+        u64::MAX,
+        "i64::MAX - i64::MIN must be exactly u64::MAX, not a wrapped value"
+    );
+    assert_eq!(sleep_delta_secs(7320, 3720).unwrap(), 3600);
+    // A negative delta (next <= wall_now, violating the caller's guard) is an
+    // explicit error instead of a wrapped huge `as u64` sleep.
+    assert!(sleep_delta_secs(100, 200).is_err());
+}
+
+/// A scheduled time whose millisecond product exceeds `i64` must fail as an
+/// explicit error before any execution — never run with a saturated
+/// `i64::MAX` millis value — and must not leak the extension into the task
+/// state.
+#[tokio::test]
+async fn test_scheduled_time_millis_overflow_is_explicit_error() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+
+    for scheduled_time_secs in [i64::MAX, i64::MAX / 1000 + 1] {
+        let outcome = task
+            .execute_once_serialized_at_scheduled_time(
+                &query_engine,
+                &frontend_client,
+                scheduled_time_secs,
+            )
+            .await;
+
+        let err = outcome.result.expect_err(
+            "unrepresentable scheduled time must be an explicit error, not a clamped run",
+        );
+        assert!(
+            err.to_string().contains("milliseconds"),
+            "unexpected error for {scheduled_time_secs}: {err}"
+        );
+        assert!(
+            outcome.new_query.is_none(),
+            "no query should be generated for an unrepresentable scheduled time"
+        );
+
+        // The extension must never have been installed (nothing to leak).
+        assert_eq!(
+            task.state
+                .read()
+                .unwrap()
+                .query_ctx
+                .extension(FLOW_SCHEDULED_TIME_MILLIS),
+            None,
+            "FLOW_SCHEDULED_TIME_MILLIS must not be set for an unrepresentable scheduled time"
+        );
+        assert!(
+            !task
+                .frontend_extensions()
+                .contains_key(FLOW_SCHEDULED_TIME_MILLIS)
+        );
+    }
 }
 
 fn output_with_region_watermarks(

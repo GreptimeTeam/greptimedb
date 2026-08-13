@@ -8,9 +8,9 @@ CREATE TABLE distinct_basic (
 
 Affected Rows: 0
 
--- should fallback to streaming mode
+-- should fallback to streaming mode when there is no EVAL INTERVAL
 -- SQLNESS REPLACE id=\d+ id=REDACTED
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
     DISTINCT number as dis
 FROM
@@ -154,6 +154,40 @@ DROP TABLE distinct_basic;
 Affected Rows: 0
 
 DROP TABLE out_distinct_basic;
+
+Affected Rows: 0
+
+-- test ttl = instant with EVAL INTERVAL must be rejected
+-- since the batching scheduler cannot read instant-TTL source tables and the
+-- streaming engine cannot honor the schedule
+CREATE TABLE distinct_basic (
+    "number" INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+)WITH ('ttl' = 'instant');
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE id=\d+ id=REDACTED
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
+SELECT
+    DISTINCT number as dis
+FROM
+    distinct_basic;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: flow 'test_distinct_basic' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval
+
+-- the flow must not have been created
+SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_basic';
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+DROP TABLE distinct_basic;
 
 Affected Rows: 0
 

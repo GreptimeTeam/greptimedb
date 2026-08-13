@@ -674,6 +674,12 @@ pub struct CreateFlow {
     /// Duration in seconds as `i64`
     /// If not set, flow will be evaluated based on time window size and other args.
     pub eval_interval: Option<i64>,
+    /// Phase offset of the flow evaluation schedule within `eval_interval`.
+    /// Duration in seconds as `i64`.
+    /// Must be in range `[0, eval_interval)`. Only legal together with
+    /// `eval_interval`. A value of zero (the default) means the schedule is
+    /// anchored to the Unix epoch, i.e. phases at `k * eval_interval`.
+    pub eval_offset: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
     /// Flow creation options from `WITH (...)`
@@ -731,6 +737,13 @@ impl Display for CreateFlow {
         }
         if let Some(eval_interval) = &self.eval_interval {
             writeln!(f, "EVAL INTERVAL '{} s'", eval_interval)?;
+        }
+        // Canonical display: omit a zero offset (equivalent to the default
+        // epoch-anchored schedule). Non-zero offsets are always emitted.
+        if let Some(eval_offset) = &self.eval_offset
+            && *eval_offset != 0
+        {
+            writeln!(f, "EVAL OFFSET '{} s'", eval_offset)?;
         }
         if let Some(comment) = &self.comment {
             writeln!(f, "COMMENT '{}'", comment)?;
