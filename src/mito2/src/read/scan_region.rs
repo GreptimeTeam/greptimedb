@@ -697,10 +697,7 @@ impl ScanRegion {
                 );
                 continue;
             }
-            let target_type = hint
-                .cloned()
-                .map(ConcreteDataType::json2)
-                .unwrap_or_else(|| ConcreteDataType::json2(JsonNativeType::Variant));
+            let target_type = hint.cloned().unwrap_or(JsonNativeType::Variant);
             json_target_types.insert(col_id, target_type);
         }
         Ok(ReadColumns::new(col_ids.iter().copied()).with_json_target_types(json_target_types))
@@ -1674,11 +1671,15 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
         read_column_types: read_columns
             .column_ids_iter()
             .map(|id| {
-                read_columns.json_target_type(id).cloned().or_else(|| {
-                    metadata
-                        .column_by_id(id)
-                        .map(|col| col.column_schema.data_type.clone())
-                })
+                read_columns
+                    .json_target_type(id)
+                    .cloned()
+                    .map(ConcreteDataType::json2)
+                    .or_else(|| {
+                        metadata
+                            .column_by_id(id)
+                            .map(|col| col.column_schema.data_type.clone())
+                    })
             })
             .collect(),
         read_columns,
@@ -2377,8 +2378,8 @@ mod tests {
                 .with_files(vec![file])
         };
 
-        let int_target = ConcreteDataType::json2(JsonNativeType::i64());
-        let string_target = ConcreteDataType::json2(JsonNativeType::String);
+        let int_target = JsonNativeType::i64();
+        let string_target = JsonNativeType::String;
         let int_fingerprint = build_scan_fingerprint(&make_input(int_target.clone()).await)
             .unwrap()
             .fingerprint;

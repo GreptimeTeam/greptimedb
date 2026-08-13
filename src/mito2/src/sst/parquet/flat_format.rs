@@ -317,7 +317,7 @@ impl FlatReadFormat {
                 field
                     .as_ref()
                     .clone()
-                    .with_data_type(target_type.as_arrow_type()),
+                    .with_data_type(ConcreteDataType::json2(target_type.clone()).as_arrow_type()),
             );
         }
         schema.fields = fields.into();

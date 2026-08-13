@@ -694,14 +694,11 @@ fn json_target_nested_paths(
     let Some(target_type) = json_target_types.get(&column_id) else {
         return Vec::new();
     };
-    let Some(json_type) = target_type.as_json() else {
-        return Vec::new();
-    };
     let Some(column) = metadata.column_by_id(column_id) else {
         return Vec::new();
     };
 
-    json_nested_paths(&column.column_schema.name, json_type.native_type())
+    json_nested_paths(&column.column_schema.name, target_type)
 }
 
 fn json_nested_paths(column_name: &str, json_type: &JsonNativeType) -> Vec<NestedPath> {
@@ -1095,10 +1092,10 @@ mod tests {
             metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
             ReadColumns::new([4]).with_json_target_types(BTreeMap::from([(
                 4,
-                ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([(
+                JsonNativeType::Object(JsonObjectType::from([(
                     "a".to_string(),
                     JsonNativeType::i64(),
-                )]))),
+                )])),
             )])),
         );
 

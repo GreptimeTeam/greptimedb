@@ -402,7 +402,7 @@ fn json2_read_datatype(
     }
 
     if let Some(concretized) = read_cols.json_target_type(column_id).cloned() {
-        return Some(concretized);
+        return Some(ConcreteDataType::json2(concretized));
     }
 
     if is_empty_json2_type(json_type) {

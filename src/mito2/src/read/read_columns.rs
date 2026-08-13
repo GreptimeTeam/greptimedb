@@ -16,10 +16,10 @@ use std::collections::BTreeMap;
 use std::mem;
 use std::sync::Arc;
 
-use datatypes::prelude::ConcreteDataType;
+use datatypes::types::json_type::JsonNativeType;
 use store_api::storage::ColumnId;
 
-pub(crate) type JsonTargetTypes = Arc<BTreeMap<ColumnId, ConcreteDataType>>;
+pub(crate) type JsonTargetTypes = Arc<BTreeMap<ColumnId, JsonNativeType>>;
 
 /// Logical columns to read from a region.
 ///
@@ -45,7 +45,7 @@ impl ReadColumns {
 
     pub fn with_json_target_types(
         mut self,
-        json_target_types: BTreeMap<ColumnId, ConcreteDataType>,
+        json_target_types: BTreeMap<ColumnId, JsonNativeType>,
     ) -> Self {
         self.json_target_types = Arc::new(json_target_types);
         self
@@ -67,7 +67,7 @@ impl ReadColumns {
         &self.json_target_types
     }
 
-    pub fn json_target_type(&self, column_id: ColumnId) -> Option<&ConcreteDataType> {
+    pub fn json_target_type(&self, column_id: ColumnId) -> Option<&JsonNativeType> {
         self.json_target_types.get(&column_id)
     }
 
@@ -75,6 +75,6 @@ impl ReadColumns {
         self.col_ids.capacity() * mem::size_of::<ColumnId>()
             + self.col_ids.len() * mem::size_of::<ColumnId>()
             + self.json_target_types.len()
-                * (mem::size_of::<ColumnId>() + mem::size_of::<ConcreteDataType>())
+                * (mem::size_of::<ColumnId>() + mem::size_of::<JsonNativeType>())
     }
 }

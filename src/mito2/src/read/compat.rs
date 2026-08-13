@@ -103,7 +103,7 @@ impl FlatCompatBatch {
                 .iter()
                 .position(|(actual_column_id, _)| actual_column_id == column_id)
             {
-                actual_schema[i].1 = target_type.clone();
+                actual_schema[i].1 = ConcreteDataType::json2(target_type.clone());
             }
         }
 

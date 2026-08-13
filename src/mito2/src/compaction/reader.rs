@@ -21,7 +21,6 @@ use common_time::timestamp::TimeUnit;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::extension::json::is_json2_extension_type;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
@@ -129,10 +128,10 @@ impl CompactionSstReaderBuilder<'_> {
             .as_ref()
             .map(|hint| {
                 hint.iter()
-                    .filter_map(|(column_name, json_type)| {
-                        self.metadata.column_by_name(column_name).map(|column| {
-                            (column.column_id, ConcreteDataType::json2(json_type.clone()))
-                        })
+                    .filter_map(|(col_name, json_type)| {
+                        self.metadata
+                            .column_by_name(col_name)
+                            .map(|col| (col.column_id, json_type.clone()))
                     })
                     .collect::<BTreeMap<_, _>>()
             })
