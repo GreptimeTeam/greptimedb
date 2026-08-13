@@ -145,3 +145,61 @@ SELECT json_path_match(parse_json('null'), '$.a == 1');
 |                                                            |
 +------------------------------------------------------------+
 
+--- json_object ---
+SELECT json_to_string(json_object('a', 1, 'b', 'text', 'c', true, 'd', 1.5));
+
++-----------------------------------------------------------------------------------------------------------------------+
+| json_to_string(json_object(Utf8("a"),Int64(1),Utf8("b"),Utf8("text"),Utf8("c"),Boolean(true),Utf8("d"),Float64(1.5))) |
++-----------------------------------------------------------------------------------------------------------------------+
+| {"a":1,"b":"text","c":true,"d":1.5}                                                                                   |
++-----------------------------------------------------------------------------------------------------------------------+
+
+SELECT json_to_string(json_object('nul', NULL));
+
++-----------------------------------------------+
+| json_to_string(json_object(Utf8("nul"),NULL)) |
++-----------------------------------------------+
+| {"nul":null}                                  |
++-----------------------------------------------+
+
+SELECT json_to_string(json_object('nl', concat('line1', chr(10), 'line2'), 'q', 'quote"back\slash'));
+
++-------------------------------------------------------------------------------------------------------------------------------+
+| json_to_string(json_object(Utf8("nl"),concat(Utf8("line1"),chr(Int64(10)),Utf8("line2")),Utf8("q"),Utf8("quote"back\slash"))) |
++-------------------------------------------------------------------------------------------------------------------------------+
+| {"nl":"line1\nline2","q":"quote\"back\\slash"}                                                                                |
++-------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT json_object('a');
+
+Error: 3001(EngineExecuteQuery), Execution error: json_object expects (key, value) argument pairs, got 1 arguments
+
+SELECT json_object(NULL, 1);
+
+Error: 3001(EngineExecuteQuery), Execution error: json_object does not allow NULL keys
+
+SELECT json_object('ts', to_timestamp(0));
+
+Error: 3001(EngineExecuteQuery), Execution error: json_object does not support values of type Timestamp(ns); cast the value to a string
+
+CREATE TABLE json_object_src (ts TIMESTAMP TIME INDEX, host STRING, pid BIGINT);
+
+Affected Rows: 0
+
+INSERT INTO json_object_src VALUES (0, 'h1', 42), (1, NULL, 7);
+
+Affected Rows: 2
+
+SELECT json_to_string(json_object('host', host, 'pid', pid)) FROM json_object_src ORDER BY ts;
+
++------------------------------------------------------------------------------------------------+
+| json_to_string(json_object(Utf8("host"),json_object_src.host,Utf8("pid"),json_object_src.pid)) |
++------------------------------------------------------------------------------------------------+
+| {"host":"h1","pid":42}                                                                         |
+| {"host":null,"pid":7}                                                                          |
++------------------------------------------------------------------------------------------------+
+
+DROP TABLE json_object_src;
+
+Affected Rows: 0
+
