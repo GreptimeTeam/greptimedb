@@ -25,7 +25,6 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::warn;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -317,6 +316,8 @@ impl SeriesScan {
         explain_verbose: bool,
     ) -> Result<ScanBatchStream> {
         self.maybe_start_candidate_distributor(metrics_set, explain_verbose);
+        // Safety: `scan_batch_in_partition` validates the index, and the receiver
+        // list always contains one entry for each output partition.
         let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
             .take()
             .context(ScanMultiTimesSnafu { partition })?;
@@ -337,6 +338,7 @@ impl SeriesScan {
                 let input = input?;
                 metrics.scan_cost += fetch_start.elapsed();
 
+                let build_start = Instant::now();
                 let reader = SeriesReader::try_new(
                     stream_ctx.clone(),
                     partition_ranges.clone(),
@@ -346,6 +348,7 @@ impl SeriesScan {
                     part_metrics.clone(),
                 )?;
                 let mut reader_stream = reader.build_stream().await?;
+                metrics.scan_cost += build_start.elapsed();
                 fetch_start = Instant::now();
                 while let Some(record_batch) = reader_stream.try_next().await? {
                     metrics.scan_cost += fetch_start.elapsed();
@@ -847,19 +850,12 @@ impl SeriesCandidateDistributor {
         );
         part_metrics.on_first_poll();
 
-        let memory_pool: Arc<dyn MemoryPool> = if self.stream_ctx.input.scan_memory_limit == 0 {
-            Arc::new(UnboundedMemoryPool::default())
-        } else {
-            Arc::new(GreedyMemoryPool::new(
-                self.stream_ctx.input.scan_memory_limit,
-            ))
-        };
         let candidate_scanner = SeriesCandidateScanner::try_new(
             self.stream_ctx.clone(),
             self.partitions.clone(),
             self.pruner.clone(),
             self.range_semaphore.clone(),
-            memory_pool,
+            self.stream_ctx.input.scan_memory_pool.clone(),
             self.metrics_set.clone(),
             part_metrics.clone(),
         )?;
