@@ -19,17 +19,19 @@ use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, ArrayRef, AsArray, BinaryViewBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType, Float64Type, Int64Type, UInt64Type};
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 
 use crate::function::Function;
 
 const NAME: &str = "json_object";
 
 /// Builds a `JSONB` object from interleaved `(key, value, key, value, ...)`
-/// arguments, like MySQL's `JSON_OBJECT`. Values are written into the binary
-/// directly, so they need no JSON text escaping. Keys must be non-NULL strings;
-/// values may be strings, numbers, booleans, or NULL (rendered as JSON null).
-/// A duplicate key keeps the last value.
+/// arguments, like MySQL's `JSON_OBJECT`; called with no arguments it returns
+/// `{}`. Values are written into the binary directly, so they need no JSON
+/// text escaping. Keys must be non-NULL strings; values may be strings,
+/// integers, floats, booleans, or NULL (rendered as JSON null). Other types —
+/// including decimals, which JSONB numbers cannot represent exactly — are
+/// rejected; cast them explicitly. A duplicate key keeps the last value.
 #[derive(Clone, Debug)]
 pub(crate) struct JsonObjectFunction {
     signature: Signature,
@@ -38,7 +40,10 @@ pub(crate) struct JsonObjectFunction {
 impl Default for JsonObjectFunction {
     fn default() -> Self {
         Self {
-            signature: Signature::variadic_any(Volatility::Immutable),
+            signature: Signature::one_of(
+                vec![TypeSignature::Nullary, TypeSignature::VariadicAny],
+                Volatility::Immutable,
+            ),
         }
     }
 }
@@ -121,7 +126,7 @@ impl Function for JsonObjectFunction {
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        if arrays.is_empty() || arrays.len() % 2 != 0 {
+        if arrays.len() % 2 != 0 {
             return Err(DataFusionError::Execution(format!(
                 "{NAME} expects (key, value) argument pairs, got {} arguments",
                 arrays.len()
@@ -145,7 +150,7 @@ impl Function for JsonObjectFunction {
             })
             .collect::<datafusion_common::Result<Vec<_>>>()?;
 
-        let rows = arrays[0].len();
+        let rows = arrays.first().map_or(args.number_rows, |a| a.len());
         let mut builder = BinaryViewBuilder::with_capacity(rows);
         let mut buf = Vec::new();
         for row in 0..rows {
@@ -220,9 +225,6 @@ mod tests {
             2,
         )
         .unwrap();
-        // Keys come out sorted (JSONB objects are key-ordered); the raw control
-        // character survives as a proper JSON escape; NULL values (typed or
-        // Null-typed) are JSON null.
         assert_eq!(
             texts,
             vec![
@@ -230,6 +232,11 @@ mod tests {
                 r#"{"host":null,"pid":7,"up":true,"v":null}"#,
             ]
         );
+    }
+
+    #[test]
+    fn empty_call_builds_one_empty_object_per_row() {
+        assert_eq!(invoke(vec![], 3).unwrap(), vec!["{}", "{}", "{}"]);
     }
 
     #[test]

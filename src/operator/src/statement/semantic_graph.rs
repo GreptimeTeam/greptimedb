@@ -487,9 +487,6 @@ static JSON_OBJECT_UDF: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
 /// column does not null the entry (descriptive columns are nullable). Keys come
 /// out sorted — JSONB objects are key-ordered regardless of input order.
 fn json_object_expr(columns: &[String]) -> Expr {
-    if columns.is_empty() {
-        return parse_json_expr(lit("{}"));
-    }
     let mut args = Vec::with_capacity(columns.len() * 2);
     for column in columns {
         args.push(lit(column.as_str()));
