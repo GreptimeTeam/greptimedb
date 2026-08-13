@@ -65,7 +65,7 @@ snafu.workspace = true
 sql.workspace = true
 store-api.workspace = true
 table.workspace = true
-uddsketch.workspace = true
+uddsketch-rs.workspace = true
 vu128.workspace = true
 wkt = { version = "0.11", optional = true }
 

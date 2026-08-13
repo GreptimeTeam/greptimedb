@@ -15828,7 +15828,8 @@ checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 [[package]]
 name = "uddsketch-rs"
 version = "0.1.0"
-source = "git+https://github.com/v0y4g3r/uddsketch-rs?rev=22be4bff8ba98aa926160eeaaf37963f53f8abe8#22be4bff8ba98aa926160eeaaf37963f53f8abe8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f0495d3e02c0e9b074e5631de7af419b9f4fdbfec4b1ca1b3180c8b3a926cb5"
 dependencies = [
  "thiserror 2.0.17",
  "vu128",
