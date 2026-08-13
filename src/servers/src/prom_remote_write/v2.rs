@@ -22,7 +22,6 @@ use api::greptime_proto::io::prometheus::write::v2::{
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Request, TimeSeries};
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value,
@@ -58,8 +57,8 @@ use crate::semantic::{
     openmetrics_unit_to_ucum,
 };
 
-type PromTags = Vec<(String, String)>;
-type ResolvedSeriesLabels = (PromCtx, String, PromTags);
+type PromTags<'a> = Vec<(&'a str, String)>;
+type ResolvedSeriesLabels<'a> = (PromCtx, String, PromTags<'a>);
 const MAX_REMOTE_WRITE_V2_SCHEMA: i32 = 8;
 const MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA: i32 = 52;
 
@@ -389,7 +388,7 @@ enum SeriesWriter<'a> {
 fn decode_series_leaves(
     mut buf: &[u8],
     mut writer: Option<SeriesWriter<'_>>,
-    mut tags: PromTags,
+    mut tags: PromTags<'_>,
     mut rows_remaining: usize,
     scratch: &mut LeafScratch,
 ) -> Result<()> {
@@ -420,15 +419,16 @@ fn decode_series_leaves(
                 })?;
                 if let Some(SeriesWriter::Samples(table_data)) = &mut writer {
                     if sample_row_template.is_none() {
-                        let timestamp_index =
-                            table_data.ensure_column(time_index_column_schema(
-                                greptime_timestamp(),
-                                ColumnDataType::TimestampMillisecond,
-                            ))?;
-                        let value_index = table_data.ensure_column(field_column_schema(
+                        let timestamp_index = table_data.ensure_column_by_name(
+                            greptime_timestamp(),
+                            ColumnDataType::TimestampMillisecond,
+                            SemanticType::Timestamp,
+                        )?;
+                        let value_index = table_data.ensure_column_by_name(
                             greptime_value(),
                             ColumnDataType::Float64,
-                        ))?;
+                            SemanticType::Field,
+                        )?;
                         let mut row = table_data.alloc_one_row();
                         row_writer::write_tags(
                             table_data,
@@ -577,10 +577,10 @@ fn get_or_create_table_data(
     }
 }
 
-fn write_native_histogram(
+fn write_native_histogram<'a>(
     table_data: &mut TableData,
     histogram: &Histogram,
-    tags: impl Iterator<Item = (String, String)>,
+    tags: impl Iterator<Item = (&'a str, String)>,
 ) -> Result<()> {
     // Persist both int and float families into the logical table schema. Only one
     // family is populated per row; the other is written as NULL so PromQL can
@@ -1108,11 +1108,11 @@ fn bucket_counts_from_deltas(deltas: &[i64]) -> Result<Vec<i64>> {
     Ok(buckets)
 }
 
-fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
+fn ensure_no_internal_histogram_labels(tags: &PromTags<'_>) -> Result<()> {
     // The histogram field column is generated from the protobuf payload.
     for (name, _) in tags {
         ensure!(
-            name != greptime_native_histogram() && name != NATIVE_HISTOGRAM_FIELD,
+            *name != greptime_native_histogram() && *name != NATIVE_HISTOGRAM_FIELD,
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 label `{name}` conflicts with an internal native histogram label"
@@ -1128,7 +1128,7 @@ fn resolve_series_labels<'a>(
     symbols: &'a [&str],
     labels_refs: &[u32],
     label_names: &mut HashSet<&'a str>,
-) -> Result<ResolvedSeriesLabels> {
+) -> Result<ResolvedSeriesLabels<'a>> {
     ensure!(
         labels_refs.len().is_multiple_of(2),
         error::InvalidPromRemoteRequestSnafu {
@@ -1160,7 +1160,7 @@ fn resolve_series_labels<'a>(
             continue;
         }
 
-        tags.push((name.to_string(), value.to_string()));
+        tags.push((name, value.to_string()));
     }
 
     let table_name = table_name.with_context(|| error::InvalidPromRemoteRequestSnafu {
@@ -2383,7 +2383,7 @@ mod tests {
         assert_eq!(greptime_native_histogram(), "custom_native_histogram");
 
         let err = ensure_no_internal_histogram_labels(&vec![(
-            NATIVE_HISTOGRAM_FIELD.to_string(),
+            NATIVE_HISTOGRAM_FIELD,
             "user_value".to_string(),
         )])
         .unwrap_err();
