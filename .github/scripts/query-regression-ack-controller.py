@@ -15,45 +15,66 @@
 
 """Trusted controller for the one-shot ACK query-regression benchmark Job.
 
-This script is trusted base/default-branch code: the controller job restores
-it (and the other trusted scripts) from the verified base commit via `git
-show` into a fresh ``$RUNNER_TEMP`` directory, and only that restored copy is
-executed. A PR cannot replace it, and it is never taken from the build
-artifact.
+This script is trusted default-branch code: the controller workflow (a
+``workflow_run`` follower of the unprivileged ``Query Regression`` build
+workflow) checks out the repository default branch and executes this script
+from that checkout. A PR cannot replace it, and it is never taken from the
+build artifact.
 
-Trust boundaries (v1, pragmatic):
+Trust boundaries (v2, secure architecture):
 
-* The controller job runs on the trusted local self-hosted runner
-  (`perf-regression-8-cores`) which holds the GitHub runner token and the ACK
-  kubeconfig. It never executes candidate payload locally: candidate binaries,
-  scripts, and cases are copied into the ACK Job pod and run only there.
-* Base and candidate binaries travel in two separate immutable artifacts. The
-  base artifact is uploaded *before* any candidate-controlled build step runs,
-  so candidate build scripts cannot overwrite the base binary. Both artifacts
-  are downloaded by exact artifact ID (build job outputs) and their manifests
-  are cross-validated against the verified SHAs; the candidate checkout HEAD
-  must equal the verified candidate SHA.
-* All candidate-controlled payload paths (the driver script and the
-  recursive tests/perf tree) are scanned before copying: every symlink in any
-  path component from the candidate root down (ancestor symlinks included) and
-  every non-regular file (FIFO, socket, device) is rejected, sources are
-  resolved, and containment under the resolved candidate checkout root is
-  enforced. A candidate symlink is never dereferenced.
-* The benchmark Job pod has `automountServiceAccountToken: false`, no GitHub /
-  cloud / kube credentials, no secrets, non-root UID/GID 1001, seccomp
-  RuntimeDefault, no privilege escalation, and all capabilities dropped. It
-  runs the digest-pinned runtime image on the dedicated
-  `alibabacloud.com/nodepool-id=npb5ff93bea3a447a698fe31ebc997ea31` bulk pool
-  (which must carry the `dedicated=perf-regression:NoSchedule` taint). The
+* The **build** workflow (``query-regression.yml``) is unprivileged: it runs
+  on the local ARC runner, compiles base/candidate binaries, uploads the base
+  artifact *before* any candidate-controlled build step runs, then uploads the
+  candidate artifact and a strict metadata artifact. It has no ACK/cloud
+  credential references, no kubeconfig, no kubectl cluster calls, and no
+  privileged controller job.
+* The **controller** workflow (``query-regression-controller.yml``) is a
+  trusted default-branch follower. It never checks out or executes PR code.
+  Its admission step validates the originating run/artifacts/PR/SHA chain
+  from GitHub API data (see ``query-regression-admission.cjs``) and only then
+  downloads the base/candidate artifacts by exact validated ids and executes
+  this script with the validated values. The metadata artifact is treated as
+  untrusted; every cross-checkable field is re-validated against the API, and
+  the manifests inside the artifacts are re-checked against the validated
+  SHAs here.
+* The controller requires a **runner-local kubeconfig** whose active user uses
+  an ``exec`` credential plugin (a short-lived-token broker). The kubeconfig
+  is never a GitHub secret, is never printed, and fails closed if it embeds a
+  token, client key/cert (inline data or file-backed), username/password,
+  auth-provider, or static exec env secrets. Token refresh is 10-15 minutes
+  (see the README); the
+  runner itself must be a trusted external/hardware identity.
+* Every kubectl call uses exactly the kubeconfig ``current-context`` that
+  ``validate_kubeconfig`` resolved and verified exec-only. Context overrides
+  are removed or fail closed: the ``--context`` flag / ``KUBECTL_CONTEXT``
+  env override is deleted from the CLI (argparse rejects ``--context``), and
+  ``KUBECTL_CONTEXT`` is stripped from every kubectl subprocess environment,
+  so no runner-side override can redirect the controller to a different
+  cluster than the validated exec-plugin kubeconfig's current-context.
+* The benchmark Job is created in the fixed namespace
+  ``query-regression-perf`` with a deterministic name
+  ``query-regression-<run-id>-<attempt>``. The namespace/image are not
+  overridable. The payload byte size is measured before Job creation and
+  capped conservatively under the 40Gi ephemeral-storage limit.
+* The benchmark Job pod has ``automountServiceAccountToken: false``, the
+  tokenless ``query-regression-workload`` service account, no GitHub / cloud /
+  kube credentials, no secrets, non-root UID/GID 1001, seccomp RuntimeDefault,
+  no privilege escalation, and all capabilities dropped. It runs the
+  digest-pinned runtime image on the dedicated
+  ``alibabacloud.com/nodepool-id=npb5ff93bea3a447a698fe31ebc997ea31`` bulk pool
+  (which must carry the ``dedicated=perf-regression:NoSchedule`` taint). The
   ACK pod runs only the performance driver and its required helpers; no
-  tooling/unit tests run on ACK.
+  tooling/unit tests run on ACK. Server-side ValidatingAdmissionPolicies
+  (deployment-gated) and RBAC/quota/network-policy manifests under
+  ``.github/runner-scale-sets/query-regression/ack/`` cap a stolen controller
+  credential to one conforming Job/Pod in an otherwise sterile namespace.
 * Nodepool scaling is implicit only: the Pending Job pod is the scale-up
   signal for ACK Cluster Autoscaler and foreground deletion of the Job/pod is
   the scale-down signal. This controller never calls any nodepool API.
-* The Job name is deterministic per run: `query-regression-<run-id>-<attempt>`.
-  Deletion is exact-name validated against that pattern, retried with a
-  bounded number of attempts, and the Job's absence is verified before the
-  controller reports success. If deletion cannot be confirmed the workflow
+* Deletion is exact-name validated against the deterministic pattern, retried
+  with a bounded number of attempts, and the Job's absence is verified before
+  the controller reports success. If deletion cannot be confirmed the workflow
   fails even when the benchmark itself reported status 0.
 * Result collection is mandatory: the controller fails the run (status != 0)
   when the required report files or the summary are missing or invalid.
@@ -73,11 +94,12 @@ Trust boundaries (v1, pragmatic):
   hard cancellation (SIGKILL / run cancellation): no further steps or jobs
   run, so the workflow also includes a separate ``if: always()`` second-
   process cleanup step, and the README documents deterministic exact-name
-  recovery plus the residual need for an independent reaper or manual cleanup.
+  recovery plus the residual need for an independent reaper or manual cleanup
+  (``ttlSecondsAfterFinished`` bounds the leak server-side).
 
 Future hardening (documented, not implemented here): replace `kubectl cp` /
 exec-gated markers with an init container + signed object-storage upload so the
-cluster RBAC no longer needs `pods/exec`.
+cluster RBAC no longer needs ``pods/exec``.
 """
 
 from __future__ import annotations
@@ -93,7 +115,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+try:  # PyYAML is optional for structured kubeconfig validation; the raw scan
+    # still fails closed on every banned key without it.
+    import yaml
+except ImportError:  # pragma: no cover - depends on the environment
+    yaml = None
 
 # ---------------------------------------------------------------------------
 # Time source (indirection so tests can drive a fake clock)
@@ -134,11 +162,26 @@ def clamp_remaining_or_raise(remaining: float, requested: int, what: str) -> int
 # ---------------------------------------------------------------------------
 
 # Deterministic per-run Job name pattern. `run-id`/`run-attempt` are decimal
-# GitHub run identifiers, so the name is always lowercase alphanumeric plus
-# dashes, within the 63-char label/name segment limit.
+# GitHub run identifiers of the *originating* build run, so the name is always
+# lowercase alphanumeric plus dashes, within the 63-char label/name segment
+# limit, and stable for the reaper.
 JOB_NAME_RE = re.compile(r"^query-regression-[1-9][0-9]*-[1-9][0-9]*$")
 
-DEFAULT_NAMESPACE = "arc-runners"
+# Fixed, non-overridable Job namespace (requirement: namespace override removed
+# or fail-closed to the exact name; the override is removed entirely).
+DEFAULT_NAMESPACE = "query-regression-perf"
+
+# Fixed, non-overridable digest-pinned runtime image (the same image the ARC
+# runner scale sets used; no new image is built or pushed by this change).
+DEFAULT_IMAGE = (
+    "greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/"
+    "greptimedb-query-regression-runner@sha256:"
+    "e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11"
+)
+
+# Conservative pre-Job payload byte cap, well under the pod's 40Gi
+# ephemeral-storage limit (2 GiB).
+PAYLOAD_BYTES_CAP_DEFAULT = 2 * 1024**3
 
 # The ACK bulk-ingestion nodepool (Hangzhou cluster bulk-ingestion-test). The
 # nodepool taint dedicated=perf-regression:NoSchedule must be present.
@@ -150,20 +193,12 @@ NODEPOOL_TAINT = {
     "effect": "NoSchedule",
 }
 
-# Digest-pinned runtime image (same image the ARC runner scale sets used; no
-# new image is built or pushed by this change).
-DEFAULT_IMAGE = (
-    "greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/"
-    "greptimedb-query-regression-runner@sha256:"
-    "e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11"
-)
-
 # One global monotonic lifecycle budget. The controller job timeout is
 # WORKFLOW_JOB_TIMEOUT_SECONDS (180 min) and must strictly exceed the
 # controller lifecycle LIFECYCLE_TIMEOUT_DEFAULT (150 min) by at least
-# SETUP_AND_OUTER_CLEANUP_MARGIN_MINIMUM (25 min) so that checkout, trusted
-# script restore, artifact download/attestation, kubeconfig setup, and the
-# second-process cleanup-only step all fit inside the job. Normal phases
+# SETUP_AND_OUTER_CLEANUP_MARGIN_MINIMUM (25 min) so that checkout, admission,
+# artifact download/attestation, kubeconfig setup, and the second-process
+# cleanup-only step all fit inside the job. Normal phases
 # (pod-ready, payload transfer, benchmark + mandatory collection) clamp to
 # cleanup_begins = hard_deadline - CLEANUP_RESERVE_DEFAULT, so no ordinary
 # path can consume the reserve; deletion is the only operation allowed inside
@@ -185,8 +220,10 @@ CANCELLATION_DELETE_BUDGET = 120     # short bounded deletion on SIGTERM/SIGINT 
 CLEANUP_ONLY_BUDGET = 600            # second-process cleanup-only deletion budget (s)
 
 # Total bound on the pod lifetime. Reached only if the controller dies; the
-# controller's own budgets are all shorter.
+# controller's own budgets are all shorter. TTL-based Job cleanup (600 s after
+# finish) bounds the leak server-side.
 ACTIVE_DEADLINE_SECONDS = 10800
+TTL_SECONDS_AFTER_FINISHED = 600
 
 # Env vars the controller passes through from its own environment into the
 # benchmark Job pod. None of these can carry credentials.
@@ -224,12 +261,71 @@ BIN_PATH_MAP = {
     "/payload/bins/candidate/query_regression_runner": "query-regression-bins/candidate/query_regression_runner",
 }
 
-# Trusted scripts restored by the workflow from the verified base commit; the
-# controller verifies the summary script against the recorded manifest.
+# ---------------------------------------------------------------------------
+# kubectl ABI pin and canonical exec/cp protocol
+# ---------------------------------------------------------------------------
+# The controller's `kubectl exec`/`kubectl cp` invocations translate into
+# CONNECT requests whose argv and stream flags depend on the exact kubectl
+# client version (kubectl cp shells out to remote `tar`). The deployment-gated
+# exec ValidatingAdmissionPolicy allows exactly these argv+stream tuples, so
+# the client version is an ABI: the controller fails closed unless the
+# runner's kubectl matches this exact pinned patch version. Upgrading kubectl
+# requires bumping this pin, updating the tuples below (the offline policy
+# test cross-checks them against the VAP), and re-running apply-test.sh's
+# disposable-canary exec/cp validation.
+KUBECTL_PINNED_VERSION = "v1.34.2"
+
+# Plain `kubectl exec <ns>/<pod> -- sh -c '<script>'` invocations. kubectl
+# sends no -i/-t, so the CONNECT stream flags are stdin=false, stdout=true,
+# stderr=true, tty=false. Each script is exactly one argv tuple in the exec
+# policy allowlist; changing one here requires changing the VAP with it.
+EXEC_LAYOUT_CHECK = (
+    "test -f /payload/run.sh && test -d /payload/bins/base && "
+    "test -d /payload/bins/candidate && test -d /payload/repo/tests/perf/query_cases"
+)
+EXEC_CHMOD = (
+    "chmod +x /payload/run.sh /payload/bins/base/greptime "
+    "/payload/bins/candidate/greptime /payload/bins/candidate/query_perf_fixture "
+    "/payload/bins/candidate/query_regression_runner"
+)
+EXEC_SHA256 = "sha256sum " + " ".join(BIN_PATH_MAP)
+EXEC_READY = "touch /payload/.ready"
+EXEC_DONE = "test -f /work/.done"
+EXEC_STATUS = "cat /work/benchmark-status 2>/dev/null || true"
+EXEC_COLLECTED = "touch /work/.collected"
+EXEC_SCRIPTS = [
+    EXEC_LAYOUT_CHECK,
+    EXEC_CHMOD,
+    EXEC_SHA256,
+    EXEC_READY,
+    EXEC_DONE,
+    EXEC_STATUS,
+    EXEC_COLLECTED,
+]
+EXEC_STREAMS = {"stdin": False, "stdout": True, "stderr": True, "tty": False}
+
+# `kubectl cp` remote `tar` argv for the pinned kubectl ABI. Push pipes a
+# local `tar cf -` into `kubectl exec -i <pod> -- tar xmf - -C <dest>`; pull
+# runs `kubectl exec <pod> -- tar cf - <abspath>` piped to a local untar.
+# Stream flags follow how the pinned kubectl wires the remoteexec streams
+# (stdout is always wired; stdin only for push). These tuples are part of the
+# exec policy allowlist and are verified end-to-end by apply-test.sh's canary;
+# if the pinned kubectl ever differs, update constants + VAP + tests together.
+CP_PUSH_COMMANDS = [["tar", "xmf", "-", "-C", "/payload"]]
+CP_PUSH_STREAMS = {"stdin": True, "stdout": True, "stderr": True, "tty": False}
+CP_PULL_COMMANDS = [
+    ["tar", "cf", "-", "/work/query-regression-work"],
+    ["tar", "cf", "-", "/work/query-regression-summary.md"],
+]
+CP_PULL_STREAMS = {"stdin": False, "stdout": True, "stderr": True, "tty": False}
+
+# Trusted scripts restored by the workflow from the default-branch checkout;
+# the controller verifies the summary script against the recorded manifest.
+# query-regression-pr-metadata.py is retired: the controller regenerates the
+# comment metadata from the validated admission values.
 TRUSTED_SCRIPT_NAMES = [
     "query-regression-ack-controller.py",
     "query-regression-summary.py",
-    "query-regression-pr-metadata.py",
 ]
 
 # Pod entrypoint: wait for the payload marker (bounded), then run the trusted
@@ -259,8 +355,8 @@ exec /bin/bash /payload/run.sh
 RUN_SH_TEMPLATE = """\
 #!/bin/bash
 # Trusted query-regression ACK Job entrypoint, generated by
-# query-regression-ack-controller.py (base-branch code). Executes only inside
-# the one-shot ACK benchmark Job pod, never on the credentialed runner.
+# query-regression-ack-controller.py (default-branch code). Executes only
+# inside the one-shot ACK benchmark Job pod, never on the credentialed runner.
 # ACK runs performance regression only.
 set -euo pipefail
 
@@ -419,14 +515,13 @@ def build_manifest(
     run_id: int,
     run_attempt: int,
     job_name: str,
-    namespace: str,
-    image: str,
     base_sha: str,
     candidate_sha: str,
 ) -> dict[str, Any]:
-    if "@sha256:" not in image:
+    """Render the one-shot benchmark Job manifest (fixed namespace/image)."""
+    if "@sha256:" not in DEFAULT_IMAGE:
         raise ControllerError(
-            f"benchmark Job image must be digest-pinned (contain '@sha256:'): {image!r}"
+            f"benchmark Job image must be digest-pinned (contain '@sha256:'): {DEFAULT_IMAGE!r}"
         )
     labels = {
         "app": "query-regression",
@@ -443,7 +538,7 @@ def build_manifest(
         "kind": "Job",
         "metadata": {
             "name": job_name,
-            "namespace": namespace,
+            "namespace": DEFAULT_NAMESPACE,
             "labels": labels,
             "annotations": annotations,
         },
@@ -452,10 +547,13 @@ def build_manifest(
             "completions": 1,
             "parallelism": 1,
             "activeDeadlineSeconds": ACTIVE_DEADLINE_SECONDS,
+            "ttlSecondsAfterFinished": TTL_SECONDS_AFTER_FINISHED,
+            "podReplacementPolicy": "Failed",
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
                     "automountServiceAccountToken": False,
+                    "serviceAccountName": "query-regression-workload",
                     "restartPolicy": "Never",
                     "nodeSelector": NODEPOOL_SELECTOR,
                     "tolerations": [NODEPOOL_TAINT],
@@ -469,7 +567,7 @@ def build_manifest(
                     "containers": [
                         {
                             "name": "benchmark",
-                            "image": image,
+                            "image": DEFAULT_IMAGE,
                             "imagePullPolicy": "IfNotPresent",
                             "command": ["/bin/sh", "-c"],
                             "args": [BOOTSTRAP_SCRIPT],
@@ -552,7 +650,7 @@ def resolve_contained(path: Path, root: Path, label: str) -> Path:
     try:
         rel = path.relative_to(root)
     except ValueError:
-        raise ControllerError(f"{label} is not under the candidate checkout root: {path}")
+        raise ControllerError(f"{label} is not under the candidate artifact root: {path}")
     cursor = root
     for part in rel.parts:
         cursor = cursor / part
@@ -562,7 +660,7 @@ def resolve_contained(path: Path, root: Path, label: str) -> Path:
             )
     resolved = path.resolve()
     if not resolved.is_relative_to(root_resolved):
-        raise ControllerError(f"{label} escapes the candidate checkout root: {resolved}")
+        raise ControllerError(f"{label} escapes the candidate artifact root: {resolved}")
     return resolved
 
 
@@ -580,7 +678,6 @@ def load_manifest(artifact_dir: Path, name: str) -> dict[str, Any]:
 def assemble_payload(
     base_artifact_dir: Path,
     candidate_artifact_dir: Path,
-    candidate_src: Path,
     trusted_summary: Path,
     payload_dir: Path,
 ) -> Path:
@@ -590,11 +687,14 @@ def assemble_payload(
       bins/...                     base + candidate binaries (two artifacts)
       repo/tests/perf/**           candidate case files (symlink-free, contained)
       repo/.github/scripts/query-regression-run.py   candidate driver (PR content)
-      repo/.github/scripts/query-regression-summary.py  TRUSTED (verified base commit)
+      repo/.github/scripts/query-regression-summary.py  TRUSTED (default branch)
       run.sh                       generated from the trusted template
 
-    The controller only copies these files; candidate content is executed
-    exclusively inside the ACK pod.
+    The controller workflow never checks out PR code: the candidate driver and
+    the tests/perf tree travel inside the candidate artifact (staged by the
+    unprivileged build workflow) and are copied from there, after the same
+    symlink/containment rejection as the binaries. The controller only copies
+    these files; candidate content is executed exclusively inside the ACK pod.
     """
     if payload_dir.exists():
         shutil.rmtree(payload_dir)
@@ -619,20 +719,23 @@ def assemble_payload(
 
     # Candidate-controlled case tree: enforce containment + reject every
     # symlink component (ancestors included) and non-regular file, then copy
-    # (no symlinks remain, so nothing is dereferenced).
+    # (no symlinks remain, so nothing is dereferenced). It lives inside the
+    # candidate artifact: repo/tests/perf.
     tests_perf = resolve_contained(
-        candidate_src / "tests" / "perf", candidate_src, "candidate tests/perf"
+        candidate_artifact_dir / "repo" / "tests" / "perf",
+        candidate_artifact_dir,
+        "candidate tests/perf",
     )
     if not tests_perf.is_dir():
-        raise ControllerError(f"candidate checkout has no tests/perf directory: {tests_perf}")
+        raise ControllerError(f"candidate artifact has no repo/tests/perf directory: {tests_perf}")
     reject_non_regular(tests_perf, "candidate tests/perf")
     shutil.copytree(tests_perf, payload_dir / "repo" / "tests" / "perf", symlinks=False)
 
     # Candidate-controlled driver: resolve, enforce containment, reject
     # symlink components, and require a regular file.
     driver = resolve_contained(
-        candidate_src / ".github" / "scripts" / "query-regression-run.py",
-        candidate_src,
+        candidate_artifact_dir / "repo" / ".github" / "scripts" / "query-regression-run.py",
+        candidate_artifact_dir,
         "candidate driver",
     )
     if not driver.is_file():
@@ -641,8 +744,8 @@ def assemble_payload(
     driver_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(driver, driver_dst)
 
-    # Trusted summary script: comes from the verified base commit via the
-    # workflow's restore step, never from the build artifact or the candidate.
+    # Trusted summary script: comes from the default-branch checkout via the
+    # workflow, never from the build artifact or the candidate.
     if trusted_summary.is_symlink() or not trusted_summary.is_file():
         raise ControllerError(f"trusted summary script is missing or not a regular file: {trusted_summary}")
     summary_dst = payload_dir / "repo" / ".github" / "scripts" / "query-regression-summary.py"
@@ -654,24 +757,322 @@ def assemble_payload(
     return payload_dir
 
 
+def measure_payload(payload_dir: Path, cap_bytes: int) -> int:
+    """Measure the payload byte size and fail closed above the pre-Job cap.
+
+    The cap is conservative (default 2 GiB) and sits well under the pod's 40Gi
+    ephemeral-storage limit so a hostile or accidental payload can never
+    exhaust the node's storage class budget.
+    """
+    total = 0
+    for path in payload_dir.rglob("*"):
+        if path.is_file():
+            try:
+                total += path.stat().st_size
+            except OSError as err:
+                raise ControllerError(f"could not stat payload file {path}: {err}") from err
+    if total > cap_bytes:
+        raise ControllerError(
+            f"payload byte size {total} exceeds the pre-Job cap of {cap_bytes} bytes; "
+            "refusing to create the benchmark Job"
+        )
+    print(f"payload byte size: {total} (cap {cap_bytes})")
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Kubeconfig validation (runner-local exec-plugin kubeconfig, fail closed)
+# ---------------------------------------------------------------------------
+
+# Keys that, if present with a value, embed long-lived or static credentials.
+# This includes file-backed client-certificate/client-key: the exec-plugin
+# broker model must be the ONLY authentication mechanism, so no static client
+# certificate/key authentication (inline base64 data or file paths) is allowed
+# on any user, active or inactive, even when an exec block is present.
+BANNED_KUBECONFIG_KEYS = (
+    "token",
+    "tokenFile",
+    "client-key-data",
+    "client-certificate-data",
+    "client-key",
+    "client-certificate",
+    "username",
+    "password",
+    "auth-provider",
+)
+
+# Exec env names that could carry a credential. Fail closed on any of these.
+SECRET_ENV_NAME_RE = re.compile(
+    r"(token|secret|password|credential|access[_-]?key|private[_-]?key|api[_-]?key|"
+    r"ak[_-]?(id|secret)|pem|cert)",
+    re.IGNORECASE,
+)
+
+# Credential-looking values: PEM blocks, JWTs, and long base64 blobs.
+CREDENTIAL_VALUE_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$|"
+    r"^[A-Za-z0-9+/]{40,}={0,2}$",
+    re.MULTILINE,
+)
+
+BANNED_KUBECONFIG_LINE_RE = re.compile(r"^[ \t]*([A-Za-z0-9_-]+)[ \t]*:")
+
+
+def _credential_looking(value: str) -> bool:
+    return bool(CREDENTIAL_VALUE_RE.search(value))
+
+
+def _secret_env_name(name: str) -> bool:
+    return bool(SECRET_ENV_NAME_RE.search(name))
+
+
+def validate_kubeconfig(path: Path) -> None:
+    """Validate a runner-local kubeconfig; fail closed on any embedded secret.
+
+    PyYAML is mandatory: without it the kubeconfig cannot be validated
+    structurally and the controller refuses to run. The kubeconfig must have a
+    resolvable ``current-context`` whose cluster and user exist, and the
+    ACTIVE user must use an ``exec`` credential plugin (a short-lived-token
+    broker); exec must be the active user's ONLY authentication mechanism.
+    It must not embed ``token``/``tokenFile``, ``client-key-data`` /
+    ``client-certificate-data``, file-backed ``client-certificate`` /
+    ``client-key``, ``username``/``password``, ``auth-provider``, or static
+    exec env secrets — on any user, active or inactive, even when an exec
+    block is present. The file content is never printed: errors name only the
+    path and the offending key.
+    """
+    if not path.exists():
+        raise ControllerError(f"runner-local kubeconfig not found: {path}")
+    if not path.is_file():
+        raise ControllerError(f"runner-local kubeconfig is not a regular file: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise ControllerError(f"could not read runner-local kubeconfig {path}: {err}") from err
+
+    # 1. Dependency-free raw scan: any occurrence of a banned key with a value
+    #    anywhere in the file rejects, regardless of YAML structure.
+    for line in text.splitlines():
+        match = BANNED_KUBECONFIG_LINE_RE.match(line)
+        if match and match.group(1) in BANNED_KUBECONFIG_KEYS:
+            raise ControllerError(
+                f"kubeconfig {path} embeds banned key {match.group(1)!r}; "
+                "only an exec credential plugin kubeconfig is allowed"
+            )
+
+    # 2. Structured validation. PyYAML is MANDATORY: the raw scan cannot
+    #    enforce the exec-plugin/current-context contract, so without it the
+    #    controller fails closed instead of weakening the check.
+    if yaml is None:
+        raise ControllerError(
+            "PyYAML is required to validate the runner-local kubeconfig; install it on the "
+            "query-regression-ack-controller runner (e.g. python3 -m pip install pyyaml or "
+            "uv run --no-project --with pyyaml) and re-run"
+        )
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as err:
+        raise ControllerError(f"kubeconfig {path} is not valid YAML: {err}") from err
+    if not isinstance(data, dict):
+        raise ControllerError(f"kubeconfig {path} is not a YAML mapping")
+    users = data.get("users") or []
+    clusters = data.get("clusters") or []
+    contexts = data.get("contexts") or []
+    if not isinstance(users, list):
+        raise ControllerError(f"kubeconfig {path} has no users list")
+    if not isinstance(clusters, list):
+        raise ControllerError(f"kubeconfig {path} has no clusters list")
+    if not isinstance(contexts, list):
+        raise ControllerError(f"kubeconfig {path} has no contexts list")
+
+    # 3. current-context must be present and fully resolvable: the context
+    #    must exist, and its cluster and user must exist. A kubeconfig without
+    #    an explicit active context is ambiguous and rejected.
+    current_context = data.get("current-context")
+    if not isinstance(current_context, str) or not current_context:
+        raise ControllerError(
+            f"kubeconfig {path} has no current-context; the active context must be explicit"
+        )
+    user_map = {}
+    for user_entry in users:
+        if not isinstance(user_entry, dict) or not user_entry.get("name"):
+            raise ControllerError(f"kubeconfig {path} has a malformed user entry")
+        user_map[str(user_entry["name"])] = user_entry
+    cluster_map = {}
+    for cluster_entry in clusters:
+        if not isinstance(cluster_entry, dict) or not cluster_entry.get("name"):
+            raise ControllerError(f"kubeconfig {path} has a malformed cluster entry")
+        cluster_map[str(cluster_entry["name"])] = cluster_entry
+    active_context = None
+    for ctx in contexts:
+        if isinstance(ctx, dict) and ctx.get("name") == current_context:
+            active_context = ctx
+            break
+    if active_context is None:
+        raise ControllerError(
+            f"kubeconfig {path} current-context {current_context!r} is not in contexts"
+        )
+    ctx_body = active_context.get("context") or {}
+    if not isinstance(ctx_body, dict):
+        raise ControllerError(f"kubeconfig {path} current-context {current_context!r} has a malformed context body")
+    ctx_cluster = ctx_body.get("cluster")
+    ctx_user = ctx_body.get("user")
+    if not ctx_cluster:
+        raise ControllerError(f"kubeconfig {path} current-context {current_context!r} has no cluster")
+    if not ctx_user:
+        raise ControllerError(f"kubeconfig {path} current-context {current_context!r} has no user")
+    if str(ctx_cluster) not in cluster_map:
+        raise ControllerError(
+            f"kubeconfig {path} current-context {current_context!r} references unknown cluster {ctx_cluster!r}"
+        )
+    if str(ctx_user) not in user_map:
+        raise ControllerError(
+            f"kubeconfig {path} current-context {current_context!r} references unknown user {ctx_user!r}"
+        )
+    active_user = str(ctx_user)
+
+    # 4. Per-user validation. Banned keys (static credentials, including
+    #    file-backed client-certificate/client-key) are rejected on every
+    #    user, active or inactive, even when an exec block is present. ONLY
+    #    the active user must provide exec auth (the exec requirement applies
+    #    to the user kubectl will actually authenticate as).
+    for user_name, user_entry in user_map.items():
+        user = user_entry.get("user") or {}
+        if not isinstance(user, dict):
+            raise ControllerError(f"kubeconfig {path} user {user_name!r} has no user mapping")
+        for banned in BANNED_KUBECONFIG_KEYS:
+            if banned in user:
+                raise ControllerError(
+                    f"kubeconfig {path} user {user_name!r} embeds banned key {banned!r}"
+                )
+        exec_block = user.get("exec")
+        if user_name != active_user:
+            # Inactive users: exec env policy still applies (they must not
+            # smuggle static secrets past the raw scan).
+            if isinstance(exec_block, dict):
+                _validate_exec_block(path, user_name, exec_block)
+            continue
+        if not isinstance(exec_block, dict):
+            raise ControllerError(
+                f"kubeconfig {path} active user {user_name!r} does not use an exec credential plugin"
+            )
+        _validate_exec_block(path, user_name, exec_block)
+
+    # 5. Raw credential-value scan (dependency-free): PEM/JWT/long-base64
+    #    values anywhere in the file reject.
+    if _credential_looking(text):
+        raise ControllerError(
+            f"kubeconfig {path} embeds a credential-looking value; "
+            "only an exec credential plugin kubeconfig is allowed"
+        )
+    print(f"kubeconfig {path} validated (exec-plugin, no embedded credentials)")
+
+
+def _validate_exec_block(path: Path, user_name: str, exec_block: dict) -> None:
+    """Validate one kubeconfig user exec block (apiVersion/command/args/env)."""
+    api_version = exec_block.get("apiVersion")
+    if api_version is not None and not re.match(
+        r"^client\.authentication\.k8s\.io/v1(beta1)?$", str(api_version)
+    ):
+        raise ControllerError(
+            f"kubeconfig {path} user {user_name!r} exec apiVersion {api_version!r} is not a "
+            "supported client.authentication.k8s.io version"
+        )
+    if not exec_block.get("command"):
+        raise ControllerError(f"kubeconfig {path} user {user_name!r} exec block has no command")
+    args = exec_block.get("args")
+    if args is not None:
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise ControllerError(f"kubeconfig {path} user {user_name!r} exec args must be a list of strings")
+    env_list = exec_block.get("env") or []
+    if not isinstance(env_list, list):
+        raise ControllerError(f"kubeconfig {path} user {user_name!r} exec env is not a list")
+    for entry in env_list:
+        if not isinstance(entry, dict):
+            raise ControllerError(f"kubeconfig {path} user {user_name!r} has a malformed exec env entry")
+        env_name = entry.get("name")
+        if env_name is None:
+            raise ControllerError(f"kubeconfig {path} user {user_name!r} exec env entry has no name")
+        env_value = entry.get("value")
+        if _secret_env_name(str(env_name)):
+            raise ControllerError(
+                f"kubeconfig {path} user {user_name!r} exec env {env_name!r} may carry a static secret"
+            )
+        if env_value is not None and _credential_looking(str(env_value)):
+            raise ControllerError(
+                f"kubeconfig {path} user {user_name!r} exec env {env_name!r} looks like a credential"
+            )
+
+
 # ---------------------------------------------------------------------------
 # kubectl plumbing
 # ---------------------------------------------------------------------------
 
 class Kubectl:
-    def __init__(self, binary: str, namespace: str, kubeconfig: str | None, context: str | None):
+    def __init__(self, binary: str, kubeconfig: str | None):
+        """Wrap the pinned kubectl ABI; context is never overridable.
+
+        Every invocation uses exactly the ``current-context`` of the validated
+        kubeconfig (see ``validate_kubeconfig``): no ``--context`` flag is
+        ever passed and ``KUBECTL_CONTEXT`` is stripped from the subprocess
+        environment, so a runner-side override cannot redirect the controller
+        to a different cluster.
+        """
         if shutil.which(binary) is None:
             raise ControllerError(
-                f"kubectl binary not found: {binary!r}. Install kubectl on the "
-                f"perf-regression-8-cores runner (see the query regression README)."
+                f"kubectl binary not found: {binary!r}. Install kubectl {KUBECTL_PINNED_VERSION} "
+                f"on the query-regression-ack-controller runner (see the query regression README)."
             )
         self.binary = binary
-        self.namespace = namespace
+        self.namespace = DEFAULT_NAMESPACE
         self.kubeconfig = kubeconfig
-        self.context = context
+        self._verify_pinned_version()
+
+    def _verify_pinned_version(self) -> None:
+        """Fail closed unless kubectl matches the pinned ABI version.
+
+        The exec/cp CONNECT argv and stream-flag tuples the controller sends
+        (and the deployment-gated exec ValidatingAdmissionPolicy allows) are
+        pinned to ``KUBECTL_PINNED_VERSION``; any other client version is
+        refused rather than risk a silently drifting command allowlist.
+        """
+        try:
+            proc = subprocess.run(
+                [self.binary, "version", "--client", "-o", "json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=self._env(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as err:
+            raise ControllerError(f"could not determine kubectl client version: {err}") from err
+        if proc.returncode != 0:
+            raise ControllerError(
+                f"kubectl version probe failed ({proc.returncode}): "
+                f"{proc.stderr.strip()[-500:]}"
+            )
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError as err:
+            raise ControllerError(f"unparsable kubectl version output: {err}") from err
+        version = str((data.get("clientVersion") or {}).get("gitVersion", ""))
+        if version != KUBECTL_PINNED_VERSION:
+            raise ControllerError(
+                f"kubectl client version {version!r} does not match the pinned ABI "
+                f"{KUBECTL_PINNED_VERSION!r}; the exec/cp protocol and the admission policy "
+                "allowlist are pinned to that exact version (bump the pin, update the "
+                "canonical command tuples, and re-run apply-test.sh's canary together)"
+            )
 
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
+        # Fail closed against a context override: kubectl honors a
+        # KUBECTL_CONTEXT env var from the runner environment, which would
+        # redirect calls away from the validated kubeconfig current-context.
+        # The validated kubeconfig is the ONLY configuration source kubectl
+        # may use.
+        env.pop("KUBECTL_CONTEXT", None)
         if self.kubeconfig:
             env["KUBECONFIG"] = self.kubeconfig
         return env
@@ -684,10 +1085,9 @@ class Kubectl:
         input_text: str | None = None,
         timeout: int = 180,
     ) -> subprocess.CompletedProcess[str]:
-        cmd = [self.binary]
-        if self.context:
-            cmd += ["--context", self.context]
-        cmd += args
+        # No --context override is ever passed: kubectl must use exactly the
+        # current-context of the validated kubeconfig (see validate_kubeconfig).
+        cmd = [self.binary] + args
         try:
             proc = subprocess.run(
                 cmd,
@@ -714,18 +1114,103 @@ class Kubectl:
 # Cluster operations
 # ---------------------------------------------------------------------------
 
-def job_exists(kubectl: Kubectl, job_name: str, timeout: int = 180) -> bool:
+def job_lookup(kubectl: Kubectl, job_name: str, timeout: int = 180) -> bool:
+    """Get the exact Job fail-closed: only a canonical result is meaningful.
+
+    ``kubectl get job NAME --ignore-not-found -o name`` exits 0 and prints
+    nothing when the Job is genuinely absent, prints exactly the single line
+    ``job.batch/NAME`` (optionally with the single standard trailing newline)
+    when it exists, and exits non-zero on authorization (403), API/transport,
+    and other failures (the client additionally raises on a subprocess
+    timeout). Only two outputs are ever read as a verdict:
+
+    * RAW empty stdout (``""``, no whitespace at all) proves absence; a
+      whitespace-only stdout (spaces/tabs/newlines) is malformed and raises.
+    * The exact ``job.batch/NAME`` resource name, with at most the single
+      standard trailing newline kubectl emits, proves presence; leading/
+      trailing spaces, a different resource name, extra content, or multiple
+      lines all raise.
+    * Any stderr at all on a successful get -- judged on the raw captured
+      bytes (``proc.stderr != ""``), so whitespace-only or newline-only
+      exec-plugin noise is pollution too -- makes the result non-canonical
+      and raises.
+
+    A malformed get must never be read as either absent or present, and a
+    failing get must NEVER be read as absence: a 403 would otherwise let a
+    still-running Job be reported as deleted (fail-open). Returns True when
+    the Job exists and raises ControllerError on any non-zero exit or
+    non-canonical output so callers fail the run / retry instead of trusting
+    absence from an error.
+    """
     validate_job_name(job_name)
     proc = kubectl.run(
-        ["get", "job", job_name, "-n", kubectl.namespace, "-o", "name"],
+        [
+            "get", "job", job_name, "-n", kubectl.namespace,
+            "--ignore-not-found", "-o", "name",
+        ],
         check=False,
         timeout=timeout,
     )
-    return proc.returncode == 0 and "job.batch/" in proc.stdout
+    if proc.returncode != 0:
+        raise ControllerError(
+            f"cannot determine whether job {job_name} exists: kubectl get failed "
+            f"({proc.returncode}): {proc.stderr.strip()[-1000:]}"
+        )
+    if proc.stderr != "":
+        # A successful get writes nothing to stderr; ANY stderr at all --
+        # judged on the RAW captured bytes (``proc.stderr != ""``), so even
+        # whitespace-only/newline-only exec-plugin noise is pollution -- means
+        # the result is not canonical and must fail closed instead of being
+        # read as absent or present.
+        raise ControllerError(
+            f"malformed output from kubectl get for job {job_name}: the get "
+            f"succeeded but wrote to stderr: {proc.stderr.strip()[-500:]}"
+        )
+    stdout = proc.stdout
+    if stdout == "":
+        # Raw empty stdout (nothing at all, not even a newline): the ONLY
+        # proof of absence. Whitespace-only output falls through to the
+        # malformed branch below.
+        return False
+    expected = f"job.batch/{job_name}"
+    if stdout == expected or stdout == expected + "\n":
+        # The exact present resource name, optionally with the single
+        # standard trailing newline kubectl's `-o name` output ends with.
+        # Two newlines, leading/trailing spaces, or any other byte sequence
+        # is malformed (see below).
+        return True
+    raise ControllerError(
+        f"malformed output from kubectl get for job {job_name}: expected raw "
+        f"empty stdout (absent) or exactly {expected!r} (present, optionally "
+        f"with one trailing newline), got {proc.stdout!r}"
+    )
+
+
+def job_exists(kubectl: Kubectl, job_name: str, timeout: int = 180) -> bool:
+    return job_lookup(kubectl, job_name, timeout=timeout)
 
 
 def job_absent(kubectl: Kubectl, job_name: str, timeout: int = 180) -> bool:
-    return not job_exists(kubectl, job_name, timeout=timeout)
+    """Confirm the Job is absent: only a successful empty get proves it.
+
+    Raises ControllerError on authorization/API/transport failures and client
+    timeouts (see job_lookup); absence is never inferred from a failing call.
+    """
+    return not job_lookup(kubectl, job_name, timeout=timeout)
+
+
+def _require_remaining(deadline: float, what: str) -> float:
+    """Return the remaining budget, raising immediately when exhausted.
+
+    Cleanup operations re-check the budget immediately before each cluster
+    call (delete, confirmation lookup): an exhausted budget raises
+    ControllerError instead of ``clamp_int`` degrading it to a 1-second
+    operation that could still start against the cluster with no time left.
+    """
+    remaining = _remaining_until(deadline)
+    if remaining <= 0:
+        raise ControllerError(f"cleanup budget exhausted before {what}")
+    return remaining
 
 
 def delete_job(
@@ -737,20 +1222,49 @@ def delete_job(
 ) -> None:
     """Delete the exact Job with bounded retries and verify its absence.
 
-    Every operation is clamped to ``deadline``; when the budget is exhausted
-    the attempt loop stops and a ControllerError is raised so the caller fails
-    the run even if the benchmark itself reported status 0.
+    Absence is proven ONLY by a successful exact lookup (see ``job_lookup``):
+    ``kubectl get job NAME --ignore-not-found -o name`` with rc=0 and raw
+    empty stdout. A non-zero delete NEVER proves absence on its own -- not
+    even an API ``NotFound`` in stderr: with an exec credential plugin, "not
+    found" text can come from the plugin itself while the delete failed for an
+    unrelated reason (timeout/transport/authz). Every success conclusion goes
+    through a subsequent successful exact lookup. Authorization/API/transport/
+    timeout failures on the lookups raise (fail closed) and are retried
+    within the bounded attempt loop; a delete that succeeded (or failed) but
+    whose confirmation lookup still shows the Job present is also retried.
+    Every operation is clamped to ``deadline`` and the remaining budget is
+    re-checked immediately before the delete and before the confirmation
+    lookup: an exhausted budget raises ControllerError instead of clamping to
+    a 1-second operation, so the caller fails the run even if the benchmark
+    itself reported status 0.
     """
     validate_job_name(job_name)
     last_error: str | None = None
     for attempt in range(1, attempts + 1):
-        remaining = _remaining_until(deadline)
-        if remaining <= 0:
-            raise ControllerError("cleanup budget exhausted before deletion could be confirmed")
-        if job_absent(kubectl, job_name, timeout=clamp_int(remaining, 30)):
-            print(f"job {job_name} already gone; nothing to delete")
-            return
-        remaining = _remaining_until(deadline)
+        remaining = _require_remaining(deadline, "deletion could be confirmed")
+        # 1. Exact absence pre-check: a successful empty get proves the Job is
+        #    already gone (e.g. a previous run's cleanup) and needs no delete.
+        try:
+            if job_absent(kubectl, job_name, timeout=clamp_int(remaining, 30)):
+                print(f"job {job_name} already gone; nothing to delete")
+                return
+        except ControllerError as err:
+            # A failing absence check must never be read as "absent": record
+            # it and retry within the bounded attempt budget (fail closed).
+            last_error = str(err)
+            print(
+                f"absence check attempt {attempt}/{attempts} failed for {job_name}: {last_error}",
+                file=sys.stderr,
+            )
+            if attempt < attempts:
+                remaining = _remaining_until(deadline)
+                if remaining > 0:
+                    _sleep(min(DELETE_RETRY_SLEEP, remaining))
+            continue
+        # 2. Delete attempt. The budget is re-checked immediately before the
+        #    delete: an exhausted budget raises instead of degrading to a
+        #    1-second clamped delete against the cluster.
+        remaining = _require_remaining(deadline, "issuing the delete")
         flag = clamp_int(remaining, delete_timeout)
         proc = kubectl.run(
             [
@@ -758,30 +1272,50 @@ def delete_job(
                 "--cascade=foreground", "--wait=true", f"--timeout={flag}s",
             ],
             check=False,
-            timeout=clamp_int(_remaining_until(deadline), flag + 60),
+            timeout=clamp_int(_require_remaining(deadline, "the delete subprocess"), flag + 60),
         )
-        if proc.returncode == 0:
-            last_error = None
-            break
-        if "not found" in proc.stderr:
-            print(f"job {job_name} already gone; nothing to delete")
-            return
-        last_error = proc.stderr.strip()[-1000:]
-        print(
-            f"delete attempt {attempt}/{attempts} failed for {job_name}: {last_error}",
-            file=sys.stderr,
-        )
+        if proc.returncode != 0:
+            # A non-zero delete NEVER proves absence by itself -- not even an
+            # API NotFound in stderr: with an exec credential plugin the
+            # "not found" text can come from the plugin itself while the
+            # delete failed for an unrelated reason. Absence is concluded
+            # only by the exact lookup below.
+            last_error = proc.stderr.strip()[-1000:]
+            print(
+                f"delete attempt {attempt}/{attempts} failed for {job_name}: {last_error}",
+                file=sys.stderr,
+            )
+        # 3. Confirmation: the ONLY success conclusion is a subsequent
+        #    successful exact lookup proving absence. The budget is re-checked
+        #    immediately before the confirmation too, so an exhausted budget
+        #    raises instead of clamping to a 1-second lookup.
+        _require_remaining(deadline, "confirming deletion")
+        try:
+            absent = job_absent(
+                kubectl, job_name, timeout=clamp_int(_remaining_until(deadline), 30)
+            )
+        except ControllerError as err:
+            last_error = str(err)
+            print(
+                f"confirmation check attempt {attempt}/{attempts} failed for {job_name}: {err}",
+                file=sys.stderr,
+            )
+        else:
+            if absent:
+                print(f"job {job_name} deleted and confirmed absent")
+                return
+            if last_error is None:
+                last_error = (
+                    f"job {job_name} still present after foreground delete; deletion not confirmed"
+                )
+                print(last_error, file=sys.stderr)
         if attempt < attempts:
-            _sleep(min(DELETE_RETRY_SLEEP, _remaining_until(deadline)))
-    if last_error is not None:
-        raise ControllerError(
-            f"failed to delete job {job_name} after {attempts} attempts: {last_error}"
-        )
-    if not job_absent(kubectl, job_name, timeout=clamp_int(_remaining_until(deadline), 30)):
-        raise ControllerError(
-            f"job {job_name} still present after foreground delete; deletion not confirmed"
-        )
-    print(f"job {job_name} deleted and confirmed absent")
+            remaining = _remaining_until(deadline)
+            if remaining > 0:
+                _sleep(min(DELETE_RETRY_SLEEP, remaining))
+    raise ControllerError(
+        f"failed to delete job {job_name} after {attempts} attempts: {last_error}"
+    )
 
 
 def create_job(kubectl: Kubectl, manifest: dict[str, Any], timeout: int = 180) -> None:
@@ -888,17 +1422,14 @@ def transfer_payload(
     exec_sh(
         kubectl,
         pod,
-        "test -f /payload/run.sh && test -d /payload/bins/base && "
-        "test -d /payload/bins/candidate && test -d /payload/repo/tests/perf/query_cases",
+        EXEC_LAYOUT_CHECK,
         timeout=clamp_remaining_or_raise(_remaining_until(deadline), 60, "payload layout check"),
     )
 
     exec_sh(
         kubectl,
         pod,
-        "chmod +x /payload/run.sh /payload/bins/base/greptime "
-        "/payload/bins/candidate/greptime /payload/bins/candidate/query_perf_fixture "
-        "/payload/bins/candidate/query_regression_runner",
+        EXEC_CHMOD,
         timeout=clamp_remaining_or_raise(_remaining_until(deadline), 60, "payload chmod"),
     )
 
@@ -906,7 +1437,7 @@ def transfer_payload(
     proc = exec_sh(
         kubectl,
         pod,
-        "sha256sum " + " ".join(BIN_PATH_MAP),
+        EXEC_SHA256,
         timeout=clamp_remaining_or_raise(_remaining_until(deadline), 120, "in-pod sha256 verification"),
     )
     manifest_binary_map = {entry["path"]: entry["sha256"] for entry in manifest_binaries}
@@ -928,7 +1459,7 @@ def transfer_payload(
     exec_sh(
         kubectl,
         pod,
-        "touch /payload/.ready",
+        EXEC_READY,
         timeout=clamp_remaining_or_raise(_remaining_until(deadline), 30, "payload marker"),
     )
     print("payload marker /payload/.ready set")
@@ -1026,7 +1557,7 @@ def collect_logs(kubectl: Kubectl, pod: str, result_dir: Path, deadline: float) 
 
 def read_benchmark_status(kubectl: Kubectl, pod: str, timeout: int = 30) -> int:
     proc = exec_sh(
-        kubectl, pod, "cat /work/benchmark-status 2>/dev/null || true", check=False, timeout=timeout
+        kubectl, pod, EXEC_STATUS, check=False, timeout=timeout
     )
     text = proc.stdout.strip() if proc.returncode == 0 else ""
     if text.isdigit():
@@ -1054,7 +1585,7 @@ def wait_for_benchmark(
             print(f"job pod reached {phase} without a completion marker")
             return 1
         done = exec_sh(
-            kubectl, pod, "test -f /work/.done", check=False,
+            kubectl, pod, EXEC_DONE, check=False,
             timeout=clamp_remaining_or_raise(_remaining_until(deadline), 30, "completion marker check"),
         )
         if done.returncode == 0:
@@ -1072,7 +1603,7 @@ def wait_for_benchmark(
             )
             validate_results(result_dir)
             exec_sh(
-                kubectl, pod, "touch /work/.collected",
+                kubectl, pod, EXEC_COLLECTED,
                 timeout=clamp_remaining_or_raise(_remaining_until(deadline), 30, "collection marker"),
             )
             return status
@@ -1088,27 +1619,17 @@ def wait_for_benchmark(
     return 1
 
 
-def verify_checkout_sha(candidate_src: Path, expected_sha: str) -> None:
-    """Fail closed unless the candidate checkout HEAD is the verified SHA."""
+def load_validation(path: Path | None) -> dict[str, Any]:
+    """Load the validated values produced by the admission script."""
+    if path is None:
+        return {}
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(candidate_src), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as err:
-        raise ControllerError(f"git rev-parse timed out for {candidate_src}") from err
-    if proc.returncode != 0:
-        raise ControllerError(
-            f"could not resolve candidate checkout HEAD at {candidate_src}: {proc.stderr.strip()[-500:]}"
-        )
-    actual = proc.stdout.strip().lower()
-    if actual != expected_sha.lower():
-        raise ControllerError(
-            f"candidate checkout HEAD {actual} does not match the verified candidate SHA {expected_sha}"
-        )
-    print(f"candidate checkout HEAD matches the verified candidate SHA {expected_sha}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        raise ControllerError(f"could not read validated admission output {path}: {err}") from err
+    if not isinstance(data, dict):
+        raise ControllerError(f"validated admission output {path} is not a JSON object")
+    return data
 
 
 def write_github_output(status: int) -> None:
@@ -1116,6 +1637,43 @@ def write_github_output(status: int) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"status={status}\n")
+
+
+def write_comment_metadata(path: Path, validation: dict[str, Any], status: int) -> None:
+    """Regenerate the comment metadata from the validated values only.
+
+    ``run_id``/``run_attempt`` are the *controller* workflow's own run
+    identifiers (the comment workflow follows the controller run), while the
+    source build run is recorded separately for provenance. Every other field
+    comes from the admission output, never from the untrusted metadata
+    artifact directly.
+    """
+    try:
+        controller_run_id = int(os.environ["CONTROLLER_RUN_ID"])
+        controller_run_attempt = int(os.environ["CONTROLLER_RUN_ATTEMPT"])
+    except (KeyError, ValueError) as err:
+        raise ControllerError(
+            "CONTROLLER_RUN_ID/CONTROLLER_RUN_ATTEMPT must be positive integers "
+            "to write the comment metadata"
+        ) from err
+    data = {
+        "pr_number": validation.get("pr_number"),
+        "head_sha": validation.get("head_sha"),
+        "event_base_sha": validation.get("event_base_sha"),
+        "built_base_sha": validation.get("built_base_sha"),
+        "candidate_sha": validation.get("candidate_sha"),
+        "head_repo": validation.get("head_repo"),
+        "base_repo": validation.get("base_repo"),
+        "label": validation.get("label"),
+        "run_id": controller_run_id,
+        "run_attempt": controller_run_attempt,
+        "source_run_id": validation.get("source_run_id"),
+        "source_run_attempt": validation.get("source_run_attempt"),
+        "status": status,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"wrote regenerated comment metadata to {path}")
 
 
 def run_cleanup(
@@ -1171,26 +1729,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create/drive/clean up the one-shot ACK query-regression benchmark Job."
     )
-    parser.add_argument("--run-id", default=os.environ.get("RUN_ID", ""))
-    parser.add_argument("--run-attempt", default=os.environ.get("RUN_ATTEMPT", "1"))
-    parser.add_argument("--namespace", default=os.environ.get("ACK_JOB_NAMESPACE", DEFAULT_NAMESPACE))
-    parser.add_argument("--image", default=os.environ.get("JOB_IMAGE", ""))
+    parser.add_argument(
+        "--run-id",
+        default=os.environ.get("SOURCE_RUN_ID", ""),
+        help="Originating build run id (validated by the admission step).",
+    )
+    parser.add_argument(
+        "--run-attempt",
+        default=os.environ.get("SOURCE_RUN_ATTEMPT", "1"),
+        help="Originating build run attempt (validated by the admission step).",
+    )
+    parser.add_argument(
+        "--validation-file",
+        type=Path,
+        default=None,
+        help="Validated admission output JSON (built/candidate SHAs, run ids, artifact ids).",
+    )
+    parser.add_argument(
+        "--kubeconfig",
+        default=os.environ.get("ACK_KUBECONFIG_PATH", ""),
+        help="Runner-local kubeconfig path using an exec credential plugin (never a secret).",
+    )
+    parser.add_argument(
+        "--trusted-source-sha",
+        default=os.environ.get("TRUSTED_SOURCE_SHA", ""),
+        help="Default-branch HEAD SHA the trusted scripts were checked out at.",
+    )
     parser.add_argument("--base-artifact-dir", type=Path, default=None)
     parser.add_argument("--candidate-artifact-dir", type=Path, default=None)
-    parser.add_argument("--candidate-src", type=Path, default=None)
     parser.add_argument("--trusted-summary", type=Path, default=None)
     parser.add_argument("--trusted-scripts-manifest", type=Path, default=None)
     parser.add_argument("--payload-dir", type=Path, default=None)
     parser.add_argument("--result-dir", type=Path, default=Path("."))
+    parser.add_argument(
+        "--comment-metadata",
+        type=Path,
+        default=None,
+        help="Write the regenerated comment metadata (query-regression-pr.json) here.",
+    )
     parser.add_argument("--kubectl", default=os.environ.get("KUBECTL", "kubectl"))
-    parser.add_argument("--kubeconfig", default=os.environ.get("KUBECONFIG"))
-    parser.add_argument("--context", default=os.environ.get("KUBECTL_CONTEXT"))
     parser.add_argument("--pod-ready-timeout", type=int, default=POD_READY_TIMEOUT_DEFAULT)
     parser.add_argument("--run-timeout", type=int, default=RUN_TIMEOUT_DEFAULT)
     parser.add_argument("--delete-timeout", type=int, default=DELETE_TIMEOUT_DEFAULT)
     parser.add_argument("--delete-attempts", type=int, default=DELETE_ATTEMPTS_DEFAULT)
     parser.add_argument("--lifecycle-timeout", type=int, default=LIFECYCLE_TIMEOUT_DEFAULT)
     parser.add_argument("--cleanup-reserve", type=int, default=CLEANUP_RESERVE_DEFAULT)
+    parser.add_argument(
+        "--payload-bytes-cap",
+        type=int,
+        default=PAYLOAD_BYTES_CAP_DEFAULT,
+        help="Pre-Job payload byte cap (default 2 GiB, under the 40Gi ephemeral limit).",
+    )
     parser.add_argument(
         "--cleanup-only",
         action="store_true",
@@ -1204,12 +1793,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def verify_trusted_scripts(trusted_summary: Path, manifest_path: Path | None, expected_source_sha: str) -> None:
+def verify_trusted_scripts(
+    trusted_summary: Path, manifest_path: Path | None, expected_source_sha: str
+) -> None:
     """Verify the trusted summary script against the restore manifest.
 
-    The restore manifest is written by the workflow's restore step from the
-    verified base commit; this fails closed if the summary the controller is
-    about to embed into the payload does not match it.
+    The restore manifest is written by the workflow from the default-branch
+    checkout (source_sha = the checked-out default-branch HEAD); this fails
+    closed if the summary the controller is about to embed into the payload
+    does not match it.
     """
     if trusted_summary.is_symlink() or not trusted_summary.is_file():
         raise ControllerError(f"trusted summary script is missing or not a regular file: {trusted_summary}")
@@ -1219,7 +1811,7 @@ def verify_trusted_scripts(trusted_summary: Path, manifest_path: Path | None, ex
     if str(manifest.get("source_sha", "")).lower() != expected_source_sha.lower():
         raise ControllerError(
             f"trusted scripts manifest source {manifest.get('source_sha')} does not match "
-            f"the verified base SHA {expected_source_sha}"
+            f"the trusted source SHA {expected_source_sha}"
         )
     files = manifest.get("files")
     if not isinstance(files, dict) or "query-regression-summary.py" not in files:
@@ -1253,29 +1845,56 @@ def main(argv: list[str] | None = None) -> int:
         run_id = validate_run_id(args.run_id)
         run_attempt = validate_run_id(args.run_attempt)
         job_name = validate_job_name(build_job_name(run_id, run_attempt))
-        image = args.image or DEFAULT_IMAGE
+        validation = load_validation(args.validation_file)
+        if validation:
+            if validation.get("source_run_id") != run_id:
+                raise ControllerError(
+                    f"validated source run id {validation.get('source_run_id')} does not match "
+                    f"--run-id {run_id}"
+                )
+            if validation.get("source_run_attempt") != run_attempt:
+                raise ControllerError(
+                    f"validated source run attempt {validation.get('source_run_attempt')} does not "
+                    f"match --run-attempt {run_attempt}"
+                )
         lifecycle = Lifecycle(args.lifecycle_timeout, args.cleanup_reserve)
+
+        # The kubeconfig is validated before any cluster call in every mode
+        # that touches the cluster (main run and second-process cleanup).
+        kubeconfig = args.kubeconfig or None
+        if not args.dry_run:
+            if not kubeconfig:
+                raise ControllerError(
+                    "a runner-local kubeconfig path is required (ACK_KUBECONFIG_PATH or "
+                    "--kubeconfig); it must use an exec credential plugin and is never a secret"
+                )
+            validate_kubeconfig(Path(kubeconfig))
 
         # Second-process cleanup needs no SHAs or payload: delete only the
         # exact deterministic Job (validated above).
         if args.cleanup_only:
-            kubectl = Kubectl(args.kubectl, args.namespace, args.kubeconfig, args.context)
+            kubectl = Kubectl(args.kubectl, kubeconfig)
             return run_cleanup_only(kubectl, job_name, args.delete_attempts, args.delete_timeout)
 
-        base_sha = os.environ.get("VERIFIED_BASE_SHA", "")
-        candidate_sha = os.environ.get("VERIFIED_CANDIDATE_SHA", "")
+        base_sha = str(validation.get("built_base_sha") or os.environ.get("VERIFIED_BASE_SHA", ""))
+        candidate_sha = str(
+            validation.get("candidate_sha") or os.environ.get("VERIFIED_CANDIDATE_SHA", "")
+        )
         for sha in (base_sha, candidate_sha):
             if not re.match(r"^[0-9a-f]{40}$", sha):
                 raise ControllerError(
-                    f"verified SHAs must be full 40-hex digests from the build job outputs: {sha!r}"
+                    f"verified SHAs must be full 40-hex digests from the admission output: {sha!r}"
                 )
+
+        # Informational pod env: base/candidate refs default to the validated
+        # SHAs (display only; the pod never uses them for admission).
+        os.environ.setdefault("BASE_REF", base_sha)
+        os.environ.setdefault("CANDIDATE_REF", candidate_sha)
 
         manifest = build_manifest(
             run_id=run_id,
             run_attempt=run_attempt,
             job_name=job_name,
-            namespace=args.namespace,
-            image=image,
             base_sha=base_sha,
             candidate_sha=candidate_sha,
         )
@@ -1284,12 +1903,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0
 
-        kubectl = Kubectl(args.kubectl, args.namespace, args.kubeconfig, args.context)
+        kubectl = Kubectl(args.kubectl, kubeconfig)
 
         required = {
             "--base-artifact-dir": args.base_artifact_dir,
             "--candidate-artifact-dir": args.candidate_artifact_dir,
-            "--candidate-src": args.candidate_src,
             "--trusted-summary": args.trusted_summary,
             "--trusted-scripts-manifest": args.trusted_scripts_manifest,
             "--payload-dir": args.payload_dir,
@@ -1298,18 +1916,18 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             raise ControllerError(f"missing required arguments: {', '.join(missing)}")
 
-        # Manifests must agree with the verified SHAs from the build job outputs.
+        # Manifests must agree with the validated SHAs from the admission output.
         base_manifest = load_manifest(args.base_artifact_dir, "base-manifest.json")
         candidate_manifest = load_manifest(args.candidate_artifact_dir, "candidate-manifest.json")
         if str(base_manifest.get("base_sha", "")).lower() != base_sha.lower():
             raise ControllerError(
                 f"base-manifest base_sha {base_manifest.get('base_sha')} does not match "
-                f"the verified base SHA {base_sha}"
+                f"the validated base SHA {base_sha}"
             )
         if str(candidate_manifest.get("candidate_sha", "")).lower() != candidate_sha.lower():
             raise ControllerError(
                 f"candidate-manifest candidate_sha {candidate_manifest.get('candidate_sha')} "
-                f"does not match the verified candidate SHA {candidate_sha}"
+                f"does not match the validated candidate SHA {candidate_sha}"
             )
         manifest_binaries = list(base_manifest.get("binaries", [])) + list(
             candidate_manifest.get("binaries", [])
@@ -1317,17 +1935,18 @@ def main(argv: list[str] | None = None) -> int:
         if not manifest_binaries:
             raise ControllerError("base/candidate manifests contain no binaries")
 
-        verify_checkout_sha(args.candidate_src, candidate_sha)
-        verify_trusted_scripts(args.trusted_summary, args.trusted_scripts_manifest, base_sha)
+        verify_trusted_scripts(
+            args.trusted_summary, args.trusted_scripts_manifest, args.trusted_source_sha
+        )
 
         payload_dir = assemble_payload(
             args.base_artifact_dir,
             args.candidate_artifact_dir,
-            args.candidate_src,
             args.trusted_summary,
             args.payload_dir,
         )
         print(f"payload assembled at {payload_dir}")
+        measure_payload(payload_dir, args.payload_bytes_cap)
 
         status = 1
         cleanup_ok = True
@@ -1393,6 +2012,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if not cleanup_ok and status == 0:
             status = 1
+        if args.comment_metadata is not None and validation.get("event") == "pull_request":
+            write_comment_metadata(args.comment_metadata, validation, status)
         write_github_output(status)
         print(f"query regression status: {status}")
         return 0
@@ -1406,7 +2027,7 @@ def _handle_termination(signum: int, frame: Any) -> None:
     # optional diagnostics/collection and immediately performs a short bounded
     # exact Job deletion/absence check. A hard SIGKILL (GitHub hard
     # cancellation) cannot run this handler; recovery is documented in the
-    # README (deterministic exact-name deletion, independent reaper/manual).
+    # README (deterministic exact-name deletion, TTL, independent reaper/manual).
     _CANCELLED["flag"] = True
     raise SystemExit(
         f"query-regression-ack-controller: received signal {signum}; cleaning up (cancellation path)"

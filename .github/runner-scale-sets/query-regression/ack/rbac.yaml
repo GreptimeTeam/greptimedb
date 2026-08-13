@@ -1,0 +1,56 @@
+# Exact namespaced RBAC for the query-regression controller identity.
+#
+# The controller kubeconfig uses an `exec` credential plugin whose identity is
+# an external broker user (short-lived tokens). The RoleBinding subject below
+# MUST be set to that identity (kind User, name matching the exec plugin's
+# reported username). Nothing cluster-wide is granted, and the verbs are the
+# exact minimum for the v1 kubectl cp/exec flow:
+#
+#   jobs:        create/get/delete   (create the Job; get/absence-check; delete)
+#   pods:        get/list            (locate the Job pod, read its phase)
+#   pods/exec:   create              (kubectl cp + exec-gated markers, v1)
+#   pods/log:    get                 (best-effort diagnostics)
+#   events:      list                (diagnostics)
+#
+# Notably absent: pods/delete, jobs/watch, any secret/configmap access, any
+# nodepool/autoscaling API, and any cluster-scoped resource. If the
+# `query-regression-controller` ServiceAccount is ever used in-cluster instead
+# of the exec identity, add it as a second subject with the same Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: query-regression-controller
+  namespace: query-regression-perf
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: query-regression-controller
+  namespace: query-regression-perf
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: query-regression-controller
+subjects:
+  # REQUIRED: set `name` to the username the kubeconfig exec credential plugin
+  # reports for the trusted controller runner identity. Never bind an
+  # administrator/cloud-account identity here.
+  - kind: User
+    name: query-regression-controller
+    apiGroup: rbac.authorization.k8s.io

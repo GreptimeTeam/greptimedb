@@ -1,0 +1,60 @@
+# OPTIONAL audit/warn rollout bindings -- MUTUALLY EXCLUSIVE with
+# validatingadmissionpolicybinding.yaml for the same policy.
+#
+# Kubernetes 1.34 forbids "Deny" together with "Warn" in one binding. The
+# enforced configuration is ["Deny", "Audit"] (see
+# validatingadmissionpolicybinding.yaml). If you want to observe policy
+# behavior without denying anything, apply THIS file instead of the enforced
+# one: every matched request is allowed but annotated (Audit) and warned
+# (Warn). Never apply both files for the same policy simultaneously.
+#
+#   kubectl apply -f validatingadmissionpolicy.yaml
+#   kubectl apply -f validatingadmissionpolicybinding-rollout.yaml   # instead of the Deny binding
+#
+# After the rollout window, replace these bindings with the enforced
+# ["Deny", "Audit"] bindings and re-run ./apply-test.sh (with
+# QR_APPLY_TEST_CANARY=1) before the next real benchmark run.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-workload-rollout
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/rollout: "warn-audit-only"
+spec:
+  policyName: query-regression-workload
+  validationActions: ["Warn", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-pods-rollout
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/rollout: "warn-audit-only"
+spec:
+  policyName: query-regression-pods
+  validationActions: ["Warn", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-exec-rollout
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/rollout: "warn-audit-only"
+spec:
+  policyName: query-regression-exec
+  validationActions: ["Warn", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf

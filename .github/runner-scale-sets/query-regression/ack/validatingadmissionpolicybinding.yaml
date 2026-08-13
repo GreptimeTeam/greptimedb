@@ -1,0 +1,53 @@
+# Bindings for the deployment-gated ValidatingAdmissionPolicies.
+#
+# DEPLOYMENT-GATED: apply together with validatingadmissionpolicy.yaml only
+# after server-side validation (./apply-test.sh). The namespaceSelector binds
+# the policies to the query-regression-perf namespace only.
+#
+# Enforcement actions: Kubernetes 1.34 forbids "Deny" together with "Warn" in
+# the same binding. The enforced configuration below is exactly
+# ["Deny", "Audit"]. An audit/warn rollout (observe without denying) is a
+# SEPARATE, mutually exclusive configuration in
+# validatingadmissionpolicybinding-rollout.yaml (["Warn", "Audit"]); apply
+# one or the other, never both to the same policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-workload
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+spec:
+  policyName: query-regression-workload
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-pods
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+spec:
+  policyName: query-regression-pods
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: query-regression-exec
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+spec:
+  policyName: query-regression-exec
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: query-regression-perf

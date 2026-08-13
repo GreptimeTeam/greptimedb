@@ -68,12 +68,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Run Node GitHub script tests
-        run: node --test .github/scripts/query-regression-comment.test.cjs
+      # uv must be set up before any step below runs `uv run`.
       - name: Setup uv
         uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
+      - name: Run Node GitHub script tests
+        run: node --test .github/scripts/query-regression-comment.test.cjs
+      - name: Run query regression admission script tests
+        run: node --test .github/scripts/query-regression-admission.test.cjs
+      - name: Run query regression policy manifest tests
+        run: uv run --no-project --with pyyaml python .github/runner-scale-sets/query-regression/ack/query-regression-policy-test.py
+      - name: Run query regression ACK controller test suite
+        run: uv run --no-project --with pyyaml python .github/scripts/query-regression-ack-controller-test.py
+      - name: Run query regression ACK offline mutation self-test
+        run: QR_APPLY_TEST_SELF=1 .github/runner-scale-sets/query-regression/ack/apply-test.sh
       - name: Run check-version script tests
         run: uv run --no-project python .github/scripts/check-version-test.py
       - name: Run enterprise license check tests

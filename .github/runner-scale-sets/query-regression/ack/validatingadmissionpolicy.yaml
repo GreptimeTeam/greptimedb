@@ -1,0 +1,332 @@
+# ValidatingAdmissionPolicies for the query-regression-perf namespace.
+#
+# DEPLOYMENT-GATED: these policies are included for review but are NOT applied
+# by any pipeline in this repository. The exact CEL expressions must be
+# validated against the live API server before deployment:
+#
+#   QR_APPLY_TEST_CANARY=1 ./apply-test.sh   # server dry-run + typeChecking +
+#                                            # real disposable-canary probes
+#
+# Do not weaken any constraint silently; if a CEL expression cannot be
+# validated against the target cluster version, fix or gate it, but keep the
+# requirement in the manifest so the gap stays visible.
+#
+# CEL notes (Kubernetes 1.34):
+#  * Optional-field presence is tested with the has(x.field) macro only. The
+#    receiver-style form (x dot has(field)) is not valid CEL against OpenAPI
+#    schemas and must never be used.
+#  * has() must guard every optional message field before it is dereferenced
+#    (e.g. securityContext, resources, volumes, initContainers, valueFrom).
+#
+# Threat model: assume the controller credential is stolen. These policies cap
+# what that credential can do to exactly one conforming benchmark Job/pod in
+# this otherwise sterile namespace: deterministic name, exact label set and
+# full-SHA annotation set, the exact digest-pinned image, one container, no
+# init/ephemeral/extra containers, an exact env contract (count, uniqueness,
+# literal allowlist, fixed path values, bounded variable formats), exact
+# resources/node placement/security, emptyDir-only volumes, exact
+# command/bootstrap-args/deadline/TTL/replacement policy, and direct pod
+# creation denied. The exec CONNECT policy sees the PodExecOptions object
+# (request.namespace/request.name + object.container/command/tty/stdin/stdout/
+# stderr) -- NOT the parent Pod's metadata, which admission policies do not
+# receive for CONNECT -- and allows exactly the canonical controller exec and
+# pinned-kubectl cp argv+stream tuples (ABI pinned to kubectl v1.34.2; see
+# query-regression-ack-controller.py constants and apply-test.sh canary).
+# Residual capability (acknowledged, intentional): a stolen credential can
+# still upload arbitrary payload content via `kubectl cp` and run arbitrary
+# code INSIDE the one sandbox pod (non-root 1001, no token, emptyDir only,
+# network denied by NetworkPolicy); the boundary contains that capability to a
+# single disposable pod, and NetworkPolicy/CNI enforcement plus the real
+# server-side canary are hard deployment gates.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: query-regression-workload
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/description: "Only the exact conforming query-regression benchmark Job may be created in query-regression-perf"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+  validations:
+    - expression: "object.metadata.namespace == 'query-regression-perf'"
+      message: "Jobs must be created in namespace query-regression-perf"
+    - expression: "object.metadata.name.matches('^query-regression-[1-9][0-9]*-[1-9][0-9]*$')"
+      message: "Job name must match query-regression-<run-id>-<attempt>"
+    - expression: |-
+        object.metadata.labels.size() == 3 &&
+        'app' in object.metadata.labels && object.metadata.labels['app'] == 'query-regression' &&
+        'run-id' in object.metadata.labels && object.metadata.labels['run-id'] == object.metadata.name.split('-')[2] &&
+        'run-attempt' in object.metadata.labels && object.metadata.labels['run-attempt'] == object.metadata.name.split('-')[3]
+      message: "labels must be exactly app=query-regression, run-id, run-attempt matching the name"
+    - expression: |-
+        object.metadata.annotations.size() == 2 &&
+        'greptimedb.io/query-regression-base-sha' in object.metadata.annotations &&
+        object.metadata.annotations['greptimedb.io/query-regression-base-sha'].matches('^[0-9a-f]{40}$') &&
+        'greptimedb.io/query-regression-candidate-sha' in object.metadata.annotations &&
+        object.metadata.annotations['greptimedb.io/query-regression-candidate-sha'].matches('^[0-9a-f]{40}$')
+      message: "annotations must be exactly the two full-SHA annotations and nothing else"
+    - expression: "object.spec.backoffLimit == 0 && object.spec.completions == 1 && object.spec.parallelism == 1"
+      message: "Job must be a one-shot single-completion Job"
+    - expression: "object.spec.activeDeadlineSeconds == 10800"
+      message: "activeDeadlineSeconds must be exactly 10800"
+    - expression: "object.spec.ttlSecondsAfterFinished == 600"
+      message: "ttlSecondsAfterFinished must be exactly 600"
+    - expression: "object.spec.podReplacementPolicy == 'Failed'"
+      message: "podReplacementPolicy must be Failed"
+    - expression: "object.spec.template.spec.restartPolicy == 'Never'"
+      message: "pod restartPolicy must be Never"
+    - expression: "object.spec.template.spec.automountServiceAccountToken == false"
+      message: "pods must not mount service account tokens"
+    - expression: "object.spec.template.spec.serviceAccountName == 'query-regression-workload'"
+      message: "pods must use the tokenless query-regression-workload service account"
+    - expression: "object.spec.template.spec.containers.size() == 1"
+      message: "exactly one container is allowed"
+    - expression: |-
+        (!has(object.spec.template.spec.initContainers) || object.spec.template.spec.initContainers.size() == 0) &&
+        (!has(object.spec.template.spec.ephemeralContainers) || object.spec.template.spec.ephemeralContainers.size() == 0)
+      message: "init and ephemeral containers are not allowed"
+    - expression: "object.spec.template.spec.containers.all(c, c.name == 'benchmark')"
+      message: "container name must be benchmark"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          c.image == 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11' &&
+          (!has(c.imagePullPolicy) || c.imagePullPolicy == 'IfNotPresent'))
+      message: "image must be the exact digest-pinned runtime image with IfNotPresent"
+    - expression: "object.spec.template.spec.containers.all(c, c.command == ['/bin/sh', '-c'])"
+      message: "container command must be exactly /bin/sh -c"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          has(c.args) && c.args.size() == 1 &&
+          c.args[0] == 'set -eu\ni=0\nuntil [ -f /payload/.ready ]; do\n  if [ "${i}" -ge 300 ]; then\n    echo "query-regression-ack: timed out waiting for /payload/.ready marker" >&2\n    exit 1\n  fi\n  sleep 2\n  i=$((i + 1))\ndone\ncd /work\nexec /bin/bash /payload/run.sh\n')
+      message: "container args must be exactly the canonical bootstrap script (no appended text)"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          (!has(c.envFrom) || c.envFrom.size() == 0) &&
+          (!has(c.ports) || c.ports.size() == 0))
+      message: "envFrom and ports are not allowed"
+    - expression: |-
+        object.spec.template.spec.containers.all(c, c.env.size() == 16)
+      message: "env must contain exactly the 16 canonical entries"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          c.env.map(e, e.name).distinct().size() == c.env.size())
+      message: "env names must be unique (no duplicates)"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          c.env.all(e, e.name in ['CASE_PATHS','HTTP_TIMEOUT','ALLOW_LARGE_FIXTURE','RUN_URL','CASE_NAME','BASE_REF','CANDIDATE_REF','CARGO_PROFILE','BASE_BIN','CANDIDATE_BIN','FIXTURE_GENERATOR','QUERY_REGRESSION_RUNNER','OTELGEN_BIN','SUMMARY_SCRIPT','UV_CACHE_DIR','GITHUB_OUTPUT'] &&
+                    !has(e.valueFrom)))
+      message: "env names must be on the literal allowlist with literal values only"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'BASE_BIN' && e.value == '/payload/bins/base/greptime'))"
+      message: "BASE_BIN must be the fixed base binary path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'CANDIDATE_BIN' && e.value == '/payload/bins/candidate/greptime'))"
+      message: "CANDIDATE_BIN must be the fixed candidate binary path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'FIXTURE_GENERATOR' && e.value == '/payload/bins/candidate/query_perf_fixture'))"
+      message: "FIXTURE_GENERATOR must be the fixed fixture path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'QUERY_REGRESSION_RUNNER' && e.value == '/payload/bins/candidate/query_regression_runner'))"
+      message: "QUERY_REGRESSION_RUNNER must be the fixed driver path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'OTELGEN_BIN' && e.value == '/usr/local/bin/otelgen'))"
+      message: "OTELGEN_BIN must be the fixed in-image path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'SUMMARY_SCRIPT' && e.value == '/payload/repo/.github/scripts/query-regression-summary.py'))"
+      message: "SUMMARY_SCRIPT must be the fixed trusted script path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'UV_CACHE_DIR' && e.value == '/tmp/uv-cache'))"
+      message: "UV_CACHE_DIR must be the fixed cache path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'GITHUB_OUTPUT' && e.value == '/work/github-output'))"
+      message: "GITHUB_OUTPUT must be the fixed result path"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'CASE_PATHS' && e.value.matches('^(all|heavy|[A-Za-z0-9_./,-]{1,200})$')))"
+      message: "CASE_PATHS must be 'all', 'heavy', or a bounded path list"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'HTTP_TIMEOUT' && e.value.matches('^[0-9]{1,5}$')))"
+      message: "HTTP_TIMEOUT must be a bounded integer string"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'ALLOW_LARGE_FIXTURE' && e.value.matches('^(true|false)$')))"
+      message: "ALLOW_LARGE_FIXTURE must be true or false"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'RUN_URL' && e.value.startsWith('https://') && e.value.size() <= 300 && e.value.contains('/actions/runs/')))"
+      message: "RUN_URL must be a bounded GitHub actions run URL"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'CASE_NAME' && e.value.size() >= 1 && e.value.size() <= 100))"
+      message: "CASE_NAME must be a bounded non-empty string"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'BASE_REF' && e.value.matches('^[0-9a-f]{40}$')))"
+      message: "BASE_REF must be a full 40-hex SHA"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'CANDIDATE_REF' && e.value.matches('^[0-9a-f]{40}$')))"
+      message: "CANDIDATE_REF must be a full 40-hex SHA"
+    - expression: "object.spec.template.spec.containers.all(c, c.env.exists_one(e, e.name == 'CARGO_PROFILE' && e.value.matches('^(nightly|release|dev)$')))"
+      message: "CARGO_PROFILE must be nightly, release, or dev"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          has(c.resources) &&
+          c.resources.requests.cpu == '4' && c.resources.requests.memory == '12Gi' &&
+          c.resources.requests['ephemeral-storage'] == '20Gi' &&
+          c.resources.limits.cpu == '8' && c.resources.limits.memory == '16Gi' &&
+          c.resources.limits['ephemeral-storage'] == '40Gi')
+      message: "resources must be exactly the benchmark contract"
+    - expression: |-
+        has(object.spec.template.spec.nodeSelector) &&
+        object.spec.template.spec.nodeSelector.size() == 1 &&
+        object.spec.template.spec.nodeSelector['alibabacloud.com/nodepool-id'] == 'npb5ff93bea3a447a698fe31ebc997ea31'
+      message: "nodeSelector must pin exactly the dedicated bulk nodepool"
+    - expression: |-
+        has(object.spec.template.spec.tolerations) &&
+        object.spec.template.spec.tolerations.size() == 1 &&
+        object.spec.template.spec.tolerations[0].key == 'dedicated' &&
+        object.spec.template.spec.tolerations[0].operator == 'Equal' &&
+        object.spec.template.spec.tolerations[0].value == 'perf-regression' &&
+        object.spec.template.spec.tolerations[0].effect == 'NoSchedule'
+      message: "tolerations must be exactly dedicated=perf-regression:NoSchedule"
+    - expression: "(!has(object.spec.template.spec.nodeName) || object.spec.template.spec.nodeName == '')"
+      message: "nodeName must be absent (placement is via nodeSelector only)"
+    - expression: "!has(object.spec.suspend) || object.spec.suspend == false"
+      message: "suspend must be absent or false (the Job must run immediately)"
+    - expression: "!has(object.spec.template.spec.schedulerName) || object.spec.template.spec.schedulerName == ''"
+      message: "schedulerName must be absent (default scheduler only)"
+    - expression: "!has(object.spec.template.spec.priorityClassName)"
+      message: "priorityClassName must be absent"
+    - expression: "!has(object.spec.template.spec.priority)"
+      message: "priority must be absent"
+    - expression: "!has(object.spec.template.spec.affinity)"
+      message: "affinity must be absent (node placement is via nodeSelector only)"
+    - expression: "!has(object.spec.template.spec.schedulingGates) || object.spec.template.spec.schedulingGates.size() == 0"
+      message: "schedulingGates must be absent or empty"
+    - expression: |-
+        has(object.spec.template.spec.securityContext) &&
+        object.spec.template.spec.securityContext.runAsNonRoot == true &&
+        object.spec.template.spec.securityContext.runAsUser == 1001 &&
+        object.spec.template.spec.securityContext.runAsGroup == 1001 &&
+        object.spec.template.spec.securityContext.fsGroup == 1001 &&
+        has(object.spec.template.spec.securityContext.seccompProfile) &&
+        object.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault'
+      message: "pod securityContext must be non-root 1001 with RuntimeDefault seccomp"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          has(c.securityContext) &&
+          c.securityContext.runAsNonRoot == true && c.securityContext.runAsUser == 1001 &&
+          c.securityContext.runAsGroup == 1001 &&
+          c.securityContext.allowPrivilegeEscalation == false &&
+          (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+          has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'])
+      message: "container securityContext must drop all capabilities and forbid escalation"
+    - expression: |-
+        (!has(object.spec.template.spec.hostNetwork) || object.spec.template.spec.hostNetwork == false) &&
+        (!has(object.spec.template.spec.hostPID) || object.spec.template.spec.hostPID == false) &&
+        (!has(object.spec.template.spec.hostIPC) || object.spec.template.spec.hostIPC == false)
+      message: "host network/PID/IPC must be disabled"
+    - expression: |-
+        has(object.spec.template.spec.volumes) &&
+        object.spec.template.spec.volumes.size() == 2 &&
+        object.spec.template.spec.volumes.all(v,
+          v.name in ['payload', 'work'] && has(v.emptyDir) && !has(v.secret) &&
+          !has(v.configMap) && !has(v.hostPath) && !has(v.persistentVolumeClaim) &&
+          !has(v.projected) && !has(v.downwardAPI) && !has(v.nfs))
+      message: "only the two payload/work emptyDir volumes are allowed (no secrets/PVC/hostPath)"
+    - expression: |-
+        object.spec.template.spec.containers.all(c,
+          has(c.volumeMounts) && c.volumeMounts.size() == 2 &&
+          c.volumeMounts.all(m,
+            (m.name == 'payload' && m.mountPath == '/payload') ||
+            (m.name == 'work' && m.mountPath == '/work')))
+      message: "volume mounts must be exactly payload->/payload and work->/work"
+    - expression: "object.spec.template.metadata.labels == object.metadata.labels"
+      message: "pod template labels must equal the Job labels"
+---
+# Direct pod creation is denied. Primary enforcement is RBAC (the controller
+# Role has no pods/create verb); this VAP is defense-in-depth only and must
+# never be treated as the sole direct-pod control.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: query-regression-pods
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/description: "Direct pod creation is denied in query-regression-perf (defense-in-depth; primary denial is RBAC no pods/create)"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "object.metadata.namespace == 'query-regression-perf'"
+      message: "pods must be created in namespace query-regression-perf"
+    - expression: "object.metadata.name.matches('^query-regression-[1-9][0-9]*-[1-9][0-9]*-[a-z0-9]{5}$')"
+      message: "pod names must match the Job-generated query-regression-<run-id>-<attempt>-<hash> pattern"
+    - expression: "object.metadata.labels['app'] == 'query-regression'"
+      message: "pods must carry label app=query-regression"
+    - expression: "object.metadata.labels['run-id'] == object.metadata.name.split('-')[2]"
+      message: "pod run-id label must equal the run id embedded in the name"
+    - expression: "object.metadata.labels['run-attempt'] == object.metadata.name.split('-')[3]"
+      message: "pod run-attempt label must equal the attempt embedded in the name"
+    - expression: "object.metadata.ownerReferences.exists(o, o.kind == 'Job' && o.name.startsWith('query-regression-'))"
+      message: "direct pod creation is denied; pods must be owned by a query-regression Job"
+---
+# Exec CONNECT policy: v1 uses `kubectl cp`/`kubectl exec` against the
+# benchmark pod. For CONNECT the admission request object is the core/v1
+# PodExecOptions -- the parent Pod's metadata (labels/ownerReferences) is NOT
+# available here, so the target is pinned via request.namespace +
+# request.name and the options via object.container/command/tty/stdin/stdout/
+# stderr. The allowlist below is exactly the canonical controller exec scripts
+# and pinned-kubectl (v1.34.2) cp remote-tar argv+stream tuples; it is
+# cross-checked structurally by query-regression-policy-test.py against the
+# controller constants and validated end-to-end by apply-test.sh's disposable
+# canary. Do not add commands here without updating the controller constants
+# (and vice versa).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: query-regression-exec
+  annotations:
+    greptimedb.io/deployment-gated: "true"
+    greptimedb.io/description: "pods/exec CONNECT is only allowed for the exact canonical controller/kubectl command tuples on query-regression benchmark pods"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec"]
+  validations:
+    - expression: "request.namespace == 'query-regression-perf'"
+      message: "exec is only allowed in namespace query-regression-perf"
+    - expression: "request.name.matches('^query-regression-[1-9][0-9]*-[1-9][0-9]*-[a-z0-9]{5}$')"
+      message: "exec is only allowed on query-regression benchmark pods"
+    - expression: "object.container == 'benchmark'"
+      message: "exec is only allowed in the benchmark container"
+    - expression: "!has(object.tty) || object.tty == false"
+      message: "interactive TTY exec is not allowed"
+    - expression: |-
+        (
+          (!has(object.stdin) || object.stdin == false) &&
+          (!has(object.stdout) || object.stdout == true) &&
+          (!has(object.stderr) || object.stderr == true) &&
+          has(object.command) && object.command in [
+            ['sh','-c','test -f /payload/run.sh && test -d /payload/bins/base && test -d /payload/bins/candidate && test -d /payload/repo/tests/perf/query_cases'],
+            ['sh','-c','chmod +x /payload/run.sh /payload/bins/base/greptime /payload/bins/candidate/greptime /payload/bins/candidate/query_perf_fixture /payload/bins/candidate/query_regression_runner'],
+            ['sh','-c','sha256sum /payload/bins/base/greptime /payload/bins/candidate/greptime /payload/bins/candidate/query_perf_fixture /payload/bins/candidate/query_regression_runner'],
+            ['sh','-c','touch /payload/.ready'],
+            ['sh','-c','test -f /work/.done'],
+            ['sh','-c','cat /work/benchmark-status 2>/dev/null || true'],
+            ['sh','-c','touch /work/.collected']
+          ]
+        ) ||
+        (
+          (!has(object.stdin) || object.stdin == true) &&
+          (!has(object.stdout) || object.stdout == true) &&
+          (!has(object.stderr) || object.stderr == true) &&
+          has(object.command) && object.command in [
+            ['tar','xmf','-','-C','/payload']
+          ]
+        ) ||
+        (
+          (!has(object.stdin) || object.stdin == false) &&
+          (!has(object.stdout) || object.stdout == true) &&
+          (!has(object.stderr) || object.stderr == true) &&
+          has(object.command) && object.command in [
+            ['tar','cf','-','/work/query-regression-work'],
+            ['tar','cf','-','/work/query-regression-summary.md']
+          ]
+        )
+      message: "exec/cp CONNECT argv and stream flags must be exactly the canonical controller/kubectl tuples"

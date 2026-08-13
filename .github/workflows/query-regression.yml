@@ -1,31 +1,27 @@
 name: Query Regression
 
-# Architecture (v1): trusted local controller; perf in a one-shot ACK Job.
-# - `build` runs on the trusted local self-hosted runner
-#   (`perf-regression-8-cores`): it resolves the immutable base/candidate
-#   SHAs, compiles the base and candidate binaries plus the query regression
-#   helpers using the runner's persistent build cache, and uploads base and
-#   candidate binaries as two separate immutable artifacts. The base artifact
-#   is uploaded BEFORE any candidate-controlled build step runs, so candidate
-#   build scripts cannot overwrite the base binary. The verified SHAs and the
-#   artifact IDs are exposed as build job outputs. No ACK credential is
-#   present in this job; the query regression tooling tests run here (build
-#   context), not on ACK.
-# - `query-regression-controller` runs on the same trusted local runner: it
-#   restores the trusted scripts (controller/summary/pr-metadata) from the
-#   verified base commit into a fresh $RUNNER_TEMP directory (never from the
-#   build artifact), downloads both artifacts by exact artifact ID, verifies
-#   the binary attestation and that the manifests agree with the verified
-#   SHAs and the candidate checkout HEAD, then executes the restored trusted
-#   controller script. The controller creates a deterministic one-shot
-#   Kubernetes Job in the ACK cluster, transfers the verified payload into
-#   the running pod with `kubectl cp` (never executing candidate content on
-#   the runner), waits for the benchmark, collects and validates the
-#   reports/summary, and deletes the exact Job with bounded retries plus an
-#   absence check. The pod has no GitHub/cloud/kube credentials and runs the
-#   performance regression only. ACK nodepool autoscaling is implicit: the
-#   Pending pod scales the dedicated nodepool up, deletion scales it down; no
-#   nodepool API is ever called.
+# Architecture (v2): unprivileged build; trusted workflow_run controller.
+# - This workflow is the UNPRIVILEGED build half. It runs on the trusted
+#   local ARC runner (`perf-regression-8-cores` for PR label runs) and has no
+#   ACK/cloud secret references, no kubeconfig, no kubectl cluster calls, and
+#   no privileged controller job.
+# - `build` resolves the immutable base/candidate SHAs, compiles the base and
+#   candidate binaries plus the query regression helpers using the runner's
+#   persistent build cache, runs the query regression tooling tests (build
+#   context), and uploads three artifacts:
+#     1. `query-regression-base-binaries`  - uploaded BEFORE any candidate-
+#        controlled build step runs, so candidate build scripts cannot
+#        overwrite the base binary;
+#     2. `query-regression-candidate-binaries` - binaries plus the candidate
+#        tests/perf tree and the candidate driver under `repo/...` (the
+#        trusted controller never checks out PR code, so the payload content
+#        travels inside this artifact);
+#     3. `query-regression-metadata` - a strict metadata artifact containing
+#        only GitHub-context values and the verified build outputs.
+# - The trusted `Query Regression Controller` workflow (workflow_run follower)
+#   validates the run/artifacts/PR/SHA chain from GitHub API data, treats the
+#   metadata artifact as untrusted, downloads the base/candidate artifacts by
+#   exact validated ids, and only then creates the one-shot ACK benchmark Job.
 on:
   workflow_call:
     inputs:
@@ -58,10 +54,33 @@ on:
         type: string
         default: nightly
       runner:
-        description: Trusted local self-hosted runner label for the build and controller jobs (must have the derived runner image, kubectl, and ACK kubeconfig access)
+        description: Trusted local self-hosted runner label for the build job (must have the derived runner image and the persistent build cache)
         required: false
         type: string
         default: perf-regression-8-cores
+    # Exact build outputs for the trusted controller's explicit release path:
+    # the caller (release.yml) passes these as typed inputs to the controller
+    # workflow_call, which cross-checks every one against the validated values
+    # from this run. Mutable refs are never used.
+    outputs:
+      verified-base-sha:
+        description: Immutable base SHA built by this run (job output verified-base-sha)
+        value: ${{ jobs.build.outputs.verified-base-sha }}
+      verified-candidate-sha:
+        description: Immutable candidate SHA built by this run (job output verified-candidate-sha)
+        value: ${{ jobs.build.outputs.verified-candidate-sha }}
+      base-artifact-id:
+        description: Artifact id of query-regression-base-binaries (job output base-artifact-id)
+        value: ${{ jobs.build.outputs.base-artifact-id }}
+      candidate-artifact-id:
+        description: Artifact id of query-regression-candidate-binaries (job output candidate-artifact-id)
+        value: ${{ jobs.build.outputs.candidate-artifact-id }}
+      run-id:
+        description: GitHub run id of this build run (the controller downloads artifacts by it)
+        value: ${{ jobs.build.outputs.run-id }}
+      run-attempt:
+        description: GitHub run attempt of this build run
+        value: ${{ jobs.build.outputs.run-attempt }}
   workflow_dispatch:
     inputs:
       case:
@@ -94,7 +113,7 @@ on:
           - release
           - dev
       runner:
-        description: Trusted local self-hosted runner label for the build and controller jobs (must have the derived runner image, kubectl, and ACK kubeconfig access)
+        description: Trusted local self-hosted runner label for the build job
         required: true
         type: choice
         default: perf-regression-8-cores
@@ -105,8 +124,6 @@ on:
 
 permissions:
   contents: read
-  # Required by actions/download-artifact@v4 to fetch artifacts by exact ID.
-  actions: read
 
 jobs:
   build:
@@ -129,6 +146,10 @@ jobs:
       verified-candidate-sha: ${{ steps.resolve.outputs.verified-candidate-sha }}
       base-artifact-id: ${{ steps.upload-base.outputs.artifact-id }}
       candidate-artifact-id: ${{ steps.upload-candidate.outputs.artifact-id }}
+      # The controller's release path downloads artifacts from THIS run by the
+      # exact run id/attempt (never a mutable ref).
+      run-id: ${{ github.run_id }}
+      run-attempt: ${{ github.run_attempt }}
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
       # The local runner image/pod provides CARGO_HOME, CARGO_TARGET_DIR,
@@ -264,7 +285,8 @@ jobs:
           }
           printf 'VERIFIED_CANDIDATE_SHA=%s\n' "${VERIFIED_CANDIDATE_SHA,,}" >> "${GITHUB_ENV}"
           printf 'VERIFIED_BASE_SHA=%s\n' "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_ENV}"
-          # Real job outputs: the controller job consumes exactly these values.
+          # Real job outputs: the trusted controller consumes exactly these
+          # values (via the metadata artifact and its own validation).
           printf 'verified-base-sha=%s\n' "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_OUTPUT}"
           printf 'verified-candidate-sha=%s\n' "${VERIFIED_CANDIDATE_SHA,,}" >> "${GITHUB_OUTPUT}"
           printf 'Verified candidate SHA: %s\n' "${VERIFIED_CANDIDATE_SHA,,}"
@@ -410,7 +432,7 @@ jobs:
           # Tooling tests execute candidate Python in the build job only — the
           # same trust context as compiling the candidate itself. They never
           # run on the ACK cluster (ACK runs performance regression only) and
-          # never in the controller job (which holds the ACK kubeconfig).
+          # never in the controller workflow (which holds the ACK kubeconfig).
           uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
           uv run --no-project python tests/perf/test_query_regression_runner_otlp_trace_load.py
           uv run --no-project python tests/perf/test_query_regression_summary_otlp.py
@@ -428,6 +450,13 @@ jobs:
             "${artifact_dir}/query-regression-bins/candidate/query_perf_fixture"
           cp "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner" \
             "${artifact_dir}/query-regression-bins/candidate/query_regression_runner"
+          # The trusted controller never checks out PR code, so the candidate
+          # tests/perf tree and the candidate driver travel inside this
+          # artifact (under repo/...) for the ACK payload.
+          mkdir -p "${artifact_dir}/repo/tests" "${artifact_dir}/repo/.github/scripts"
+          cp -a "${GITHUB_WORKSPACE}/src/tests/perf" "${artifact_dir}/repo/tests/"
+          cp "${GITHUB_WORKSPACE}/src/.github/scripts/query-regression-run.py" \
+            "${artifact_dir}/repo/.github/scripts/query-regression-run.py"
           cd "${artifact_dir}"
           python3 - "${VERIFIED_CANDIDATE_SHA}" <<'PY'
           import json
@@ -460,272 +489,77 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  query-regression-controller:
-    if: >-
-      ${{ github.event_name != 'pull_request' ||
-           (github.event_name == 'pull_request' &&
-            !github.event.pull_request.draft &&
-            (github.event.label.name == 'query-regression' ||
-             github.event.label.name == 'heavy-regression')) }}
-    needs: build
-    runs-on: ${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}
-    timeout-minutes: 180
-    concurrency:
-      group: query-regression-persistent-cache-v1
-      queue: max
-      cancel-in-progress: false
-    env:
-      # Verified SHAs and artifact IDs come from the build job outputs only —
-      # never re-derived from the PR head or any other independent source.
-      VERIFIED_BASE_SHA: ${{ needs.build.outputs.verified-base-sha }}
-      VERIFIED_CANDIDATE_SHA: ${{ needs.build.outputs.verified-candidate-sha }}
-      BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name != 'pull_request' && (inputs.candidate_ref || github.ref) || '' }}
-      EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-      CASE_PATHS: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy' || 'all') || inputs.case }}
-      HTTP_TIMEOUT: ${{ github.event_name == 'pull_request' && '300' || inputs.http_timeout }}
-      ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      CASE_NAME: ${{ github.event_name == 'pull_request' && (github.event.label.name == 'heavy-regression' && 'heavy case set' || 'default case set') || inputs.case }}
-      CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
-    steps:
-      - name: Checkout trusted source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          # The trusted scripts are restored from the verified base commit only
-          # (the same revision the base binary was built from), so candidate
-          # content can never replace controller/summary/metadata code that
-          # runs in this job.
-          ref: ${{ needs.build.outputs.verified-base-sha }}
-          path: trusted-src
-          persist-credentials: false
-
-      - name: Restore trusted query regression scripts
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Fresh $RUNNER_TEMP directory; scripts are never taken from the
-          # build artifact (candidate-controlled) or from the workspace where
-          # the candidate checkout lives.
-          trusted_dir="${RUNNER_TEMP}/query-regression-trusted-scripts"
-          rm -rf "${trusted_dir}"
-          mkdir -p "${trusted_dir}"
-          for script in query-regression-ack-controller.py query-regression-summary.py query-regression-pr-metadata.py; do
-            git -C "${GITHUB_WORKSPACE}/trusted-src" show "${VERIFIED_BASE_SHA}:.github/scripts/${script}" \
-              > "${trusted_dir}/${script}" || {
-                printf 'Trusted script %s is missing from verified base commit %s.\n' \
-                  "${script}" "${VERIFIED_BASE_SHA}" >&2
-                printf 'It must be merged to the base/default branch before a query-regression run can be admitted.\n' >&2
-                exit 1
-              }
-            test -s "${trusted_dir}/${script}"
-          done
-          python3 - "${trusted_dir}" "${VERIFIED_BASE_SHA}" <<'PY'
-          import hashlib
-          import json
-          import sys
-          from pathlib import Path
-
-          trusted_dir = Path(sys.argv[1])
-          source_sha = sys.argv[2]
-          manifest = {"source_sha": source_sha, "files": {}}
-          for path in sorted(trusted_dir.iterdir()):
-              if path.is_file() and path.name.endswith(".py"):
-                  manifest["files"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
-          (trusted_dir / "trusted-scripts-manifest.json").write_text(
-              json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8"
-          )
-          PY
-          test -s "${trusted_dir}/trusted-scripts-manifest.json"
-          printf 'TRUSTED_SCRIPTS_DIR=%s\n' "${trusted_dir}" >> "${GITHUB_ENV}"
-          printf 'Trusted scripts restored from %s to %s\n' "${VERIFIED_BASE_SHA}" "${trusted_dir}"
-
-      - name: Checkout candidate source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          # The exact verified candidate/merge SHA from the build job outputs —
-          # the same revision the candidate binaries were built from.
-          ref: ${{ needs.build.outputs.verified-candidate-sha }}
-          path: src
-          persist-credentials: false
-
-      - name: Download query regression base binaries
-        uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ needs.build.outputs.base-artifact-id }}
-          path: query-regression-artifacts/base
-          merge-multiple: true
-
-      - name: Download query regression candidate binaries
-        uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ needs.build.outputs.candidate-artifact-id }}
-          path: query-regression-artifacts/candidate
-          merge-multiple: true
-
-      - name: Verify build manifests and binary attestation
-        shell: bash
-        run: |
-          set -euo pipefail
-          base_dir="${GITHUB_WORKSPACE}/query-regression-artifacts/base"
-          candidate_dir="${GITHUB_WORKSPACE}/query-regression-artifacts/candidate"
-          cd "${GITHUB_WORKSPACE}"
-          [[ -f "${base_dir}/base-manifest.json" ]] || {
-            printf 'base-manifest.json is missing from the downloaded base artifact.\n' >&2
-            exit 1
-          }
-          [[ -f "${candidate_dir}/candidate-manifest.json" ]] || {
-            printf 'candidate-manifest.json is missing from the downloaded candidate artifact.\n' >&2
-            exit 1
-          }
-          python3 - <<'PY' > .query-regression-attestation.sha256
-          import json
-
-          base = json.load(open("query-regression-artifacts/base/base-manifest.json", encoding="utf-8"))
-          candidate = json.load(open("query-regression-artifacts/candidate/candidate-manifest.json", encoding="utf-8"))
-          for manifest, prefix in (
-              (base, "query-regression-artifacts/base/"),
-              (candidate, "query-regression-artifacts/candidate/"),
-          ):
-              for entry in manifest["binaries"]:
-                  print(f"{entry['sha256']}  {prefix}{entry['path']}")
-          PY
-          if ! sha256sum -c .query-regression-attestation.sha256; then
-            printf 'binary attestation mismatch: downloaded binaries do not match the build manifests.\n' >&2
-            exit 1
-          fi
-          base_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_sha"])' "${base_dir}/base-manifest.json")"
-          candidate_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_sha"])' "${candidate_dir}/candidate-manifest.json")"
-          for sha in "${base_sha}" "${candidate_sha}" "${VERIFIED_BASE_SHA}" "${VERIFIED_CANDIDATE_SHA}"; do
-            [[ "${sha}" =~ ^[[:xdigit:]]{40}$ ]] || {
-              printf 'SHA is not a full 40-hex digest: %s\n' "${sha}" >&2
-              exit 1
-            }
-          done
-          [[ "${base_sha,,}" == "${VERIFIED_BASE_SHA,,}" ]] || {
-            printf 'base-manifest base_sha %s does not match verified base SHA %s.\n' \
-              "${base_sha}" "${VERIFIED_BASE_SHA}" >&2
-            exit 1
-          }
-          [[ "${candidate_sha,,}" == "${VERIFIED_CANDIDATE_SHA,,}" ]] || {
-            printf 'candidate-manifest candidate_sha %s does not match verified candidate SHA %s.\n' \
-              "${candidate_sha}" "${VERIFIED_CANDIDATE_SHA}" >&2
-            exit 1
-          }
-          # The candidate checkout must be the exact verified candidate SHA.
-          checkout_sha="$(git -C "${GITHUB_WORKSPACE}/src" rev-parse HEAD)"
-          [[ "${checkout_sha,,}" == "${VERIFIED_CANDIDATE_SHA,,}" ]] || {
-            printf 'Checked-out candidate %s does not match verified candidate SHA %s.\n' \
-              "${checkout_sha,,}" "${VERIFIED_CANDIDATE_SHA,,}" >&2
-            exit 1
-          }
-          printf 'Verified base SHA: %s\n' "${base_sha}"
-          printf 'Verified candidate SHA: %s\n' "${candidate_sha}"
-
-      - name: Prepare ACK kubeconfig
-        env:
-          ACK_KUBECONFIG: ${{ secrets.ACK_KUBECONFIG }}
-        run: |
-          set -euo pipefail
-          command -v kubectl >/dev/null 2>&1 || {
-            printf 'kubectl is required on the %s runner; see the query-regression README (controller prerequisites).\n' \
-              "${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}" >&2
-            exit 1
-          }
-          if [[ -n "${ACK_KUBECONFIG:-}" ]]; then
-            umask 077
-            mkdir -p "${RUNNER_TEMP}"
-            printf '%s' "${ACK_KUBECONFIG}" > "${RUNNER_TEMP}/ack-kubeconfig"
-            printf 'KUBECONFIG=%s\n' "${RUNNER_TEMP}/ack-kubeconfig" >> "${GITHUB_ENV}"
-          fi
-          printf 'kubectl client: '
-          kubectl version --client -o yaml 2>/dev/null | sed -n 's/^    gitVersion: /v/p' | head -n 1 || true
-
-      - name: Run ACK query regression controller
-        id: controller
-        env:
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          # Digest-pinned runtime image: the same image the ARC scale sets
-          # used. No new image is built or pushed by this workflow.
-          JOB_IMAGE: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11
-        run: >-
-          python3 "${TRUSTED_SCRIPTS_DIR}/query-regression-ack-controller.py"
-          --base-artifact-dir "${GITHUB_WORKSPACE}/query-regression-artifacts/base"
-          --candidate-artifact-dir "${GITHUB_WORKSPACE}/query-regression-artifacts/candidate"
-          --candidate-src "${GITHUB_WORKSPACE}/src"
-          --trusted-summary "${TRUSTED_SCRIPTS_DIR}/query-regression-summary.py"
-          --trusted-scripts-manifest "${TRUSTED_SCRIPTS_DIR}/trusted-scripts-manifest.json"
-          --payload-dir "${RUNNER_TEMP}/query-regression-payload"
-          --result-dir "${GITHUB_WORKSPACE}"
-
-      - name: Clean up ACK benchmark job (second process, best effort)
-        if: always()
-        env:
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          # Second-process cleanup: if the controller step failed or was
-          # terminated (its finally may not have run), delete only the exact
-          # deterministic Job for this run. Exact-name validation is identical
-          # to the controller path. Under GitHub hard cancellation no further
-          # steps run; recovery is documented in the README.
-          trusted_dir="${TRUSTED_SCRIPTS_DIR:-}"
-          if [[ -z "${trusted_dir}" ]]; then
-            echo "trusted scripts not restored; nothing to clean up"
-            exit 0
-          fi
-          python3 "${trusted_dir}/query-regression-ack-controller.py" \
-            --cleanup-only \
-            --run-id "${RUN_ID}" \
-            --run-attempt "${RUN_ATTEMPT}" \
-            --namespace "${ACK_JOB_NAMESPACE:-arc-runners}" \
-            --delete-timeout 120 \
-            --delete-attempts 3
-
-      - name: Write PR metadata for trusted comment workflow
-        if: ${{ always() && github.event_name == 'pull_request' }}
+      - name: Stage strict query regression metadata
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: uv run --no-project python "${TRUSTED_SCRIPTS_DIR}/query-regression-pr-metadata.py"
+          LABEL_NAME: ${{ github.event.label.name }}
+          BASE_ARTIFACT_ID: ${{ steps.upload-base.outputs.artifact-id }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.upload-candidate.outputs.artifact-id }}
+          CASE_PATHS_INPUT: ${{ github.event_name == 'pull_request' && '' || inputs.case }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The strict metadata artifact carries ONLY GitHub-context values and
+          # the verified build outputs (step outputs of the upload steps). It
+          # is treated as untrusted by the controller and every field is
+          # cross-checked against the GitHub API there. Candidate-controlled
+          # build steps run before this step, so the file is always rewritten
+          # here from env/step outputs before the upload below.
+          metadata_dir="${GITHUB_WORKSPACE}/query-regression-artifacts/metadata"
+          mkdir -p "${metadata_dir}"
+          python3 - <<'PY' > "${metadata_dir}/query-regression-metadata.json"
+          import json
+          import os
 
-      - name: Upload query regression artifacts
-        if: always()
+          event = os.environ["GITHUB_EVENT_NAME"]
+          if event == "pull_request":
+              pr_number = int(os.environ["PR_NUMBER"])
+              head_sha = os.environ["EVENT_HEAD_SHA"]
+              event_base_sha = os.environ["EVENT_BASE_SHA"]
+              head_repo = os.environ["HEAD_REPO"]
+              base_repo = os.environ["BASE_REPO"]
+              label = os.environ.get("LABEL_NAME", "")
+          else:
+              pr_number = None
+              head_sha = os.environ["GITHUB_SHA"]
+              event_base_sha = os.environ.get("BASE_REF", "") or None
+              head_repo = os.environ["GITHUB_REPOSITORY"]
+              base_repo = os.environ["GITHUB_REPOSITORY"]
+              label = None
+
+          if event == "pull_request":
+              case_paths = "heavy" if label == "heavy-regression" else "all"
+          else:
+              case_paths = os.environ.get("CASE_PATHS_INPUT", "all")
+
+          metadata = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "event": event,
+              "pr_number": pr_number,
+              "head_sha": head_sha,
+              "event_base_sha": event_base_sha,
+              "head_repo": head_repo,
+              "base_repo": base_repo,
+              "label": label,
+              "case": case_paths,
+              "built_base_sha": os.environ["VERIFIED_BASE_SHA"],
+              "candidate_sha": os.environ["VERIFIED_CANDIDATE_SHA"],
+              "base_artifact_id": int(os.environ["BASE_ARTIFACT_ID"]),
+              "candidate_artifact_id": int(os.environ["CANDIDATE_ARTIFACT_ID"]),
+          }
+          print(json.dumps(metadata, sort_keys=True))
+          PY
+          test -s "${metadata_dir}/query-regression-metadata.json"
+
+      - name: Upload query regression metadata
         uses: actions/upload-artifact@v4
         with:
-          name: query-regression-report
-          path: |
-            query-regression-work/**/query-regression-report.json
-            query-regression-work/**/base/report.json
-            query-regression-work/**/candidate/report.json
-            query-regression-work/**/logs/**
-            query-regression-work/**/otelgen/**
-            query-regression-summary.md
-            query-regression-pod.log
-            query-regression-pod-describe.txt
-          if-no-files-found: warn
+          name: query-regression-metadata
+          path: query-regression-artifacts/metadata/**
+          if-no-files-found: error
           retention-days: 7
-
-      - name: Upload trusted comment artifact
-        if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: query-regression-comment
-          path: |
-            query-regression-pr.json
-            query-regression-work/**/query-regression-report.json
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Fail on regression failure
-        if: ${{ steps.controller.outputs.status != '0' }}
-        run: exit 1

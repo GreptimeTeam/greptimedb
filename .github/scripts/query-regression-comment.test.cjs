@@ -19,6 +19,189 @@ function report(name, measurements, thresholds = []) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Validation-chain harness. The comment workflow follows the trusted
+// `Query Regression Controller` run; the controller followed the `Query
+// Regression` build run and regenerated the comment metadata from validated
+// values. The validator must pin the artifact to the immediate controller run
+// and resolve/re-validate the original source build run from the metadata.
+// ---------------------------------------------------------------------------
+
+const HEAD_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const BUILT_BASE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const EVENT_BASE_SHA = 'cccccccccccccccccccccccccccccccccccccccc';
+const CANDIDATE_SHA = 'dddddddddddddddddddddddddddddddddddddddd';
+const DEFAULT_BRANCH_SHA = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const MOVED_SHA = 'ffffffffffffffffffffffffffffffffffffffff';
+
+function defaultMetadata(overrides = {}) {
+  return {
+    run_id: 201,
+    run_attempt: 2,
+    source_run_id: 101,
+    source_run_attempt: 1,
+    base_repo: 'owner/repo',
+    pr_number: 42,
+    head_sha: HEAD_SHA,
+    head_repo: 'fork/repo',
+    built_base_sha: BUILT_BASE_SHA,
+    event_base_sha: EVENT_BASE_SHA,
+    candidate_sha: CANDIDATE_SHA,
+    ...overrides,
+  };
+}
+
+function defaultController(overrides = {}) {
+  return {
+    id: 201,
+    attempt: 2,
+    payload: {
+      id: 201,
+      name: 'Query Regression Controller',
+      event: 'workflow_run',
+      conclusion: 'success',
+      path: '.github/workflows/query-regression-controller.yml',
+      head_sha: DEFAULT_BRANCH_SHA,
+      head_repository: { full_name: 'owner/repo' },
+      pull_requests: [],
+    },
+    api: {
+      id: 201,
+      name: 'Query Regression Controller',
+      event: 'workflow_run',
+      conclusion: 'success',
+      path: '.github/workflows/query-regression-controller.yml',
+      head_sha: DEFAULT_BRANCH_SHA,
+      head_repository: { full_name: 'owner/repo' },
+    },
+    ...overrides,
+  };
+}
+
+function defaultSource(overrides = {}) {
+  return {
+    id: 101,
+    attempt: 1,
+    api: {
+      id: 101,
+      name: 'Query Regression',
+      event: 'pull_request',
+      conclusion: 'success',
+      run_attempt: 1,
+      path: '.github/workflows/query-regression.yml',
+      head_sha: HEAD_SHA,
+      head_branch: 'feature-branch',
+      head_repository: { full_name: 'fork/repo', owner: { login: 'fork' } },
+      pull_requests: [],
+    },
+    ...overrides,
+  };
+}
+
+function defaultForkPr() {
+  return {
+    number: 42,
+    head: { repo: { full_name: 'fork/repo' }, sha: HEAD_SHA },
+    base: { repo: { full_name: 'owner/repo' } },
+  };
+}
+
+function defaultOpenPull() {
+  return {
+    state: 'open',
+    base: { repo: { full_name: 'owner/repo' } },
+    head: { repo: { full_name: 'fork/repo' }, sha: HEAD_SHA },
+  };
+}
+
+async function runValidator({
+  metadata = defaultMetadata(),
+  controller = defaultController(),
+  source = defaultSource(),
+  prs = [defaultForkPr()],
+  pull = defaultOpenPull(),
+  envRunId,
+  envRunAttempt,
+  useAttemptEndpoint = true,
+  failSourceResolve = false,
+} = {}) {
+  const originalCwd = process.cwd();
+  const originalRunId = process.env.WORKFLOW_RUN_ID;
+  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
+  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
+  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
+  const outputs = new Map();
+  const warnings = [];
+  const calls = [];
+  try {
+    fs.mkdirSync(artifactDir);
+    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify(metadata));
+    process.chdir(temporaryDir);
+    process.env.WORKFLOW_RUN_ID = String(envRunId === undefined ? controller.id : envRunId);
+    process.env.WORKFLOW_RUN_ATTEMPT = String(envRunAttempt === undefined ? controller.attempt : envRunAttempt);
+
+    const actions = {
+      getWorkflowRun: async params => {
+        calls.push({ endpoint: 'getWorkflowRun', params: { ...params } });
+        if (controller && params.run_id === controller.id) return { data: controller.api };
+        if (source && params.run_id === source.id) return { data: source.api };
+        throw new Error('HTTP 404: run not found');
+      },
+    };
+    if (useAttemptEndpoint) {
+      actions.getWorkflowRunAttempt = async params => {
+        calls.push({ endpoint: 'getWorkflowRunAttempt', params: { ...params } });
+        if (failSourceResolve) throw new Error('HTTP 404: attempt not found');
+        if (source && params.run_id === source.id && params.attempt_number === source.attempt) {
+          return { data: source.api };
+        }
+        throw new Error('HTTP 404: attempt not found');
+      };
+    }
+    const github = {
+      rest: {
+        actions,
+        pulls: {
+          list: async params => {
+            calls.push({ endpoint: 'pulls.list', params: { ...params } });
+            return { data: prs };
+          },
+          get: async params => {
+            calls.push({ endpoint: 'pulls.get', params: { ...params } });
+            return { data: pull };
+          },
+        },
+      },
+    };
+    const context = {
+      repo: { owner: 'owner', repo: 'repo' },
+      payload: { workflow_run: controller.payload },
+    };
+    const core = {
+      info() {},
+      warning(message) { warnings.push(message); },
+      setOutput(name, value) { outputs.set(name, value); },
+    };
+
+    await handler({ github, context, core });
+
+    const summaryPath = outputs.get('summary_path');
+    return {
+      outputs: new Map(outputs),
+      warnings,
+      calls,
+      summary: summaryPath ? fs.readFileSync(summaryPath, 'utf8') : null,
+    };
+  } finally {
+    process.chdir(originalCwd);
+    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
+    else process.env.WORKFLOW_RUN_ID = originalRunId;
+    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
+    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+}
+
 test('keeps the default export callable and exposes only the test seam', () => {
   assert.equal(typeof handler, 'function');
   assert.equal(handler.constructor.name, 'AsyncFunction');
@@ -305,73 +488,353 @@ test('escapes Markdown table content, including bare carriage returns', () => {
   assert.doesNotMatch(table, /hidden|comment|drop|\r/);
 });
 
-test('writes the explicit no-report summary without an empty table', async () => {
-  const originalCwd = process.cwd();
-  const originalRunId = process.env.WORKFLOW_RUN_ID;
-  const originalRunAttempt = process.env.WORKFLOW_RUN_ATTEMPT;
-  const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-regression-comment-'));
-  const artifactDir = path.join(temporaryDir, 'query-regression-comment');
-  const outputs = new Map();
+test('publishes only after validating the controller run, the source build run, and the PR', async () => {
+  const result = await runValidator();
 
-  try {
-    fs.mkdirSync(artifactDir);
-    fs.writeFileSync(path.join(artifactDir, 'query-regression-pr.json'), JSON.stringify({
-      run_id: 101,
-      run_attempt: 1,
-      base_repo: 'owner/repo',
-      pr_number: 42,
-      head_sha: 'head-sha',
-      head_repo: 'fork/repo',
-      built_base_sha: 'base-sha',
-      event_base_sha: 'event-base-sha',
-      candidate_sha: 'candidate-sha',
-    }));
-    process.chdir(temporaryDir);
-    process.env.WORKFLOW_RUN_ID = '101';
-    process.env.WORKFLOW_RUN_ATTEMPT = '1';
+  assert.equal(result.outputs.get('should_post'), 'true');
+  assert.equal(result.outputs.get('pr_number'), '42');
+  assert.match(result.summary, /No query-regression JSON reports were found in the artifact\./);
+  assert.doesNotMatch(result.summary, /\| Case \| Query \|/);
+  // Both trusted runs are linked from the regenerated metadata.
+  assert.match(result.summary, /Controller run:\*\* https:\/\/github\.com\/owner\/repo\/actions\/runs\/201/);
+  assert.match(result.summary, /Source build run:\*\* https:\/\/github\.com\/owner\/repo\/actions\/runs\/101/);
 
-    await handler({
-      core: {
-        info() {},
-        warning() {},
-        setOutput(name, value) { outputs.set(name, value); },
-      },
-      context: {
-        repo: { owner: 'owner', repo: 'repo' },
-        payload: {
-          workflow_run: {
-            event: 'pull_request',
-            head_sha: 'head-sha',
-            head_repository: { full_name: 'fork/repo' },
-            pull_requests: [{ number: 42 }],
-          },
-        },
-      },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({
-              data: {
-                state: 'open',
-                base: { repo: { full_name: 'owner/repo' } },
-                head: { repo: { full_name: 'fork/repo' }, sha: 'head-sha' },
-              },
-            }),
-          },
-        },
+  // The validator independently consulted the GitHub API for both runs, the
+  // fork fallback, and the current PR state.
+  assert.ok(result.calls.some(call => (
+    call.endpoint === 'getWorkflowRun' && call.params.run_id === 201
+  )));
+  assert.ok(result.calls.some(call => (
+    call.endpoint === 'getWorkflowRunAttempt' &&
+    call.params.run_id === 101 &&
+    call.params.attempt_number === 1
+  )));
+  assert.ok(result.calls.some(call => (
+    call.endpoint === 'pulls.list' && call.params.head === 'fork:feature-branch'
+  )));
+  assert.ok(result.calls.some(call => (
+    call.endpoint === 'pulls.get' && call.params.pull_number === 42
+  )));
+});
+
+test('publishes when the source run lists the PR directly without the fork fallback', async () => {
+  const source = defaultSource({
+    api: { ...defaultSource().api, pull_requests: [{ number: 42 }] },
+  });
+  const result = await runValidator({ source, prs: [] });
+
+  assert.equal(result.outputs.get('should_post'), 'true');
+  assert.ok(!result.calls.some(call => call.endpoint === 'pulls.list'));
+  assert.ok(result.calls.some(call => call.endpoint === 'pulls.get'));
+});
+
+test('publishes via the run-endpoint fallback when the attempt endpoint is unavailable', async () => {
+  const result = await runValidator({ useAttemptEndpoint: false });
+
+  assert.equal(result.outputs.get('should_post'), 'true');
+  assert.ok(result.calls.some(call => (
+    call.endpoint === 'getWorkflowRun' && call.params.run_id === 101
+  )));
+});
+
+test('rejects a comment artifact replayed from another controller run', async () => {
+  const result = await runValidator({ envRunId: 999 });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+  assert.ok(!result.calls.some(call => call.endpoint === 'getWorkflowRun'));
+});
+
+test('rejects metadata without valid source_run_id/source_run_attempt', async () => {
+  const result = await runValidator({
+    metadata: defaultMetadata({ source_run_id: undefined, source_run_attempt: undefined }),
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects metadata with forged source_run_id/source_run_attempt values', async () => {
+  const result = await runValidator({
+    metadata: defaultMetadata({ source_run_id: 'not-a-number', source_run_attempt: 0 }),
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a controller run that was not triggered by workflow_run', async () => {
+  const base = defaultController();
+  const result = await runValidator({
+    controller: {
+      ...base,
+      payload: { ...base.payload, event: 'push' },
+      api: { ...base.api, event: 'push' },
+    },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a controller run from a different workflow', async () => {
+  const base = defaultController();
+  const result = await runValidator({
+    controller: {
+      ...base,
+      payload: { ...base.payload, name: 'Other Workflow' },
+      api: { ...base.api, name: 'Other Workflow' },
+    },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('publishes when the controller run path is unqualified or ref-qualified', async () => {
+  // REST/workflow_run payload `path` appends the triggering ref
+  // (`.github/workflows/x.yml@refs/...`); the validator canonicalizes by
+  // stripping the first `@ref` suffix and requires the exact controller
+  // workflow file.
+  for (const path of [
+    '.github/workflows/query-regression-controller.yml', // unqualified
+    '.github/workflows/query-regression-controller.yml@refs/heads/main', // branch-qualified
+    '.github/workflows/query-regression-controller.yml@refs/tags/v1.2.3', // tag-qualified
+    `.github/workflows/query-regression-controller.yml@${DEFAULT_BRANCH_SHA}`, // SHA-qualified
+  ]) {
+    const base = defaultController();
+    const result = await runValidator({
+      controller: {
+        ...base,
+        payload: { ...base.payload, path },
+        api: { ...base.api, path },
       },
     });
-
-    const summary = fs.readFileSync(path.join(artifactDir, 'query-regression-summary.md'), 'utf8');
-    assert.equal(outputs.get('should_post'), 'true');
-    assert.match(summary, /No query-regression JSON reports were found in the artifact\./);
-    assert.doesNotMatch(summary, /\| Case \| Query \|/);
-  } finally {
-    process.chdir(originalCwd);
-    if (originalRunId === undefined) delete process.env.WORKFLOW_RUN_ID;
-    else process.env.WORKFLOW_RUN_ID = originalRunId;
-    if (originalRunAttempt === undefined) delete process.env.WORKFLOW_RUN_ATTEMPT;
-    else process.env.WORKFLOW_RUN_ATTEMPT = originalRunAttempt;
-    fs.rmSync(temporaryDir, { recursive: true, force: true });
+    assert.equal(result.outputs.get('should_post'), 'true');
   }
+});
+
+test('publishes when the source build run path is unqualified or ref-qualified', async () => {
+  for (const path of [
+    '.github/workflows/query-regression.yml', // unqualified
+    '.github/workflows/query-regression.yml@refs/heads/feature-branch', // branch-qualified
+    '.github/workflows/query-regression.yml@refs/tags/v1.2.3', // tag-qualified
+    `.github/workflows/query-regression.yml@${HEAD_SHA}`, // SHA-qualified
+  ]) {
+    const base = defaultSource();
+    const result = await runValidator({
+      source: { ...base, api: { ...base.api, path } },
+    });
+    assert.equal(result.outputs.get('should_post'), 'true');
+  }
+});
+
+test('rejects a controller run whose workflow file path is not the controller workflow', async () => {
+  // Exact canonical path is required: a different workflow file fails even
+  // when the display name is correct (path is the canonical identity).
+  for (const path of [
+    '.github/workflows/evil.yml',
+    '.github/workflows/evil.yml@refs/heads/main',
+    '.github/workflows/query-regression.yml@refs/heads/main',
+  ]) {
+    const base = defaultController();
+    const result = await runValidator({
+      controller: {
+        ...base,
+        payload: { ...base.payload, path },
+        api: { ...base.api, path },
+      },
+    });
+    assert.equal(result.outputs.get('should_post'), 'false');
+    assert.equal(result.outputs.has('summary_path'), false);
+  }
+});
+
+test('rejects a source build run whose workflow file path is not the Query Regression workflow', async () => {
+  for (const path of [
+    '.github/workflows/evil.yml',
+    '.github/workflows/evil.yml@refs/heads/main',
+    '.github/workflows/query-regression-controller.yml@refs/heads/main',
+  ]) {
+    const base = defaultSource();
+    const result = await runValidator({
+      source: { ...base, api: { ...base.api, path } },
+    });
+    assert.equal(result.outputs.get('should_post'), 'false');
+    assert.equal(result.outputs.has('summary_path'), false);
+  }
+});
+
+test('canonicalizes REST run paths by stripping the first @ref suffix', () => {
+  assert.equal(handler.canonicalRunPath('.github/workflows/query-regression.yml'), '.github/workflows/query-regression.yml');
+  assert.equal(handler.canonicalRunPath('.github/workflows/query-regression-controller.yml@refs/heads/main'), '.github/workflows/query-regression-controller.yml');
+  assert.equal(handler.canonicalRunPath('.github/workflows/query-regression-controller.yml@refs/tags/v1.2.3'), '.github/workflows/query-regression-controller.yml');
+  assert.equal(handler.canonicalRunPath(`.github/workflows/query-regression.yml@${HEAD_SHA}`), '.github/workflows/query-regression.yml');
+  assert.equal(handler.SOURCE_WORKFLOW_NAME, 'Query Regression');
+  assert.equal(handler.CONTROLLER_WORKFLOW_NAME, 'Query Regression Controller');
+  assert.equal(handler.SOURCE_WORKFLOW_PATH, '.github/workflows/query-regression.yml');
+  assert.equal(handler.CONTROLLER_WORKFLOW_PATH, '.github/workflows/query-regression-controller.yml');
+});
+
+test('rejects a controller run whose head repository is not the base repository', async () => {
+  const base = defaultController();
+  const result = await runValidator({
+    controller: {
+      ...base,
+      payload: { ...base.payload, head_repository: { full_name: 'evil/repo' } },
+      api: { ...base.api, head_repository: { full_name: 'evil/repo' } },
+    },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects when the controller run cannot be verified via the API', async () => {
+  const base = defaultController();
+  const result = await runValidator({
+    controller: { ...base, id: 999 },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects an unresolvable source build run', async () => {
+  const result = await runValidator({ failSourceResolve: true });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a source run that is not the Query Regression workflow', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, name: 'Other Build' } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a source run that is not a pull_request event', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, event: 'push' } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a source run that did not conclude successfully', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, conclusion: 'failure' } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a source run whose head SHA differs from the metadata', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, head_sha: MOVED_SHA } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a source run whose head repository differs from the metadata (fork spoof)', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, head_repository: { full_name: 'other/fork' } } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects when the source run attempt does not exist', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, attempt: 2, api: { ...base.api, run_attempt: 2 } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a re-run attempt via the fallback when the attempt endpoint is unavailable', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    useAttemptEndpoint: false,
+    source: { ...base, api: { ...base.api, run_attempt: 2 } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects when the artifact PR is not in the source run pull_requests', async () => {
+  const base = defaultSource();
+  const result = await runValidator({
+    source: { ...base, api: { ...base.api, pull_requests: [{ number: 43 }] } },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects when the fork fallback does not uniquely resolve the PR', async () => {
+  const result = await runValidator({
+    prs: [defaultForkPr(), { ...defaultForkPr(), number: 43 }],
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects when the fork fallback resolves a different PR', async () => {
+  const result = await runValidator({
+    prs: [{ ...defaultForkPr(), number: 43 }],
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a closed PR', async () => {
+  const result = await runValidator({
+    pull: { ...defaultOpenPull(), state: 'closed' },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a PR whose head SHA moved after the source run (stale PR)', async () => {
+  const result = await runValidator({
+    pull: {
+      ...defaultOpenPull(),
+      head: { repo: { full_name: 'fork/repo' }, sha: MOVED_SHA },
+    },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
+});
+
+test('rejects a PR whose head or base repository changed', async () => {
+  const result = await runValidator({
+    pull: {
+      ...defaultOpenPull(),
+      head: { repo: { full_name: 'other/fork' }, sha: HEAD_SHA },
+    },
+  });
+
+  assert.equal(result.outputs.get('should_post'), 'false');
+  assert.equal(result.outputs.has('summary_path'), false);
 });

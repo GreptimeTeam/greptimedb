@@ -1,8 +1,27 @@
 name: Query Regression Comment
 
+# Follows the trusted `Query Regression Controller` workflow (which validated
+# the originating run/artifacts/PR/SHA chain and regenerated the comment
+# metadata from the validated values). Write isolation: `pull-requests: write`
+# exists only in this workflow; the controller workflow itself never writes to
+# PRs.
+#
+# `query-regression-comment.cjs` (default-branch trusted code) re-validates the
+# whole chain before posting (any failure skips the comment, fail closed):
+#   * pins the downloaded comment artifact to THIS controller run (metadata
+#     run_id/run_attempt vs the workflow_run payload) — replay rejection;
+#   * independently re-validates this controller run from the GitHub API
+#     (workflow name, workflow_run event, head repository, conclusion);
+#   * resolves the ORIGINAL source build run from the controller-generated
+#     metadata `source_run_id`/`source_run_attempt` and re-validates it from
+#     the GitHub API (workflow name, pull_request event, success conclusion,
+#     exact attempt, head SHA, head repository) — fork/spoof rejection;
+#   * re-validates PR membership of the source run (pull_requests or the fork
+#     fallback) and the current PR (open state, base/head repositories, head
+#     SHA) — stale/moved PR rejection.
 on:
   workflow_run:
-    workflows: ["Query Regression"]
+    workflows: ["Query Regression Controller"]
     types: [completed]
 
 permissions:
@@ -13,7 +32,7 @@ permissions:
 jobs:
   comment:
     if: >-
-      ${{ github.event.workflow_run.event == 'pull_request' &&
+      ${{ github.repository == 'GreptimeTeam/greptimedb' &&
           github.event.workflow_run.conclusion != 'cancelled' &&
           github.event.workflow_run.conclusion != 'skipped' }}
     runs-on: ubuntu-latest

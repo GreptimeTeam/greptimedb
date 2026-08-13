@@ -1,0 +1,17 @@
+# Deny-all NetworkPolicy for the query-regression-perf namespace.
+#
+# No ingress or egress rules means all traffic is denied (default-deny). The
+# benchmark pod needs no egress after startup: the payload is delivered via
+# kubectl cp/exec from the controller and the image is already present. If a
+# case ever requires egress, add the narrowest possible allow rules here with
+# explicit approval; do not weaken the default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: query-regression-perf
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

@@ -1,0 +1,28 @@
+# LimitRange: every container in the namespace must declare resources within
+# the benchmark contract. Defaults match the Job container so a bare container
+# cannot sneak in unbounded resource claims.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: query-regression
+  namespace: query-regression-perf
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: "4"
+        memory: "12Gi"
+        ephemeral-storage: "20Gi"
+      default:
+        cpu: "8"
+        memory: "16Gi"
+        ephemeral-storage: "40Gi"
+      max:
+        cpu: "8"
+        memory: "16Gi"
+        ephemeral-storage: "40Gi"
+      min:
+        cpu: "1"
+        memory: "1Gi"
+      maxLimitRequestRatio:
+        cpu: "2"

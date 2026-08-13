@@ -466,6 +466,32 @@ jobs:
       cargo_profile: nightly
       runner: perf-regression-8-cores
 
+  # Synchronous ACK benchmark controller for the release path. It runs only
+  # after the build job above succeeded and receives the build's EXACT verified
+  # outputs (run id/attempt, base/candidate SHAs, artifact ids) as typed
+  # inputs; the controller workflow's admission gate validates the caller
+  # (Release, push/schedule/workflow_dispatch) and cross-checks every input
+  # against the values validated from the build run via the GitHub API. The
+  # controller runs on its own trusted runner label with the runner-local
+  # exec-plugin kubeconfig; no ACK credential ever reaches the build.
+  query-regression-controller-release:
+    name: Query regression ACK benchmark (release)
+    if: ${{ needs.prepare-release-validation.outputs.run-query-regression == 'true' }}
+    needs: [
+      query-regression-release,
+      prepare-release-validation,
+    ]
+    uses: ./.github/workflows/query-regression-controller.yml
+    with:
+      source_run_id: ${{ needs.query-regression-release.outputs.run-id }}
+      source_run_attempt: ${{ needs.query-regression-release.outputs.run-attempt }}
+      base_sha: ${{ needs.query-regression-release.outputs.verified-base-sha }}
+      candidate_sha: ${{ needs.query-regression-release.outputs.verified-candidate-sha }}
+      base_artifact_id: ${{ needs.query-regression-release.outputs.base-artifact-id }}
+      candidate_artifact_id: ${{ needs.query-regression-release.outputs.candidate-artifact-id }}
+      case: all
+      cargo_profile: nightly
+
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
     if: |
@@ -477,15 +503,15 @@ jobs:
       needs.prepare-release-validation.result == 'success' &&
       (needs.compat-release.result == 'success' ||
        (needs.prepare-release-validation.outputs.run-compat == 'false' && needs.compat-release.result == 'skipped')) &&
-      (needs.query-regression-release.result == 'success' ||
-       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped'))
+      (needs.query-regression-controller-release.result == 'success' ||
+       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-controller-release.result == 'skipped'))
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
       prepare-release-validation,
       compat-release,
-      query-regression-release,
+      query-regression-controller-release,
     ]
     runs-on: ubuntu-latest
     outputs:
@@ -564,8 +590,8 @@ jobs:
       needs.prepare-release-validation.result == 'success' &&
       (needs.compat-release.result == 'success' ||
        (needs.prepare-release-validation.outputs.run-compat == 'false' && needs.compat-release.result == 'skipped')) &&
-      (needs.query-regression-release.result == 'success' ||
-       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped')) &&
+      (needs.query-regression-controller-release.result == 'success' ||
+       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-controller-release.result == 'skipped')) &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
       (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
@@ -585,7 +611,7 @@ jobs:
       release-images-to-dockerhub,
       prepare-release-validation,
       compat-release,
-      query-regression-release,
+      query-regression-controller-release,
     ]
     runs-on: ubuntu-latest
     steps:

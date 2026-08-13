@@ -1,0 +1,18 @@
+# Namespace for the one-shot ACK query-regression benchmark Job.
+#
+# The namespace is deliberately sterile: it contains no ARC deployment, no
+# runner listener, no long-lived credentials, and (once the deployment-gated
+# admission policies are enabled) only the exact conforming benchmark Job/pod
+# can be created. PSA `restricted` is enforced at the namespace level.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: query-regression-perf
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    greptimedb.io/query-regression: "true"
+    greptimedb.io/description: "One-shot ACK query-regression benchmark namespace; no ARC, no credentials, one conforming Job at a time"

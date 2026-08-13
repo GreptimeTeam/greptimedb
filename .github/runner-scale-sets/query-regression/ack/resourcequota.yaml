@@ -1,0 +1,23 @@
+# ResourceQuota: exactly one Job and one Pod, with the exact benchmark
+# resource totals, so nothing else fits in the namespace and a stolen
+# controller credential can create at most one conforming Job at a time.
+#
+# The hard values equal the benchmark Job's exact request/limit totals:
+# requests 4 CPU / 12Gi memory / 20Gi ephemeral-storage, limits 8 CPU / 16Gi
+# memory / 40Gi ephemeral-storage. A second Job (or any pod) is rejected by
+# the count quotas; a larger Job is rejected by the resource totals.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: query-regression
+  namespace: query-regression-perf
+spec:
+  hard:
+    count/jobs: "1"
+    count/pods: "1"
+    requests.cpu: "4"
+    requests.memory: "12Gi"
+    requests.ephemeral-storage: "20Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    limits.ephemeral-storage: "40Gi"
