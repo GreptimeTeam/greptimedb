@@ -163,6 +163,7 @@ mysql_async = { version = "0.37", default-features = false, features = [
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
+servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
