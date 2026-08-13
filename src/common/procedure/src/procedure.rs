@@ -507,12 +507,6 @@ impl ProcedureWithId {
         self.context = context;
         self
     }
-
-    /// Attaches event context to this procedure submission.
-    pub fn with_event_context(mut self, event_context: PersistentEventContext) -> Self {
-        self.context.event_context = Some(event_context);
-        self
-    }
 }
 
 impl fmt::Debug for ProcedureWithId {

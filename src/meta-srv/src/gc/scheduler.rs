@@ -373,7 +373,7 @@ impl GcScheduler {
                     true,
                     gc_timeout,
                     dropped_routes_override,
-                    procedure_context.clone(),
+                    procedure_context,
                 )
                 .await?;
             combined_report.merge(report);

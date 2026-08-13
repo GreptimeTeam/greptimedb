@@ -29,6 +29,7 @@ pub struct ProcedureEventInput {
 }
 
 impl ProcedureEventInput {
+    /// Creates procedure event input with a trigger reason and no extensions.
     pub fn new(reason: TriggerReason) -> Self {
         Self {
             reason,

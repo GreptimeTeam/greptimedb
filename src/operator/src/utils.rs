@@ -38,7 +38,7 @@ pub fn to_meta_query_context(
 }
 
 /// Builds the execution envelope for a frontend-originated procedure.
-pub fn to_executor_context(
+pub(crate) fn to_executor_context(
     query_context: QueryContextRef,
     trigger_reason: TriggerReason,
 ) -> ExecutorContext {
@@ -51,7 +51,8 @@ pub fn to_executor_context(
     }
 }
 
-pub fn to_executor_context_with_origin_frontend(
+/// Builds a frontend-originated procedure envelope with the trusted frontend origin.
+pub(crate) fn to_executor_context_with_origin_frontend(
     query_context: QueryContextRef,
     origin_frontend_addr: &str,
     trigger_reason: TriggerReason,
