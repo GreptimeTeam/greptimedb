@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-use common_event_recorder::PersistentEventContext;
+use common_event_recorder::ProcedureEventInput;
 use common_procedure::{ProcedureId, ProcedureManagerRef};
 use common_telemetry::tracing_context::W3cTrace;
 use snafu::{OptionExt, ResultExt};
@@ -24,7 +24,7 @@ use crate::ddl_manager::DdlManagerRef;
 use crate::error::{
     ParseProcedureIdSnafu, ProcedureNotFoundSnafu, QueryProcedureSnafu, Result, UnsupportedSnafu,
 };
-use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::ddl::{QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
     self, GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -34,8 +34,14 @@ use crate::rpc::procedure::{
 #[derive(Debug, Clone, Default)]
 pub struct ExecutorContext {
     pub tracing_context: Option<W3cTrace>,
+    /// Query execution data available at the frontend/standalone submission boundary.
+    ///
+    /// Only DDL serializes the full context. Migration and GC use its typed
+    /// channel to derive protocol without sending the query context itself.
+    pub query_context: Option<QueryContext>,
     pub actor: Option<String>,
-    pub event_context: Option<PersistentEventContext>,
+    /// Caller-supplied event metadata. Protocol is derived by the submission adapter.
+    pub event_input: Option<ProcedureEventInput>,
 }
 
 /// The procedure executor that accepts ddl, region migration task etc.
@@ -44,7 +50,7 @@ pub trait ProcedureExecutor: Send + Sync {
     /// Submit a ddl task
     async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
 
@@ -129,7 +135,7 @@ impl LocalProcedureExecutor {
 impl ProcedureExecutor for LocalProcedureExecutor {
     async fn submit_ddl_task(
         &self,
-        ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
         self.ddl_manager.submit_ddl_task(ctx, request).await

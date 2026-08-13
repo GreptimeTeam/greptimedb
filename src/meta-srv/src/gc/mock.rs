@@ -26,12 +26,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common_catalog::consts::MITO_ENGINE;
+use common_event_recorder::PersistentEventContext;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::PersistentEventContext;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_procedure::ProcedureContext;
 use common_telemetry::debug;
 use ordered_float::OrderedFloat;
 use store_api::region_engine::RegionRole;
@@ -214,10 +215,13 @@ impl SchedulerCtx for MockSchedulerCtx {
         _full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
-        event_context: PersistentEventContext,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
-        self.gc_event_contexts.lock().unwrap().push(event_context);
+        self.gc_event_contexts
+            .lock()
+            .unwrap()
+            .push(procedure_context.event_context.unwrap_or_default());
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {

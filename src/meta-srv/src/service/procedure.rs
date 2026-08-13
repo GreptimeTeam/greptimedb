@@ -18,10 +18,12 @@ use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, GcRegionsRequest,
     GcRegionsResponse, GcStats, GcTableRequest, GcTableResponse, MigrateRegionRequest,
-    MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
+    MigrateRegionResponse, ProcedureActor, ProcedureDetailRequest, ProcedureDetailResponse,
+    ProcedureEventContext as PbProcedureEventContext, ProcedureStateResponse,
     QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
     ReconcileResponse, ReconcileTable, ResolveStrategy, Role, procedure_service_server,
 };
+use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::procedure_executor::ExecutorContext;
@@ -33,6 +35,7 @@ use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
 };
+use common_procedure::ProcedureContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
@@ -46,6 +49,45 @@ use crate::procedure::region_migration::manager::{
 };
 use crate::service::GrpcResult;
 use crate::{check_leader, error, gc};
+
+struct ProcedureSubmission {
+    actor: Option<String>,
+    event_context: Option<PbProcedureEventContext>,
+}
+
+impl TryFrom<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for ProcedureSubmission {
+    type Error = Status;
+
+    fn try_from(
+        (actor, event_context): (Option<ProcedureActor>, Option<PbProcedureEventContext>),
+    ) -> Result<Self, Self::Error> {
+        let actor = actor
+            .map(|actor| {
+                if actor.username.is_empty() {
+                    Err(Status::invalid_argument(
+                        "Procedure actor must not be empty",
+                    ))
+                } else {
+                    Ok(actor.username)
+                }
+            })
+            .transpose()?;
+
+        Ok(Self {
+            actor,
+            event_context,
+        })
+    }
+}
+
+impl From<ProcedureSubmission> for ProcedureContext {
+    fn from(context: ProcedureSubmission) -> Self {
+        Self {
+            actor: context.actor,
+            event_context: context.event_context.map(PersistentEventContext::from),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl procedure_service_server::ProcedureService for Metasrv {
@@ -89,9 +131,15 @@ impl procedure_service_server::ProcedureService for Metasrv {
             task,
             wait,
             timeout_secs,
+            event_context,
+            actor,
         } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
+        let ProcedureSubmission {
+            actor,
+            event_context,
+        } = ProcedureSubmission::try_from((actor, event_context))?;
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -102,15 +150,17 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
         restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
+        let executor_context = ExecutorContext {
+            tracing_context: Some(header.tracing_context),
+            query_context: Some(query_context),
+            actor,
+            event_input: event_context.map(ProcedureEventInput::from),
+        };
         let resp = self
             .ddl_manager()
             .submit_ddl_task(
-                &ExecutorContext {
-                    tracing_context: Some(header.tracing_context),
-                    ..Default::default()
-                },
+                executor_context,
                 SubmitDdlTaskRequest {
-                    query_context,
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
                     task,
@@ -135,9 +185,13 @@ impl procedure_service_server::ProcedureService for Metasrv {
             from_peer,
             to_peer,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
         let from_peer = self
             .lookup_datanode_peer(from_peer)
             .await?
@@ -149,13 +203,16 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let pid = self
             .region_migration_manager()
-            .submit_procedure(RegionMigrationProcedureTask {
-                region_id: region_id.into(),
-                from_peer,
-                to_peer,
-                timeout: Duration::from_secs(timeout_secs.into()),
-                trigger_reason: RegionMigrationTriggerReason::Manual,
-            })
+            .submit_procedure(
+                procedure_context,
+                RegionMigrationProcedureTask {
+                    region_id: region_id.into(),
+                    from_peer,
+                    to_peer,
+                    timeout: Duration::from_secs(timeout_secs.into()),
+                    trigger_reason: RegionMigrationTriggerReason::Manual,
+                },
+            )
             .await?
             .map(procedure::pid_to_pb_pid);
 
@@ -266,16 +323,23 @@ impl procedure_service_server::ProcedureService for Metasrv {
             region_ids,
             full_file_listing,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
 
         let response = self
-            .handle_gc_regions(MetaGcRegionsRequest {
-                region_ids,
-                full_file_listing,
-                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
-            })
+            .handle_gc_regions(
+                procedure_context,
+                MetaGcRegionsRequest {
+                    region_ids,
+                    full_file_listing,
+                    timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
+                },
+            )
             .await?;
 
         Ok(Response::new(gc_response_to_regions_pb(response)))
@@ -291,18 +355,25 @@ impl procedure_service_server::ProcedureService for Metasrv {
             table_name,
             full_file_listing,
             timeout_secs,
+            event_context,
+            actor,
         } = request.into_inner();
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
 
         let response = self
-            .handle_gc_table(MetaGcTableRequest {
-                catalog_name,
-                schema_name,
-                table_name,
-                full_file_listing,
-                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
-            })
+            .handle_gc_table(
+                procedure_context,
+                MetaGcTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    full_file_listing,
+                    timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
+                },
+            )
             .await?;
 
         Ok(Response::new(gc_response_to_table_pb(response)))
@@ -371,17 +442,30 @@ impl Metasrv {
         }
     }
 
-    async fn handle_gc_regions(&self, request: MetaGcRegionsRequest) -> error::Result<GcResponse> {
+    async fn handle_gc_regions(
+        &self,
+        procedure_context: ProcedureContext,
+        request: MetaGcRegionsRequest,
+    ) -> error::Result<GcResponse> {
         let region_ids: Vec<RegionId> = request
             .region_ids
             .into_iter()
             .map(RegionId::from_u64)
             .collect();
-        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
-            .await
+        self.trigger_gc_for_regions(
+            procedure_context,
+            region_ids,
+            request.full_file_listing,
+            request.timeout,
+        )
+        .await
     }
 
-    async fn handle_gc_table(&self, request: MetaGcTableRequest) -> error::Result<GcResponse> {
+    async fn handle_gc_table(
+        &self,
+        procedure_context: ProcedureContext,
+        request: MetaGcTableRequest,
+    ) -> error::Result<GcResponse> {
         let table_name_key = TableNameKey::new(
             &request.catalog_name,
             &request.schema_name,
@@ -406,13 +490,19 @@ impl Metasrv {
             .context(TableMetadataManagerSnafu)?;
 
         let region_ids: Vec<RegionId> = route.region_routes.iter().map(|r| r.region.id).collect();
-        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
-            .await
+        self.trigger_gc_for_regions(
+            procedure_context,
+            region_ids,
+            request.full_file_listing,
+            request.timeout,
+        )
+        .await
     }
 
     /// Triggers manual GC for specified regions and returns the GC response.
     async fn trigger_gc_for_regions(
         &self,
+        procedure_context: ProcedureContext,
         region_ids: Vec<RegionId>,
         full_file_listing: bool,
         timeout: Option<Duration>,
@@ -429,6 +519,7 @@ impl Metasrv {
                 region_ids: Some(region_ids),
                 full_file_listing: Some(full_file_listing),
                 timeout,
+                procedure_context,
             })
             .await
             .map_err(|_| {
@@ -502,14 +593,15 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
 mod tests {
     use std::time::Duration;
 
-    use api::v1::meta::Role;
+    use api::v1::meta::{ProcedureActor, ProcedureEventContext, Role};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
         CreatorGrantIntent, DdlTask, QueryContext,
     };
+    use common_procedure::ProcedureContext;
     use tonic::metadata::{MetadataMap, MetadataValue};
 
-    use super::{Metasrv, restore_create_database_creator};
+    use super::{Metasrv, ProcedureSubmission, restore_create_database_creator};
 
     fn create_database_task() -> DdlTask {
         DdlTask::new_create_database(
@@ -645,5 +737,42 @@ mod tests {
         };
         assert_eq!(task.creator, Some(creator));
         assert!(trusted.extensions.is_empty());
+    }
+
+    #[test]
+    fn test_procedure_submission_rejects_empty_actor() {
+        let submission = ProcedureSubmission::try_from((
+            Some(ProcedureActor {
+                username: "alice".to_string(),
+            }),
+            Some(ProcedureEventContext {
+                reason: "manual".to_string(),
+                protocol: "postgres".to_string(),
+                extensions: Default::default(),
+            }),
+        ))
+        .unwrap();
+        assert_eq!(submission.actor.as_deref(), Some("alice"));
+        assert_eq!(
+            submission
+                .event_context
+                .as_ref()
+                .map(|context| context.protocol.as_str()),
+            Some("postgres")
+        );
+
+        assert!(
+            ProcedureSubmission::try_from((
+                Some(ProcedureActor {
+                    username: String::new(),
+                }),
+                None,
+            ))
+            .is_err()
+        );
+
+        let procedure_context =
+            ProcedureContext::from(ProcedureSubmission::try_from((None, None)).unwrap());
+        assert_eq!(procedure_context.event_context, None);
     }
 }
