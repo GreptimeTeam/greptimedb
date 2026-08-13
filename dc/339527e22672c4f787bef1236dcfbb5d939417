@@ -1,0 +1,40 @@
+src/common/event-recorder/src/context.rs
+  s_f9f42fa04e4dc7::t_ff885f17787aad 15-16,27-28,127-130
+src/common/function/src/admin/gc.rs
+  s_f9f42fa04e4dc7::t_0873291a0e8af1 17,48-55,76-85
+  s_f9f42fa04e4dc7::t_0119daa2f99dbc 192,308-312,317-321
+Cargo.toml
+  s_f9f42fa04e4dc7::t_05b0a9c9eb481e 162
+src/common/function/src/state.rs
+  s_f9f42fa04e4dc7::t_0119daa2f99dbc 39,96-100,109-113
+src/common/function/src/admin/purge_table.rs
+  s_f9f42fa04e4dc7::t_e74e61e295cc41 88
+  s_f9f42fa04e4dc7::t_7d67ba7595357e 163,166
+src/common/function/src/handlers.rs
+  s_f9f42fa04e4dc7::t_0873291a0e8af1 21,111-115,118-122
+src/operator/src/procedure.rs
+  s_f9f42fa04e4dc7::t_0873291a0e8af1 138-142,144,150-154,156
+src/meta-client/src/client.rs
+  s_f9f42fa04e4dc7::t_36c79c030f1e98 851,860
+  s_f9f42fa04e4dc7::t_0873291a0e8af1 846-850,855-859
+Cargo.lock
+  s_f9f42fa04e4dc7::t_4214d9591a86ba 6042,6588,11246,11294,11307
+src/common/meta/src/rpc/ddl.rs
+  s_f9f42fa04e4dc7::t_02b08e0f172fef 1940,1950
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "dc339527e22672c4f787bef1236dcfbb5d939417",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

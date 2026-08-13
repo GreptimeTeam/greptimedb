@@ -1,0 +1,33 @@
+src/meta-client/src/client.rs
+  s_f9f42fa04e4dc7::t_65b9074226fdb0 72,878
+src/common/meta/src/ddl_manager.rs
+  s_f9f42fa04e4dc7::t_ca2465b6bd3b64 1472-1473,1481-1482,1509-1510,1582-1625,1761-1764,1767-1815
+  s_f9f42fa04e4dc7::t_63d5c97da100bd 124,133,948-954,958-964,1277,1293,1362,1378
+  s_f9f42fa04e4dc7::t_51c5dd59240907 1514-1515,1765-1766
+  s_f9f42fa04e4dc7::t_143277e9a18e62 1816
+src/meta-client/src/client/procedure.rs
+  s_f9f42fa04e4dc7::t_8f1d2eb26199a4 23-26
+  s_f9f42fa04e4dc7::t_65b9074226fdb0 64-65,73-74,278,339,384,534,581,589-593
+  s_f9f42fa04e4dc7::t_b272841dabf60d 775-799
+  s_f9f42fa04e4dc7::t_d8bcb189523507 582
+  s_f9f42fa04e4dc7::t_d45039ec293f6b 66-72,583-588
+  s_f9f42fa04e4dc7::t_39ee7c484bde6e 594-595
+src/common/procedure/src/local.rs
+  s_f9f42fa04e4dc7::t_8a5bd0e1e5f3e8 1065,1724-1780,1806-1815,1823,1840-1841
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "0e99d6829ca33651a2e204c65e9a93dbd7e45799",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

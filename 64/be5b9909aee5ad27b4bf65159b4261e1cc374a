@@ -1,0 +1,23 @@
+src/operator/src/utils.rs
+  s_f9f42fa04e4dc7::t_549e68f2c86f50 41,54-55
+src/meta-srv/src/gc/scheduler.rs
+  s_f9f42fa04e4dc7::t_549e68f2c86f50 376
+src/common/event-recorder/src/context.rs
+  s_f9f42fa04e4dc7::t_549e68f2c86f50 32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "64be5b9909aee5ad27b4bf65159b4261e1cc374a",
+  "prompts": {},
+  "sessions": {
+    "s_f9f42fa04e4dc7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff18c-729f-7dd2-9ff0-4d84b144a51a",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
