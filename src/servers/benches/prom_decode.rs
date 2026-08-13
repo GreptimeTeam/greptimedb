@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2 as write_v2;
 use api::prom_store::remote::{self as write_v1, WriteRequest};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+};
 use prost::Message;
 use servers::prom_remote_write::decode::{PromSeriesProcessor, PromWriteRequest};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
@@ -187,6 +189,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
 /// Workloads:
 /// - `fixture`: existing `write_request.pb.data` converted v1 -> v2
 /// - `synthetic_*`: generated series with shared labels (symbol-table friendly)
+#[allow(clippy::print_stderr)]
 fn bench_prom_v1_vs_v2_decode(c: &mut Criterion) {
     let fixture_v1_bytes = load_fixture_v1_bytes();
     let fixture_v1 = WriteRequest::decode(fixture_v1_bytes.as_slice()).unwrap();
@@ -251,23 +254,25 @@ fn bench_prom_v1_vs_v2_decode(c: &mut Criterion) {
     // --- full path: protobuf -> Greptime row inserts ---
     {
         let mut group = c.benchmark_group("prom_rw_decode_to_rows");
-        group.measurement_time(Duration::from_secs(3));
+        group.sample_size(50);
+        group.measurement_time(Duration::from_secs(5));
 
         for (name, v1_bytes, v2_bytes) in &workloads {
             group.throughput(Throughput::Bytes(v1_bytes.len() as u64));
             group.bench_with_input(BenchmarkId::new("v1_custom", name), v1_bytes, |b, bytes| {
                 let mut prom_request = PromWriteRequest::default();
                 let mut processor = PromSeriesProcessor::default_processor();
-                b.iter(|| {
-                    prom_request
-                        .decode(
-                            black_box(bytes.clone()),
-                            PromValidationMode::Strict,
-                            &mut processor,
-                        )
-                        .unwrap();
-                    black_box(prom_request.as_row_insert_requests());
-                });
+                b.iter_batched(
+                    || bytes.clone(),
+                    |bytes| {
+                        prom_request
+                            .decode(black_box(bytes), PromValidationMode::Strict, &mut processor)
+                            .unwrap();
+                        let rows = prom_request.as_row_insert_requests();
+                        black_box(&rows);
+                    },
+                    BatchSize::LargeInput,
+                );
             });
 
             // Baseline: stock prost WriteRequest + existing converter.

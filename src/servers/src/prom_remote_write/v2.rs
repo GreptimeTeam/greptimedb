@@ -22,8 +22,11 @@ use api::greptime_proto::io::prometheus::write::v2::{
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Request, TimeSeries};
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value};
+use api::v1::{
+    ColumnDataType, ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value,
+};
 use bytes::{Buf, Bytes};
 use common_grpc::precision::Precision;
 use common_query::native_histogram::*;
@@ -390,6 +393,8 @@ fn decode_series_leaves(
     mut rows_remaining: usize,
     scratch: &mut LeafScratch,
 ) -> Result<()> {
+    let mut sample_row_template = None;
+
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).context(error::DecodePromRemoteRequestSnafu)?;
         match tag {
@@ -414,14 +419,38 @@ fn decode_series_leaves(
                     }
                 })?;
                 if let Some(SeriesWriter::Samples(table_data)) = &mut writer {
-                    if rows_remaining == 0 {
-                        write_sample(
+                    if sample_row_template.is_none() {
+                        let timestamp_index =
+                            table_data.ensure_column(time_index_column_schema(
+                                greptime_timestamp(),
+                                ColumnDataType::TimestampMillisecond,
+                            ))?;
+                        let value_index = table_data.ensure_column(field_column_schema(
+                            greptime_value(),
+                            ColumnDataType::Float64,
+                        ))?;
+                        let mut row = table_data.alloc_one_row();
+                        row_writer::write_tags(
                             table_data,
-                            &scratch.sample,
                             std::mem::take(&mut tags).into_iter(),
+                            &mut row,
                         )?;
-                    } else {
-                        write_sample(table_data, &scratch.sample, tags.iter().cloned())?;
+                        sample_row_template = Some((row, timestamp_index, value_index));
+                    }
+
+                    if let Some((row, timestamp_index, value_index)) = sample_row_template.as_mut()
+                    {
+                        row[*timestamp_index].value_data = Some(
+                            ValueData::TimestampMillisecondValue(scratch.sample.timestamp),
+                        );
+                        row[*value_index].value_data =
+                            Some(ValueData::F64Value(scratch.sample.value));
+                        let row = if rows_remaining == 0 {
+                            std::mem::take(row)
+                        } else {
+                            row.clone()
+                        };
+                        table_data.add_row(row);
                     }
                 }
             }
@@ -546,26 +575,6 @@ fn get_or_create_table_data(
         }
         Entry::Vacant(entry) => entry.insert(TableData::new(column_count, row_count)),
     }
-}
-
-fn write_sample(
-    table_data: &mut TableData,
-    sample: &Sample,
-    tags: impl Iterator<Item = (String, String)>,
-) -> Result<()> {
-    let mut row = table_data.alloc_one_row();
-    row_writer::write_ts_to_millis(
-        table_data,
-        greptime_timestamp(),
-        Some(sample.timestamp),
-        Precision::Millisecond,
-        &mut row,
-    )?;
-    row_writer::write_f64(table_data, greptime_value(), sample.value, &mut row)?;
-    row_writer::write_tags(table_data, tags, &mut row)?;
-    table_data.add_row(row);
-
-    Ok(())
 }
 
 fn write_native_histogram(
@@ -1758,6 +1767,14 @@ mod tests {
         assert_eq!(
             rows.rows[1].values[1].value_data,
             Some(ValueData::F64Value(43.0))
+        );
+        assert_eq!(
+            rows.rows[1].values[2].value_data,
+            Some(ValueData::StringValue("api".to_string()))
+        );
+        assert_eq!(
+            rows.rows[1].values[3].value_data,
+            Some(ValueData::StringValue("localhost:9090".to_string()))
         );
     }
 
