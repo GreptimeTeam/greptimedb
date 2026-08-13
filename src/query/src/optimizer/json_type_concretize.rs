@@ -69,6 +69,9 @@ impl OptimizerRule for JsonTypeConcretizeRule {
     }
 }
 
+// FIXME: `json_types` is keyed only by unqualified column name. In joins with
+// same-named JSON2 columns, a hint deduced from one scan can be applied to
+// another scan. Carry the originating relation/scan when deducing hints.
 /// Applies JSON type hints to providers that can carry scan request hints.
 ///
 /// Returns `true` if at least one JSON2 hint is retained and written to the provider.
