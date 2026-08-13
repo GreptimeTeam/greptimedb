@@ -43,15 +43,15 @@ use store_api::storage::consts::ReservedColumnId;
 use crate::access_layer::TempFileCleaner;
 use crate::error::{
     DecodeSnafu, InvalidMetaSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
-    Result, WriteParquetSnafu,
+    Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
-const MIN_TS_COLUMN: &str = "min_ts";
-const MAX_TS_COLUMN: &str = "max_ts";
-const ROW_COUNT_COLUMN: &str = "row_count";
+const MIN_TS_COLUMN: &str = "__pk_min_ts";
+const MAX_TS_COLUMN: &str = "__pk_max_ts";
+const ROW_COUNT_COLUMN: &str = "__pk_row_count";
 const TABLE_ID_COLUMN: &str = "__table_id";
 const TSID_COLUMN: &str = "__tsid";
 const WRITE_BATCH_SIZE: usize = 1024;
@@ -75,6 +75,10 @@ impl AsyncWriter {
 
     fn output_bytes(&self) -> u64 {
         self.output_bytes
+    }
+
+    fn into_inner(self) -> Writer {
+        self.inner
     }
 }
 
@@ -466,7 +470,7 @@ impl PkIndexWriter {
         let result = self
             .writer
             .as_mut()
-            .context(InvalidRecordBatchSnafu {
+            .context(UnexpectedSnafu {
                 reason: "primary-key index Parquet writer is closed",
             })?
             .write(&batch)
@@ -487,10 +491,17 @@ impl PkIndexWriter {
         self.metrics.aggregate_elapsed += aggregate_start.elapsed().saturating_sub(write_cost);
 
         let finish_start = Instant::now();
-        let mut writer = self.writer.take().context(InvalidRecordBatchSnafu {
+        self.writer
+            .as_mut()
+            .context(UnexpectedSnafu {
+                reason: "primary-key index Parquet writer is closed",
+            })?
+            .finish()
+            .await
+            .context(WriteParquetSnafu)?;
+        let writer = self.writer.take().context(UnexpectedSnafu {
             reason: "primary-key index Parquet writer is closed",
         })?;
-        writer.finish().await.context(WriteParquetSnafu)?;
         self.metrics.output_bytes = writer.into_inner().output_bytes();
         self.metrics.finish_elapsed += finish_start.elapsed();
         Ok(())
@@ -498,7 +509,12 @@ impl PkIndexWriter {
 
     async fn cleanup(&mut self) {
         let start = Instant::now();
-        self.writer.take();
+        if let Some(writer) = self.writer.take() {
+            let mut writer = writer.into_inner().into_inner();
+            if let Err(error) = writer.abort().await {
+                common_telemetry::warn!(error; "Failed to abort primary-key index writer");
+            }
+        }
         self.current_primary_key = None;
         self.current_row = None;
         self.buffered_rows.clear();
@@ -528,6 +544,20 @@ pub fn pk_columns_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
 }
 
 fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
+    for column in &metadata.column_metadatas {
+        ensure!(
+            !matches!(
+                column.column_schema.name.as_str(),
+                MIN_TS_COLUMN | MAX_TS_COLUMN | ROW_COUNT_COLUMN
+            ),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "primary-key index internal column name {} is already in use",
+                    column.column_schema.name
+                ),
+            }
+        );
+    }
     ensure!(
         metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         InvalidMetaSnafu {
@@ -694,16 +724,19 @@ fn rows_to_batch(schema: &SchemaRef, rows: &[PkIndexRow]) -> Result<RecordBatch>
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
     use datatypes::arrow::array::{
         BinaryDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
         TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
     };
     use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
+    use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use object_store::ErrorKind;
     use object_store::services::Memory;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -784,9 +817,9 @@ mod tests {
                 .map(|field| field.name().as_str())
                 .collect::<Vec<_>>(),
             [
-                "min_ts",
-                "max_ts",
-                "row_count",
+                "__pk_min_ts",
+                "__pk_max_ts",
+                "__pk_row_count",
                 "__table_id",
                 "__tsid",
                 "tag_0",
@@ -798,6 +831,41 @@ mod tests {
 
         let dense = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         assert!(pk_columns_schema(&dense).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reject_pk_index_internal_column_names_before_opening_writer() {
+        for (index, name) in [MIN_TS_COLUMN, MAX_TS_COLUMN, ROW_COUNT_COLUMN]
+            .into_iter()
+            .enumerate()
+        {
+            let mut builder = RegionMetadataBuilder::from_existing(
+                sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse),
+            );
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 100 + index as u32,
+            });
+            let metadata = Arc::new(builder.build().unwrap());
+            let store = object_store();
+            let path = format!("collision-{index}.parquet");
+            let error = PkIndexWriter::try_new(
+                metadata,
+                store.clone(),
+                &path,
+                PkIndexWriterOptions::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+
+            assert!(error.to_string().contains(name), "{error}");
+            assert_eq!(
+                store.stat(&path).await.unwrap_err().kind(),
+                ErrorKind::NotFound
+            );
+        }
     }
 
     #[test]
