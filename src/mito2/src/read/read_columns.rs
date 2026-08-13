@@ -33,6 +33,9 @@ pub struct ReadColumns {
 }
 
 impl ReadColumns {
+    /// Creates read columns from logical column ids.
+    ///
+    /// This preserves the input order and duplicate ids.
     pub fn new<I>(col_ids: I) -> Self
     where
         I: IntoIterator<Item = ColumnId>,
