@@ -1675,9 +1675,7 @@ mod tests {
     use std::time::Duration;
 
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
-    use api::prom_store::remote::{
-        Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
-    };
+    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::greptime_request::Request;
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     use api::v1::query_request::Query;
@@ -2282,7 +2280,7 @@ mod tests {
     impl ProcedureExecutor for NoopProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            _ctx: ExecutorContext,
             _request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
             common_meta::error::UnsupportedSnafu {

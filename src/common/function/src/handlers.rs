@@ -89,10 +89,14 @@ pub trait TableMutationHandler: Send + Sync {
 #[async_trait]
 pub trait ProcedureServiceHandler: Send + Sync {
     /// Permanently purge a dropped table.
-    async fn purge_table(&self, table_name: TableName, query_ctx: QueryContextRef) -> Result<()>;
+    async fn purge_table(&self, query_ctx: QueryContextRef, table_name: TableName) -> Result<()>;
 
     /// Migrate a region from source peer to target peer, returns the procedure id if success.
-    async fn migrate_region(&self, request: MigrateRegionRequest) -> Result<Option<String>>;
+    async fn migrate_region(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MigrateRegionRequest,
+    ) -> Result<Option<String>>;
 
     /// Reconcile a table, database or catalog, returns the procedure id if success.
     async fn reconcile(&self, request: ReconcileRequest) -> Result<Option<String>>;
@@ -107,10 +111,18 @@ pub trait ProcedureServiceHandler: Send + Sync {
     fn catalog_manager(&self) -> &CatalogManagerRef;
 
     /// Manually trigger GC for specific regions.
-    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse>;
+    async fn gc_regions(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MetaGcRegionsRequest,
+    ) -> Result<MetaGcResponse>;
 
     /// Manually trigger GC for a table.
-    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse>;
+    async fn gc_table(
+        &self,
+        query_ctx: QueryContextRef,
+        request: MetaGcTableRequest,
+    ) -> Result<MetaGcResponse>;
 }
 
 /// This flow service handler is only use for flush flow for now.

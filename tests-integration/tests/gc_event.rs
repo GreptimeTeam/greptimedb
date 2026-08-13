@@ -15,8 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
-use common_procedure::{ProcedureId, ProcedureWithId, watcher};
+use common_event_recorder::{PersistentEventContext, TriggerReason};
+use common_procedure::{ProcedureContext, ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
 use mito2::gc::GcConfig;
@@ -137,9 +137,9 @@ async fn test_batch_gc_event() {
         .submit(ProcedureWithId {
             id: procedure_id,
             procedure: Box::new(procedure),
-            context: common_procedure::ProcedureContext::from_event_context(
-                PersistentEventContext::new(TriggerReason::Manual),
-            ),
+            context: ProcedureContext::from_event_context(PersistentEventContext::new(
+                TriggerReason::Manual,
+            )),
         })
         .await
         .unwrap();

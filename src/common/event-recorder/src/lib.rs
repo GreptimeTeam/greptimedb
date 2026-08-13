@@ -22,5 +22,5 @@ pub mod recorder;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use context::{PersistentEventContext, TriggerReason};
+pub use context::{PersistentEventContext, ProcedureEventInput, TriggerReason};
 pub use recorder::*;
