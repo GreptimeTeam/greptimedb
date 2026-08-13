@@ -473,6 +473,10 @@ pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 /// field in the flow create request.
 pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
 
+/// Reserved internal per-flow runtime intent (`memtable_only` | `sequence_range`),
+/// injected only by internal producers and persisted with flow metadata for recovery.
+pub const INTERNAL_INCREMENTAL_MODE_KEY: &str = "__greptime_internal_incremental_mode";
+
 const FLOW_SCHEDULED_TIME_MILLIS_EXTENSION_KEY: &str = "flow.scheduled_time_millis";
 
 fn without_scheduled_time_extension(mut query_context: QueryContext) -> QueryContext {
@@ -519,6 +523,7 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
+            | INTERNAL_INCREMENTAL_MODE_KEY
             | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
                 return UnexpectedSnafu {
@@ -772,9 +777,6 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
         let sql = value.task.sql.clone();
         let eval_schedule = value.task.eval_schedule.clone();
 
-        // Start with a clean options map. The transient schedule payload is
-        // only for the meta→flownode CreateRequest boundary and must not be
-        // persisted in FlowInfoValue.options.
         let mut options: HashMap<String, String> = value
             .task
             .flow_options

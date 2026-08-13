@@ -25,9 +25,9 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{
     CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
-    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, defer_on_missing_source,
-    effective_eval_schedule_from_flow_info, resolve_schedule_defaults_into_task,
-    validate_flow_options,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, INTERNAL_INCREMENTAL_MODE_KEY,
+    defer_on_missing_source, effective_eval_schedule_from_flow_info,
+    resolve_schedule_defaults_into_task, validate_flow_options,
 };
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
@@ -326,6 +326,24 @@ fn test_validate_flow_options_allows_incremental_read_option() {
 }
 
 #[test]
+fn test_validate_flow_options_accepts_internal_incremental_mode_key() {
+    // Meta accepts the reserved key because an internal producer may inject
+    // it after user option validation; value validation is the flow crate's job.
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+        "sequence_range".to_string(),
+    );
+
+    validate_flow_options(&task).unwrap();
+}
+
+#[test]
 fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
     for key in [
         "eval_interval_anchor",
@@ -346,11 +364,16 @@ fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
             .insert(key.to_string(), "value".to_string());
 
         let err = validate_flow_options(&task).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string()
-                .contains(&format!("Unknown flow option '{key}'")),
+            msg.contains(&format!("Unknown flow option '{key}'")),
             "unexpected error for {key}: {err}"
         );
+        let supported = msg
+            .split("supported user options: ")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(!supported.contains(INTERNAL_INCREMENTAL_MODE_KEY), "{err}");
     }
 }
 

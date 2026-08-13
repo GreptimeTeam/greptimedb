@@ -371,6 +371,10 @@ struct FlowScanDecision {
     memtable_max_sequence: Option<u64>,
     /// Whether to skip SST files for memtable-only incremental source scans.
     skip_sst_files: bool,
+    /// Explicit intent to read an exact row-level sequence delta `(min, max]`
+    /// across memtables and all SST files (`flow.incremental_mode=sequence_range`).
+    /// Historical `memtable_only` reads never set this.
+    exact_sequence_range: bool,
 }
 
 impl FlowScanDecision {
@@ -381,6 +385,7 @@ impl FlowScanDecision {
             memtable_min_sequence: None,
             memtable_max_sequence: None,
             skip_sst_files: false,
+            exact_sequence_range: false,
         }
     }
 }
@@ -395,6 +400,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
+            exact_sequence_range: false,
         });
     };
 
@@ -426,9 +432,14 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
     // into SSTs, instead of silently bypassing the stale-fence check. If a future
     // incremental delta also carries an upper bound, the lower-bound stale check
     // still proves whether memtable-only is safe.
-    let skip_sst_files = apply_incremental
-        && memtable_min_sequence.is_some()
-        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
+    let is_memtable_only =
+        flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
+    // `sequence_range` is the exact row-level delta: it always includes SSTs and
+    // explicitly requests row-level filtering across memtables and every SST.
+    let is_sequence_range =
+        flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange);
+
+    let skip_sst_files = apply_incremental && memtable_min_sequence.is_some() && is_memtable_only;
 
     Ok(FlowScanDecision {
         is_sink_scan: false,
@@ -437,6 +448,9 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         memtable_min_sequence,
         memtable_max_sequence,
         skip_sst_files,
+        exact_sequence_range: apply_incremental
+            && memtable_min_sequence.is_some()
+            && is_sequence_range,
     })
 }
 
@@ -456,6 +470,7 @@ fn build_scan_request(
         snapshot_on_scan: decision.snapshot_on_scan,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
+        exact_sequence_range: decision.exact_sequence_range,
         ..Default::default()
     }
 }
@@ -791,6 +806,62 @@ mod tests {
         assert_eq!(request.memtable_max_sequence, Some(42));
         assert!(!request.snapshot_on_scan);
         assert!(request.skip_sst_files);
+        // Historical memtable-only never requests the exact capability.
+        assert!(!request.exact_sequence_range);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_sequence_range_mode_includes_ssts() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "sequence_range".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert_eq!(request.memtable_min_sequence, Some(55));
+        assert_eq!(request.memtable_max_sequence, Some(77));
+        assert!(!request.skip_sst_files);
+        assert!(request.exact_sequence_range);
+        assert!(!request.snapshot_on_scan);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_sequence_range_binds_snapshot_on_open() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "sequence_range".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert_eq!(request.memtable_min_sequence, Some(55));
+        assert_eq!(request.memtable_max_sequence, None);
+        assert!(request.snapshot_on_scan);
+        assert!(!request.skip_sst_files);
+        assert!(request.exact_sequence_range);
     }
 
     #[test]

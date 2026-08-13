@@ -21,7 +21,9 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, INTERNAL_INCREMENTAL_MODE_KEY,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -43,17 +45,18 @@ use store_api::storage::{RegionId, TableId};
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
 
-use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
+use crate::batching_mode::{BatchingModeOptions, IncrementalMode};
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
-    InvalidQuerySnafu, JoinTaskSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InternalSnafu, InvalidQuerySnafu, JoinTaskSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu,
+    UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -480,6 +483,24 @@ impl BatchingEngine {
                     }
                     .build()
                 })?;
+        }
+
+        if let Some(incremental_mode) = flow_options.get(INTERNAL_INCREMENTAL_MODE_KEY) {
+            let lowered = incremental_mode.trim().to_ascii_lowercase();
+            batch_opts.incremental_mode = match lowered.as_str() {
+                "memtable_only" => IncrementalMode::MemtableOnly,
+                "sequence_range" => IncrementalMode::SequenceRange,
+                _ => {
+                    // A bad value in the reserved internal key is a broken
+                    // internal contract, not a user input error.
+                    return Err(InternalSnafu {
+                        reason: format!(
+                            "Invalid internal flow option {INTERNAL_INCREMENTAL_MODE_KEY}: {incremental_mode}"
+                        ),
+                    }
+                    .build());
+                }
+            };
         }
 
         Ok(Arc::new(batch_opts))
@@ -1097,6 +1118,33 @@ mod tests {
             )]))
             .unwrap();
         assert!(enabled_opts.experimental_enable_incremental_read);
+    }
+
+    #[tokio::test]
+    async fn test_flow_option_parses_incremental_mode() {
+        let engine = new_test_engine().await;
+
+        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
+        assert_eq!(IncrementalMode::MemtableOnly, default_opts.incremental_mode);
+
+        let sequence_range_opts = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+                " sequence_range ".to_string(),
+            )]))
+            .unwrap();
+        assert_eq!(
+            IncrementalMode::SequenceRange,
+            sequence_range_opts.incremental_mode
+        );
+
+        let err = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+                "bogus".to_string(),
+            )]))
+            .unwrap_err();
+        assert!(matches!(err, Error::Internal { .. }), "{err}");
     }
 
     #[test]

@@ -42,6 +42,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
+    INTERNAL_INCREMENTAL_MODE_KEY,
 };
 #[cfg(feature = "enterprise")]
 use common_meta::ddl_manager::FlowExtensionRef;
@@ -128,7 +129,12 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-const ALLOWED_FLOW_OPTIONS: &[&str] = &[
+/// User-facing flow options accepted from SQL `WITH (...)`. The reserved
+/// internal option [`INTERNAL_INCREMENTAL_MODE_KEY`] is not a user option:
+/// it is rejected here and can only be injected into the underlying
+/// `CreateFlowTask` by an internal producer (e.g. FlowExtension) after user
+/// option validation.
+const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
@@ -219,7 +225,7 @@ fn validate_and_normalize_flow_options(
     let mut extension_options = HashMap::new();
 
     for (key, value) in options {
-        if key == FlowType::FLOW_TYPE_KEY {
+        if key == FlowType::FLOW_TYPE_KEY || key == INTERNAL_INCREMENTAL_MODE_KEY {
             return InvalidSqlSnafu {
                 err_msg: format!("flow option '{key}' is reserved for internal use"),
             }
@@ -3396,6 +3402,22 @@ mod test {
             err.to_string()
                 .contains("flow option 'flow_type' is reserved for internal use")
         );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_rejects_internal_incremental_mode_key() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+                "sequence_range".to_string(),
+            )]),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(&format!(
+            "flow option '{INTERNAL_INCREMENTAL_MODE_KEY}' is reserved for internal use"
+        )));
     }
 
     #[test]

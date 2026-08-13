@@ -16,7 +16,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, INTERNAL_INCREMENTAL_MODE_KEY};
 use common_meta::key::FlowId;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -171,7 +171,7 @@ impl InformationSchemaFlows {
             comment,
             flow_options: sql::statements::OptionMap::from_filtered_string_map(
                 flow_info.options(),
-                &[FlowType::FLOW_TYPE_KEY],
+                &[FlowType::FLOW_TYPE_KEY, INTERNAL_INCREMENTAL_MODE_KEY],
             ),
             query,
         };
@@ -462,5 +462,59 @@ impl DfPartitionStream for InformationSchemaFlows {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use chrono::Utc;
+    use common_meta::ddl::create_flow::{
+        DEFER_ON_MISSING_SOURCE_KEY, FlowType, INTERNAL_INCREMENTAL_MODE_KEY,
+    };
+    use common_meta::key::flow::flow_info::{FlowInfoValue, FlowStatus};
+    use table::table_name::TableName;
+
+    use super::InformationSchemaFlows;
+
+    fn test_flow_info() -> FlowInfoValue {
+        FlowInfoValue {
+            source_table_ids: vec![],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "my_sink"),
+            flownode_ids: BTreeMap::new(),
+            catalog_name: "greptime".to_string(),
+            query_context: None,
+            flow_name: "my_flow".to_string(),
+            raw_sql: "SELECT number FROM numbers".to_string(),
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            options: HashMap::from([
+                (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string()),
+                (FlowType::FLOW_TYPE_KEY.to_string(), "batching".to_string()),
+                (
+                    INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+                    "sequence_range".to_string(),
+                ),
+            ]),
+            status: FlowStatus::Active,
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
+            eval_schedule: None,
+        }
+    }
+
+    #[test]
+    fn test_generate_show_create_flow_hides_internal_options() {
+        let flow_info = test_flow_info();
+        let sql = InformationSchemaFlows::generate_show_create_flow(&flow_info).unwrap();
+
+        // The user option survives and the reserved internal keys are hidden.
+        assert!(sql.contains("defer_on_missing_source = 'true'"));
+        assert!(!sql.contains(FlowType::FLOW_TYPE_KEY));
+        assert!(!sql.contains(INTERNAL_INCREMENTAL_MODE_KEY));
     }
 }
