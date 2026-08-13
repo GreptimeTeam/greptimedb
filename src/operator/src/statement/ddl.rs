@@ -99,7 +99,8 @@ use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions, parse_entity_columns, parse_entity_option_key,
+    SEMANTIC_PREFIX, TableOptions, has_stable_string_form, is_semantic_option_key,
+    parse_entity_columns, parse_entity_option_key, validate_semantic_option,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -1881,8 +1882,18 @@ impl StatementExecutor {
 
             (req, invalidate_keys)
         } else {
-            // This is logical table
-            let req = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(vec![expr]));
+            // This is logical table. Annotation alters only rewrite its own
+            // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            let annotation_alter = expr
+                .kind
+                .as_ref()
+                .is_some_and(|kind| common_grpc_expr::annotation_alter_family(kind).is_some());
+            let task = if annotation_alter {
+                DdlTask::new_alter_table(expr)
+            } else {
+                DdlTask::new_alter_logical_tables(vec![expr])
+            };
+            let req = SubmitDdlTaskRequest::new(task);
 
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
@@ -2338,19 +2349,6 @@ pub fn verify_alter(
         .context(error::BuildTableMetaSnafu { table_name })?;
 
     validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
-    // A column referenced by an entity declaration may be dropped (the
-    // read-time derivation skips the stale declaration), but must not change
-    // to a type without a stable string form.
-    for (key, value) in &new_meta.options.extra_options {
-        if parse_entity_option_key(key).is_none() {
-            continue;
-        }
-        for col in &parse_entity_columns(value) {
-            if let Some(column) = new_meta.schema.column_schema_by_name(col) {
-                ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
-            }
-        }
-    }
 
     Ok(true)
 }
@@ -2409,7 +2407,7 @@ pub fn create_table_info(
         &create_table.time_index,
     )?;
 
-    validate_entity_semantic_options(&table_options, &schema)?;
+    validate_semantic_table_options(&table_options, &schema)?;
 
     let meta = TableMeta {
         schema,
@@ -2557,23 +2555,6 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `CAST(column AS Utf8)` yields a stable entity-id string — the
-/// binary-backed and nested types do not, and without the DDL check the
-/// failure would surface only when the graph is scanned.
-fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> bool {
-    use datatypes::prelude::ConcreteDataType;
-    !matches!(
-        data_type,
-        ConcreteDataType::Binary(_)
-            | ConcreteDataType::Json(_)
-            | ConcreteDataType::Vector(_)
-            | ConcreteDataType::List(_)
-            | ConcreteDataType::Struct(_)
-            | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Null(_)
-    )
-}
-
 fn ensure_entity_column_renders_as_string(
     key: &str,
     col: &str,
@@ -2591,12 +2572,28 @@ fn ensure_entity_column_renders_as_string(
     Ok(())
 }
 
-/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist (tag or field) and
+/// Validates `greptime.semantic.*` options. Keys under the prefix must be
+/// known and values in their key's domain — SQL CREATE checks this at parse
+/// time, but gRPC expressions bypass the parser. Entity options' named
+/// columns must exist (tag or field) and
 /// have a stable string form — the derivation renders id, scope and
 /// descriptive values as strings.
-fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
+fn validate_semantic_table_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
     for (key, value) in &table_options.extra_options {
+        if key.starts_with(SEMANTIC_PREFIX) {
+            ensure!(
+                is_semantic_option_key(key),
+                InvalidSqlSnafu {
+                    err_msg: format!("unknown semantic option `{key}`"),
+                }
+            );
+            ensure!(
+                validate_semantic_option(key, value),
+                InvalidSqlSnafu {
+                    err_msg: format!("invalid value `{value}` for semantic option `{key}`"),
+                }
+            );
+        }
         if parse_entity_option_key(key).is_none() {
             continue;
         };
@@ -3133,7 +3130,7 @@ mod test {
     }
 
     #[test]
-    fn test_validate_entity_semantic_options() {
+    fn test_validate_semantic_table_options() {
         let schema = Schema::new(vec![
             ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
@@ -3156,22 +3153,36 @@ mod test {
             )][..],
             &[("greptime.semantic.entity.service.id", "value")][..],
         ] {
-            assert!(validate_entity_semantic_options(&opts(pairs), &schema).is_ok());
+            assert!(validate_semantic_table_options(&opts(pairs), &schema).is_ok());
         }
 
-        let missing = validate_entity_semantic_options(
+        let missing = validate_semantic_table_options(
             &opts(&[("greptime.semantic.entity.service.id", "nope")]),
             &schema,
         )
         .unwrap_err();
         assert!(matches!(missing, error::Error::ColumnNotFound { .. }));
 
-        let binary_id = validate_entity_semantic_options(
+        let binary_id = validate_semantic_table_options(
             &opts(&[("greptime.semantic.entity.service.id", "payload")]),
             &schema,
         )
         .unwrap_err();
         assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
+
+        // The SQL parser checks keys and value domains, but gRPC expressions
+        // bypass it.
+        let bad_value = validate_semantic_table_options(
+            &opts(&[("greptime.semantic.signal_type", "garbage")]),
+            &schema,
+        )
+        .unwrap_err();
+        assert!(matches!(bad_value, error::Error::InvalidSql { .. }));
+
+        let unknown_key =
+            validate_semantic_table_options(&opts(&[("greptime.semantic.nonsense", "x")]), &schema)
+                .unwrap_err();
+        assert!(matches!(unknown_key, error::Error::InvalidSql { .. }));
     }
 
     #[test]
@@ -3559,9 +3570,10 @@ WITH ('repartition.column.hint' = ' host ')",
             }],
         }));
         let err = verify_alter(1, table_info.clone(), modify).unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
         assert!(
-            err.to_string().contains("cannot render as a string"),
-            "{err}"
+            msg.contains("must keep a type that renders as a string"),
+            "{msg}"
         );
 
         // Dropping a declared column stays allowed: the derivation skips the

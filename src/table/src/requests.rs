@@ -301,6 +301,27 @@ pub struct ModifyColumnTypeRequest {
     pub target_type: ConcreteDataType,
 }
 
+/// A family of annotation table options: pure metadata markers that no region
+/// consumes. Setting or unsetting them only rewrites the table's
+/// `extra_options`, so the alter skips region dispatch entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnnotationFamily {
+    /// `greptime.semantic.*` options (see the [`semantic`] module).
+    Semantic,
+}
+
+impl AnnotationFamily {
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            Self::Semantic => SEMANTIC_PREFIX,
+        }
+    }
+
+    pub fn of_key(key: &str) -> Option<Self> {
+        key.starts_with(SEMANTIC_PREFIX).then_some(Self::Semantic)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterKind {
     AddColumns {
@@ -325,6 +346,14 @@ pub enum AlterKind {
         column_name: String,
     },
     UnsetRepartitionColumnHint,
+    SetAnnotations {
+        family: AnnotationFamily,
+        options: Vec<(String, String)>,
+    },
+    UnsetAnnotations {
+        family: AnnotationFamily,
+        keys: Vec<String>,
+    },
     SetIndexes {
         options: Vec<SetIndexOption>,
     },

@@ -37,8 +37,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
+    AddColumnRequest, AlterKind, AnnotationFamily, ModifyColumnTypeRequest,
+    REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
+    has_stable_string_form, is_semantic_option_key, parse_entity_columns, parse_entity_option_key,
+    validate_semantic_option,
 };
 use crate::table_reference::TableReference;
 
@@ -335,6 +337,12 @@ impl TableMeta {
                 self.set_repartition_column_hint(table_name, column_name)
             }
             AlterKind::UnsetRepartitionColumnHint => self.unset_repartition_column_hint(),
+            AlterKind::SetAnnotations { family, options } => {
+                self.set_annotations(table_name, *family, options)
+            }
+            AlterKind::UnsetAnnotations { family, keys } => {
+                self.unset_annotations(table_name, *family, keys)
+            }
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
@@ -420,6 +428,89 @@ impl TableMeta {
     fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
         let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
         self.set_table_options(&requests)
+    }
+
+    /// Applies an annotation SET. Validation lives here, on the mutation
+    /// path, so it runs both at frontend verification and again inside the
+    /// alter procedure's prepare step — under the table lock, against fresh
+    /// metadata.
+    fn set_annotations(
+        &self,
+        table_name: &str,
+        family: AnnotationFamily,
+        options: &[(String, String)],
+    ) -> Result<TableMetaBuilder> {
+        let AnnotationFamily::Semantic = family;
+        let mut new_options = self.options.clone();
+        for (key, value) in options {
+            ensure!(
+                is_semantic_option_key(key),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!("unknown semantic option `{key}`"),
+                }
+            );
+            ensure!(
+                validate_semantic_option(key, value),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!("invalid value `{value}` for semantic option `{key}`"),
+                }
+            );
+            if parse_entity_option_key(key).is_some() {
+                for col in parse_entity_columns(value) {
+                    let column = self.schema.column_schema_by_name(&col).with_context(|| {
+                        error::ColumnNotExistsSnafu {
+                            column_name: &col,
+                            table_name,
+                        }
+                    })?;
+                    ensure!(
+                        has_stable_string_form(&column.data_type),
+                        error::InvalidAlterRequestSnafu {
+                            table: table_name,
+                            err: format!(
+                                "entity column `{col}` (option `{key}`) has type \
+                                 `{}`, which cannot render as a string",
+                                column.data_type
+                            ),
+                        }
+                    );
+                }
+            }
+            new_options.extra_options.insert(key.clone(), value.clone());
+        }
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+        Ok(builder)
+    }
+
+    /// Applies an annotation UNSET. Deliberately lenient inside the family's
+    /// namespace: keys this version does not recognise may still be removed,
+    /// so options left behind by other versions can be cleaned up.
+    fn unset_annotations(
+        &self,
+        table_name: &str,
+        family: AnnotationFamily,
+        keys: &[String],
+    ) -> Result<TableMetaBuilder> {
+        let mut new_options = self.options.clone();
+        for key in keys {
+            ensure!(
+                key.starts_with(family.prefix()),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.prefix()
+                    ),
+                }
+            );
+            new_options.extra_options.remove(key);
+        }
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+        Ok(builder)
     }
 
     fn set_repartition_column_hint(
@@ -959,6 +1050,23 @@ impl TableMeta {
         for col_to_change in requests {
             let change_column_name = &col_to_change.column_name;
 
+            // A column referenced by an entity declaration may be dropped (the
+            // read-time derivation skips the stale declaration), but must not
+            // change to a type without a stable string form.
+            if !has_stable_string_form(&col_to_change.target_type)
+                && let Some(key) = entity_option_referencing(&self.options, change_column_name)
+            {
+                return error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column `{change_column_name}` is referenced by entity option \
+                         `{key}` and must keep a type that renders as a string, got `{}`",
+                        col_to_change.target_type
+                    ),
+                }
+                .fail();
+            }
+
             let index = table_schema
                 .column_index_by_name(change_column_name)
                 .with_context(|| error::ColumnNotExistsSnafu {
@@ -1406,6 +1514,14 @@ impl TableInfo {
             self.name.as_str(),
         )
     }
+}
+
+fn entity_option_referencing<'a>(options: &'a TableOptions, column: &str) -> Option<&'a str> {
+    options.extra_options.iter().find_map(|(key, value)| {
+        (parse_entity_option_key(key).is_some()
+            && parse_entity_columns(value).iter().any(|c| c == column))
+        .then_some(key.as_str())
+    })
 }
 
 /// Set column fulltext options if it passed the validation.
@@ -2626,5 +2742,190 @@ mod tests {
             table_type: TableType::Base,
         };
         assert_eq!(actual, expected);
+    }
+
+    use crate::requests::{SEMANTIC_METRIC_UNIT, SEMANTIC_SIGNAL_TYPE};
+
+    /// `host` is a tag, `service` and `note` are string fields, `payload` is a
+    /// binary field.
+    fn semantic_test_meta() -> TableMeta {
+        let column_schemas = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("service", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(5)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_set_semantic_annotations() {
+        let meta = semantic_test_meta();
+        // `service` is a plain field: entity columns may be tags or fields.
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::Semantic,
+            options: vec![
+                (SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string()),
+                (
+                    "greptime.semantic.entity.service.id".to_string(),
+                    "service".to_string(),
+                ),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            new_meta.options.extra_options.get(SEMANTIC_SIGNAL_TYPE),
+            Some(&"trace".to_string())
+        );
+        assert_eq!(
+            new_meta
+                .options
+                .extra_options
+                .get("greptime.semantic.entity.service.id"),
+            Some(&"service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_semantic_annotations_rejects_invalid() {
+        let meta = semantic_test_meta();
+        let cases = [
+            (
+                "greptime.semantic.unknown_key",
+                "x",
+                "unknown semantic option",
+            ),
+            (SEMANTIC_SIGNAL_TYPE, "garbage", "invalid value"),
+            (
+                "greptime.semantic.entity.host.id",
+                "no_such_column",
+                "no_such_column",
+            ),
+            (
+                "greptime.semantic.entity.host.id",
+                "payload",
+                "cannot render as a string",
+            ),
+        ];
+        for (key, value, needle) in cases {
+            let alter_kind = AlterKind::SetAnnotations {
+                family: AnnotationFamily::Semantic,
+                options: vec![(key.to_string(), value.to_string())],
+            };
+            let err = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .err()
+                .unwrap();
+            assert!(
+                err.to_string().contains(needle),
+                "key `{key}`: unexpected error `{err}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unset_semantic_annotations() {
+        let mut meta = semantic_test_meta();
+        meta.options
+            .extra_options
+            .insert(SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string());
+        // A key this version does not recognise, still inside the namespace.
+        meta.options
+            .extra_options
+            .insert("greptime.semantic.future_key".to_string(), "x".to_string());
+
+        let alter_kind = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec![
+                SEMANTIC_SIGNAL_TYPE.to_string(),
+                "greptime.semantic.future_key".to_string(),
+                // Absent key: removal is a no-op, not an error.
+                SEMANTIC_METRIC_UNIT.to_string(),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(SEMANTIC_SIGNAL_TYPE)
+        );
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key("greptime.semantic.future_key")
+        );
+
+        let outside = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec!["ttl".to_string()],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &outside)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("annotation namespace"), "{err}");
+    }
+
+    #[test]
+    fn test_modify_entity_column_type_keeps_string_form() {
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "service".to_string(),
+        );
+
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "service".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // An unreferenced column may still change to a non-string form.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "note".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        meta.builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap();
     }
 }

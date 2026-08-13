@@ -66,6 +66,35 @@ order by rel_type, src_id;
 
 drop table graph_app_metrics;
 
+-- Declarations can be added after the fact: a table created without semantic
+-- options joins the graph once ALTER TABLE declares its entities, and leaves
+-- it again on UNSET.
+create table graph_late_metrics (
+  ts timestamp time index,
+  svc string,
+  env string,
+  latency double
+);
+
+insert into graph_late_metrics values (now(), 'checkout', 'eu-1', 1.5);
+
+select entity_type, entity_id from greptime_private.semantic_entities order by entity_type, entity_id;
+
+alter table graph_late_metrics set 'greptime.semantic.entity.service.id' = 'svc', 'greptime.semantic.entity.service.scope' = 'env';
+
+select entity_type, entity_id, scope from greptime_private.semantic_entities order by entity_type, entity_id;
+
+-- A column referenced by a declaration must keep a string-renderable type.
+alter table graph_late_metrics modify column svc binary;
+
+alter table graph_late_metrics unset 'greptime.semantic.entity.service.id';
+
+alter table graph_late_metrics unset 'greptime.semantic.entity.service.scope';
+
+select entity_type, entity_id from greptime_private.semantic_entities order by entity_type, entity_id;
+
+drop table graph_late_metrics;
+
 -- Calls derivation over trace-v1 tables, all branches in one scan: the client
 -- span and its child server span land in different tables and still pair into
 -- one edge with RED metrics; the epoch-timestamped pair falls outside the

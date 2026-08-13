@@ -29,7 +29,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest,
+    AddColumnRequest, AlterKind, AlterTableRequest, AnnotationFamily, ModifyColumnTypeRequest,
     REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption, UnsetIndexOption,
 };
 
@@ -43,6 +43,52 @@ use crate::error::{
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
 const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
+
+/// Classifies a SET/UNSET key batch: `Ok(Some(family))` when every key belongs
+/// to the same annotation family, `Ok(None)` when none does, and an error on a
+/// mixed batch — annotation alters skip region dispatch, so they cannot share
+/// a statement with options that regions must see.
+fn annotation_family_of_keys<'a>(
+    mut keys: impl Iterator<Item = &'a str>,
+) -> Result<Option<AnnotationFamily>> {
+    let Some(first) = keys.next() else {
+        return Ok(None);
+    };
+    let family = AnnotationFamily::of_key(first);
+    for key in keys {
+        let this = AnnotationFamily::of_key(key);
+        if this != family {
+            let prefix = family.or(this).unwrap().prefix();
+            return error::InvalidTableOptionRequestSnafu {
+                err_msg: format!(
+                    "`{prefix}*` options must be altered separately from other table options"
+                ),
+            }
+            .fail();
+        }
+    }
+    Ok(family)
+}
+
+/// Returns the annotation family when `kind` is a SET/UNSET whose keys all
+/// belong to one family — the alters that only rewrite table metadata and skip
+/// region dispatch. Mixed batches answer `None`; [`alter_expr_to_request`]
+/// rejects them with a precise error.
+pub fn annotation_alter_family(kind: &Kind) -> Option<AnnotationFamily> {
+    match kind {
+        Kind::SetTableOptions(api::v1::SetTableOptions { table_options }) => {
+            annotation_family_of_keys(table_options.iter().map(|option| option.key.as_str()))
+                .ok()
+                .flatten()
+        }
+        Kind::UnsetTableOptions(api::v1::UnsetTableOptions { keys }) => {
+            annotation_family_of_keys(keys.iter().map(|key| key.as_str()))
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    }
+}
 
 fn set_index_option_from_proto(set_index: api::v1::SetIndex) -> Result<SetIndexOption> {
     let options = set_index.options.context(MissingAlterIndexOptionSnafu)?;
@@ -179,6 +225,16 @@ pub fn alter_expr_to_request(
                 AlterKind::SetRepartitionColumnHint {
                     column_name: option.value.clone(),
                 }
+            } else if let Some(family) = annotation_family_of_keys(
+                table_options.iter().map(|option| option.key.as_str()),
+            )? {
+                AlterKind::SetAnnotations {
+                    family,
+                    options: table_options
+                        .iter()
+                        .map(|option| (option.key.clone(), option.value.clone()))
+                        .collect(),
+                }
             } else {
                 AlterKind::SetTableOptions {
                     options: table_options
@@ -203,6 +259,13 @@ pub fn alter_expr_to_request(
                     }
                 );
                 AlterKind::UnsetRepartitionColumnHint
+            } else if let Some(family) =
+                annotation_family_of_keys(keys.iter().map(|key| key.as_str()))?
+            {
+                AlterKind::UnsetAnnotations {
+                    family,
+                    keys: keys.clone(),
+                }
             } else {
                 AlterKind::UnsetTableOptions {
                     keys: keys
@@ -613,5 +676,109 @@ mod tests {
             alter_request.alter_kind,
             AlterKind::UnsetRepartitionColumnHint
         ));
+    }
+
+    #[test]
+    fn test_semantic_options_classified_as_annotations() {
+        let expr = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![
+                    PbOption {
+                        key: "greptime.semantic.signal_type".to_string(),
+                        value: "trace".to_string(),
+                    },
+                    PbOption {
+                        key: "greptime.semantic.entity.host.id".to_string(),
+                        value: "host".to_string(),
+                    },
+                ],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
+        let AlterKind::SetAnnotations { family, options } = alter_request.alter_kind else {
+            panic!(
+                "expected SetAnnotations, got {:?}",
+                alter_request.alter_kind
+            );
+        };
+        assert_eq!(family, AnnotationFamily::Semantic);
+        assert_eq!(options.len(), 2);
+
+        let expr = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::UnsetTableOptions(UnsetTableOptions {
+                keys: vec!["greptime.semantic.signal_type".to_string()],
+            })),
+        };
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
+        assert!(matches!(
+            alter_request.alter_kind,
+            AlterKind::UnsetAnnotations {
+                family: AnnotationFamily::Semantic,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_semantic_options_reject_mixed_batch() {
+        let mixed_set = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![
+                    PbOption {
+                        key: "greptime.semantic.signal_type".to_string(),
+                        value: "trace".to_string(),
+                    },
+                    PbOption {
+                        key: table::requests::TTL_KEY.to_string(),
+                        value: "7d".to_string(),
+                    },
+                ],
+            })),
+        };
+        let err = alter_expr_to_request(1, mixed_set, None).unwrap_err();
+        assert!(err.to_string().contains("altered separately"), "{err}");
+
+        let mixed_unset = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::UnsetTableOptions(UnsetTableOptions {
+                keys: vec![
+                    "ttl".to_string(),
+                    "greptime.semantic.signal_type".to_string(),
+                ],
+            })),
+        };
+        let err = alter_expr_to_request(1, mixed_unset, None).unwrap_err();
+        assert!(err.to_string().contains("altered separately"), "{err}");
+    }
+
+    #[test]
+    fn test_annotation_alter_family() {
+        // Mixed batches are not metadata-only; the converter rejects them,
+        // while this routing helper answers `None`.
+        let mixed = Kind::SetTableOptions(SetTableOptions {
+            table_options: vec![
+                PbOption {
+                    key: "greptime.semantic.signal_type".to_string(),
+                    value: "trace".to_string(),
+                },
+                PbOption {
+                    key: "ttl".to_string(),
+                    value: "7d".to_string(),
+                },
+            ],
+        });
+        assert_eq!(annotation_alter_family(&mixed), None);
     }
 }

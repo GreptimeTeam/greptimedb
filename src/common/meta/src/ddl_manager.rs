@@ -31,6 +31,7 @@ use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
+use table::requests::AnnotationFamily;
 use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
@@ -1071,8 +1072,18 @@ async fn handle_alter_table_task(
         .get(table_id)
         .await?
         .context(TableRouteNotFoundSnafu { table_id })?;
+    // Semantic annotation alters only rewrite the logical table's own
+    // metadata (no region dispatch), so they may target logical tables.
+    let semantic_annotation_alter =
+        alter_table_task
+            .alter_table
+            .kind
+            .as_ref()
+            .is_some_and(|kind| {
+                common_grpc_expr::annotation_alter_family(kind) == Some(AnnotationFamily::Semantic)
+            });
     ensure!(
-        table_route_value.is_physical(),
+        table_route_value.is_physical() || semantic_annotation_alter,
         UnexpectedLogicalRouteTableSnafu {
             err_msg: format!("{:?} is a non-physical TableRouteValue.", table_ref),
         }

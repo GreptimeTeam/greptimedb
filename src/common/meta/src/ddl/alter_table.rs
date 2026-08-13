@@ -470,6 +470,9 @@ pub(crate) fn only_enables_skip_wal(alter_kind: &Kind) -> bool {
 }
 
 fn is_metadata_only_alter(alter_kind: &Kind) -> bool {
+    if common_grpc_expr::annotation_alter_family(alter_kind).is_some() {
+        return true;
+    }
     match alter_kind {
         Kind::RenameTable { .. } => true,
         Kind::SetTableOptions(SetTableOptions { table_options }) => {
