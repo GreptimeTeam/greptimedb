@@ -560,8 +560,8 @@ impl RegionOpener {
                 on_region_opened,
             )
             .await?;
-            // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
-            // Only set after the WAL replay is completed.
+            // For remote WAL, set topic_latest_entry_id to the topic's latest
+            // entry id only after the WAL replay completes.
 
             if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
                 wal.store()
