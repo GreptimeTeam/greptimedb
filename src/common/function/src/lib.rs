@@ -18,6 +18,7 @@ mod admin;
 mod flush_flow;
 mod macros;
 mod system;
+mod uddsketch_compat;
 
 pub mod aggrs;
 pub mod function;

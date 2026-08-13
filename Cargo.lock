@@ -2498,6 +2498,7 @@ dependencies = [
  "table",
  "tokio",
  "uddsketch-rs",
+ "vu128",
  "wkt",
 ]
 
