@@ -17,7 +17,6 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use mito2::compaction::run::{
     Item, Ranged, SortedRun, find_overlapping_items, find_sorted_runs, find_sorted_runs_original,
-    merge_seq_files, reduce_runs,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -47,20 +46,6 @@ impl Item for MockFile {
     fn size(&self) -> usize {
         self.size
     }
-}
-
-fn generate_test_files(n: usize) -> Vec<MockFile> {
-    let mut files = Vec::with_capacity(n);
-    for _ in 0..n {
-        // Create slightly overlapping ranges to force multiple sorted runs
-        files.push(MockFile {
-            start: 0,
-            end: 10,
-            pk: 0,
-            size: 10,
-        });
-    }
-    files
 }
 
 fn generate_same_timestamp_files(total_files: usize, files_per_timestamp: usize) -> Vec<MockFile> {
@@ -107,21 +92,6 @@ fn bench_find_sorted_runs(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_reduce_runs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("reduce_runs");
-
-    for size in [10, 100, 1000].iter() {
-        group.bench_function(format!("size_{}", size), |b| {
-            let mut files = generate_test_files(*size);
-            let runs = find_sorted_runs(&mut files);
-            b.iter(|| {
-                reduce_runs(black_box(runs.clone()));
-            });
-        });
-    }
-    group.finish();
-}
-
 fn bench_find_overlapping_items(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_overlapping_items");
 
@@ -158,45 +128,9 @@ fn bench_find_overlapping_items(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_merge_seq_files(c: &mut Criterion) {
-    let mut group = c.benchmark_group("merge_seq_files");
-
-    for size in [10, 100, 1000].iter() {
-        group.bench_function(format!("size_{}", size), |b| {
-            // Create a set of files with varying sizes
-            let mut files = Vec::with_capacity(*size);
-
-            for i in 0..*size {
-                // Create files with different sizes to test the scoring algorithm
-                let file_size = if i % 3 == 0 {
-                    5
-                } else if i % 3 == 1 {
-                    10
-                } else {
-                    15
-                };
-
-                files.push(MockFile {
-                    start: i as i64,
-                    end: (i + 1) as i64,
-                    pk: 0,
-                    size: file_size,
-                });
-            }
-
-            b.iter(|| {
-                merge_seq_files(black_box(&files), black_box(Some(50)));
-            });
-        });
-    }
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_find_sorted_runs,
-    bench_reduce_runs,
     bench_find_overlapping_items,
-    bench_merge_seq_files
 );
 criterion_main!(benches);
