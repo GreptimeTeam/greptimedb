@@ -28,7 +28,6 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -39,8 +38,8 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
-    EncodeSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
+    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -261,18 +260,9 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if ty.is_json2() {
-                            // JSON2 query-time projection should have been handled before
-                            // flat compat. Keep a release-mode fallback for unexpected
-                            // schema paths.
-                            debug_assert!(false, "JSON2 should be materialized before flat compat");
-                            JsonArray::from(old_column)
-                                .project_to(&ty.as_arrow_type())
-                                .context(ConvertValueSnafu)?
-                        } else {
+                        let casted =
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
-                                .context(ComputeArrowSnafu)?
-                        };
+                                .context(ComputeArrowSnafu)?;
                         Ok(casted)
                     } else {
                         Ok(old_column.clone())
