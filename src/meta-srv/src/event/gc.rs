@@ -212,8 +212,8 @@ mod tests {
 
     use api::v1::ColumnSchema;
     use common_event_recorder::event_table::{
-        EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+        PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
     use common_event_recorder::{EventTypeFilter, PersistentEventContext, TriggerReason};
@@ -536,6 +536,7 @@ mod tests {
         );
         let mut event_schema = procedure_schema();
         event_schema.extend(schema());
+        event_schema.push(ACTOR_COLUMN.column_schema());
         event_schema.push(EVENT_CONTEXT_COLUMN.column_schema());
         let mut values = vec![
             ValueData::StringValue(procedure_id.to_string()).into(),
@@ -553,6 +554,7 @@ mod tests {
             )
             .values,
         );
+        values.push(Value { value_data: None });
         values.push(Value { value_data: None });
 
         assert_event_contract(

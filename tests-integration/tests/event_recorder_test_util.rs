@@ -26,6 +26,33 @@ use session::context::QueryContext;
 const MAX_ATTEMPTS: usize = 60;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Asserts that submission and completion events record the expected actor.
+pub(crate) async fn assert_procedure_actor(
+    instance: &Arc<Instance>,
+    procedure_id: &str,
+    actor: Option<&str>,
+) {
+    let actor_predicate = actor.map_or_else(
+        || "count(actor) = 0".to_string(),
+        |actor| format!("count(*) = count(CASE WHEN actor = '{actor}' THEN 1 END)"),
+    );
+    for trigger in ["Submitted", "Succeeded"] {
+        assert_eventually_eq(
+            instance,
+            &format!(
+                "SELECT count(*) > 0 AND {actor_predicate} AS actor_matches FROM greptime_private.events WHERE procedure_id = '{procedure_id}' AND json_get_string(procedure_trigger, 'type') = '{trigger}'"
+            ),
+            "\
++---------------+
+| actor_matches |
++---------------+
+| true          |
++---------------+",
+        )
+        .await;
+    }
+}
+
 /// Asserts that the query eventually returns exactly one event.
 pub(crate) async fn assert_single_event(instance: &Arc<Instance>, query: &str) {
     for _ in 0..MAX_ATTEMPTS {
