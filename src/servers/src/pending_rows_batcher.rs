@@ -323,6 +323,8 @@ enum WorkerCommand {
         response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
         _permit: OwnedSemaphorePermit,
     },
+    #[cfg(test)]
+    Ack { ack_tx: oneshot::Sender<()> },
 }
 
 // Batch key is derived from QueryContext; it assumes catalog/schema/physical_table fully
@@ -998,6 +1000,10 @@ fn start_worker(
                                 ).await;
                             }
                             break;
+                        }
+                        #[cfg(test)]
+                        Some(WorkerCommand::Ack { ack_tx }) => {
+                            let _ = ack_tx.send(());
                         }
                     }
                 }
@@ -2963,17 +2969,14 @@ mod tests {
             .await
             .unwrap();
 
-        for _ in 0..10 {
-            if worker_tx.capacity() > 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            1,
-            worker_tx.capacity(),
-            "worker did not receive the submitted batch"
-        );
+        // The channel is FIFO, so the ack proves the worker has dequeued and
+        // processed the submission (anchoring the flush deadline) before the
+        // caller advances virtual time.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        worker_tx.send(WorkerCommand::Ack { ack_tx }).await.unwrap();
+        ack_rx
+            .await
+            .expect("worker exited before acking the submitted batch");
 
         response_rx
     }
