@@ -53,9 +53,9 @@ mod test {
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
         AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType, ColumnDataTypeExtension,
-        ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
-        DropTableExpr, InsertIntoPlan, InsertRequest, InsertRequests, QueryRequest, SemanticType,
-        VectorTypeExtension, alter_table_expr,
+        ColumnDef, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, DdlRequest, DeleteRequest,
+        DeleteRequests, DropTableExpr, EvalInterval, InsertIntoPlan, InsertRequest, InsertRequests,
+        QueryRequest, SemanticType, TableName, VectorTypeExtension, alter_table_expr,
     };
     use auth::{
         DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
@@ -64,7 +64,7 @@ mod test {
     use client::OutputData;
     use common_base::Plugins;
     use common_catalog::consts::{
-        DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE,
+        DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE,
         SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
     };
     use common_meta::rpc::router::region_distribution;
@@ -136,6 +136,94 @@ mod test {
         GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
             .await
             .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_grpc_ddl_flow_rejects_internal_transport_keys() {
+        // Direct gRPC DDL requests bypass the SQL parser. A caller that crafts
+        // a `CreateFlowExpr` with an internal transport key in flow_options is
+        // trying to spoof a trusted `EVAL OFFSET` / schedule: the operator's
+        // `create_flow_inner` must reject it before any trusted extraction.
+        let standalone = GreptimeDbStandaloneBuilder::new(
+            "test_standalone_grpc_ddl_flow_rejects_internal_transport_keys",
+        )
+        .build()
+        .await;
+        let instance = standalone.fe_instance();
+
+        for key in [
+            "__greptime_internal_eval_offset_secs",
+            "__greptime_internal_eval_schedule",
+        ] {
+            let expr = CreateFlowExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                flow_name: format!("spoofed_flow_{}", key.len()),
+                source_table_names: vec![],
+                sink_table_name: Some(TableName {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "spoofed_sink".to_string(),
+                }),
+                or_replace: false,
+                create_if_not_exists: false,
+                expire_after: None,
+                eval_interval: Some(EvalInterval { seconds: 3600 }),
+                comment: String::new(),
+                sql: "SELECT 1".to_string(),
+                flow_options: HashMap::from([(key.to_string(), "120".to_string())]),
+            };
+            let request = Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::CreateFlow(expr)),
+            });
+            let err = GrpcQueryHandler::do_query(instance.as_ref(), request, QueryContext::arc())
+                .await
+                .unwrap_err();
+            let err_msg = format!("{err:?}");
+            assert!(
+                err_msg.contains(&format!("flow option '{key}' is reserved for internal use")),
+                "expected reserved-key rejection for {key}, got: {err_msg}"
+            );
+        }
+
+        // A benign flow_options map (no internal keys) passes the boundary
+        // guard; the request then proceeds to flow creation which fails on the
+        // missing source table (not on the transport guard).
+        let expr = CreateFlowExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            flow_name: "benign_missing_source_flow".to_string(),
+            source_table_names: vec![TableName {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "definitely_missing_table".to_string(),
+            }],
+            sink_table_name: Some(TableName {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "benign_missing_source_sink".to_string(),
+            }),
+            or_replace: false,
+            create_if_not_exists: false,
+            expire_after: None,
+            eval_interval: Some(EvalInterval { seconds: 3600 }),
+            comment: String::new(),
+            sql: "SELECT * FROM definitely_missing_table".to_string(),
+            flow_options: HashMap::new(),
+        };
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateFlow(expr)),
+        });
+        let err = GrpcQueryHandler::do_query(instance.as_ref(), request, QueryContext::arc())
+            .await
+            .unwrap_err();
+        let err_msg = format!("{err:?}");
+        assert!(
+            err_msg.contains("missing source tables"),
+            "benign request should fail on missing sources, got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains("reserved for internal use"),
+            "benign request must not trip the transport guard, got: {err_msg}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

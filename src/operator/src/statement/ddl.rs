@@ -42,6 +42,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
+    INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
 };
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
@@ -205,7 +206,10 @@ fn validate_and_normalize_flow_options(
     options
         .into_iter()
         .map(|(key, value)| {
-            if key == FlowType::FLOW_TYPE_KEY {
+            if matches!(
+                key.as_str(),
+                FlowType::FLOW_TYPE_KEY | INTERNAL_EVAL_OFFSET_KEY | INTERNAL_EVAL_SCHEDULE_KEY
+            ) {
                 return InvalidSqlSnafu {
                     err_msg: format!("flow option '{key}' is reserved for internal use"),
                 }
@@ -232,11 +236,60 @@ fn validate_and_normalize_flow_options(
         .collect()
 }
 
+/// Rejects a raw `CreateFlowExpr` that smuggles the internal transient
+/// transport keys (`__greptime_internal_eval_offset_secs` /
+/// `__greptime_internal_eval_schedule`) through `flow_options`.
+///
+/// These keys are trusted only when inserted by the SQL path *after* user
+/// option validation (see `create_flow_procedure`). A key present on an expr
+/// arriving at a direct gRPC boundary is always a spoof attempt and must be
+/// rejected before any trusted extraction could happen.
+fn reject_spoofed_internal_flow_transport_keys(
+    flow_options: &HashMap<String, String>,
+) -> Result<()> {
+    for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
+        if flow_options.contains_key(key) {
+            return InvalidSqlSnafu {
+                err_msg: format!("flow option '{key}' is reserved for internal use"),
+            }
+            .fail();
+        }
+    }
+    Ok(())
+}
+
+/// Validates `EVAL OFFSET` semantics at the operator boundary: an offset is
+/// only legal together with `EVAL INTERVAL` and must lie in
+/// `[0, eval_interval)`. Never modulo-normalized.
+fn validate_eval_offset(
+    eval_offset_secs: Option<i64>,
+    eval_interval_secs: Option<i64>,
+) -> Result<()> {
+    if let Some(offset_secs) = eval_offset_secs {
+        let Some(eval_interval_secs) = eval_interval_secs else {
+            return InvalidSqlSnafu {
+                err_msg: "EVAL OFFSET requires EVAL INTERVAL to be specified".to_string(),
+            }
+            .fail();
+        };
+        if !(0..eval_interval_secs).contains(&offset_secs) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "EVAL OFFSET must be in range [0, EVAL INTERVAL), got {offset_secs} seconds with EVAL INTERVAL {eval_interval_secs} seconds"
+                ),
+            }
+            .fail();
+        }
+    }
+    Ok(())
+}
+
 fn determine_flow_type_for_source_state(
     flow_name: &str,
     flow_options: &HashMap<String, String>,
     has_missing_source_table: bool,
     has_instant_ttl_source_table: bool,
+    force_batching: bool,
 ) -> Result<Option<FlowType>> {
     if has_missing_source_table {
         let defer_on_missing_source = flow_options
@@ -259,6 +312,19 @@ fn determine_flow_type_for_source_state(
     }
 
     if has_instant_ttl_source_table {
+        if force_batching {
+            // The batching scheduler cannot read instant-TTL source tables, so
+            // a flow with `EVAL INTERVAL` must be rejected instead of silently
+            // falling back to streaming (where the schedule/offset would be
+            // ignored).
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "flow '{}' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval",
+                    flow_name
+                ),
+            }
+            .fail();
+        }
         return Ok(Some(FlowType::Streaming));
     }
 
@@ -741,23 +807,39 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // TODO(ruihang): do some verification
-        let expr = expr_helper::to_create_flow_task_expr(stmt, &query_context)?;
+        let expr = expr_helper::to_create_flow_task_expr(stmt.clone(), &query_context)?;
 
-        self.create_flow_inner(expr, query_context).await
+        // The typed `EVAL OFFSET` comes straight from the parsed SQL AST; it is
+        // the only trusted source of the offset at this boundary. It is
+        // transported to meta via the transient option key, inserted only after
+        // user option validation (see `create_flow_procedure`).
+        self.create_flow_procedure(expr, stmt.eval_offset, query_context)
+            .await?;
+        Ok(Output::new_with_affected_rows(0))
     }
 
+    /// Direct gRPC entry point for `CREATE FLOW`.
+    ///
+    /// A `CreateFlowExpr` decoded from a raw gRPC request is never trusted to
+    /// carry the internal transport keys: only the SQL path
+    /// ([`StatementExecutor::create_flow`]) supplies a typed `EVAL OFFSET`.
+    /// Any internal key present here is a spoof attempt and is rejected before
+    /// any trusted extraction could happen.
     pub async fn create_flow_inner(
         &self,
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        self.create_flow_procedure(expr, query_context).await?;
+        reject_spoofed_internal_flow_transport_keys(&expr.flow_options)?;
+        self.create_flow_procedure(expr, None, query_context)
+            .await?;
         Ok(Output::new_with_affected_rows(0))
     }
 
     async fn create_flow_procedure(
         &self,
         mut expr: CreateFlowExpr,
+        eval_offset_secs: Option<i64>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let eval_interval_secs = expr.eval_interval.as_ref().map(|e| e.seconds);
@@ -772,6 +854,14 @@ impl StatementExecutor {
             .fail();
         }
 
+        // Validate EVAL OFFSET semantics at the operator boundary (defense in
+        // depth; the parser already enforces them deterministically). The
+        // offset arrives as a typed parameter, never from `flow_options`.
+        validate_eval_offset(eval_offset_secs, eval_interval_secs)?;
+
+        // Validate user options. `validate_and_normalize_flow_options` also
+        // rejects the internal transport keys, so a spoofed key smuggled into
+        // the expr can never be honored here.
         expr.flow_options =
             validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs)?;
 
@@ -782,6 +872,16 @@ impl StatementExecutor {
 
         expr.flow_options
             .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
+
+        // Trusted insertion AFTER user option validation: this is the only
+        // place the transient offset key may be added, and it is added from the
+        // typed SQL AST value, not from anything the user supplied in options.
+        if let Some(offset_secs) = eval_offset_secs {
+            expr.flow_options.insert(
+                INTERNAL_EVAL_OFFSET_KEY.to_string(),
+                offset_secs.to_string(),
+            );
+        }
 
         let task = CreateFlowTask::try_from(PbCreateFlowTask {
             create_flow: Some(expr),
@@ -804,6 +904,10 @@ impl StatementExecutor {
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
+        // A flow with `EVAL INTERVAL` must use the batching scheduler so the
+        // fixed epoch-phase schedule (including any `EVAL OFFSET`) is honored.
+        let has_eval_interval = expr.eval_interval.is_some();
+
         let mut has_missing_source_table = false;
         let mut has_instant_ttl_source_table = false;
 
@@ -827,13 +931,18 @@ impl StatementExecutor {
 
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 warn!(
-                    "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
+                    "Source table `{}` for flow `{}`'s ttl=instant, {}",
                     format_full_table_name(
                         &src_table_name.catalog_name,
                         &src_table_name.schema_name,
                         &src_table_name.table_name
                     ),
-                    expr.flow_name
+                    expr.flow_name,
+                    if has_eval_interval {
+                        "rejecting flow because EVAL INTERVAL requires the batching scheduler which does not support instant TTL"
+                    } else {
+                        "fallback to streaming mode"
+                    }
                 );
                 has_instant_ttl_source_table = true;
             }
@@ -844,8 +953,18 @@ impl StatementExecutor {
             &expr.flow_options,
             has_missing_source_table,
             has_instant_ttl_source_table,
+            has_eval_interval,
         )? {
             return Ok(flow_type);
+        }
+
+        // A flow with `EVAL INTERVAL` (and therefore possibly `EVAL OFFSET`)
+        // always uses the batching scheduler: the fixed epoch-phase schedule is
+        // only honored by the batching scheduler, regardless of the SQL shape.
+        // Non-aggregate SQL is supported as an explicit full-query flow (the
+        // batching engine requires a time-window expression or EVAL INTERVAL).
+        if has_eval_interval {
+            return Ok(FlowType::Batching);
         }
 
         let engine = &self.query_engine;
@@ -3229,7 +3348,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             "eval_interval_missed_tick_policy",
             "eval_interval_catchup_max_runs",
             "eval_interval_catchup_max_lag",
-            "__greptime_internal_eval_schedule",
         ] {
             let err = validate_and_normalize_flow_options(
                 HashMap::from([(key.to_string(), "value".to_string())]),
@@ -3246,9 +3364,30 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
-    fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
-        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false)
+    fn test_internal_transport_keys_rejected_as_reserved() {
+        for key in [
+            "__greptime_internal_eval_schedule",
+            "__greptime_internal_eval_offset_secs",
+        ] {
+            let err = validate_and_normalize_flow_options(
+                HashMap::from([(key.to_string(), "120".to_string())]),
+                Some(300),
+            )
             .unwrap_err();
+
+            assert!(
+                err.to_string()
+                    .contains(&format!("flow option '{key}' is reserved for internal use")),
+                "unexpected error for {key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
+        let err =
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false, false)
+                .unwrap_err();
 
         assert!(err.to_string().contains(
             "missing source tables for flow 'my_flow'; use WITH (defer_on_missing_source = true) to create a pending flow"
@@ -3261,7 +3400,13 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())]);
 
         assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &flow_options, true, true).unwrap(),
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true, false)
+                .unwrap(),
+            Some(FlowType::Batching)
+        );
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true, true)
+                .unwrap(),
             Some(FlowType::Batching)
         );
     }
@@ -3269,9 +3414,77 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     #[test]
     fn test_determine_flow_type_for_source_state_instant_ttl_without_missing_sources() {
         assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true).unwrap(),
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, false)
+                .unwrap(),
             Some(FlowType::Streaming)
         );
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_instant_ttl_with_eval_interval_is_rejected() {
+        // A flow with `EVAL INTERVAL` is forced onto the batching scheduler,
+        // which cannot read instant-TTL source tables: reject instead of
+        // silently falling back to streaming (where the schedule/offset would
+        // be ignored).
+        let err =
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, true)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_reject_spoofed_internal_flow_transport_keys_at_grpc_boundary() {
+        // A direct gRPC `CreateFlowExpr` (decoded from protobuf) carrying an
+        // internal transport key in flow_options is a spoof attempt. This is
+        // the exact guard `create_flow_inner` applies at the gRPC boundary.
+        for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
+            let flow_options = HashMap::from([(key.to_string(), "120".to_string())]);
+            let err = reject_spoofed_internal_flow_transport_keys(&flow_options).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("flow option '{key}' is reserved for internal use")),
+                "unexpected error for {key}: {err}"
+            );
+        }
+
+        // A benign expr (no internal keys) passes the guard.
+        let flow_options =
+            HashMap::from([("defer_on_missing_source".to_string(), "true".to_string())]);
+        assert!(reject_spoofed_internal_flow_transport_keys(&flow_options).is_ok());
+        assert!(reject_spoofed_internal_flow_transport_keys(&HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_eval_offset_operator_boundary() {
+        // offset without interval
+        let err = validate_eval_offset(Some(60), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("EVAL OFFSET requires EVAL INTERVAL"),
+            "unexpected error: {err}"
+        );
+
+        // negative / equal / greater than interval
+        for offset_secs in [-1, 300, 301] {
+            let err = validate_eval_offset(Some(offset_secs), Some(300)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("EVAL OFFSET must be in range [0, EVAL INTERVAL)"),
+                "unexpected error for offset {offset_secs}: {err}"
+            );
+        }
+
+        // valid offsets (including zero) are accepted
+        for offset_secs in [0, 1, 299] {
+            validate_eval_offset(Some(offset_secs), Some(300)).unwrap();
+        }
+        validate_eval_offset(None, None).unwrap();
+        validate_eval_offset(None, Some(300)).unwrap();
     }
 
     #[test]

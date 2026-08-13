@@ -1296,6 +1296,13 @@ pub struct CreateFlowTask {
     /// Duration in seconds. Data older than this duration will not be used.
     pub expire_after: Option<i64>,
     pub eval_interval_secs: Option<i64>,
+    /// Phase offset of the evaluation schedule within `eval_interval_secs`,
+    /// in seconds. Must be in `[0, eval_interval_secs)`. `None` means a zero
+    /// offset (epoch-anchored schedule).
+    /// Transported through the transient option map (no proto field), see
+    /// `INTERNAL_EVAL_OFFSET_KEY`.
+    #[serde(default)]
+    pub eval_offset_secs: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -1321,10 +1328,26 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             eval_interval,
             comment,
             sql,
-            flow_options,
+            mut flow_options,
         } = pb.create_flow.context(error::InvalidProtoMsgSnafu {
             err_msg: "expected create_flow",
         })?;
+
+        // Parse and strip the trusted transient offset key inserted by the
+        // operator after user option validation. It must never persist in
+        // user-visible options.
+        let eval_offset_secs =
+            match flow_options.remove(crate::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY) {
+                Some(value) => Some(value.parse::<i64>().map_err(|_| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Invalid internal eval offset payload '{value}': expected whole seconds"
+                        ),
+                    }
+                    .build()
+                })?),
+                None => None,
+            };
 
         Ok(CreateFlowTask {
             catalog_name,
@@ -1339,6 +1362,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             create_if_not_exists,
             expire_after: expire_after.map(|e| e.value),
             eval_interval_secs: eval_interval.map(|e| e.seconds),
+            eval_offset_secs,
             comment,
             sql,
             flow_options,
@@ -1358,12 +1382,21 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             create_if_not_exists,
             expire_after,
             eval_interval_secs: eval_interval,
+            eval_offset_secs,
             comment,
             sql,
-            flow_options,
+            mut flow_options,
             ..
         }: CreateFlowTask,
     ) -> Self {
+        // Re-insert the transient offset key so the proto round-trip (e.g. DDL
+        // task submission between frontend and metasrv) preserves the offset.
+        if let Some(offset_secs) = eval_offset_secs {
+            flow_options.insert(
+                crate::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY.to_string(),
+                offset_secs.to_string(),
+            );
+        }
         PbCreateFlowTask {
             create_flow: Some(CreateFlowExpr {
                 catalog_name,
