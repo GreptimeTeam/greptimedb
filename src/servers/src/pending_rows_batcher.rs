@@ -2947,6 +2947,8 @@ mod tests {
         assert!(!should_close_worker_on_idle_timeout(0, 1));
     }
 
+    const WORKER_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     async fn submit_mock_worker_batch(
         worker_tx: &mpsc::Sender<WorkerCommand>,
         total_rows: usize,
@@ -2982,19 +2984,15 @@ mod tests {
     }
 
     async fn receive_mock_flush_result(
-        response_rx: &mut oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
-    ) -> Option<std::result::Result<(), Arc<Error>>> {
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-            match response_rx.try_recv() {
-                Ok(result) => return Some(result),
-                Err(oneshot::error::TryRecvError::Empty) => {}
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    panic!("flush result channel closed without a result")
-                }
-            }
-        }
-        None
+        response_rx: oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
+        context: &str,
+    ) -> std::result::Result<(), Arc<Error>> {
+        // Under paused time the timeout auto-advances the clock and fires
+        // deterministically if the flush never completes.
+        tokio::time::timeout(WORKER_TEST_TIMEOUT, response_rx)
+            .await
+            .unwrap_or_else(|_| panic!("{context}"))
+            .expect("flush result channel closed without a result")
     }
 
     fn assert_missing_physical_table(result: std::result::Result<(), Arc<Error>>) {
@@ -3071,10 +3069,10 @@ mod tests {
         // drains the batch before that deadline is reached.
         tokio::task::yield_now().await;
         advance(flush_interval / 2).await;
-        let mut size_flush_rx = submit_mock_worker_batch(&worker_tx, 2, 1000).await;
-        let size_flush_result = receive_mock_flush_result(&mut size_flush_rx)
-            .await
-            .expect("row threshold did not flush the first batch");
+        let size_flush_rx = submit_mock_worker_batch(&worker_tx, 2, 1000).await;
+        let size_flush_result =
+            receive_mock_flush_result(size_flush_rx, "row threshold did not flush the first batch")
+                .await;
         assert_missing_physical_table(size_flush_result);
 
         // Submit a low-volume batch before the first batch's old timer would
@@ -3092,9 +3090,11 @@ mod tests {
         ));
 
         advance(Duration::from_millis(1)).await;
-        let timed_flush_result = receive_mock_flush_result(&mut timed_flush_rx)
-            .await
-            .expect("batch was not flushed one interval after its creation");
+        let timed_flush_result = receive_mock_flush_result(
+            timed_flush_rx,
+            "batch was not flushed one interval after its creation",
+        )
+        .await;
         assert_missing_physical_table(timed_flush_result);
 
         let _ = shutdown.send(());
