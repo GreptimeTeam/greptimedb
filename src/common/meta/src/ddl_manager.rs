@@ -554,8 +554,26 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            AlterLogicalTablesProcedure::new(alter_table_tasks, physical_table_id, context);
+        // Resolve the logical table ids up front: procedure locks are fixed
+        // at submission, so `lock_key` cannot derive them during `Prepare`.
+        let logical_table_ids = {
+            let table_refs = alter_table_tasks
+                .iter()
+                .map(|task| task.table_ref())
+                .collect::<Vec<_>>();
+            utils::table_id::get_all_table_ids_by_names(
+                self.table_metadata_manager().table_name_manager(),
+                &table_refs,
+            )
+            .await?
+        };
+
+        let procedure = AlterLogicalTablesProcedure::new(
+            alter_table_tasks,
+            physical_table_id,
+            logical_table_ids,
+            context,
+        );
 
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);

@@ -391,6 +391,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             ),
         ],
         43,
+        vec![],
         test_context(),
     );
     let drop_table = DropTableProcedure::new(
