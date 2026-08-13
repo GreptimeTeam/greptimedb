@@ -28,7 +28,7 @@ use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
-use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::{DataType, Float64Type};
 use uddsketch::{BatchWorkspace, UddSketch};
 
@@ -161,10 +161,15 @@ impl DfAccumulator for UddSketchState {
         match array.data_type() {
             DataType::Float64 => {
                 let f64_array = as_primitive_array::<Float64Type>(array)?;
-                self.values.clear();
-                self.values.extend(f64_array.iter().flatten());
+                let values: &[f64] = if f64_array.null_count() == 0 {
+                    f64_array.values().as_ref()
+                } else {
+                    self.values.clear();
+                    self.values.extend(f64_array.iter().flatten());
+                    self.values.as_slice()
+                };
                 self.uddsketch
-                    .add_batch_with_workspace(&self.values, &mut self.workspace)
+                    .add_batch_with_workspace(values, &mut self.workspace)
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
             }
             // meaning instantiate as `uddsketch_merge`
@@ -296,6 +301,34 @@ mod tests {
         } else {
             panic!("Expected binary scalar value");
         }
+    }
+
+    #[test]
+    fn test_uddsketch_state_non_null_batch_avoids_values_buffer() {
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let array = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
+
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
+
+        assert_eq!(state.uddsketch.count(), 3);
+        assert_eq!(state.values.capacity(), 0);
+    }
+
+    #[test]
+    fn test_uddsketch_state_non_null_sliced_batch() {
+        let mut state = UddSketchState::new(10, 0.01).unwrap();
+        let array = Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]);
+        let array = array.slice(1, 2);
+        let array = Arc::new(array) as ArrayRef;
+
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
+
+        assert_eq!(state.uddsketch.count(), 2);
+        assert_eq!(state.uddsketch.sum(), 5.0);
     }
 
     #[test]
