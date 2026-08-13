@@ -56,7 +56,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{
+    InvalidPartitionExprSnafu, InvalidRequestSnafu, Result, SequenceRangeUnsupportedSnafu,
+};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -85,6 +87,7 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::version::SstVersion;
 
 #[cfg(feature = "vector_index")]
 const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
@@ -437,6 +440,23 @@ impl ScanRegion {
     async fn scan_input(self) -> Result<ScanInput> {
         let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
+        // Exact `sequence_range` mode filters rows row-level on every
+        // time-matching SST. The legacy `sst_min_sequence` file-pruning hint
+        // would silently skip preserved files whose max sequence does not
+        // exceed it (e.g. `(5, 10]` with `sst_min_sequence = 8` drops a file
+        // with max = 8, losing sequences 6..8), so the conflicting combination
+        // is rejected explicitly instead of being silently approximated.
+        if sst_min_sequence.is_some() && self.exact_sequence_range().is_some() {
+            return SequenceRangeUnsupportedSnafu {
+                region_id: self.region_id(),
+                min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
+                max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
+                reason:
+                    "sst_min_sequence pruning hint is incompatible with exact sequence-range reads"
+                        .to_string(),
+            }
+            .fail();
+        }
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
 
@@ -458,10 +478,27 @@ impl ScanRegion {
         };
 
         let ssts = &self.version.ssts;
+        // Exact `(C, H]` scans skip files whose max sequence cannot reach the
+        // lower bound C: the whole file predates the range. This applies to
+        // marked files (no in-range rows) and to unmarked files already proven
+        // disjoint by `files_allow_exact_sequence_range` (their rows must not
+        // pass through unfiltered).
+        let sequence_range = self.exact_sequence_range();
+        let exact_min_sequence = match &sequence_range {
+            Some(SequenceRange::GtLtEq { min, .. }) => Some(*min),
+            _ => None,
+        };
         let mut files = Vec::new();
         if !self.request.skip_sst_files {
             for level in ssts.levels() {
                 for file in level.files.values() {
+                    if let Some(min) = exact_min_sequence
+                        && let Some(file_sequence) = file.meta_ref().sequence
+                        && file_sequence.get() <= min
+                    {
+                        continue;
+                    }
+
                     let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
                         (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
                         // If the file's sequence is None (or actually is zero), it could mean the file
@@ -579,6 +616,7 @@ impl ScanRegion {
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
             )
+            .with_sequence_range(sequence_range)
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "vector_index")]
         let input = input
@@ -728,6 +766,14 @@ impl ScanRegion {
 
     fn region_id(&self) -> RegionId {
         self.version.metadata.region_id
+    }
+
+    /// Returns the exact sequence range for row-level sequence filtering, or
+    /// `None` when the scan is not an exact `sequence_range` request or the
+    /// region cannot guarantee exactness (no per-row sequences preserved, or a
+    /// file in the version lacks the preserved-sequence marker).
+    fn exact_sequence_range(&self) -> Option<SequenceRange> {
+        exact_sequence_range(&self.request, &self.version)
     }
 
     /// Build time range predicate from filters.
@@ -950,6 +996,13 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// Exact sequence range to filter rows row-level on SST reads.
+    ///
+    /// Set only when the region preserves per-row sequences
+    /// (`preserve_row_sequence` on an append-only table) and the scan
+    /// carries an explicit exact range. When set, SST readers apply the same
+    /// `(checkpoint, upper_bound]` row-level filter as memtables.
+    pub(crate) sequence_range: Option<SequenceRange>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Counters that should receive query-load metrics.
@@ -991,6 +1044,7 @@ impl ScanInput {
             distribution: None,
             explain_flat_format: false,
             snapshot_sequence: None,
+            sequence_range: None,
             compaction: false,
             query_stat_counters: None,
             #[cfg(feature = "enterprise")]
@@ -1187,6 +1241,12 @@ impl ScanInput {
         snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
         self.snapshot_sequence = snapshot_sequence;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_sequence_range(mut self, sequence_range: Option<SequenceRange>) -> Self {
+        self.sequence_range = sequence_range;
         self
     }
 
@@ -1608,6 +1668,51 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
+/// Returns true if every unmarked SST in `ssts` can be excluded from an exact
+/// `(min_seq, max]` scan: it must carry a known max sequence not exceeding the
+/// lower bound `min_seq`, so none of its rows can fall inside the range.
+/// Marked files always qualify (the reader filters their rows row-level);
+/// unmarked files with an unknown max sequence fail closed.
+pub(crate) fn files_allow_exact_sequence_range(ssts: &SstVersion, min_seq: SequenceNumber) -> bool {
+    ssts.levels().iter().all(|level| {
+        level.files.values().all(|file| {
+            let meta = file.meta_ref();
+            meta.preserve_row_sequence || meta.sequence.is_some_and(|seq| seq.get() <= min_seq)
+        })
+    })
+}
+
+/// Single source of truth for the exact row-level sequence-range capability.
+///
+/// Returns the exact `GtLtEq { min, max }` range when **all** of the following
+/// hold — and only then — so the engine and the reader can never drift:
+/// - the scan explicitly requests `exact_sequence_range` (Flow's
+///   `sequence_range` mode; historical `memtable_only` scans never set it), and
+/// - the scan does not skip SST files (exactness requires reading them), and
+/// - the region preserves per-row sequences (`preserve_row_sequence`),
+///   and
+/// - every unmarked SST carries a known max sequence not exceeding the lower
+///   bound `min`, so it cannot contribute rows to `(min, max]`.
+///
+/// Returns `None` otherwise. Callers must keep main's fences/fallback semantics
+/// and never silently approximate.
+pub(crate) fn exact_sequence_range(
+    request: &ScanRequest,
+    version: &crate::region::version::Version,
+) -> Option<SequenceRange> {
+    if !request.exact_sequence_range
+        || request.skip_sst_files
+        || !version.options.preserve_row_sequence
+    {
+        return None;
+    }
+    let min = request.memtable_min_sequence?;
+    let max = request.memtable_max_sequence?;
+    if !files_allow_exact_sequence_range(&version.ssts, min) {
+        return None;
+    }
+    Some(SequenceRange::GtLtEq { min, max })
+}
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -1722,6 +1827,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprin
         append_mode: input.append_mode,
         filter_deleted: input.filter_deleted,
         merge_mode: input.merge_mode,
+        sequence_range: input.sequence_range,
         partition_expr_version: metadata.partition_expr_version,
     }
     .build();
@@ -2274,6 +2380,7 @@ mod tests {
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
+            sequence_range: None,
             partition_expr_version: 0,
         }
         .build();
@@ -2347,6 +2454,7 @@ mod tests {
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::LastRow,
+            sequence_range: None,
             partition_expr_version: metadata.partition_expr_version,
         }
         .build();
@@ -2714,5 +2822,40 @@ mod tests {
 
             assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
         }
+    }
+
+    #[test]
+    fn test_files_allow_exact_sequence_range() {
+        use std::num::NonZeroU64;
+
+        use crate::test_util::new_noop_file_purger;
+
+        let purger = new_noop_file_purger();
+        let file = |sequence: Option<NonZeroU64>, marked: bool| FileMeta {
+            sequence,
+            preserve_row_sequence: marked,
+            ..Default::default()
+        };
+
+        // Marked file (always OK) + unmarked files with known max sequences.
+        let mut ssts = SstVersion::new();
+        ssts.add_files(
+            purger.clone(),
+            [
+                file(NonZeroU64::new(5), true),
+                file(NonZeroU64::new(5), false),
+                file(NonZeroU64::new(9), false),
+            ]
+            .into_iter(),
+        );
+        // C=5: the unmarked file with max 9 overlaps (5, H] -> not allowed.
+        assert!(!files_allow_exact_sequence_range(&ssts, 5));
+        // C=9: every unmarked file's max <= C -> allowed.
+        assert!(files_allow_exact_sequence_range(&ssts, 9));
+
+        // Unknown max sequence fails closed even when C is large.
+        let mut ssts = SstVersion::new();
+        ssts.add_files(purger, [file(None, false)].into_iter());
+        assert!(!files_allow_exact_sequence_range(&ssts, 100));
     }
 }

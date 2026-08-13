@@ -22,6 +22,7 @@ use api::v1::helper::{row, tag_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ArrowIpc, BulkWalEntry, ColumnDataType, Row, Rows, SemanticType, Value, WalEntry};
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
 use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
@@ -37,6 +38,7 @@ use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest,
     RegionBulkInsertsRequest, RegionOpenRequest, RegionRequest, SetIndexOption, SetRegionOption,
+    UnsetRegionOption,
 };
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -1983,6 +1985,287 @@ async fn test_alter_region_append_mode_invalid() {
 
     // append_mode should still be true
     check_append_mode(&engine, true);
+}
+
+#[tokio::test]
+async fn test_alter_region_preserve_row_sequence_lifecycle() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("test_alter_region_preserve_row_sequence_lifecycle").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let alter = |kind: AlterKind| {
+        engine.handle_request(region_id, RegionRequest::Alter(RegionAlterRequest { kind }))
+    };
+
+    // Fill the memtable while preserve_row_sequence is disabled.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.memtables.num_rows() > 0);
+    let flushed_sequence = version.flushed_sequence;
+
+    // Enable alone on the non-empty memtable: applies in memory through the
+    // fast path, neither flushing nor losing rows.
+    alter(AlterKind::SetRegionOptions {
+        options: vec![SetRegionOption::PreserveRowSequence(true)],
+    })
+    .await
+    .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.options.preserve_row_sequence);
+    assert_eq!(0, version.ssts.levels()[0].files.len());
+    assert!(version.memtables.num_rows() > 0);
+    assert_eq!(flushed_sequence, version.flushed_sequence);
+
+    // Rows written after the ALTER share the pre-ALTER memtable; a later flush
+    // writes both into one SST marked with preserve_row_sequence.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 5),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.options.preserve_row_sequence);
+    let level0 = &version.ssts.levels()[0].files;
+    assert_eq!(1, level0.len());
+    assert!(
+        level0
+            .values()
+            .next()
+            .unwrap()
+            .meta_ref()
+            .preserve_row_sequence
+    );
+    let flushed_sequence = version.flushed_sequence;
+
+    // Exact scan (2, 5] returns pre-ALTER row "2" (seq 3) and post-ALTER rows
+    // "3" and "4" (seqs 4 and 5): distinct row sequences survive the flush.
+    let scan_exact = async |min: Option<u64>, max: Option<u64>| -> String {
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: min,
+                    memtable_max_sequence: max,
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        sort_batches_and_print(&batches, &["tag_0", "ts"])
+    };
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
++-------+---------+---------------------+";
+    assert_eq!(expected, scan_exact(Some(2), Some(5)).await);
+
+    // Fill the memtable again and unset on the non-empty memtable: applies in
+    // memory without creating another SST.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(5, 7),
+        },
+    )
+    .await;
+    alter(AlterKind::UnsetRegionOptions {
+        keys: vec![UnsetRegionOption::PreserveRowSequence],
+    })
+    .await
+    .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(!version.options.preserve_row_sequence);
+    assert_eq!(1, version.ssts.levels()[0].files.len());
+    assert!(version.memtables.num_rows() > 0);
+
+    // The exact capability is unsupported immediately: both bounds are still
+    // enforceable against the flushed frontier, yet row-level filtering is off.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(flushed_sequence),
+                memtable_max_sequence: Some(flushed_sequence),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(matches!(err, error::Error::SequenceRangeUnsupported { .. }));
+
+    // A subsequent flush under the disabled state writes an unmarked SST while
+    // the earlier marked SST stays untouched.
+    flush_region(&engine, region_id, None).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    let level0 = &version.ssts.levels()[0].files;
+    assert_eq!(2, level0.len());
+    let newest = level0
+        .values()
+        .max_by_key(|f| f.meta_ref().sequence)
+        .unwrap();
+    assert!(!newest.meta_ref().preserve_row_sequence);
+    assert_eq!(
+        1,
+        level0
+            .values()
+            .filter(|f| f.meta_ref().preserve_row_sequence)
+            .count()
+    );
+}
+
+#[tokio::test]
+async fn test_alter_region_append_mode_preserve_combined_flushes_in_both_orders() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix(
+        "test_alter_region_append_mode_preserve_combined_flushes_in_both_orders",
+    )
+    .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Both orders of the combined ALTER must behave identically: append_mode's
+    // requirement for an empty memtable is not bypassed by preserve_row_sequence.
+    for (region_id, options) in [
+        (
+            RegionId::new(1, 1),
+            vec![
+                SetRegionOption::AppendMode(true),
+                SetRegionOption::PreserveRowSequence(true),
+            ],
+        ),
+        (
+            RegionId::new(1, 2),
+            vec![
+                SetRegionOption::PreserveRowSequence(true),
+                SetRegionOption::AppendMode(true),
+            ],
+        ),
+    ] {
+        let request = CreateRequestBuilder::new().build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // Non-empty memtable: the combined ALTER must flush before applying.
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas,
+                rows: build_rows(0, 3),
+            },
+        )
+        .await;
+
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions { options },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let version = engine.get_region(region_id).unwrap().version();
+        assert!(version.options.append_mode && version.options.preserve_row_sequence);
+        // The append_mode change forced a flush: the memtable is now empty and
+        // the pre-ALTER rows live in the flushed SST.
+        assert_eq!(0, version.memtables.num_rows());
+
+        let request = ScanRequest::default();
+        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(3, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    }
+}
+
+#[tokio::test]
+async fn test_alter_region_preserve_row_sequence_requires_append_mode() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env =
+        TestEnv::with_prefix("test_alter_region_preserve_row_sequence_requires_append_mode").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+
+    let alter = |options: Vec<SetRegionOption>| {
+        engine.handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions { options },
+            }),
+        )
+    };
+
+    let err = alter(vec![SetRegionOption::PreserveRowSequence(true)])
+        .await
+        .unwrap_err();
+    let err = err.as_any().downcast_ref::<error::Error>().unwrap();
+    assert_matches!(
+        err,
+        error::Error::InvalidMetadata { source, .. }
+            if source.to_string().contains("preserve_row_sequence is only supported for append-only tables")
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+    // Disabling on a non-append region is a no-op success and leaves the
+    // option off.
+    alter(vec![SetRegionOption::PreserveRowSequence(false)])
+        .await
+        .unwrap();
+    assert!(
+        !engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .preserve_row_sequence
+    );
 }
 
 /// Builds a batch against the schema before [add_nullable_field1]

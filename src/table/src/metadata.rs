@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -403,6 +403,15 @@ impl TableMeta {
                             .insert(MAX_ROW_GROUP_ROW_COUNT.to_string(), row_count.to_string());
                     } else {
                         new_options.extra_options.remove(MAX_ROW_GROUP_ROW_COUNT);
+                    }
+                }
+                SetRegionOption::PreserveRowSequence(preserve) => {
+                    if *preserve {
+                        new_options
+                            .extra_options
+                            .insert(PRESERVE_ROW_SEQUENCE.to_string(), preserve.to_string());
+                    } else {
+                        new_options.extra_options.remove(PRESERVE_ROW_SEQUENCE);
                     }
                 }
                 SetRegionOption::SkipWal => {
@@ -1766,6 +1775,66 @@ mod tests {
                 .extra_options
                 .get(MERGE_MODE_KEY)
                 .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_preserve_row_sequence_option() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let apply = |meta: &TableMeta, kind: &AlterKind| {
+            meta.builder_with_alter_kind("my_table", kind)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+
+        let with_true = apply(
+            &meta,
+            &AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::PreserveRowSequence(true)],
+            },
+        );
+        assert_eq!(
+            Some("true"),
+            with_true
+                .options
+                .extra_options
+                .get(PRESERVE_ROW_SEQUENCE)
+                .map(String::as_str)
+        );
+
+        let set_false = apply(
+            &with_true,
+            &AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::PreserveRowSequence(false)],
+            },
+        );
+        assert!(
+            !set_false
+                .options
+                .extra_options
+                .contains_key(PRESERVE_ROW_SEQUENCE)
+        );
+
+        let unset = apply(
+            &with_true,
+            &AlterKind::UnsetTableOptions {
+                keys: vec![UnsetRegionOption::PreserveRowSequence],
+            },
+        );
+        assert!(
+            !unset
+                .options
+                .extra_options
+                .contains_key(PRESERVE_ROW_SEQUENCE)
         );
     }
 

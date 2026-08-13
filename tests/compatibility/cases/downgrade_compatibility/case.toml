@@ -1,8 +1,8 @@
 name = "downgrade_compatibility"
-reason = "Verify v1.1.4 can reopen a table whose region WAL options were written by the current binary."
-introduced_by = "fix: preserve legacy region WAL options format"
+reason = "Verify v1.1.4 can reopen a table whose region WAL options were written by the current binary, and can read all rows of an append-only table flushed and compacted with preserve_row_sequence enabled."
+introduced_by = "fix: preserve legacy region WAL options format; preserve_row_sequence"
 topologies = ["distributed", "standalone"]
 from_range = [">=v1.2.0"]
 to_range = ["=v1.1.4"]
-features = ["table", "wal", "downgrade"]
+features = ["table", "wal", "downgrade", "append", "preserve_row_sequence"]
 owner = "metasrv"
