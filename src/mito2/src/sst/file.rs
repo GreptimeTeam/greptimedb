@@ -282,6 +282,18 @@ pub struct FileMeta {
         deserialize_with = "deserialize_bytes_option"
     )]
     pub primary_key_max: Option<Bytes>,
+    /// Whether the file preserves per-row sequence numbers usable for exact
+    /// row-level sequence filtering.
+    ///
+    /// Set when the file is written by a flush or compaction of a region with
+    /// `preserve_row_sequence` enabled (append-only tables). Absent
+    /// or `false` in legacy files, which must not be row-level sequence filtered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserve_row_sequence: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Debug for FileMeta {
@@ -1116,6 +1128,30 @@ mod tests {
             deserialized_file_meta.file_id,
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
         );
+        assert!(!deserialized_file_meta.preserve_row_sequence);
+    }
+
+    #[test]
+    fn test_file_meta_preserve_row_sequence_serde() {
+        let file_meta = FileMeta {
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_string(&file_meta).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["preserve_row_sequence"], true);
+
+        let deserialized: FileMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(file_meta, deserialized);
+
+        let file_meta_false = FileMeta {
+            preserve_row_sequence: false,
+            ..file_meta.clone()
+        };
+        let serialized_false = serde_json::to_string(&file_meta_false).unwrap();
+        let value_false: serde_json::Value = serde_json::from_str(&serialized_false).unwrap();
+        assert!(value_false.get("preserve_row_sequence").is_none());
     }
     #[test]
     fn test_is_index_consistent_with_region() {
