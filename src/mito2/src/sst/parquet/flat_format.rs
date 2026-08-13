@@ -300,20 +300,14 @@ impl FlatReadFormat {
 
     /// Gets the projected output schema expected by the scan.
     pub(crate) fn output_arrow_schema(&self) -> Result<SchemaRef> {
-        let read_columns = self.parquet_read_columns();
-        let projection = read_columns.root_indices();
+        let projection = self.parquet_read_columns().root_indices();
         let mut schema = self
             .arrow_schema()
             .project(projection)
             .context(ComputeArrowSnafu)?;
         let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
         for (column_id, target_type) in self.json_target_types().iter() {
-            let Some(index) = self
-                .format_projection()
-                .column_id_to_projected_index
-                .get(column_id)
-                .copied()
-            else {
+            let Some(index) = self.parquet_projected_index_by_id(*column_id) else {
                 continue;
             };
             let Some(field) = schema.fields().get(index) else {
@@ -328,6 +322,25 @@ impl FlatReadFormat {
         }
         schema.fields = fields.into();
         Ok(Arc::new(schema))
+    }
+
+    /// Index of a column in the projected schema produced directly by parquet
+    /// reading, before any primary-key-to-flat conversion.
+    fn parquet_projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => p
+                .format_projection
+                .column_id_to_projected_index
+                .get(&column_id)
+                .copied(),
+            // `format_projection` addresses the post-conversion flat batch here.
+            // This helper needs the raw primary-key projection used by parquet reading.
+            ParquetAdapter::PrimaryKeyToFlat(p) => p
+                .format
+                .field_id_to_projected_index()
+                .get(&column_id)
+                .copied(),
+        }
     }
 
     /// Gets the metadata of the SST.
