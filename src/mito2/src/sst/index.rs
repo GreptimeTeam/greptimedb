@@ -1687,6 +1687,7 @@ mod tests {
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
+            preserve_row_sequence: false,
             index_options: IndexOptions::default(),
             index_config,
             inverted_index_config: Default::default(),

@@ -33,7 +33,7 @@ use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
 use common_meta::SchemaOptions;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, INTERNAL_INCREMENTAL_MODE_KEY};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_query::prelude::greptime_timestamp;
@@ -1079,7 +1079,7 @@ pub fn show_create_flow(
         comment,
         flow_options: OptionMap::from_filtered_string_map(
             flow_val.options(),
-            &[FlowType::FLOW_TYPE_KEY],
+            &[FlowType::FLOW_TYPE_KEY, INTERNAL_INCREMENTAL_MODE_KEY],
         ),
         query,
     };
@@ -1384,8 +1384,14 @@ pub async fn show_processlist(
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use chrono::Utc;
+    use common_meta::ddl::create_flow::{
+        DEFER_ON_MISSING_SOURCE_KEY, FlowType, INTERNAL_INCREMENTAL_MODE_KEY,
+    };
+    use common_meta::key::flow::flow_info::{FlowInfoValue, FlowStatus};
     use common_query::{Output, OutputData};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::Timezone;
@@ -1399,9 +1405,10 @@ mod test {
     use sql::ast::{Ident, ObjectName};
     use sql::statements::show::ShowVariables;
     use table::TableRef;
+    use table::table_name::TableName;
     use table::test_util::MemTable;
 
-    use super::{describe_column_type_name, show_variable};
+    use super::{describe_column_type_name, show_create_flow, show_variable};
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
@@ -1529,5 +1536,58 @@ mod test {
             Ok(_) => unreachable!(),
             Err(e) => Err(e),
         }
+    }
+
+    #[test]
+    fn test_show_create_flow_hides_internal_options() {
+        let flow_info = FlowInfoValue {
+            source_table_ids: vec![],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "my_sink"),
+            flownode_ids: BTreeMap::new(),
+            catalog_name: "greptime".to_string(),
+            query_context: None,
+            flow_name: "my_flow".to_string(),
+            raw_sql: "SELECT number FROM numbers".to_string(),
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            options: std::collections::HashMap::from([
+                (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string()),
+                (FlowType::FLOW_TYPE_KEY.to_string(), "batching".to_string()),
+                (
+                    INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
+                    "sequence_range".to_string(),
+                ),
+            ]),
+            status: FlowStatus::Active,
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
+            eval_schedule: None,
+        };
+        let ctx = Arc::new(QueryContextBuilder::default().build());
+        let output = show_create_flow(
+            ObjectName::from(vec![Ident::new("my_flow")]),
+            flow_info,
+            ctx,
+        )
+        .unwrap();
+        let sql = match output.data {
+            OutputData::RecordBatches(record) => record
+                .take()
+                .first()
+                .unwrap()
+                .iter_column_as_string(1)
+                .next()
+                .unwrap()
+                .unwrap(),
+            _ => unreachable!(),
+        };
+
+        // The user option survives and the reserved internal keys are hidden.
+        assert!(sql.contains("defer_on_missing_source = 'true'"));
+        assert!(!sql.contains(FlowType::FLOW_TYPE_KEY));
+        assert!(!sql.contains(INTERNAL_INCREMENTAL_MODE_KEY));
     }
 }

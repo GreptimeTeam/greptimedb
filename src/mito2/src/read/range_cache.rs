@@ -31,7 +31,7 @@ use datatypes::value::scalar_value_to_timestamp;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
-use store_api::storage::{FileId, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
 use table::predicate::is_string_timestamp_literal;
 use tokio::sync::{mpsc, oneshot};
 
@@ -63,6 +63,10 @@ pub(crate) struct ScanRequestFingerprint {
     append_mode: bool,
     filter_deleted: bool,
     merge_mode: MergeMode,
+    /// Exact sequence range applied row-level on SST reads, or `None` for scans
+    /// without row-level sequence filtering. Kept in the cache key so filtered
+    /// range results are never reused for scans with a different (or no) range.
+    sequence_range: Option<SequenceRange>,
     stage: RangeScanStage,
     /// We keep the partition expr version to ensure we won't reuse the fingerprint after we change the partition expr.
     /// We store the version instead of the whole partition expr or partition expr filters.
@@ -86,6 +90,7 @@ pub(crate) struct ScanRequestFingerprintBuilder {
     pub(crate) append_mode: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) merge_mode: MergeMode,
+    pub(crate) sequence_range: Option<SequenceRange>,
     pub(crate) partition_expr_version: u64,
 }
 
@@ -100,6 +105,7 @@ impl ScanRequestFingerprintBuilder {
             append_mode,
             filter_deleted,
             merge_mode,
+            sequence_range,
             partition_expr_version,
         } = self;
 
@@ -114,6 +120,7 @@ impl ScanRequestFingerprintBuilder {
             append_mode,
             filter_deleted,
             merge_mode,
+            sequence_range,
             stage: RangeScanStage::Data,
             partition_expr_version,
         }
@@ -164,6 +171,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: self.stage,
             partition_expr_version: self.partition_expr_version,
         }
@@ -177,6 +185,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: RangeScanStage::CandidateSeries,
             partition_expr_version: self.partition_expr_version,
         }
@@ -190,6 +199,7 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            sequence_range: self.sequence_range,
             stage: RangeScanStage::SeriesData(range),
             partition_expr_version: self.partition_expr_version,
         }
@@ -860,6 +870,7 @@ pub fn bench_cache_flat_range_stream(
         append_mode: false,
         filter_deleted: false,
         merge_mode: MergeMode::LastRow,
+        sequence_range: None,
         partition_expr_version: 0,
     }
     .build();
@@ -926,6 +937,7 @@ mod tests {
             append_mode: false,
             filter_deleted,
             merge_mode: MergeMode::LastRow,
+            sequence_range: None,
             partition_expr_version,
         }
         .build()

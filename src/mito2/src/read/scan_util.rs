@@ -29,9 +29,10 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
-use store_api::storage::RegionId;
+use snafu::ResultExt;
+use store_api::storage::{RegionId, SequenceRange};
 
-use crate::error::Result;
+use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -48,7 +49,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
-use crate::sst::parquet::flat_format::time_index_column_index;
+use crate::sst::parquet::flat_format::{sequence_column_index, time_index_column_index};
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
@@ -1501,6 +1502,49 @@ pub(crate) async fn scan_flat_file_ranges(
     ))
 }
 
+/// Filters a flat-format record batch by the exact sequence range.
+///
+/// Returns `None` when the entire batch is filtered out. The sequence column is
+/// the second-to-last internal column of the flat format
+/// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
+/// projection/compat conversion that drops internal columns.
+///
+/// `file_preserves_sequence` gates the filter per file: only files written with
+/// preserved per-row sequences (the `preserve_row_sequence` marker) may be
+/// row-level sequence filtered. Without the marker, rows are passed through
+/// untouched to keep main's file-level semantics.
+fn filter_flat_batch_by_sequence(
+    record_batch: RecordBatch,
+    sequence_range: Option<SequenceRange>,
+    file_preserves_sequence: bool,
+) -> Result<Option<RecordBatch>> {
+    let Some(sequence) = sequence_range else {
+        return Ok(Some(record_batch));
+    };
+    if !file_preserves_sequence {
+        return Ok(Some(record_batch));
+    }
+
+    let num_rows = record_batch.num_rows();
+    if num_rows == 0 {
+        return Ok(Some(record_batch));
+    }
+    let sequence_column = record_batch.column(sequence_column_index(record_batch.num_columns()));
+    let predicate = sequence
+        .filter(sequence_column)
+        .context(ComputeArrowSnafu)?;
+    let select_count = predicate.true_count();
+    if select_count == 0 {
+        return Ok(None);
+    }
+    if select_count == num_rows {
+        return Ok(Some(record_batch));
+    }
+    let filtered_batch = datatypes::arrow::compute::filter_record_batch(&record_batch, &predicate)
+        .context(ComputeArrowSnafu)?;
+    Ok(Some(filtered_batch))
+}
+
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1527,7 +1571,19 @@ pub fn build_flat_file_range_scan_stream(
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
-                    stream_ctx.input.series_row_selector,
+                    // In exact `sequence_range` mode the row-group-level LastRow
+                    // shortcut would reduce each row group to its last-timestamp
+                    // row *before* the row-level sequence filter runs, silently
+                    // dropping in-range rows (a series with seq 1 at t1 and seq 2
+                    // at t2 under `(0, 1]` keeps only seq 2 and then filters it
+                    // out). Bypass the shortcut so the final per-row selector
+                    // (`FlatLastRowReader`, applied after source merging and the
+                    // sequence filter) selects on the filtered rows instead.
+                    if stream_ctx.input.sequence_range.is_some() {
+                        None
+                    } else {
+                        stream_ctx.input.series_row_selector
+                    },
                     fetch_metrics.as_deref(),
                 )
                 .await?
@@ -1546,6 +1602,14 @@ pub fn build_flat_file_range_scan_stream(
                     batch
                 } else {
                     record_batch
+                };
+
+                let Some(record_batch) = filter_flat_batch_by_sequence(
+                    record_batch,
+                    stream_ctx.input.sequence_range,
+                    range.file_handle().meta_ref().preserve_row_sequence,
+                )? else {
+                    continue;
                 };
 
                 if let Some(flat_compat) = may_compat {
@@ -2031,5 +2095,110 @@ mod tests {
         assert!(batches.is_empty());
 
         assert_eq!(split_ts(&[42]), vec![vec![42]]);
+    }
+}
+
+#[cfg(test)]
+mod sequence_filter_tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::{Int64Array, StringArray, UInt8Array, UInt64Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use store_api::storage::SequenceRange;
+
+    use super::filter_flat_batch_by_sequence;
+
+    /// Builds a flat-format record batch: `(tag, field, ts, __primary_key, __sequence, __op_type)`.
+    fn batch(sequences: &[u64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, false),
+            Field::new("field_0", DataType::Int64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__primary_key", DataType::UInt8, false),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+        let tags = StringArray::from_iter_values((0..sequences.len()).map(|i| i.to_string()));
+        let fields = Int64Array::from_iter_values(0..sequences.len() as i64);
+        let ts = datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
+            (0..sequences.len()).map(|i| i as i64 * 1000),
+        );
+        let pk = UInt8Array::from(vec![0u8; sequences.len()]);
+        let seq = UInt64Array::from_iter_values(sequences.iter().copied());
+        let op = UInt8Array::from(vec![0u8; sequences.len()]);
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(tags),
+                Arc::new(fields),
+                Arc::new(ts),
+                Arc::new(pk),
+                Arc::new(seq),
+                Arc::new(op),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn remaining_tags(batch: &RecordBatch) -> Vec<String> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_filter_flat_batch_by_sequence_no_range_or_legacy_file() {
+        let b = batch(&[1, 2, 3, 4]);
+
+        let out = filter_flat_batch_by_sequence(b.clone(), None, true).unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
+
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_filter_flat_batch_by_sequence_exact_range() {
+        let b = batch(&[1, 2, 3, 4]);
+
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["2"]);
+
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 10, max: 20 }),
+            true,
+        )
+        .unwrap();
+        assert!(out.is_none());
+
+        let empty = batch(&[]);
+        let out = filter_flat_batch_by_sequence(
+            empty,
+            Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(out.unwrap().num_rows(), 0);
     }
 }

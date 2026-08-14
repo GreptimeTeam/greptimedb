@@ -20,12 +20,13 @@ use common_telemetry::tracing::warn;
 use datafusion_expr::{DmlStatement, LogicalPlan};
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SINK_TABLE_ID,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::Error;
+use crate::batching_mode::IncrementalMode;
 use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::table_creator::QueryType;
 use crate::batching_mode::task::BatchingTask;
@@ -221,10 +222,11 @@ impl BatchingTask {
         if let Some(checkpoints_json) = incremental_checkpoints_json {
             let sink_table_id = self.sink_table_id().await?;
             extensions.push((FLOW_SINK_TABLE_ID, sink_table_id.to_string()));
-            extensions.push((
-                FLOW_INCREMENTAL_MODE,
-                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
-            ));
+            let incremental_mode = match self.config.batch_opts.incremental_mode {
+                IncrementalMode::SequenceRange => FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
+                IncrementalMode::MemtableOnly => FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+            };
+            extensions.push((FLOW_INCREMENTAL_MODE, incremental_mode.to_string()));
             extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
         }
 
