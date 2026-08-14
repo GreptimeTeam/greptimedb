@@ -664,9 +664,10 @@ mod tests {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_time::Timezone;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
     use store_api::metric_engine_consts::{
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
         METRIC_ENGINE_NAME,
@@ -692,6 +693,36 @@ mod tests {
             .build()
             .unwrap();
         let table_info = TableInfoBuilder::new("test", table_meta).build().unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        crate::tests::new_query_engine_with_table(table)
+    }
+
+    async fn create_timestamp_test_engine() -> QueryEngineRef {
+        let columns = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "st",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![0, 1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::new("timestamps", table_meta)
+            .build()
+            .unwrap();
         let table = EmptyTable::from_table_info(&table_info);
 
         crate::tests::new_query_engine_with_table(table)
@@ -827,6 +858,43 @@ mod tests {
         .unwrap();
 
         engine.planner().plan(&stmt, query_ctx).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_insert_timestamp_literals_use_query_timezone() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+
+        for (sql, expected_timestamp) in [
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 VALUES ('2026-08-02 12:00:00.001', now())",
+                1_785_643_200_001_i64,
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-03 12:00:00.001', now()",
+                1_785_729_600_001_i64,
+            ),
+        ] {
+            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+            let plan = engine
+                .planner()
+                .plan(&stmt, query_ctx.clone())
+                .await
+                .unwrap()
+                .display_indent()
+                .to_string();
+
+            assert!(
+                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                "{plan}"
+            );
+        }
     }
 
     #[tokio::test]
