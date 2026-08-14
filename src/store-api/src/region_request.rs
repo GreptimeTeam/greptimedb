@@ -1458,7 +1458,6 @@ pub enum SetRegionOption {
     AutoFlushInterval(Option<Duration>),
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
-    /// Modifying the preserve per-row sequence numbers option.
     PreserveRowSequence(bool),
     // Stops writing new WAL entries. This operation is irreversible.
     SkipWal,
@@ -1576,7 +1575,6 @@ pub enum UnsetRegionOption {
     Ttl,
     MaxRowGroupRowCount,
     WriteBufferSize,
-    /// Unset the preserve per-row sequence numbers option.
     PreserveRowSequence,
 }
 

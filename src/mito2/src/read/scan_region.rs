@@ -768,10 +768,6 @@ impl ScanRegion {
         self.version.metadata.region_id
     }
 
-    /// Returns the exact sequence range for row-level sequence filtering, or
-    /// `None` when the scan is not an exact `sequence_range` request or the
-    /// region cannot guarantee exactness (no per-row sequences preserved, or a
-    /// file in the version lacks the preserved-sequence marker).
     fn exact_sequence_range(&self) -> Option<SequenceRange> {
         exact_sequence_range(&self.request, &self.version)
     }
