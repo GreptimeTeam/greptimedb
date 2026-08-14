@@ -63,13 +63,9 @@ pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<Proce
 
 /// Builds the optional procedure actor transported by a procedure RPC.
 pub(crate) fn procedure_actor(context: &ExecutorContext) -> Option<ProcedureActor> {
-    context
-        .actor
-        .as_deref()
-        .filter(|username| !username.is_empty())
-        .map(|username| ProcedureActor {
-            username: username.to_string(),
-        })
+    context.actor.as_ref().map(|username| ProcedureActor {
+        username: username.clone(),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -531,7 +527,7 @@ mod tests {
     use tonic::{Request, Response, Status};
 
     use crate::client::MetaClientBuilder;
-    use crate::client::procedure::{gc_timeout_secs, procedure_actor, procedure_event_context};
+    use crate::client::procedure::{gc_timeout_secs, procedure_event_context};
 
     #[test]
     fn test_gc_timeout_secs() {
@@ -576,21 +572,6 @@ mod tests {
             procedure_event_context(&unknown_channel_context).map(PersistentEventContext::from),
             Some(PersistentEventContext::new(TriggerReason::Manual))
         );
-    }
-
-    #[test]
-    fn test_procedure_actor() {
-        let context = ExecutorContext {
-            actor: Some(String::new()),
-            ..Default::default()
-        };
-        assert!(procedure_actor(&context).is_none());
-
-        let context = ExecutorContext {
-            actor: Some("alice".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(procedure_actor(&context).unwrap().username, "alice");
     }
 
     #[derive(Clone)]
@@ -728,18 +709,18 @@ mod tests {
             username: "alice".to_string(),
             created_at_ns: 42,
         };
-        let executor_context = |actor: String| ExecutorContext {
+        let executor_context = ExecutorContext {
             query_context: Some(QueryContext {
                 channel: Channel::Postgres as u8,
                 ..Default::default()
             }),
-            actor: Some(actor),
+            actor: Some("effective-user".to_string()),
             event_input: Some(ProcedureEventInput::new(TriggerReason::Manual)),
             ..Default::default()
         };
         ProcedureExecutor::submit_ddl_task(
             &client,
-            executor_context("effective-user".to_string()),
+            executor_context,
             SubmitDdlTaskRequest::new(DdlTask::new_create_database(
                 "greptime".to_string(),
                 "metrics".to_string(),
@@ -771,27 +752,6 @@ mod tests {
         );
         let extensions = &request.query_context.unwrap().extensions;
         assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
-
-        ProcedureExecutor::submit_ddl_task(
-            &client,
-            executor_context(String::new()),
-            SubmitDdlTaskRequest::new(DdlTask::new_drop_database(
-                "greptime".to_string(),
-                "metrics".to_string(),
-                false,
-            )),
-        )
-        .await
-        .unwrap();
-        assert!(
-            request_rx
-                .recv()
-                .await
-                .unwrap()
-                .into_inner()
-                .actor
-                .is_none()
-        );
 
         server_handle.abort();
     }

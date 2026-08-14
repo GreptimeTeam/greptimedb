@@ -41,9 +41,11 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
+use tests_integration::test_util::setup_authenticated_grpc_database;
 
 use crate::event_recorder_test_util::{
-    assert_eventually_eq, assert_single_event, find_eventually_string, find_eventually_u32,
+    assert_eventually_eq, assert_procedure_actor, assert_single_event, find_eventually_string,
+    find_eventually_u32,
 };
 
 const EVENTS_TABLE: &str = "greptime_private.events";
@@ -53,6 +55,8 @@ const LOGICAL_TABLE: &str = "table_ddl_events_logical";
 const AUTO_TABLE: &str = "table_ddl_events_auto";
 const AUTO_INFLUX_TABLE: &str = "table_ddl_events_auto_influx";
 const GRPC_TABLE: &str = "table_ddl_events_grpc";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_ddl_procedure_events() {
@@ -150,6 +154,7 @@ async fn test_table_ddl_procedure_events() {
     .unwrap();
     let grpc_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", GRPC_TABLE).await;
+    assert_procedure_actor(&frontend, &grpc_create_procedure_id, Some("greptime")).await;
     assert_event_context(
         &frontend,
         "create_table",
@@ -200,26 +205,27 @@ async fn test_table_ddl_procedure_events() {
 
     // Act / Assert: Create Table retains its rich submitted row and records the
     // created table ID when it completes.
-    run_sql_with_context(
-        &frontend,
-        &format!(
-            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
-        ),
-        Arc::new(QueryContext::with_channel(
-            "greptime",
-            "public",
-            Channel::HttpSql,
-        )),
+    let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
+        frontend.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
     )
     .await;
+    actor_db
+        .sql(format!(
+            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
+        ))
+        .await
+        .unwrap();
     let table_id = find_table_id(&frontend, TABLE).await;
     let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
+    assert_procedure_actor(&frontend, &create_table_procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_event_context(
         &frontend,
         "create_table",
         &create_table_procedure_id,
         "manual",
-        Some("httpsql"),
+        Some("grpc"),
     )
     .await;
     assert_named_submitted_event(

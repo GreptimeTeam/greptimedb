@@ -47,9 +47,11 @@ use crate::http::header::{
 };
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
-use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
+use crate::prom_remote_write::{
+    REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
+};
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -57,8 +59,6 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
-const REMOTE_WRITE_V1_VERSION: &str = "1.0";
-const REMOTE_WRITE_V2_VERSION: &str = "2.0";
 const REMOTE_WRITE_V1_PROTO: &str = "prometheus.WriteRequest";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
@@ -194,11 +194,11 @@ async fn remote_write_v1(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            record_remote_write_samples(&db, error.rows_written);
+            record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, error.rows_written);
             return Err(error.error);
         }
     };
-    record_remote_write_samples(&db, outcome.rows_written);
+    record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.rows_written);
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -264,8 +264,8 @@ async fn remote_write_v2(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            record_remote_write_samples(&db, error.samples_written);
-            record_remote_write_histograms(&db, error.histograms_written);
+            record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, error.samples_written);
+            record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, error.histograms_written);
             return Ok(remote_write_v2_error_response(
                 error.error,
                 error.samples_written,
@@ -276,8 +276,8 @@ async fn remote_write_v2(
     };
     debug_assert_eq!(outcome.samples_written, sample_count);
     debug_assert_eq!(outcome.histograms_written, histogram_count);
-    record_remote_write_samples(&db, outcome.samples_written);
-    record_remote_write_histograms(&db, outcome.histograms_written);
+    record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, outcome.samples_written);
+    record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, outcome.histograms_written);
 
     let mut headers = write_cost_header_map(outcome.write_cost);
     append_remote_write_v2_written_headers(
@@ -322,7 +322,7 @@ fn prepare_remote_write_context(
     query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
     let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
+        .with_label_values(&[db.as_str(), remote_write_version])
         .start_timer();
 
     (db, query_ctx, timer)
@@ -608,21 +608,21 @@ fn incomplete_prom_write_error() -> error::Error {
     .build()
 }
 
-fn record_remote_write_samples(db: &str, rows: u64) {
+fn record_remote_write_samples(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 
-fn record_remote_write_histograms(db: &str, rows: u64) {
+fn record_remote_write_histograms(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 

@@ -12,20 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(try_blocks)]
+//! Primary-key index writer.
 
-mod admin;
-mod flush_flow;
-mod macros;
-mod system;
-mod uddsketch_compat;
+mod writer;
 
-pub mod aggrs;
-pub mod function;
-pub mod function_factory;
-pub mod function_registry;
-pub mod handlers;
-pub mod helper;
-pub mod scalars;
-pub mod state;
-pub mod utils;
+pub use writer::{PkIndexWriter, PkIndexWriterMetrics, PkIndexWriterOptions, pk_columns_schema};
