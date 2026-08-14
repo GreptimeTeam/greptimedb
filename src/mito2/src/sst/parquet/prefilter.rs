@@ -1457,9 +1457,7 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
@@ -1495,9 +1493,7 @@ mod tests {
         ));
         let legacy_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "memtable",
             false,
@@ -1524,9 +1520,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let raw_pk_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "memtable",
             true,
@@ -1560,9 +1554,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let full_read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -1594,7 +1586,7 @@ mod tests {
         let ts = metric_metadata.time_index_column().column_id;
         let projected_read_format = FlatReadFormat::new(
             metric_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([field_0, ts]),
+            ReadColumns::new([field_0, ts]),
             None,
             "test",
             true,
@@ -1646,9 +1638,7 @@ mod tests {
         ));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
@@ -1686,9 +1676,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -1734,9 +1722,7 @@ mod tests {
             Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             false,
