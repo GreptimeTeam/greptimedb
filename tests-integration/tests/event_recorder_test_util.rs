@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,35 @@ use session::context::QueryContext;
 
 const MAX_ATTEMPTS: usize = 60;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Asserts through the supplied SQL executor that a table procedure records
+/// the expected actor for both submission and completion events.
+pub(crate) async fn assert_procedure_actor_by_table<F, Fut>(
+    event_type: &str,
+    table_name: &str,
+    actor: &str,
+    mut execute: F,
+) where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let query = format!(
+        "SELECT count(DISTINCT json_get_string(procedure_trigger, 'type')) = 2 \
+         AND count(*) = count(CASE WHEN actor = '{actor}' THEN 1 END) AS actor_matches \
+         FROM greptime_private.events \
+         WHERE type = '{event_type}' AND table_name = '{table_name}' \
+         AND json_get_string(procedure_trigger, 'type') IN ('Submitted', 'Succeeded')"
+    );
+
+    for _ in 0..MAX_ATTEMPTS {
+        if execute(query.clone()).await {
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    panic!("timed out waiting for procedure actor: {query}");
+}
 
 /// Asserts that submission and completion events record the expected actor.
 pub(crate) async fn assert_procedure_actor(

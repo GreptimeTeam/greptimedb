@@ -35,6 +35,8 @@ use tests_integration::test_util::{
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
+use crate::event_recorder_test_util::assert_procedure_actor_by_table;
+
 #[macro_export]
 macro_rules! sql_test {
     ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
@@ -148,6 +150,7 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+    let read_pool = conn_re.unwrap();
 
     // 4. readonly user
     let conn_re = MySqlPoolOptions::new()
@@ -181,6 +184,19 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .execute("CREATE TABLE test (ts timestamp time index)")
         .await
         .unwrap();
+    let actor_query_pool = &read_pool;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "test",
+        "writeonly_user",
+        |query| async move {
+            sqlx::query_scalar::<_, bool>(&query)
+                .fetch_one(actor_query_pool)
+                .await
+                .unwrap_or(false)
+        },
+    )
+    .await;
     let err = pool.execute("SHOW TABLES").await.unwrap_err();
     assert!(
         err.to_string()
@@ -466,8 +482,10 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
 }
 
 pub async fn test_postgres_auth(store_type: StorageType) {
-    let user_provider =
-        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let user_provider = user_provider_from_option(
+        "static_user_provider:cmd:greptime_user=greptime_pwd,writeonly_user:wo=writeonly_pwd",
+    )
+    .unwrap();
 
     let (mut guard, fe_pg_server) =
         setup_pg_server_with_user_provider(store_type, "sql_crud", Some(user_provider)).await;
@@ -518,6 +536,32 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+    let read_pool = conn_re.unwrap();
+
+    let write_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "postgres://writeonly_user:writeonly_pwd@{addr}/public"
+        ))
+        .await
+        .unwrap();
+    write_pool
+        .execute("CREATE TABLE postgres_auth_actor (ts timestamp time index)")
+        .await
+        .unwrap();
+    let actor_query_pool = &read_pool;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "postgres_auth_actor",
+        "writeonly_user",
+        |query| async move {
+            sqlx::query_scalar::<_, bool>(&query)
+                .fetch_one(actor_query_pool)
+                .await
+                .unwrap_or(false)
+        },
+    )
+    .await;
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
