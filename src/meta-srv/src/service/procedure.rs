@@ -55,28 +55,14 @@ struct ProcedureSubmission {
     event_context: Option<PbProcedureEventContext>,
 }
 
-impl TryFrom<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for ProcedureSubmission {
-    type Error = Status;
-
-    fn try_from(
+impl From<(Option<ProcedureActor>, Option<PbProcedureEventContext>)> for ProcedureSubmission {
+    fn from(
         (actor, event_context): (Option<ProcedureActor>, Option<PbProcedureEventContext>),
-    ) -> Result<Self, Self::Error> {
-        let actor = actor
-            .map(|actor| {
-                if actor.username.is_empty() {
-                    Err(Status::invalid_argument(
-                        "Procedure actor must not be empty",
-                    ))
-                } else {
-                    Ok(actor.username)
-                }
-            })
-            .transpose()?;
-
-        Ok(Self {
-            actor,
+    ) -> Self {
+        Self {
+            actor: actor.map(|actor| actor.username),
             event_context,
-        })
+        }
     }
 }
 
@@ -139,7 +125,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
         let ProcedureSubmission {
             actor,
             event_context,
-        } = ProcedureSubmission::try_from((actor, event_context))?;
+        } = ProcedureSubmission::from((actor, event_context));
         let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -191,7 +177,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let procedure_context =
-            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
+            ProcedureContext::from(ProcedureSubmission::from((actor, event_context)));
         let from_peer = self
             .lookup_datanode_peer(from_peer)
             .await?
@@ -329,7 +315,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let procedure_context =
-            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
+            ProcedureContext::from(ProcedureSubmission::from((actor, event_context)));
 
         let response = self
             .handle_gc_regions(
@@ -361,7 +347,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let procedure_context =
-            ProcedureContext::from(ProcedureSubmission::try_from((actor, event_context))?);
+            ProcedureContext::from(ProcedureSubmission::from((actor, event_context)));
 
         let response = self
             .handle_gc_table(
@@ -593,15 +579,14 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
 mod tests {
     use std::time::Duration;
 
-    use api::v1::meta::{ProcedureActor, ProcedureEventContext, Role};
+    use api::v1::meta::Role;
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
         CreatorGrantIntent, DdlTask, QueryContext,
     };
-    use common_procedure::ProcedureContext;
     use tonic::metadata::{MetadataMap, MetadataValue};
 
-    use super::{Metasrv, ProcedureSubmission, restore_create_database_creator};
+    use super::{Metasrv, restore_create_database_creator};
 
     fn create_database_task() -> DdlTask {
         DdlTask::new_create_database(
@@ -737,42 +722,5 @@ mod tests {
         };
         assert_eq!(task.creator, Some(creator));
         assert!(trusted.extensions.is_empty());
-    }
-
-    #[test]
-    fn test_procedure_submission_rejects_empty_actor() {
-        let submission = ProcedureSubmission::try_from((
-            Some(ProcedureActor {
-                username: "alice".to_string(),
-            }),
-            Some(ProcedureEventContext {
-                reason: "manual".to_string(),
-                protocol: "postgres".to_string(),
-                extensions: Default::default(),
-            }),
-        ))
-        .unwrap();
-        assert_eq!(submission.actor.as_deref(), Some("alice"));
-        assert_eq!(
-            submission
-                .event_context
-                .as_ref()
-                .map(|context| context.protocol.as_str()),
-            Some("postgres")
-        );
-
-        assert!(
-            ProcedureSubmission::try_from((
-                Some(ProcedureActor {
-                    username: String::new(),
-                }),
-                None,
-            ))
-            .is_err()
-        );
-
-        let procedure_context =
-            ProcedureContext::from(ProcedureSubmission::try_from((None, None)).unwrap());
-        assert_eq!(procedure_context.event_context, None);
     }
 }
