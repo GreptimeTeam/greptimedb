@@ -15,19 +15,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_event_recorder::{PersistentEventContext, TriggerReason};
-use common_procedure::{ProcedureContext, ProcedureId, ProcedureWithId, watcher};
 use common_test_util::temp_dir::create_temp_dir;
-use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions};
+use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_authenticated_grpc_database,
+};
 
-use crate::event_recorder_test_util::find_eventually_string;
+use crate::event_recorder_test_util::{assert_procedure_actor, find_eventually_string};
 
 const TABLE_NAME: &str = "batch_gc_events";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 const MAX_ATTEMPTS: usize = 60;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -121,30 +123,27 @@ async fn test_batch_gc_event() {
         .collect::<Vec<_>>();
     assert_eq!(regions.len(), 1);
 
-    let procedure = BatchGcProcedure::new(
-        cluster.metasrv.mailbox().clone(),
-        cluster.metasrv.table_metadata_manager().clone(),
-        cluster.metasrv.options().grpc.server_addr.clone(),
-        regions,
-        false,
-        Duration::from_secs(10),
-        Default::default(),
-    );
-    let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-00000000bac0").unwrap();
-    let mut watcher = cluster
-        .metasrv
-        .procedure_manager()
-        .submit(ProcedureWithId {
-            id: procedure_id,
-            procedure: Box::new(procedure),
-            context: ProcedureContext::from_event_context(PersistentEventContext::new(
-                TriggerReason::Manual,
-            )),
-        })
+    let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
+    actor_db
+        .sql(format!("ADMIN GC_REGIONS({})", regions[0].as_u64()))
         .await
         .unwrap();
-    watcher::wait(&mut watcher).await.unwrap();
     assert_sst_count(&cluster, 1).await;
+
+    let procedure_id = find_eventually_string(
+        instance,
+        &format!(
+            "SELECT procedure_id FROM greptime_private.events WHERE type = 'batch_gc' AND actor = '{PROCEDURE_ACTOR}' AND json_get_string(procedure_trigger, 'type') = 'Submitted'"
+        ),
+        "procedure_id",
+    )
+    .await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
 
     let submitted = format!(
         r#"SELECT json_to_string(event_context) AS event_context
@@ -155,7 +154,7 @@ WHERE type = 'batch_gc'
   AND json_get_string(procedure_trigger, 'type') = 'Submitted'"#,
     );
     assert_eq!(
-        r#"{"reason":"manual"}"#,
+        r#"{"protocol":"grpc","reason":"manual"}"#,
         find_eventually_string(instance, &submitted, "event_context").await
     );
 

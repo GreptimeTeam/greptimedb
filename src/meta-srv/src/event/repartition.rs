@@ -364,8 +364,8 @@ mod tests {
     use api::v1::{ColumnSchema, Row, Value};
     use common_event_recorder::Event;
     use common_event_recorder::event_table::{
-        EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+        PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
     use common_procedure::{EventTrigger, ProcedureEvent, ProcedureId, ProcedureState};
@@ -668,6 +668,7 @@ mod tests {
         );
         let mut schema = procedure_schema();
         schema.extend(parent_schema());
+        schema.push(ACTOR_COLUMN.column_schema());
         schema.push(EVENT_CONTEXT_COLUMN.column_schema());
 
         assert_event_contract(
@@ -684,6 +685,7 @@ mod tests {
                     ValueData::StringValue("public".to_string()).into(),
                     ValueData::StringValue("repartition_events".to_string()).into(),
                     ValueData::U32Value(1024).into(),
+                    Value { value_data: None },
                     Value { value_data: None },
                 ],
             }],
