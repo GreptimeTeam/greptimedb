@@ -2048,7 +2048,11 @@ async fn test_bulk_write_sequence_not_committed_before_install() {
 
     let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(
         region_id,
-        engine.get_region(region_id).unwrap().version_control.clone(),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .clone(),
     );
 
     // Start a bulk write in the background; it pauses before installation.
