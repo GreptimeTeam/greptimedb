@@ -15,17 +15,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use client::Database;
 use common_test_util::temp_dir::create_temp_dir;
 use meta_srv::gc::GcSchedulerOptions;
 use mito2::gc::GcConfig;
-use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_authenticated_grpc_database,
+};
 
-use crate::event_recorder_test_util::{assert_eventually_eq, find_eventually_string};
+use crate::event_recorder_test_util::{
+    assert_eventually_eq, assert_procedure_actor, find_eventually_string,
+};
 
 const TABLE_NAME: &str = "repartition_events";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_event() {
@@ -56,11 +61,17 @@ async fn test_repartition_event() {
         .build(true)
         .await;
     let instance = cluster.fe_instance();
+    let (database, _grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
 
-    execute_partition(instance).await;
+    execute_partition(&database).await;
     let partition_procedure_id = assert_repartition_event(instance).await;
     assert_repartition_group_event(instance, &partition_procedure_id).await;
-    execute_merge(instance).await;
+    execute_merge(&database).await;
     let merge_procedure_id = find_submitted_procedure_id(
         instance,
         "repartition",
@@ -70,10 +81,11 @@ async fn test_repartition_event() {
         ),
     )
     .await;
+    assert_procedure_actor(instance, &merge_procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_merge_repartition_group_event(instance, &merge_procedure_id).await;
 }
 
-async fn execute_partition(instance: &Arc<frontend::instance::Instance>) {
+async fn execute_partition(database: &Database) {
     for sql in [
         format!(
             "CREATE TABLE {TABLE_NAME} (host INT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE = mito"
@@ -83,21 +95,13 @@ async fn execute_partition(instance: &Arc<frontend::instance::Instance>) {
         ),
         format!("ALTER TABLE {TABLE_NAME} PARTITION ON COLUMNS (host) (host < 10, host >= 10)"),
     ] {
-        instance
-            .do_query(&sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        database.sql(sql).await.unwrap();
     }
 }
 
-async fn execute_merge(instance: &Arc<frontend::instance::Instance>) {
+async fn execute_merge(database: &Database) {
     let sql = format!("ALTER TABLE {TABLE_NAME} MERGE PARTITION (host < 10, host >= 10)");
-    instance
-        .do_query(&sql, QueryContext::arc())
-        .await
-        .remove(0)
-        .unwrap();
+    database.sql(sql).await.unwrap();
 }
 
 async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) -> String {
@@ -110,6 +114,7 @@ async fn assert_repartition_event(instance: &Arc<frontend::instance::Instance>) 
         ),
     )
     .await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
     json_path_match(payload, '$.version == 2') AS payload_version,
@@ -168,6 +173,7 @@ async fn assert_repartition_group_event(
         ),
     )
     .await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
     parent_procedure_id = '{parent_procedure_id}' AS matches_parent_procedure_id,
@@ -235,6 +241,7 @@ async fn assert_merge_repartition_group_event(
         ),
     )
     .await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     let query = format!(
         r#"SELECT type, catalog_name, schema_name, table_name, table_id,
     parent_procedure_id = '{parent_procedure_id}' AS matches_parent_procedure_id,

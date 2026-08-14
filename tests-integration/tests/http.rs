@@ -82,6 +82,8 @@ use tests_integration::test_util::{
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
+use crate::event_recorder_test_util::assert_procedure_actor_by_table;
+
 #[macro_export]
 macro_rules! http_test {
     ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
@@ -255,6 +257,29 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let actor_query_client = &client;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "auth_test",
+        "writeonly_user",
+        |query| async move {
+            let res = actor_query_client
+                .get(&format!("/v1/sql?db=public&sql={}", encode(&query)))
+                .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+                .send()
+                .await;
+            let Ok(body) = serde_json::from_str::<GreptimedbV1Response>(&res.text().await) else {
+                return false;
+            };
+            matches!(
+                body.output().first(),
+                Some(GreptimeQueryOutput::Records(records))
+                    if records.rows().first().and_then(|row| row.first()).and_then(Value::as_bool)
+                        == Some(true)
+            )
+        },
+    )
+    .await;
     let res = client
         .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
         .header(
