@@ -48,7 +48,7 @@ use crate::http::header::{
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
+use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -235,23 +235,11 @@ async fn remote_write_v2(
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let request = match decode_remote_write_v2_request(is_zstd, body) {
-        Ok(request) => request,
-        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
-    };
-    if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
-        return Ok(remote_write_v2_error_response(
-            error::InvalidPromRemoteRequestSnafu {
-                msg: "prometheus remote write v2 native histogram ingestion is experimental; set prom_store.experimental_enable_prometheus_native_histogram = true to enable it"
-                    .to_string(),
-            }
-            .build(),
-            0,
-            0,
-            0,
-        ));
-    }
-    let req = match into_write_requests(request) {
+    let req = match decode_remote_write_v2(
+        is_zstd,
+        body,
+        experimental_enable_prometheus_native_histogram,
+    ) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
@@ -300,15 +288,6 @@ async fn remote_write_v2(
     );
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
-}
-
-fn request_has_native_histograms(
-    request: &api::greptime_proto::io::prometheus::write::v2::Request,
-) -> bool {
-    request
-        .timeseries
-        .iter()
-        .any(|series| !series.histograms.is_empty())
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {

@@ -77,7 +77,7 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
     assert_eq!(histogram.timestamp, 1782358160412);
 
     let (sample_inserts, histogram_inserts, sample_count, histogram_count) =
-        remote_write_v2::write_requests(decoded).unwrap();
+        remote_write_v2::decode_write_requests(false, Bytes::from_static(BODY), true).unwrap();
     assert!(sample_inserts.is_empty());
     assert_eq!(sample_count, 0);
     assert_eq!(histogram_count, 1);
