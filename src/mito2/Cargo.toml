@@ -121,6 +121,11 @@ harness = false
 required-features = ["test"]
 
 [[bench]]
+name = "bench_page_range_cache"
+harness = false
+required-features = ["test"]
+
+[[bench]]
 name = "bench_filter_time_partition"
 harness = false
 required-features = ["test"]
