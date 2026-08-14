@@ -18,10 +18,11 @@ use std::{assert_matches, fs};
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_recordbatch::RecordBatches;
 use object_store::layers::mock::{Error as MockError, ErrorKind, MockLayerBuilder};
 use store_api::region_engine::{MitoCopyRegionFromRequest, RegionEngine, RegionRole};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
@@ -352,4 +353,138 @@ async fn test_engine_copy_region_unexpected_state_with_format(flat_format: bool)
         err.as_any().downcast_ref::<Error>().unwrap(),
         Error::RegionState { .. }
     )
+}
+
+// Regression for #8865: `copy_region_from` must not carry the source region's
+// `FileMeta::preserve_row_sequence` trust marker into the target region, whose
+// sequence domain is independent. The copied file's physical per-row sequences
+// belong to the source region only; trusting them in the target would let an
+// exact sequence-range request replay source rows as if they were target
+// sequences. The marker must be cleared so the target fails closed with
+// `SequenceRangeUnsupported` instead.
+#[tokio::test]
+async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("copy-region-from-preserve-sequence").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Source and target regions both preserve per-row sequences.
+    let source_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 42),
+    };
+    put_rows(&engine, source_region_id, rows).await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    // The flushed source file keeps the trust marker: the source region's own
+    // sequence domain is intact.
+    let source_manifest = engine
+        .get_region(source_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(1, source_manifest.files.len());
+    assert!(
+        source_manifest
+            .files
+            .values()
+            .all(|meta| meta.preserve_row_sequence),
+        "source files must keep the preserve_row_sequence marker"
+    );
+
+    // Create a preserve-enabled target and copy the source files into it.
+    let target_region_id = RegionId::new(1, 2);
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .copy_region_from(
+            target_region_id,
+            MitoCopyRegionFromRequest {
+                source_region_id,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The copied file in the target must NOT be trusted: its physical per-row
+    // sequences belong to the source region's independent sequence domain.
+    let target_manifest = engine
+        .get_region(target_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(1, target_manifest.files.len());
+    assert!(
+        target_manifest
+            .files
+            .values()
+            .all(|meta| !meta.preserve_row_sequence),
+        "copied files must have the preserve_row_sequence marker cleared"
+    );
+
+    // An exact sequence-range request intersecting the copied rows' sequences
+    // (rows 3..=7 in the source domain) must fail closed with
+    // `SequenceRangeUnsupported` instead of replaying source-domain rows.
+    let err = engine
+        .scanner(
+            target_region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(2),
+                memtable_max_sequence: Some(7),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+
+    // Sanity: the source region keeps the marker and still serves the same
+    // exact range with its own row-level sequences (3..=7, 5 rows).
+    let stream = engine
+        .scan_to_stream(
+            source_region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(2),
+                memtable_max_sequence: Some(7),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        5, row_count,
+        "source exact range should return rows with sequence 3..=7"
+    );
 }
