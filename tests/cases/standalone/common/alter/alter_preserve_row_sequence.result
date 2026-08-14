@@ -1,0 +1,126 @@
+-- Test altering preserve_row_sequence on an append-only table, including
+-- persistence across a restart.
+-- Create an append-only table
+CREATE TABLE test_alter_preserve_row_sequence(
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    cpu DOUBLE,
+    PRIMARY KEY(host)
+) ENGINE=mito WITH('append_mode'='true');
+
+Affected Rows: 0
+
+-- Insert some data
+INSERT INTO test_alter_preserve_row_sequence VALUES ('host1', 0, 1.0), ('host2', 1, 2.0);
+
+Affected Rows: 2
+
+-- SET preserve_row_sequence on the append-only table should succeed
+ALTER TABLE test_alter_preserve_row_sequence SET 'preserve_row_sequence' = 'true';
+
+Affected Rows: 0
+
+-- SHOW CREATE TABLE should show both append_mode and preserve_row_sequence
+SHOW CREATE TABLE test_alter_preserve_row_sequence;
+
++----------------------------------+-----------------------------------------------------------------+
+| Table                            | Create Table                                                    |
++----------------------------------+-----------------------------------------------------------------+
+| test_alter_preserve_row_sequence | CREATE TABLE IF NOT EXISTS "test_alter_preserve_row_sequence" ( |
+|                                  |   "host" STRING NULL,                                           |
+|                                  |   "ts" TIMESTAMP(3) NOT NULL,                                   |
+|                                  |   "cpu" DOUBLE NULL,                                            |
+|                                  |   TIME INDEX ("ts"),                                            |
+|                                  |   PRIMARY KEY ("host")                                          |
+|                                  | )                                                               |
+|                                  |                                                                 |
+|                                  | ENGINE=mito                                                     |
+|                                  | WITH(                                                           |
+|                                  |   append_mode = 'true',                                         |
+|                                  |   preserve_row_sequence = 'true'                                |
+|                                  | )                                                               |
++----------------------------------+-----------------------------------------------------------------+
+
+-- Restart the server: the option and the inserted data must survive
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE test_alter_preserve_row_sequence;
+
++----------------------------------+-----------------------------------------------------------------+
+| Table                            | Create Table                                                    |
++----------------------------------+-----------------------------------------------------------------+
+| test_alter_preserve_row_sequence | CREATE TABLE IF NOT EXISTS "test_alter_preserve_row_sequence" ( |
+|                                  |   "host" STRING NULL,                                           |
+|                                  |   "ts" TIMESTAMP(3) NOT NULL,                                   |
+|                                  |   "cpu" DOUBLE NULL,                                            |
+|                                  |   TIME INDEX ("ts"),                                            |
+|                                  |   PRIMARY KEY ("host")                                          |
+|                                  | )                                                               |
+|                                  |                                                                 |
+|                                  | ENGINE=mito                                                     |
+|                                  | WITH(                                                           |
+|                                  |   append_mode = 'true',                                         |
+|                                  |   preserve_row_sequence = 'true'                                |
+|                                  | )                                                               |
++----------------------------------+-----------------------------------------------------------------+
+
+-- Ordinary query should still see the inserted rows after restart
+SELECT * FROM test_alter_preserve_row_sequence ORDER BY host, ts;
+
++-------+-------------------------+-----+
+| host  | ts                      | cpu |
++-------+-------------------------+-----+
+| host1 | 1970-01-01T00:00:00     | 1.0 |
+| host2 | 1970-01-01T00:00:00.001 | 2.0 |
++-------+-------------------------+-----+
+
+-- UNSET preserve_row_sequence should succeed
+ALTER TABLE test_alter_preserve_row_sequence UNSET 'preserve_row_sequence';
+
+Affected Rows: 0
+
+-- SHOW CREATE TABLE should keep append_mode but drop preserve_row_sequence
+SHOW CREATE TABLE test_alter_preserve_row_sequence;
+
++----------------------------------+-----------------------------------------------------------------+
+| Table                            | Create Table                                                    |
++----------------------------------+-----------------------------------------------------------------+
+| test_alter_preserve_row_sequence | CREATE TABLE IF NOT EXISTS "test_alter_preserve_row_sequence" ( |
+|                                  |   "host" STRING NULL,                                           |
+|                                  |   "ts" TIMESTAMP(3) NOT NULL,                                   |
+|                                  |   "cpu" DOUBLE NULL,                                            |
+|                                  |   TIME INDEX ("ts"),                                            |
+|                                  |   PRIMARY KEY ("host")                                          |
+|                                  | )                                                               |
+|                                  |                                                                 |
+|                                  | ENGINE=mito                                                     |
+|                                  | WITH(                                                           |
+|                                  |   append_mode = 'true'                                          |
+|                                  | )                                                               |
++----------------------------------+-----------------------------------------------------------------+
+
+-- Clean up
+DROP TABLE test_alter_preserve_row_sequence;
+
+Affected Rows: 0
+
+-- Test that preserve_row_sequence requires append_mode=true
+CREATE TABLE test_alter_preserve_no_append(
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    cpu DOUBLE,
+    PRIMARY KEY(host)
+) ENGINE=mito;
+
+Affected Rows: 0
+
+-- Setting preserve_row_sequence on a non-append-only table should fail
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE test_alter_preserve_no_append SET 'preserve_row_sequence' = 'true';
+
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Invalid region options, preserve_row_sequence is only supported for append-only tables (append_mode must be true)
+
+-- Clean up
+DROP TABLE test_alter_preserve_no_append;
+
+Affected Rows: 0
+
