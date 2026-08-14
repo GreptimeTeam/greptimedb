@@ -554,7 +554,7 @@ async fn run_flat_prune_iteration(
     let reader_builder = ParquetReaderBuilder::new(table_dir, path_type, file_handle, object_store)
         .expected_metadata(Some(region_meta))
         .cache(CacheStrategy::Disabled)
-        .projection(projection.map(ReadColumns::from_deduped_column_ids));
+        .projection(projection.map(ReadColumns::new));
     let mut reader_metrics = ReaderMetrics::default();
     let start = Instant::now();
     let mut stats = IterationStats::default();

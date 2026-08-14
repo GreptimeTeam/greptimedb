@@ -38,7 +38,7 @@ use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
-use crate::read::read_columns::{ReadColumn, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
@@ -108,18 +108,19 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     };
     assert_eq!(
         seq_scan.input().read_cols,
-        ReadColumns::from_deduped_column_ids([1, 0])
+        ReadColumns::new([1, 0])
+            .with_json_target_types(BTreeMap::from([(1, JsonNativeType::Variant)]))
     );
 
     let stream = scanner.scan().await?;
     let batches = RecordBatches::try_collect(stream).await?;
     let expected = r#"
-+------------------------------------------+-------+
-| field_0                                  | tag_0 |
-+------------------------------------------+-------+
-| {a: {x: 10, y: ignored-a}, b: ignored-b} | tag-1 |
-| {a: {x: 20, y: ignored-c}, b: ignored-d} | tag-2 |
-+------------------------------------------+-------+
++------------------------------------------------+-------+
+| field_0                                        | tag_0 |
++------------------------------------------------+-------+
+| {"a":{"x":10,"y":"ignored-a"},"b":"ignored-b"} | tag-1 |
+| {"a":{"x":20,"y":"ignored-c"},"b":"ignored-d"} | tag-2 |
++------------------------------------------------+-------+
 "#;
     assert_eq!(batches.pretty_print()?, expected.trim());
 
@@ -149,19 +150,8 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     // whole JSON2 struct. tag_0 is still read as a normal root column.
     assert_eq!(
         seq_scan.input().read_cols,
-        ReadColumns {
-            cols: vec![
-                ReadColumn::new(
-                    1,
-                    vec![vec![
-                        "field_0".to_string(),
-                        "a".to_string(),
-                        "x".to_string()
-                    ]]
-                ),
-                ReadColumn::new(0, vec![]),
-            ]
-        }
+        ReadColumns::new([1, 0])
+            .with_json_target_types(BTreeMap::from([(1, json_type_hint["field_0"].clone())]))
     );
 
     // The scanner should still return a valid RecordBatch in the requested logical projection.
@@ -189,10 +179,7 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     let Scanner::Seq(seq_scan) = &scanner else {
         unreachable!();
     };
-    assert_eq!(
-        seq_scan.input().read_cols,
-        ReadColumns::from_deduped_column_ids([0])
-    );
+    assert_eq!(seq_scan.input().read_cols, ReadColumns::new([0]));
 
     let stream = scanner.scan().await?;
     let batches = RecordBatches::try_collect(stream).await?;
@@ -204,6 +191,19 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
 | tag-2 |
 +-------+
 "#;
+    assert_eq!(batches.pretty_print()?, expected.trim());
+
+    // JSON type hints are derived from the whole query plan, so they may include
+    // columns unrelated to this scan. Mito2 should ignore hints for unknown
+    // columns (`other_json`) instead of failing.
+    let request = ScanRequest {
+        projection: Some(vec![0]),
+        json_type_hint: HashMap::from([("other_json".to_string(), JsonNativeType::String)]),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await?;
+    let stream = scanner.scan().await?;
+    let batches = RecordBatches::try_collect(stream).await?;
     assert_eq!(batches.pretty_print()?, expected.trim());
     Ok(())
 }

@@ -72,9 +72,9 @@ impl BulkIterContext {
         let codec = build_primary_key_codec(&region_metadata);
 
         let read_cols = if let Some(col_ids) = projection {
-            ReadColumns::from_deduped_column_ids(col_ids.iter().copied())
+            ReadColumns::new(col_ids.iter().copied())
         } else {
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 region_metadata
                     .column_metadatas
                     .iter()
