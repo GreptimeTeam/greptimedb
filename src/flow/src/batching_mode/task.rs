@@ -442,7 +442,9 @@ impl BatchingTask {
     }
 
     /// Number of child queries allowed per tick in Phase 0 batching mode.
-    /// `0` is treated as `1` defensively (current single-query behavior).
+    /// The default `3` enables the strategy; `1` is the official opt-out that
+    /// restores the legacy single-query-per-tick behavior; `0` is treated as
+    /// `1` defensively (a `1`-compatible alias).
     fn max_queries_per_tick(&self) -> usize {
         self.config
             .batch_opts
@@ -453,10 +455,11 @@ impl BatchingTask {
     /// Executes one tick under `execution_lock` and keeps the generated query
     /// context for the background loop's error logging/backoff.
     ///
-    /// With Phase 0 batching enabled (`experimental_max_queries_per_tick > 1`)
-    /// this serially drains up to N independent short-range child queries, each
-    /// generated with `max_window_cnt = Some(1)` so its filter covers at most
-    /// one `window_size`-sized dirty window. It stops early on the first
+    /// With Phase 0 batching enabled (`experimental_max_queries_per_tick > 1`,
+    /// the default is `3`) this serially drains up to N independent short-range
+    /// child queries, each generated with `max_window_cnt = Some(1)` so its
+    /// filter covers at most one `window_size`-sized dirty window, and each
+    /// consuming the newest dirty window first. It stops early on the first
     /// no-dirty (`Ok(None)`) or error outcome, or when N children have run or a
     /// shutdown signal arrives. Subsequent child queries continue only while the
     /// previous successful child was scoped dirty-window work
@@ -468,8 +471,8 @@ impl BatchingTask {
     /// children are never restored. The tick outcome aggregates affected rows
     /// and elapsed durations across children.
     ///
-    /// With the default `N == 1` this delegates to the existing single-query
-    /// execution, so default behavior is exactly unchanged.
+    /// With `N == 1` (the official opt-out) this delegates to the existing
+    /// single-query execution, so the legacy behavior is exactly restored.
     async fn execute_tick_serialized_with_outcome(
         &self,
         engine: &QueryEngineRef,
@@ -1341,6 +1344,31 @@ impl BatchingTask {
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
+
+                    // Phase 0 batching (N > 1): when scoped dirty work still
+                    // remains after a successful tick — live dirty windows or
+                    // pending fenced-repair windows — start the next tick
+                    // immediately instead of sleeping, so a backlog drains as
+                    // fast as the per-tick child budget allows. `Ok(None)` and
+                    // `Err` keep the existing sleep/backoff below. The EVAL
+                    // scheduled loop is unaffected (it never enters this
+                    // adaptive path).
+                    if self.max_queries_per_tick() > 1 {
+                        let has_backlog = {
+                            let state = self.state.read().unwrap();
+                            !state.dirty_time_windows.is_empty()
+                                || state
+                                    .pending_fenced_repair()
+                                    .is_some_and(|repair| !repair.pending_windows().is_empty())
+                        };
+                        if has_backlog {
+                            debug!(
+                                "Flow id = {:?}, Phase 0 backlog still present after tick, starting next tick immediately",
+                                self.config.flow_id
+                            );
+                            continue;
+                        }
+                    }
 
                     let sleep_until = {
                         let state = self.state.write().unwrap();

@@ -639,7 +639,7 @@ impl DirtyTimeWindows {
 
             if let Some(task_ctx) = task_ctx {
                 debug!(
-                    "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
+                    "Flow id = {:?}, too many time windows: {}, only {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
                     merged_windows.len(),
                     window_cnt,
@@ -651,7 +651,7 @@ impl DirtyTimeWindows {
                 );
             } else {
                 debug!(
-                    "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
+                    "Flow id = {:?}, too many time windows: {}, only {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
                     merged_windows.len(),
                     window_cnt,
@@ -661,7 +661,10 @@ impl DirtyTimeWindows {
             }
         }
 
-        // get the first `window_cnt` time windows
+        // Select the windows to query. Phase 0 child queries
+        // (`window_cnt == 1`) take the NEWEST dirty window first so short-range
+        // children drain recent data ahead of the backlog; the general
+        // `window_cnt > 1` path keeps the legacy oldest-first order.
         let max_time_range = window_size * window_cnt as i32;
 
         let mut to_be_query = BTreeMap::new();
@@ -669,54 +672,91 @@ impl DirtyTimeWindows {
         // are removed/inserted here and only committed on success.
         let mut new_windows = merged_windows.clone();
         let mut cur_time_range = chrono::Duration::zero();
-        for (idx, (start, end)) in merged_windows.iter().enumerate() {
-            let first_end = start
-                .add_duration(window_size.to_std().unwrap())
-                .context(TimeSnafu)?;
-            let end = end.unwrap_or(first_end);
 
-            // if time range is too long, stop
-            if cur_time_range >= max_time_range {
-                break;
+        if window_cnt == 1 {
+            // Newest-first Phase 0 selection: take the last merged window.
+            if let Some((start, end)) = merged_windows.last_key_value() {
+                let first_end = start
+                    .add_duration(window_size.to_std().unwrap())
+                    .context(TimeSnafu)?;
+                // `None` end keeps the existing `[start, start+window_size)`
+                // behavior.
+                let end = end.unwrap_or(first_end);
+
+                let Some(x) = end.sub(start) else {
+                    // Unrepresentable range; nothing to select this round.
+                    // Mirrors the legacy `continue` on `end.sub(start)`.
+                    return Ok(None);
+                };
+                if x <= window_size {
+                    // Whole window fits: take `[start, end)` entirely.
+                    to_be_query.insert(*start, Some(end));
+                    new_windows.remove(start);
+                    cur_time_range += x;
+                } else {
+                    // Window larger than one chunk: take the newest chunk
+                    // `[end - window_size, end)` and keep the remainder
+                    // `[start, end - window_size)` dirty.
+                    let split_at = end
+                        .sub_duration(window_size.to_std().unwrap())
+                        .context(TimeSnafu)?;
+                    to_be_query.insert(split_at, Some(end));
+                    new_windows.remove(start);
+                    new_windows.insert(*start, Some(split_at));
+                    cur_time_range += window_size;
+                }
             }
+        } else {
+            // Legacy oldest-first: get the first `window_cnt` time windows.
+            for (idx, (start, end)) in merged_windows.iter().enumerate() {
+                let first_end = start
+                    .add_duration(window_size.to_std().unwrap())
+                    .context(TimeSnafu)?;
+                let end = end.unwrap_or(first_end);
 
-            // if we have enough time windows, stop
-            if idx >= window_cnt {
-                break;
-            }
-
-            let Some(x) = end.sub(start) else {
-                continue;
-            };
-            if cur_time_range + x <= max_time_range {
-                to_be_query.insert(*start, Some(end));
-                new_windows.remove(start);
-                cur_time_range += x;
-            } else {
-                // too large a window, split it
-                // split at window_size * times
-                let surplus = max_time_range - cur_time_range;
-                if surplus.num_seconds() < window_size.num_seconds() {
-                    // Skip splitting if surplus is smaller than window_size.
-                    // An exactly window-sized surplus (`surplus == window_size`)
-                    // must proceed so that `max_window_cnt=1` consumes exactly
-                    // one aligned window-sized chunk and leaves the remainder
-                    // dirty, instead of stalling on the merged range.
+                // if time range is too long, stop
+                if cur_time_range >= max_time_range {
                     break;
                 }
-                let times = surplus.num_seconds() / window_size.num_seconds();
 
-                let split_offset = window_size * times as i32;
-                let split_at = start
-                    .add_duration(split_offset.to_std().unwrap())
-                    .context(TimeSnafu)?;
-                to_be_query.insert(*start, Some(split_at));
+                // if we have enough time windows, stop
+                if idx >= window_cnt {
+                    break;
+                }
 
-                // remove the original window
-                new_windows.remove(start);
-                new_windows.insert(split_at, Some(end));
-                cur_time_range += split_offset;
-                break;
+                let Some(x) = end.sub(start) else {
+                    continue;
+                };
+                if cur_time_range + x <= max_time_range {
+                    to_be_query.insert(*start, Some(end));
+                    new_windows.remove(start);
+                    cur_time_range += x;
+                } else {
+                    // too large a window, split it
+                    // split at window_size * times
+                    let surplus = max_time_range - cur_time_range;
+                    if surplus.num_seconds() < window_size.num_seconds() {
+                        // Skip splitting if surplus is smaller than window_size.
+                        // An exactly window-sized surplus (`surplus == window_size`)
+                        // must proceed so that `max_window_cnt=1` consumes exactly
+                        // one aligned window-sized chunk and leaves the remainder
+                        // dirty, instead of stalling on the merged range.
+                        break;
+                    }
+                    let times = surplus.num_seconds() / window_size.num_seconds();
+
+                    let split_offset = window_size * times as i32;
+                    let split_at = start
+                        .add_duration(split_offset.to_std().unwrap())
+                        .context(TimeSnafu)?;
+                    to_be_query.insert(*start, Some(split_at));
+
+                    // remove the original window
+                    new_windows.remove(start);
+                    new_windows.insert(split_at, Some(end));
+                    cur_time_range += split_offset;
+                    break;
+                }
             }
         }
 
@@ -1314,11 +1354,12 @@ mod test {
         }
     }
 
-    /// `gen_filter_exprs` with `window_cnt = 1` must consume exactly one
-    /// window-sized chunk per call from a merged multi-window range. Regression
-    /// test for the exact-fit split stall: when the remaining surplus equals
-    /// exactly `window_size`, the split must still happen so the merged range
-    /// drains one chunk at a time instead of stalling forever.
+    /// `gen_filter_exprs` with `window_cnt = 1` (Phase 0 child) must consume
+    /// exactly one window-sized chunk per call from a merged multi-window
+    /// range, taking the NEWEST chunk first. Regression test for the
+    /// exact-fit split stall: when the remaining surplus equals exactly
+    /// `window_size`, the split must still happen so the merged range drains
+    /// one chunk at a time instead of stalling forever.
     #[test]
     fn test_gen_filter_exprs_window_cnt_one_consumes_one_window_chunk_per_call() {
         let window_size = chrono::Duration::seconds(5);
@@ -1336,36 +1377,36 @@ mod test {
         let first = dirty
             .gen_filter_exprs("ts", None, window_size, 1, 0, None)
             .unwrap()
-            .expect("first call should consume one window-sized chunk");
+            .expect("first call should consume the newest window-sized chunk");
         assert_eq!(
             first.time_ranges,
-            vec![(Timestamp::new_second(0), Timestamp::new_second(5))]
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
         );
         assert_eq!(
             dirty.windows,
-            BTreeMap::from([(Timestamp::new_second(5), Some(Timestamp::new_second(15)))])
+            BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(10)))])
         );
 
         let second = dirty
             .gen_filter_exprs("ts", None, window_size, 1, 0, None)
             .unwrap()
-            .expect("second call should consume the next window-sized chunk");
+            .expect("second call should consume the next-newest window-sized chunk");
         assert_eq!(
             second.time_ranges,
             vec![(Timestamp::new_second(5), Timestamp::new_second(10))]
         );
         assert_eq!(
             dirty.windows,
-            BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))])
+            BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(5)))])
         );
 
         let third = dirty
             .gen_filter_exprs("ts", None, window_size, 1, 0, None)
             .unwrap()
-            .expect("third call should consume the last window-sized chunk");
+            .expect("third call should consume the oldest window-sized chunk");
         assert_eq!(
             third.time_ranges,
-            vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+            vec![(Timestamp::new_second(0), Timestamp::new_second(5))]
         );
         assert!(dirty.windows.is_empty());
 
@@ -1375,6 +1416,109 @@ mod test {
                 .unwrap()
                 .is_none(),
             "fully drained dirty windows should produce no filter"
+        );
+    }
+
+    /// `gen_filter_exprs` with `window_cnt > 1` must keep the legacy
+    /// oldest-first selection order even though Phase 0 children
+    /// (`window_cnt == 1`) are newest-first. Regression test for the
+    /// multi-window semantics that must not be flipped wholesale.
+    #[test]
+    fn test_gen_filter_exprs_window_cnt_gt_one_keeps_oldest_first() {
+        let window_size = chrono::Duration::seconds(5);
+        let mut dirty = DirtyTimeWindows::default();
+        // Three disjoint merged windows, far enough apart (gap > MERGE_DIST)
+        // to stay separate.
+        dirty.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        dirty.add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+        dirty.add_window(Timestamp::new_second(200), Some(Timestamp::new_second(205)));
+
+        // window_cnt = 2: the legacy path takes the two OLDEST windows.
+        let filter = dirty
+            .gen_filter_exprs("ts", None, window_size, 2, 0, None)
+            .unwrap()
+            .expect("two oldest windows should be selected");
+        assert_eq!(
+            filter.time_ranges,
+            vec![
+                (Timestamp::new_second(0), Timestamp::new_second(5)),
+                (Timestamp::new_second(100), Timestamp::new_second(105)),
+            ],
+            "window_cnt > 1 must keep oldest-first selection"
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([(Timestamp::new_second(200), Some(Timestamp::new_second(205)))])
+        );
+    }
+
+    /// `gen_filter_exprs` with `window_cnt = 1` must keep selecting the
+    /// NEWEST window across multiple disjoint merged windows, take the whole
+    /// window when it fits, split the newest chunk off the right side when it
+    /// is larger than `window_size`, and fall back to the existing
+    /// `[start, start+window_size)` behavior for unbounded (`None` end)
+    /// windows.
+    #[test]
+    fn test_gen_filter_exprs_window_cnt_one_newest_first_multi_window_and_unbounded() {
+        let window_size = chrono::Duration::seconds(5);
+        let mut dirty = DirtyTimeWindows::default();
+        // Three disjoint merged windows: [0s, 5s), [100s, 130s) (larger than
+        // window_size) and an unbounded dirty marker at 200s.
+        dirty.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        dirty.add_window(Timestamp::new_second(100), Some(Timestamp::new_second(130)));
+        dirty.add_window(Timestamp::new_second(200), None);
+
+        // Newest first: the unbounded marker is the last merged window; `None`
+        // end keeps the existing `[start, start+window_size)` behavior.
+        let first = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("unbounded newest window should be selected");
+        assert_eq!(
+            first.time_ranges,
+            vec![(Timestamp::new_second(200), Timestamp::new_second(205))]
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([
+                (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                (Timestamp::new_second(100), Some(Timestamp::new_second(130))),
+            ])
+        );
+
+        // Next: [100s, 130s) is larger than window_size; take the newest chunk
+        // [125s, 130s) and keep the remainder [100s, 125s) dirty.
+        let second = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("oversized newest window should be split from the right");
+        assert_eq!(
+            second.time_ranges,
+            vec![(Timestamp::new_second(125), Timestamp::new_second(130))]
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([
+                (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                (Timestamp::new_second(100), Some(Timestamp::new_second(125))),
+            ])
+        );
+
+        // And again: [120s, 125s), remainder [100s, 120s).
+        let third = dirty
+            .gen_filter_exprs("ts", None, window_size, 1, 0, None)
+            .unwrap()
+            .expect("oversized newest window should keep splitting from the right");
+        assert_eq!(
+            third.time_ranges,
+            vec![(Timestamp::new_second(120), Timestamp::new_second(125))]
+        );
+        assert_eq!(
+            dirty.windows,
+            BTreeMap::from([
+                (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                (Timestamp::new_second(100), Some(Timestamp::new_second(120))),
+            ])
         );
     }
 
@@ -1438,8 +1582,10 @@ mod test {
         .unwrap();
 
         // Merge collapses the three windows into one [0s, 15s) range, which is
-        // selected (and split into a staged remainder) before construction; the
-        // missing time-window expression then fails the alignment step.
+        // selected via the Phase 0 newest-first path (`window_cnt == 1`): the
+        // newest chunk [10s, 15s) is staged and the remainder [0s, 10s) kept
+        // before construction; the missing time-window expression then fails
+        // the alignment step.
         let result = dirty.gen_filter_exprs("ts", None, window_size, 1, 0, Some(&task));
 
         assert!(

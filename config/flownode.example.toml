@@ -27,12 +27,13 @@ node_id = 14
 ## Time window merge distance
 #+experimental_time_window_merge_threshold=3
 ## Maximum number of independent short-range child queries executed serially
-## within one flow tick. 1 (default) keeps the current single-query behavior;
-## N > 1 splits one tick into up to N child queries, each scoped to at most one
-## time-window-sized dirty window. Subsequent child queries continue only for
-## scoped dirty-window work; unfiltered full-snapshot and incremental-delta
-## queries execute at most once per tick. 0 is treated as 1.
-#+experimental_max_queries_per_tick=1
+## within one flow tick (Phase 0 batching scheduling). 3 (default) enables the
+## strategy: child queries consume the newest dirty windows first, and while a
+## backlog remains the next tick starts immediately. Set to 1 to opt out and
+## restore the legacy single-query-per-tick behavior; 0 is treated as 1.
+## Unfiltered full-snapshot and incremental-delta queries execute at most once
+## per tick.
+#+experimental_max_queries_per_tick=3
 ## Whether to enable experimental flow incremental source reads.
 ## When disabled, batching flows always execute full-snapshot queries.
 ## Can be overridden per flow with WITH (experimental_enable_incremental_read = 'true').

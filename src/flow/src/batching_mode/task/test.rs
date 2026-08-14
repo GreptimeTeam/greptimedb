@@ -527,11 +527,13 @@ fn assert_sql_uses_scheduled_time(sql: &str) {
     );
 }
 
-/// After a scheduled-time attempt fails (missing sink), the
-/// `FLOW_SCHEDULED_TIME_MILLIS` extension must not leak into
-/// `TaskState.query_ctx` or `frontend_extensions()`.
+/// Under the default Phase 0 batching (N=3), a scheduled-time attempt against a
+/// missing sink table with no dirty windows returns `Ok(None)`: the first
+/// scoped child query finds no dirty windows to repair and never reaches the
+/// sink lookup. The `FLOW_SCHEDULED_TIME_MILLIS` extension must still not leak
+/// into `TaskState.query_ctx` or `frontend_extensions()`.
 #[tokio::test]
-async fn test_scheduled_time_ctx_restored_on_error() {
+async fn test_scheduled_time_ctx_restored_on_default_missing_sink() {
     let TestTaskParts {
         task, query_engine, ..
     } = new_test_task_engine_and_plan_with_query(
@@ -567,10 +569,82 @@ async fn test_scheduled_time_ctx_restored_on_error() {
         )
         .await;
 
-    // Missing sink table → gen_insert_plan_unlocked should fail.
+    // Default N=3 batching: the scoped child finds no dirty windows, so the
+    // tick reports no-query (`Ok(None)`) without ever resolving the missing
+    // sink table.
+    assert!(
+        matches!(outcome.result, Ok(None)),
+        "Expected Ok(None) under default N=3 batching (no dirty windows; missing sink never reached), got {:?}",
+        outcome.result
+    );
+
+    // After: extension must be restored to absent.
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None,
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into query_ctx after Ok(None)"
+    );
+    assert!(
+        !task
+            .frontend_extensions()
+            .contains_key(FLOW_SCHEDULED_TIME_MILLIS),
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into frontend_extensions after Ok(None)"
+    );
+}
+
+/// With `experimental_max_queries_per_tick = 1` (the official Phase 0 opt-out
+/// that restores the legacy single-query-per-tick behavior), a scheduled-time
+/// attempt against a missing sink table must fail: the legacy path resolves the
+/// sink table before generating the query, so `get_table_info_df_schema`
+/// returns `TableNotFound`. The `FLOW_SCHEDULED_TIME_MILLIS` extension must be
+/// restored to absent after the error.
+#[tokio::test]
+async fn test_scheduled_time_ctx_restored_on_error_with_legacy_opt_out() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+        phase0_batch_opts(1),
+    )
+    .await;
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+
+    // Before: no scheduled time extension
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None
+    );
+    assert!(
+        !task
+            .frontend_extensions()
+            .contains_key(FLOW_SCHEDULED_TIME_MILLIS)
+    );
+
+    let scheduled_time_secs = 1700000000i64;
+    let outcome = task
+        .execute_once_serialized_at_scheduled_time(
+            &query_engine,
+            &frontend_client,
+            scheduled_time_secs,
+        )
+        .await;
+
+    // N=1 opt-out restores the legacy single-query path: the missing sink table
+    // is resolved before query generation, so this must be an error.
     assert!(
         outcome.result.is_err(),
-        "Expected an error (missing sink), got {:?}",
+        "Expected an error (missing sink) with the N=1 legacy opt-out, got {:?}",
         outcome.result
     );
 
@@ -1051,10 +1125,12 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
     );
     assert_eq!(state.dirty_time_windows.len(), 1);
 
+    // Phase 0 children (window_cnt == 1) consume the NEWEST pending window
+    // first while the active fence keeps the frozen high H untouched.
     let first_filter = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
         first_filter.time_ranges,
-        vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+        vec![(Timestamp::new_second(100), Timestamp::new_second(105))]
     );
 
     let decision = BatchingTask::apply_query_result_to_state(
@@ -1074,7 +1150,7 @@ fn test_continued_fenced_repair_uses_pending_snapshot_not_later_live_dirty() {
     let second_filter = next_fenced_repair_filter(&mut state, 1);
     assert_eq!(
         second_filter.time_ranges,
-        vec![(Timestamp::new_second(100), Timestamp::new_second(105))]
+        vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
     );
     assert!(state.fenced_repair_pending_is_empty());
     assert_eq!(state.dirty_time_windows.len(), 1);
@@ -1244,8 +1320,8 @@ async fn test_fenced_repair_mismatch_next_plan_is_scoped_base_repair() {
     };
     assert_eq!(
         filter.time_ranges,
-        vec![(Timestamp::new_second(100), Timestamp::new_second(105))],
-        "executed pre-H repair item should not be requeued; only remaining pending window is retried"
+        vec![(Timestamp::new_second(10), Timestamp::new_second(15))],
+        "executed pre-H repair item (the newest [100,105) under newest-first) should not be requeued; only remaining pending window [10,15) is retried"
     );
 }
 
@@ -2577,12 +2653,19 @@ fn phase0_batch_opts(max_queries_per_tick: usize) -> Arc<BatchingModeOptions> {
 }
 
 #[test]
-fn test_experimental_max_queries_per_tick_defaults_to_one() {
+fn test_experimental_max_queries_per_tick_defaults_to_three() {
+    // `3` is the default: Phase 0 short-range batching is enabled by default.
     assert_eq!(
         BatchingModeOptions::default().experimental_max_queries_per_tick,
-        1
+        3
     );
-    // `0` must be treated as `1` defensively.
+    // `1` is the official opt-out that restores legacy single-query behavior.
+    let opts = BatchingModeOptions {
+        experimental_max_queries_per_tick: 1,
+        ..Default::default()
+    };
+    assert_eq!(opts.experimental_max_queries_per_tick, 1);
+    // `0` must be treated as `1` defensively (a `1`-compatible alias).
     let opts = BatchingModeOptions {
         experimental_max_queries_per_tick: 0,
         ..Default::default()
@@ -3331,4 +3414,203 @@ async fn test_phase0_tick_holds_execution_lock_between_children() {
         competitor_frontend_rx.try_recv().is_err(),
         "competitor ran only after the tick drained all dirty windows, so no frontend query"
     );
+}
+
+/// Mock frontend handler for the adaptive-loop tests: re-marks a small dirty
+/// window on every call (simulating new ingest so a backlog always remains),
+/// counts calls, and sends the task shutdown signal after a chosen call count.
+struct BacklogReMarkPhase0Handler {
+    counters: Phase0Counters,
+    task: BatchingTask,
+    shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    shutdown_after_calls: usize,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for BacklogReMarkPhase0Handler {
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let call = self.counters.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if call >= self.shutdown_after_calls {
+            if let Some(tx) = self.shutdown_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        }
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs() as i64;
+        self.task
+            .state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .add_window(
+                Timestamp::new_second(now_secs),
+                Some(Timestamp::new_second(now_secs + 5)),
+            );
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+/// Adaptive loop with N=3 and a persistent live backlog: after a successful
+/// tick that still leaves dirty work, the loop must start the next tick
+/// immediately instead of sleeping `min_refresh` (set to 1 hour here). The
+/// handler re-marks a small dirty window on every call and shuts the task down
+/// after 6 frontend calls (= two ticks x three children).
+#[tokio::test]
+async fn test_phase0_adaptive_loop_continues_immediately_with_backlog() {
+    let sink_table = "phase0_adaptive_immediate";
+    let batch_opts = Arc::new(BatchingModeOptions {
+        experimental_max_queries_per_tick: 3,
+        experimental_min_refresh_duration: Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let (task, query_engine, shutdown_tx) =
+        new_phase0_time_window_task(sink_table, batch_opts).await;
+    register_twe_sink(&query_engine, sink_table, 9501);
+    add_three_dirty_windows(&task);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(BacklogReMarkPhase0Handler {
+        counters: counters.clone(),
+        task: task.clone(),
+        shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+        shutdown_after_calls: 6,
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    // If the loop slept min_refresh (1h) after a successful tick, this would
+    // time out; with the immediate-continue behavior it finishes right after
+    // the 6th call sends shutdown.
+    let loop_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        task.start_adaptive_loop(query_engine, frontend_client),
+    )
+    .await;
+    assert!(
+        loop_result.is_ok(),
+        "adaptive loop with a persistent backlog must not sleep between ticks"
+    );
+    assert_eq!(
+        counters.call_count(),
+        6,
+        "expected two ticks x three children before shutdown"
+    );
+}
+
+/// Adaptive loop with N=3 and no dirty windows: the tick produces `Ok(None)`
+/// and the loop must keep the existing backoff (sleep min_refresh = 1h) rather
+/// than spinning or continuing immediately. Sending shutdown while the loop is
+/// sleeping must NOT stop it (shutdown is only checked at the top of the next
+/// iteration after the sleep elapses).
+#[tokio::test]
+async fn test_phase0_adaptive_loop_sleeps_on_no_dirty() {
+    let sink_table = "phase0_adaptive_sleep_none";
+    let batch_opts = Arc::new(BatchingModeOptions {
+        experimental_max_queries_per_tick: 3,
+        experimental_min_refresh_duration: Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let (task, query_engine, shutdown_tx) =
+        new_phase0_time_window_task(sink_table, batch_opts).await;
+    register_twe_sink(&query_engine, sink_table, 9502);
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let loop_handle = tokio::spawn({
+        let task = task.clone();
+        let query_engine = query_engine.clone();
+        let frontend_client = frontend_client.clone();
+        async move {
+            task.start_adaptive_loop(query_engine, frontend_client)
+                .await;
+        }
+    });
+
+    // No dirty windows: no frontend call may happen and the loop must not
+    // finish — it should be blocked in the min_refresh sleep.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(counters.call_count(), 0);
+    assert!(!loop_handle.is_finished());
+
+    // A sleeping loop cannot observe shutdown until the sleep elapses, so it
+    // must NOT finish quickly (a spinning/continuing loop would).
+    let _ = shutdown_tx.send(());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !loop_handle.is_finished(),
+        "Ok(None) must keep the backoff sleep, not continue immediately"
+    );
+
+    loop_handle.abort();
+}
+
+/// Adaptive loop with N=3 and a failing child: the tick returns `Err` and the
+/// loop must keep the existing backoff (sleep min_refresh = 1h) instead of
+/// continuing immediately. The failing child is the only frontend call.
+#[tokio::test]
+async fn test_phase0_adaptive_loop_backs_off_on_error() {
+    let sink_table = "phase0_adaptive_backoff_err";
+    let batch_opts = Arc::new(BatchingModeOptions {
+        experimental_max_queries_per_tick: 3,
+        experimental_min_refresh_duration: Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let (task, query_engine, shutdown_tx) =
+        new_phase0_time_window_task(sink_table, batch_opts).await;
+    register_twe_sink(&query_engine, sink_table, 9503);
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+
+    let counters = Phase0Counters::new();
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+        Arc::new(Phase0CountingHandler::new(counters.clone()).failing_on(1));
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let loop_handle = tokio::spawn({
+        let task = task.clone();
+        let query_engine = query_engine.clone();
+        let frontend_client = frontend_client.clone();
+        async move {
+            task.start_adaptive_loop(query_engine, frontend_client)
+                .await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        counters.call_count(),
+        1,
+        "the failing child should be the only frontend call"
+    );
+    assert!(!loop_handle.is_finished());
+
+    // A backing-off loop cannot observe shutdown until the sleep elapses.
+    let _ = shutdown_tx.send(());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !loop_handle.is_finished(),
+        "Err must keep the backoff sleep, not continue immediately"
+    );
+
+    loop_handle.abort();
 }
