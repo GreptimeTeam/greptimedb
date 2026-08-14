@@ -861,7 +861,11 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
         }
 
-        let val = Self::get_param_as_literal_expr(param, Some(*op), Some(ArrowDataType::Float64))?;
+        let val = Self::get_param_as_literal_expr(
+            param.as_deref(),
+            Some(*op),
+            Some(ArrowDataType::Float64),
+        )?;
 
         // convert op and value columns to window exprs.
         let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
@@ -3228,7 +3232,7 @@ impl PromPlanner {
                     }
 
                     _ => {
-                        let expr = Self::get_param_as_literal_expr(&Some(arg.clone()), None, None)?;
+                        let expr = Self::get_param_as_literal_expr(Some(arg.as_ref()), None, None)?;
                         result.literals.push(expr);
                     }
                 }
@@ -4308,8 +4312,11 @@ impl PromPlanner {
         let expr = match op.id() {
             token::T_SUM => sum_udaf().call(vec![input]),
             token::T_QUANTILE => {
-                let q =
-                    Self::get_param_as_literal_expr(param, Some(op), Some(ArrowDataType::Float64))?;
+                let q = Self::get_param_as_literal_expr(
+                    param.as_deref(),
+                    Some(op),
+                    Some(ArrowDataType::Float64),
+                )?;
                 quantile_udaf().call(vec![q, input])
             }
             token::T_AVG => avg_udaf().call(vec![input]),
@@ -4584,11 +4591,11 @@ impl PromPlanner {
     }
 
     fn get_param_as_literal_expr(
-        param: &Option<Box<PromExpr>>,
+        param: Option<&PromExpr>,
         op: Option<TokenType>,
         expected_type: Option<ArrowDataType>,
     ) -> Result<DfExpr> {
-        let prom_param = param.as_deref().with_context(|| {
+        let prom_param = param.with_context(|| {
             if let Some(op) = op {
                 FunctionInvalidArgumentSnafu {
                     fn_name: op.to_string(),
@@ -4686,16 +4693,21 @@ impl PromPlanner {
         Ok(normalized_exprs)
     }
 
-    /// Try to build a [f64] from [PromExpr].
-    fn try_build_float_literal(expr: &PromExpr) -> Option<f64> {
-        match expr {
-            PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
-            PromExpr::Paren(ParenExpr { expr }) => Self::try_build_float_literal(expr),
-            PromExpr::Unary(UnaryExpr { expr, .. }) => {
-                Self::try_build_float_literal(expr).map(|f| -f)
-            }
-            PromExpr::Binary(_) => {
-                let expr = Self::try_build_literal_expr(expr)?;
+    /// Create a classic, native, or mixed histogram helper plan.
+    async fn create_histogram_plan(
+        &mut self,
+        function_name: &str,
+        args: &PromFunctionArgs,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let float_literal = |param: &PromExpr| -> Result<f64> {
+            let value = (|| {
+                let expr = Self::get_param_as_literal_expr(
+                    Some(param),
+                    None,
+                    Some(ArrowDataType::Float64),
+                )
+                .ok()?;
                 let simplifier = ExprSimplifier::new(SimplifyContext::default());
                 let expr = simplifier.coerce(expr, &DFSchema::empty()).ok()?;
                 let DfExpr::Literal(value, _) = simplifier.simplify(expr).ok()? else {
@@ -4707,44 +4719,21 @@ impl PromPlanner {
                     return None;
                 };
                 Some(value)
-            }
-            PromExpr::StringLiteral(_)
-            | PromExpr::VectorSelector(_)
-            | PromExpr::MatrixSelector(_)
-            | PromExpr::Call(_)
-            | PromExpr::Extension(_)
-            | PromExpr::Aggregate(_)
-            | PromExpr::Subquery(_) => None,
-        }
-    }
-
-    /// Create a classic, native, or mixed histogram helper plan.
-    async fn create_histogram_plan(
-        &mut self,
-        function_name: &str,
-        args: &PromFunctionArgs,
-        query_engine_state: &QueryEngineState,
-    ) -> Result<LogicalPlan> {
-        let invalid_argument = || FunctionInvalidArgumentSnafu {
-            fn_name: function_name.to_string(),
+            })()
+            .with_context(|| FunctionInvalidArgumentSnafu {
+                fn_name: function_name.to_string(),
+            })?;
+            Ok(value)
         };
         let (function, input) = match (function_name, args.args.as_slice()) {
             (SPECIAL_HISTOGRAM_QUANTILE, [quantile, input]) => (
-                HistogramFoldOperation::Quantile(
-                    Self::try_build_float_literal(quantile)
-                        .with_context(invalid_argument)?
-                        .into(),
-                ),
+                HistogramFoldOperation::Quantile(float_literal(quantile)?.into()),
                 input.as_ref().clone(),
             ),
             (SPECIAL_HISTOGRAM_FRACTION, [lower, upper, input]) => (
                 HistogramFoldOperation::Fraction {
-                    lower: Self::try_build_float_literal(lower)
-                        .with_context(invalid_argument)?
-                        .into(),
-                    upper: Self::try_build_float_literal(upper)
-                        .with_context(invalid_argument)?
-                        .into(),
+                    lower: float_literal(lower)?.into(),
+                    upper: float_literal(upper)?.into(),
                 },
                 input.as_ref().clone(),
             ),
@@ -4947,7 +4936,7 @@ impl PromPlanner {
             }
             .fail();
         }
-        let lit = Self::get_param_as_literal_expr(&Some(args.args[0].clone()), None, None)?;
+        let lit = Self::get_param_as_literal_expr(Some(args.args[0].as_ref()), None, None)?;
 
         // reuse `SPECIAL_TIME_FUNCTION` as name of time index column
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
