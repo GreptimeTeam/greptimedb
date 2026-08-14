@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use datafusion_common::Result;
+use datafusion_common::{DFSchema, Result, ScalarValue};
 use datafusion_expr::expr::{Alias, Cast};
-use datafusion_expr::{Expr, ExprSchemable, LogicalPlan, Projection, Union};
+use datafusion_expr::{Distinct, Expr, ExprSchemable, LogicalPlan, Projection, Union, Values};
 use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
 
@@ -25,9 +25,11 @@ use crate::plan::ExtractExpr;
 
 /// Rewrites string literals that feed timestamp columns at an INSERT boundary.
 ///
-/// The rewrite follows output columns through relational nodes but does not
-/// evaluate source expressions. This keeps explicit casts and other query
-/// expressions on DataFusion's existing path.
+/// A column that carries the same literal in every row is folded into the
+/// assignment expression, which leaves the source query untouched. `VALUES`
+/// rows and `UNION` branches carry per-row values, so those nodes are rewritten
+/// in place instead. Source expressions are never evaluated, which keeps
+/// explicit casts on DataFusion's existing path.
 pub(super) fn rewrite_insert_assignments(
     plan: LogicalPlan,
     query_ctx: QueryContextRef,
@@ -37,6 +39,7 @@ pub(super) fn rewrite_insert_assignments(
     };
 
     let converter = InsertAssignmentConverter { query_ctx };
+    let mut exprs = assignment.expr.clone();
     let mut input = assignment.input.as_ref().clone();
     let mut changed = false;
     for (output_idx, expr) in assignment.expr.iter().enumerate() {
@@ -48,6 +51,17 @@ pub(super) fn rewrite_insert_assignments(
         let Some(input_idx) = assignment_input_index(expr, input.schema()) else {
             continue;
         };
+
+        let literal = lineage_literal(&input, input_idx).cloned();
+        if let Some(literal) = literal
+            && let Some(folded) = converter.convert_literal(&literal, target_type)
+        {
+            let (qualifier, field) = assignment.schema.qualified_field(output_idx);
+            exprs[output_idx] = folded.alias_qualified(qualifier.cloned(), field.name());
+            changed = true;
+            continue;
+        }
+
         if let Some(rewritten) = converter.rewrite_output_column(&input, input_idx, target_type)? {
             input = rewritten;
             changed = true;
@@ -57,7 +71,42 @@ pub(super) fn rewrite_insert_assignments(
     if !changed {
         return Ok(LogicalPlan::Projection(assignment));
     }
-    Projection::try_new(assignment.expr, Arc::new(input)).map(LogicalPlan::Projection)
+    Projection::try_new(exprs, Arc::new(input)).map(LogicalPlan::Projection)
+}
+
+/// Resolves the literal that `output_idx` carries in every row of `plan`.
+///
+/// Only nodes that keep a row's value intact are followed, so the caller can
+/// treat the result as a constant of the whole relation.
+fn lineage_literal(plan: &LogicalPlan, output_idx: usize) -> Option<&ScalarValue> {
+    if output_idx >= plan.schema().fields().len() {
+        return None;
+    }
+
+    match plan {
+        LogicalPlan::Projection(projection) => match unalias(&projection.expr[output_idx]) {
+            Expr::Literal(value, _) => Some(value),
+            Expr::Column(column) => {
+                let input_idx = projection.input.schema().maybe_index_of_column(column)?;
+                lineage_literal(projection.input.as_ref(), input_idx)
+            }
+            _ => None,
+        },
+        // These nodes drop, reorder or deduplicate rows without touching the
+        // value a surviving row carries, and their schema stays positional.
+        LogicalPlan::Filter(_)
+        | LogicalPlan::Sort(_)
+        | LogicalPlan::Limit(_)
+        | LogicalPlan::SubqueryAlias(_)
+        | LogicalPlan::Distinct(Distinct::All(_)) => {
+            let inputs = plan.inputs();
+            let [input] = inputs.as_slice() else {
+                return None;
+            };
+            lineage_literal(input, output_idx)
+        }
+        _ => None,
+    }
 }
 
 struct InsertAssignmentConverter {
@@ -88,8 +137,9 @@ impl InsertAssignmentConverter {
                 self.rewrite_projection(projection, output_idx, target_type)
             }
             LogicalPlan::Union(union) => self.rewrite_union(union, output_idx, target_type),
-            // Filter, Sort, and Distinct are not passthrough nodes here: changing
-            // an input type could change the source query before assignment.
+            // Filter, Sort and Distinct are excluded here: retyping a column
+            // they read would change the source query. Constants still reach
+            // the assignment through `lineage_literal`, which mutates nothing.
             LogicalPlan::Limit(_) | LogicalPlan::SubqueryAlias(_) => {
                 self.rewrite_passthrough(plan, output_idx, target_type)
             }
@@ -103,59 +153,43 @@ impl InsertAssignmentConverter {
         output_idx: usize,
         target_type: &DataType,
     ) -> Result<Option<LogicalPlan>> {
-        let expr = &projection.expr[output_idx];
-        let Some((rewritten_expr, rewritten_input, expr_changed)) =
-            self.rewrite_projection_expr(expr, projection.input.as_ref(), target_type)?
-        else {
-            return Ok(None);
-        };
-
-        let mut exprs = projection.expr.clone();
-        exprs[output_idx] = if expr_changed && !matches!(rewritten_expr, Expr::Alias(_)) {
-            let (qualifier, field) = projection.schema.qualified_field(output_idx);
-            rewritten_expr.alias_qualified(qualifier.cloned(), field.name())
-        } else {
-            rewritten_expr
-        };
-
-        Projection::try_new(exprs, Arc::new(rewritten_input))
-            .map(LogicalPlan::Projection)
-            .map(Some)
-    }
-
-    fn rewrite_projection_expr(
-        &self,
-        expr: &Expr,
-        input: &LogicalPlan,
-        target_type: &DataType,
-    ) -> Result<Option<(Expr, LogicalPlan, bool)>> {
-        match expr {
-            Expr::Alias(alias) => {
-                let Some((rewritten, input, changed)) =
-                    self.rewrite_projection_expr(&alias.expr, input, target_type)?
-                else {
-                    return Ok(None);
-                };
-                let mut alias = alias.clone();
-                alias.expr = Box::new(rewritten);
-                Ok(Some((Expr::Alias(alias), input, changed)))
-            }
+        match unalias(&projection.expr[output_idx]) {
             Expr::Literal(value, _) => {
-                let Some(rewritten) = self.convert_literal(value, target_type) else {
+                let Some(converted) = self.convert_literal(value, target_type) else {
                     return Ok(None);
                 };
-                Ok(Some((rewritten, input.clone(), true)))
+                let (qualifier, field) = projection.schema.qualified_field(output_idx);
+                let mut exprs = projection.expr.clone();
+                exprs[output_idx] = converted.alias_qualified(qualifier.cloned(), field.name());
+
+                Projection::try_new(exprs, projection.input.clone())
+                    .map(LogicalPlan::Projection)
+                    .map(Some)
             }
             Expr::Column(column) => {
+                // Retyping the input column affects every output column reading
+                // it, so only follow lineage with a single consumer.
+                if projection
+                    .expr
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, other)| idx != output_idx && other.column_refs().contains(column))
+                {
+                    return Ok(None);
+                }
+
+                let input = projection.input.as_ref();
                 let Some(input_idx) = input.schema().maybe_index_of_column(column) else {
                     return Ok(None);
                 };
-                let Some(rewritten_input) =
-                    self.rewrite_output_column(input, input_idx, target_type)?
+                let Some(rewritten) = self.rewrite_output_column(input, input_idx, target_type)?
                 else {
                     return Ok(None);
                 };
-                Ok(Some((expr.clone(), rewritten_input, false)))
+
+                Projection::try_new(projection.expr.clone(), Arc::new(rewritten))
+                    .map(LogicalPlan::Projection)
+                    .map(Some)
             }
             _ => Ok(None),
         }
@@ -163,7 +197,7 @@ impl InsertAssignmentConverter {
 
     fn rewrite_values(
         &self,
-        values: &datafusion_expr::Values,
+        values: &Values,
         output_idx: usize,
         target_type: &DataType,
     ) -> Result<Option<LogicalPlan>> {
@@ -234,12 +268,8 @@ impl InsertAssignmentConverter {
             .map(Some)
     }
 
-    fn convert_literal(
-        &self,
-        value: &datafusion_common::ScalarValue,
-        target_type: &DataType,
-    ) -> Option<Expr> {
-        let datafusion_common::ScalarValue::Utf8(Some(value)) = value else {
+    fn convert_literal(&self, value: &ScalarValue, target_type: &DataType) -> Option<Expr> {
+        let ScalarValue::Utf8(Some(value)) = value else {
             return None;
         };
         cast_string_to_timestamp(value, target_type, Some(&self.query_ctx.timezone()))
@@ -249,15 +279,8 @@ impl InsertAssignmentConverter {
     }
 }
 
-fn assignment_input_index(
-    expr: &Expr,
-    input_schema: &datafusion_common::DFSchema,
-) -> Option<usize> {
-    let expr = match expr {
-        Expr::Alias(Alias { expr, .. }) => expr.as_ref(),
-        expr => expr,
-    };
-    let expr = match expr {
+fn assignment_input_index(expr: &Expr, input_schema: &DFSchema) -> Option<usize> {
+    let expr = match unalias(expr) {
         Expr::Cast(Cast { expr, .. }) => expr.as_ref(),
         expr => expr,
     };
@@ -265,6 +288,13 @@ fn assignment_input_index(
         return None;
     };
     input_schema.maybe_index_of_column(column)
+}
+
+fn unalias(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Alias(Alias { expr, .. }) => unalias(expr),
+        expr => expr,
+    }
 }
 
 #[cfg(test)]

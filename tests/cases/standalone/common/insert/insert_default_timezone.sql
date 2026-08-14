@@ -45,6 +45,22 @@ SELECT '2026-08-10 12:00:00.001', now()
 UNION ALL
 SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now();
 
+INSERT INTO test3 (ts, ts_ns) SELECT a, b FROM (
+    SELECT c AS a, c AS b FROM (SELECT '2026-08-12 12:00:00.123456789' AS c) AS t1
+) AS t2;
+
+INSERT INTO test3 (ts, st) SELECT c, s FROM (
+    SELECT '2026-08-13 12:00:00.001' AS c, now() AS s
+) AS t WHERE c > '2026-01-01';
+
+INSERT INTO test3 (ts, st) SELECT c, s FROM (
+    SELECT '2026-08-14 12:00:00.001' AS c, now() AS s
+) AS t ORDER BY c;
+
+INSERT INTO test3 (ts, st) SELECT DISTINCT c, s FROM (
+    SELECT '2026-08-15 12:00:00.001' AS c, now() AS s
+) AS t;
+
 INSERT INTO test3 (ts, st, ts_ns) VALUES (
     '2026-08-09 12:00:00.001',
     now(),

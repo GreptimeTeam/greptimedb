@@ -711,12 +711,18 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts_ns",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                true,
+            ),
         ];
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![])
-            .value_indices(vec![0, 1])
+            .value_indices(vec![0, 1, 2, 3])
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -899,6 +905,27 @@ mod tests {
                  SELECT '2026-08-07 12:00:00.001', now()",
                 &[1_785_988_800_001_i64, 1_786_075_200_001_i64][..],
             ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT c, s FROM (\
+                     SELECT '2026-08-13 12:00:00.001' AS c, now() AS s\
+                 ) AS t WHERE c > '2026-01-01'",
+                &[1_786_593_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT c, s FROM (\
+                     SELECT '2026-08-14 12:00:00.001' AS c, now() AS s\
+                 ) AS t ORDER BY c",
+                &[1_786_680_000_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT DISTINCT c, s FROM (\
+                     SELECT '2026-08-15 12:00:00.001' AS c, now() AS s\
+                 ) AS t",
+                &[1_786_766_400_001_i64][..],
+            ),
         ] {
             let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
             let plan = engine
@@ -941,6 +968,53 @@ mod tests {
             plan.contains("arrow_cast(Utf8(\"2026-08-08 12:00:00.001\")"),
             "{plan}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_insert_converts_source_literal_shared_by_several_columns() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+
+        // Converting the shared source column in place would retype `note` to a
+        // timestamp and truncate `ts_ns` to the millisecond precision of `ts`.
+        for (sql, expected) in [
+            (
+                "INSERT INTO timestamps (ts, note) SELECT a, b FROM (\
+                     SELECT c AS a, c AS b FROM (\
+                         SELECT '2026-08-12 12:00:00.001' AS c\
+                     ) AS t1\
+                 ) AS t2",
+                &["TimestampMillisecond(1786507200001, None)", "note:Utf8"][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, ts_ns) SELECT a, b FROM (\
+                     SELECT c AS a, c AS b FROM (\
+                         SELECT '2026-08-12 12:00:00.123456789' AS c\
+                     ) AS t1\
+                 ) AS t2",
+                &[
+                    "TimestampMillisecond(1786507200123, None)",
+                    "TimestampNanosecond(1786507200123456789, None)",
+                ][..],
+            ),
+        ] {
+            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+            let plan = engine
+                .planner()
+                .plan(&stmt, query_ctx.clone())
+                .await
+                .unwrap()
+                .display_indent_schema()
+                .to_string();
+
+            for expected in expected {
+                assert!(plan.contains(expected), "{plan}");
+            }
+        }
     }
 
     #[tokio::test]
