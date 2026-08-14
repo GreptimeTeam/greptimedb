@@ -173,6 +173,16 @@ impl<S> RegionWorkerLoop<S> {
             if !target_region_manifest.files.contains_key(file_id) {
                 let mut new_file_meta = file_meta.clone();
                 new_file_meta.region_id = target_region_id;
+                // The target region has an independent sequence domain: the
+                // physical per-row sequences in the copied file belong to the
+                // source region, so they must not be trusted for exact
+                // sequence-range reads on the target. Clear the
+                // `preserve_row_sequence` marker to fail closed until the scan
+                // provably cannot intersect the copied rows (see
+                // `files_allow_exact_sequence_range`); otherwise an exact
+                // request would replay source-domain rows as if they were
+                // target sequences.
+                new_file_meta.preserve_row_sequence = false;
                 files_to_copy.push(new_file_meta);
             }
         }
