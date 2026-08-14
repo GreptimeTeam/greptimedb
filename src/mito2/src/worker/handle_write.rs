@@ -128,9 +128,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
                 region_ctx.write_memtable().await;
                 region_ctx.write_bulk().await;
-                // Publish only after all rows (including bulk parts) are
-                // physically installed, so a scan opening on the committed
-                // sequence can never bind H to invisible rows.
                 region_ctx.publish_sequence_and_entry_id();
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
@@ -142,8 +139,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         common_runtime::spawn_global(async move {
                             region_ctx.write_memtable().await;
                             region_ctx.write_bulk().await;
-                            // The spawned task owns the moved ctx, so publish
-                            // inside the task after the memtable writes.
                             region_ctx.publish_sequence_and_entry_id();
                             (region_ctx.put_num, region_ctx.delete_num)
                         })
@@ -763,10 +758,6 @@ mod tests {
     use crate::test_util::ts_ms_value;
     use crate::test_util::version_util::VersionControlBuilder;
 
-    /// Creates a bulk part with `num_rows` rows. The schema carries the
-    /// builder metadata's columns (`tag_0` primary key + `ts` time index) so
-    /// the bulk-install conversion succeeds; `timestamp_index` points at the
-    /// `ts` column.
     fn new_bulk_part(num_rows: i64) -> BulkPart {
         let schema = Arc::new(Schema::new(vec![
             Field::new("tag_0", DataType::Utf8, true),
@@ -887,7 +878,6 @@ mod tests {
         }
     }
 
-    /// Creates a write context for `region_id` with one pending mutation of one row.
     fn new_region_ctx(
         region_id: RegionId,
     ) -> (RegionWriteCtx, oneshot::Receiver<Result<AffectedRows>>) {
@@ -940,16 +930,13 @@ mod tests {
         region_ctxs.insert(ok_region, ctx);
         let entry_id = region_ctxs[&ok_region].next_entry_id();
 
-        // The failed region must not fail the batch or panic the worker.
+        // The failed region must not fail the batch.
         assert!(write_wal(&wal, &mut region_ctxs).await);
 
         assert!(region_ctxs[&failing_region].is_failed());
         assert!(!region_ctxs[&ok_region].is_failed());
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
 
-        // Run the memtable and publication phase the worker runs after `write_wal`.
-        // The failed region installed no rows, so its committed sequence must not
-        // advance; the successful sibling region advances normally.
         for region_ctx in region_ctxs.values_mut() {
             region_ctx.write_memtable().await;
             region_ctx.write_bulk().await;
@@ -969,30 +956,15 @@ mod tests {
                 .committed_sequence()
         );
 
-        // Waiters of the failed region get the error while others get the result.
         drop(region_ctxs);
         assert!(failing_rx.await.unwrap().is_err());
         assert_eq!(1, ok_rx.await.unwrap().unwrap());
     }
 
-    // The committed sequence must not be published before the bulk part's rows
-    // are physically installed in the memtable: publication happens strictly
-    // after `write_bulk` returns. Armed with the bulk-install test barrier,
-    // this deterministically pauses the worker's memtable phase between the
-    // ordinary-memtable handling and the bulk installation and asserts the
-    // region's committed sequence is still its initial value (0) — read via
-    // the `version_control()` accessor, never through a scanner API. After the
-    // barrier is released, the committed sequence must advance to cover the
-    // bulk rows.
     #[tokio::test]
     async fn test_bulk_write_sequence_not_committed_before_install_worker_level() {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
-        assert_eq!(
-            0,
-            version_control.committed_sequence(),
-            "the builder must start at sequence 0"
-        );
 
         let mut region_ctxs = HashMap::new();
         let mut ctx = RegionWriteCtx::new(
@@ -1002,21 +974,18 @@ mod tests {
             None,
         );
         let (tx, rx) = oneshot::channel();
-        // Push a 3-row bulk part without an explicit sequence, exactly like the
-        // worker's `process_bulk_requests`.
         assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None));
         region_ctxs.insert(region_id, ctx);
 
-        // Run the WAL phase the worker runs before the memtable phase.
         let wal = Wal::new(Arc::new(MockLogStore::default()));
         assert!(write_wal(&wal, &mut region_ctxs).await);
         assert!(!region_ctxs[&region_id].is_failed());
 
-        // Arm the bulk-install barrier: `write_bulk` pauses right before the
-        // parts are physically installed into the memtable.
-        let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(region_id);
+        let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(
+            region_id,
+            version_control.clone(),
+        );
 
-        // Run the worker's memtable and publication phases in the background.
         let write_handle = tokio::spawn(async move {
             let mut region_ctx = region_ctxs.remove(&region_id).unwrap();
             region_ctx.write_memtable().await;
@@ -1024,7 +993,6 @@ mod tests {
             region_ctx.publish_sequence_and_entry_id();
         });
 
-        // Wait until the write paused at the barrier: deterministic, no sleeps.
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             barrier.wait_until_reached(),
@@ -1032,16 +1000,12 @@ mod tests {
         .await
         .expect("bulk write never reached the install barrier");
 
-        // The committed sequence must not have advanced yet: publication
-        // happens strictly after the bulk part is installed.
         assert_eq!(
             0,
             version_control.committed_sequence(),
             "committed sequence leaked before the bulk part was installed"
         );
 
-        // Release the barrier: the bulk part installs and the committed
-        // sequence advances to cover all 3 bulk rows.
         barrier.release();
         write_handle.await.expect("bulk write should complete");
         assert_eq!(
@@ -1050,7 +1014,6 @@ mod tests {
             "committed sequence must cover the installed bulk rows"
         );
 
-        // The bulk waiter is notified with the number of installed rows.
         assert_eq!(3, rx.await.unwrap().unwrap());
     }
 
