@@ -61,6 +61,11 @@ type PromTags<'a> = Vec<(&'a str, String)>;
 type ResolvedSeriesLabels<'a> = (PromCtx, String, PromTags<'a>);
 const MAX_REMOTE_WRITE_V2_SCHEMA: i32 = 8;
 const MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA: i32 = 52;
+const TIME_SERIES_LABELS_REFS_TAG: u32 = 1;
+const TIME_SERIES_SAMPLES_TAG: u32 = 2;
+const TIME_SERIES_HISTOGRAMS_TAG: u32 = 3;
+const TIME_SERIES_EXEMPLARS_TAG: u32 = 4;
+const TIME_SERIES_METADATA_TAG: u32 = 5;
 
 struct BorrowedRequest<'a> {
     symbols: Vec<&'a str>,
@@ -334,12 +339,14 @@ fn scan_series(
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf)?;
         match tag {
-            1 => uint32::merge_repeated(wire_type, labels_refs, &mut buf, DecodeContext::default())
-                .map_err(|mut error| {
+            TIME_SERIES_LABELS_REFS_TAG => {
+                uint32::merge_repeated(wire_type, labels_refs, &mut buf, DecodeContext::default())
+                    .map_err(|mut error| {
                     error.push("TimeSeries", "labels_refs");
                     error
-                })?,
-            2 => {
+                })?
+            }
+            TIME_SERIES_SAMPLES_TAG => {
                 take_length_delimited(wire_type, &mut buf).map_err(|mut error| {
                     error.push("TimeSeries", "samples");
                     error
@@ -348,7 +355,7 @@ fn scan_series(
                     DecodeError::new("remote write v2 sample count overflows usize")
                 })?;
             }
-            3 => {
+            TIME_SERIES_HISTOGRAMS_TAG => {
                 take_length_delimited(wire_type, &mut buf).map_err(|mut error| {
                     error.push("TimeSeries", "histograms");
                     error
@@ -357,15 +364,17 @@ fn scan_series(
                     DecodeError::new("remote write v2 histogram count overflows usize")
                 })?;
             }
-            4 => {
+            TIME_SERIES_EXEMPLARS_TAG => {
                 take_length_delimited(wire_type, &mut buf)?;
             }
-            5 => message::merge(wire_type, metadata, &mut buf, DecodeContext::default()).map_err(
-                |mut error| {
-                    error.push("TimeSeries", "metadata");
-                    error
-                },
-            )?,
+            TIME_SERIES_METADATA_TAG => {
+                message::merge(wire_type, metadata, &mut buf, DecodeContext::default()).map_err(
+                    |mut error| {
+                        error.push("TimeSeries", "metadata");
+                        error
+                    },
+                )?
+            }
             _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default())?,
         }
     }
@@ -397,9 +406,11 @@ fn decode_series_leaves(
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).context(error::DecodePromRemoteRequestSnafu)?;
         match tag {
-            1 => skip_field(wire_type, tag, &mut buf, DecodeContext::default())
-                .context(error::DecodePromRemoteRequestSnafu)?,
-            2 => {
+            TIME_SERIES_LABELS_REFS_TAG => {
+                skip_field(wire_type, tag, &mut buf, DecodeContext::default())
+                    .context(error::DecodePromRemoteRequestSnafu)?
+            }
+            TIME_SERIES_SAMPLES_TAG => {
                 scratch.sample.clear();
                 message::merge(
                     wire_type,
@@ -454,7 +465,7 @@ fn decode_series_leaves(
                     }
                 }
             }
-            3 => {
+            TIME_SERIES_HISTOGRAMS_TAG => {
                 scratch.histogram.clear();
                 message::merge(
                     wire_type,
@@ -488,7 +499,7 @@ fn decode_series_leaves(
                     }
                 }
             }
-            4 => {
+            TIME_SERIES_EXEMPLARS_TAG => {
                 scratch.exemplar.clear();
                 message::merge(
                     wire_type,
@@ -502,7 +513,7 @@ fn decode_series_leaves(
                 })
                 .context(error::DecodePromRemoteRequestSnafu)?;
             }
-            5 => {
+            TIME_SERIES_METADATA_TAG => {
                 take_length_delimited(wire_type, &mut buf)
                     .map_err(|mut error| {
                         error.push("TimeSeries", "metadata");
