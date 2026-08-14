@@ -130,6 +130,21 @@ def render_manifest(controller, run_id: str = "123456789") -> dict:
     return json.loads(proc.stdout)
 
 
+def cel_env_names_unique(env: list[dict]) -> bool:
+    """Python mirror of the VAP env-name uniqueness CEL expression semantics.
+
+    The policy expresses "env names must be unique" as
+    ``c.env.all(e1, c.env.exists_one(e2, e2.name == e1.name))`` -- every env
+    entry has exactly one same-named entry, which holds iff the names are
+    pairwise unique (an empty env passes vacuously). The tests assert the CEL
+    text itself; this mirror pins the semantics so a rewrite that keeps the
+    text but changes meaning is caught, and duplicate envs (including
+    byte-identical entries) stay denied.
+    """
+    names = [e["name"] for e in env]
+    return all(names.count(name) == 1 for name in names)
+
+
 @unittest.skipIf(yaml is None, "PyYAML not available")
 class PolicyManifestTest(unittest.TestCase):
     def test_namespace_is_psa_restricted(self) -> None:
@@ -321,9 +336,13 @@ class PolicyManifestTest(unittest.TestCase):
         allowlist = "[" + ",".join(f"'{n}'" for n in expected_names) + "]"
         self.assertIn(allowlist, expressions)
         self.assertIn(f"c.env.size() == {len(expected_names)}", expressions)
-        # Duplicate env entries are rejected structurally (distinct check).
+        # Duplicate env entries are rejected by the K8s 1.34-safe uniqueness
+        # check (nested core macros all + exists_one). The distinct() list
+        # macro is undeclared in the Kubernetes CEL environment (ACK v1.34.1
+        # dry-run: "undeclared reference to distinct") and must never be used.
+        self.assertNotIn(".distinct(", expressions)
         self.assertIn(
-            "c.env.map(e, e.name).distinct().size() == c.env.size()", expressions
+            "c.env.all(e1, c.env.exists_one(e2, e2.name == e1.name))", expressions
         )
         # Fixed path values.
         for name, value in controller.POD_ENV:
@@ -347,6 +366,69 @@ class PolicyManifestTest(unittest.TestCase):
                 f"e.name == '{name}' && {bounded[name]}", expressions,
                 f"missing bounded env format for {name}",
             )
+
+    def test_no_cel_distinct_macro_anywhere_in_policies(self) -> None:
+        """K8s 1.34 CEL does not declare the list distinct() macro: it comes
+        from the cel-go lists extension that Kubernetes never registers, so any
+        expression using it fails server-side compilation (exactly what the ACK
+        v1.34.1 dry-run hit on the env-uniqueness check). No expression in any
+        of the three policies may use it."""
+        docs = load_all(ACK_DIR / "validatingadmissionpolicy.yaml")
+        expressions = [
+            v["expression"]
+            for doc in docs
+            for v in doc["spec"]["validations"]
+        ]
+        for expression in expressions:
+            self.assertNotIn(
+                ".distinct(", expression,
+                f"undeclared .distinct( macro found in expression: {expression}",
+            )
+
+    def test_workload_vap_env_uniqueness_keeps_duplicates_denied(self) -> None:
+        """The env-name uniqueness check must be the K8s 1.34-safe nested
+        core-macro form, and its semantics must keep duplicate env names
+        denied (fail-closed).
+
+        Semantic pin: cel_env_names_unique() mirrors the exact CEL text
+        asserted below (c.env.all(e1, c.env.exists_one(e2, e2.name ==
+        e1.name))) -- every env entry has exactly one same-named entry, i.e.
+        pairwise-unique names. The canonical 16-entry env passes; a name
+        appearing twice fails, including byte-identical duplicate entries
+        (which a naive e2 != e1 self-exclusion would wrongly let through);
+        an empty env passes vacuously but is independently denied by the
+        c.env.size() == 16 validation, so the policy stays fail-closed
+        overall.
+        """
+        controller = load_controller()
+        doc = next(
+            d
+            for d in load_all(ACK_DIR / "validatingadmissionpolicy.yaml")
+            if d["metadata"]["name"] == "query-regression-workload"
+        )
+        expressions = "\n".join(v["expression"] for v in doc["spec"]["validations"])
+        self.assertIn(
+            "c.env.all(e1, c.env.exists_one(e2, e2.name == e1.name))", expressions
+        )
+        self.assertNotIn(".distinct(", expressions)
+        canonical = [
+            {"name": name, "value": ""} for name in controller.PASSTHROUGH_ENV
+        ] + [
+            {"name": name, "value": value} for name, value in controller.POD_ENV
+        ]
+        self.assertEqual(len(canonical), 16)
+        self.assertTrue(cel_env_names_unique(canonical))
+        # Byte-identical duplicate entry: still denied (exists_one counts it).
+        duplicated = canonical + [dict(canonical[0])]
+        self.assertFalse(cel_env_names_unique(duplicated))
+        # Same name, different value: also denied.
+        renamed = list(canonical)
+        renamed[1] = {"name": canonical[0]["name"], "value": "different"}
+        self.assertFalse(cel_env_names_unique(renamed))
+        # Vacuous truth on an empty env; the size() == 16 validation (asserted
+        # by test_workload_vap_env_contract_matches_controller_constants) is
+        # what denies an empty/missing env, keeping the policy fail-closed.
+        self.assertTrue(cel_env_names_unique([]))
 
     def test_pods_vap_denies_direct_pods(self) -> None:
         doc = next(

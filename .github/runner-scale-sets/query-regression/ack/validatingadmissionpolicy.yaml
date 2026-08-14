@@ -17,6 +17,11 @@
 #    schemas and must never be used.
 #  * has() must guard every optional message field before it is dereferenced
 #    (e.g. securityContext, resources, volumes, initContainers, valueFrom).
+#  * The list distinct() macro (cel-go lists extension) is NOT declared in the
+#    Kubernetes CEL environment and fails server-side compilation (ACK v1.34.1
+#    dry-run flagged it). Dedup/uniqueness must be expressed with nested core
+#    macros only -- e.g. the env-name uniqueness check below uses
+#    all + exists_one, which compile on every Kubernetes release.
 #
 # Threat model: assume the controller credential is stolen. These policies cap
 # what that credential can do to exactly one conforming benchmark Job/pod in
@@ -115,7 +120,7 @@ spec:
       message: "env must contain exactly the 16 canonical entries"
     - expression: |-
         object.spec.template.spec.containers.all(c,
-          c.env.map(e, e.name).distinct().size() == c.env.size())
+          c.env.all(e1, c.env.exists_one(e2, e2.name == e1.name)))
       message: "env names must be unique (no duplicates)"
     - expression: |-
         object.spec.template.spec.containers.all(c,
