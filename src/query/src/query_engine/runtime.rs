@@ -16,9 +16,11 @@ use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionConfig;
+use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
+use datafusion_common::config::SpillCompression;
 
-use crate::options::QueryOptions;
+use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
 use crate::query_engine::state::MetricsMemoryPool;
 
 /// Reference-counted query runtime provider.
@@ -67,14 +69,67 @@ pub struct DefaultQueryRuntimeProvider;
 impl DefaultQueryRuntimeProvider {
     /// Creates a default DataFusion runtime environment builder.
     pub fn runtime_env_builder(ctx: QueryRuntimeContext<'_>) -> RuntimeEnvBuilder {
+        let mut builder = RuntimeEnvBuilder::new();
+
+        // Attach the bounded metrics memory pool only when a limit is set
+        // (>0). When unbounded (0), keep the DataFusion default
+        // (UnboundedMemoryPool).
         if ctx.resolved_memory_pool_size > 0 {
-            RuntimeEnvBuilder::new().with_memory_pool(Arc::new(MetricsMemoryPool::new(
+            builder = builder.with_memory_pool(Arc::new(MetricsMemoryPool::new(
                 ctx.resolved_memory_pool_size,
-            )))
-        } else {
-            RuntimeEnvBuilder::new()
+                ctx.query_options.experimental_memory_pool_policy,
+            )));
+        }
+
+        match ctx.query_options.experimental_spill_mode {
+            QuerySpillMode::Default => {
+                // No custom disk manager; preserve DataFusion default OS temp directory.
+            }
+            QuerySpillMode::Custom => {
+                let mut dm_builder = DiskManagerBuilder::default();
+                if let Some(ref path) = ctx.query_options.experimental_spill_path {
+                    dm_builder =
+                        dm_builder.with_mode(DiskManagerMode::Directories(vec![path.clone()]));
+                }
+                dm_builder = dm_builder.with_max_temp_directory_size(
+                    ctx.query_options
+                        .experimental_spill_max_temp_directory_size
+                        .as_bytes(),
+                );
+                builder = builder.with_disk_manager_builder(dm_builder);
+            }
+            QuerySpillMode::Disabled => {
+                let dm_builder = DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled);
+                builder = builder.with_disk_manager_builder(dm_builder);
+            }
+        }
+
+        builder
+    }
+}
+
+impl QueryRuntimeProvider for DefaultQueryRuntimeProvider {
+    fn configure_session_config(&self, ctx: QueryRuntimeContext<'_>, config: &mut SessionConfig) {
+        // Set spill compression on the session config only when spill mode is
+        // Custom. In Default/Disabled modes, DataFusion's own default
+        // (Uncompressed) is preserved—setting compression when spill is not
+        // explicitly configured would be misleading.
+        if ctx.query_options.experimental_spill_mode == QuerySpillMode::Custom {
+            config.options_mut().execution.spill_compression =
+                spill_compression_from_options(ctx.query_options.experimental_spill_compression);
         }
     }
 }
 
-impl QueryRuntimeProvider for DefaultQueryRuntimeProvider {}
+/// Map [`QuerySpillCompression`] to DataFusion's [`SpillCompression`].
+///
+/// This conversion is intentionally not a `From` impl because the
+/// semantics depend on the spill mode; callers should only invoke
+/// this when `experimental_spill_mode == Custom`.
+fn spill_compression_from_options(comp: QuerySpillCompression) -> SpillCompression {
+    match comp {
+        QuerySpillCompression::Uncompressed => SpillCompression::Uncompressed,
+        QuerySpillCompression::Lz4Frame => SpillCompression::Lz4Frame,
+        QuerySpillCompression::Zstd => SpillCompression::Zstd,
+    }
+}
