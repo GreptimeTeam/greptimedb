@@ -869,16 +869,35 @@ mod tests {
         );
         let engine = create_timestamp_test_engine().await;
 
-        for (sql, expected_timestamp) in [
+        for (sql, expected_timestamps) in [
             (
                 "INSERT INTO timestamps (ts, st) \
                  VALUES ('2026-08-02 12:00:00.001', now())",
-                1_785_643_200_001_i64,
+                &[1_785_643_200_001_i64][..],
             ),
             (
                 "INSERT INTO timestamps (ts, st) \
                  SELECT '2026-08-03 12:00:00.001', now()",
-                1_785_729_600_001_i64,
+                &[1_785_729_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-04 12:00:00.001', now() LIMIT 1",
+                &[1_785_816_000_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT * FROM (\
+                     SELECT '2026-08-05 12:00:00.001', now()\
+                 ) AS source",
+                &[1_785_902_400_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-06 12:00:00.001', now() \
+                 UNION ALL \
+                 SELECT '2026-08-07 12:00:00.001', now()",
+                &[1_785_988_800_001_i64, 1_786_075_200_001_i64][..],
             ),
         ] {
             let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
@@ -890,11 +909,68 @@ mod tests {
                 .display_indent()
                 .to_string();
 
-            assert!(
-                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
-                "{plan}"
-            );
+            for expected_timestamp in expected_timestamps {
+                assert!(
+                    plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                    "{plan}"
+                );
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn test_insert_explicit_timestamp_cast_keeps_datafusion_semantics() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        let sql = "INSERT INTO timestamps (ts, st) \
+                   VALUES (CAST('2026-08-08 12:00:00.001' AS TIMESTAMP), now())";
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .unwrap()
+            .display_indent()
+            .to_string();
+
+        assert!(
+            plan.contains("arrow_cast(Utf8(\"2026-08-08 12:00:00.001\")"),
+            "{plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_mixed_union_keeps_source_coercion() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        let sql = "INSERT INTO timestamps (ts, st) \
+                   SELECT '2026-08-10 12:00:00.001', now() \
+                   UNION ALL \
+                   SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now()";
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .unwrap()
+            .display_indent_schema()
+            .to_string();
+        assert!(
+            !plan.contains("TimestampMillisecond(1786334400001, None)"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("arrow_cast(Utf8(\"2026-08-11 12:00:00.001\")"),
+            "{plan}"
+        );
     }
 
     #[tokio::test]
