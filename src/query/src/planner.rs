@@ -979,8 +979,7 @@ mod tests {
         );
         let engine = create_timestamp_test_engine().await;
 
-        // Converting the shared source column in place would retype `note` to a
-        // timestamp and truncate `ts_ns` to the millisecond precision of `ts`.
+        // Rewriting `c` in place would also retype `note` and truncate `ts_ns`.
         for (sql, expected) in [
             (
                 "INSERT INTO timestamps (ts, note) SELECT a, b FROM (\

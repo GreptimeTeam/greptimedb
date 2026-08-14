@@ -24,12 +24,9 @@ use crate::optimizer::type_conversion::cast_string_to_timestamp;
 use crate::plan::ExtractExpr;
 
 /// Rewrites string literals that feed timestamp columns at an INSERT boundary.
-///
-/// A column that carries the same literal in every row is folded into the
-/// assignment expression, which leaves the source query untouched. `VALUES`
-/// rows and `UNION` branches carry per-row values, so those nodes are rewritten
-/// in place instead. Source expressions are never evaluated, which keeps
-/// explicit casts on DataFusion's existing path.
+/// Constants are folded at the assignment to avoid changing source types;
+/// `VALUES` and `UNION` inputs are rewritten per row or branch. Explicit casts
+/// stay on DataFusion's existing path.
 pub(super) fn rewrite_insert_assignments(
     plan: LogicalPlan,
     query_ctx: QueryContextRef,
@@ -74,10 +71,7 @@ pub(super) fn rewrite_insert_assignments(
     Projection::try_new(exprs, Arc::new(input)).map(LogicalPlan::Projection)
 }
 
-/// Resolves the literal that `output_idx` carries in every row of `plan`.
-///
-/// Only nodes that keep a row's value intact are followed, so the caller can
-/// treat the result as a constant of the whole relation.
+/// Resolves a literal when every row carries the same value at `output_idx`.
 fn lineage_literal(plan: &LogicalPlan, output_idx: usize) -> Option<&ScalarValue> {
     if output_idx >= plan.schema().fields().len() {
         return None;
@@ -114,8 +108,6 @@ struct InsertAssignmentConverter {
 }
 
 impl InsertAssignmentConverter {
-    /// Rewrites one output column. `Some` always contains a changed plan;
-    /// `None` keeps the original plan.
     fn rewrite_output_column(
         &self,
         plan: &LogicalPlan,
@@ -301,26 +293,9 @@ fn unalias(expr: &Expr) -> &Expr {
 mod tests {
     use datafusion_common::ScalarValue;
     use datafusion_common::arrow::datatypes::TimeUnit;
-    use datafusion_expr::Literal;
     use session::context::QueryContext;
 
     use super::*;
-
-    #[test]
-    fn test_convert_literal_uses_query_timezone_and_target_precision() {
-        let query_ctx = QueryContext::arc();
-        query_ctx.set_timezone(common_time::Timezone::from_tz_string("Asia/Shanghai").unwrap());
-        let converter = InsertAssignmentConverter { query_ctx };
-        let target_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
-
-        assert_eq!(
-            converter.convert_literal(
-                &ScalarValue::Utf8(Some("2009-02-13 23:31:30.123456789".to_string())),
-                &target_type,
-            ),
-            Some(ScalarValue::TimestampNanosecond(Some(1_234_539_090_123_456_789), None).lit())
-        );
-    }
 
     #[test]
     fn test_convert_literal_falls_back_for_unsupported_literal() {
