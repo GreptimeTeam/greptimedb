@@ -17,6 +17,13 @@
 #    schemas and must never be used.
 #  * has() must guard every optional message field before it is dereferenced
 #    (e.g. securityContext, resources, volumes, initContainers, valueFrom).
+#  * requests/limits under container resources are optional map fields too:
+#    has(c.resources) alone does not make c.resources.requests.cpu
+#    type-checkable -- ACK v1.34.1 typeChecking flags unguarded requests/
+#    limits access as undefined-field. Guard each level (has(c.resources.
+#    requests), has(c.resources.limits)) before any access, then pin
+#    size() == 3 plus the exact keys/values; 'key' in <map> is the
+#    API-server-acceptable presence check for map entries.
 #  * The list distinct() macro (cel-go lists extension) is NOT declared in the
 #    Kubernetes CEL environment and fails server-side compilation (ACK v1.34.1
 #    dry-run flagged it). Dedup/uniqueness must be expressed with nested core
@@ -162,10 +169,14 @@ spec:
     - expression: |-
         object.spec.template.spec.containers.all(c,
           has(c.resources) &&
-          c.resources.requests.cpu == '4' && c.resources.requests.memory == '12Gi' &&
-          c.resources.requests['ephemeral-storage'] == '20Gi' &&
-          c.resources.limits.cpu == '8' && c.resources.limits.memory == '16Gi' &&
-          c.resources.limits['ephemeral-storage'] == '40Gi')
+          has(c.resources.requests) && c.resources.requests.size() == 3 &&
+          has(c.resources.limits) && c.resources.limits.size() == 3 &&
+          'cpu' in c.resources.requests && c.resources.requests.cpu == '4' &&
+          'memory' in c.resources.requests && c.resources.requests.memory == '12Gi' &&
+          'ephemeral-storage' in c.resources.requests && c.resources.requests['ephemeral-storage'] == '20Gi' &&
+          'cpu' in c.resources.limits && c.resources.limits.cpu == '8' &&
+          'memory' in c.resources.limits && c.resources.limits.memory == '16Gi' &&
+          'ephemeral-storage' in c.resources.limits && c.resources.limits['ephemeral-storage'] == '40Gi')
       message: "resources must be exactly the benchmark contract"
     - expression: |-
         has(object.spec.template.spec.nodeSelector) &&

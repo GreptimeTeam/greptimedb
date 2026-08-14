@@ -32,6 +32,12 @@ and asserts the security properties without contacting any cluster:
   ["Deny", "Audit"] (never Deny+Warn), and the exec policy targets the
   PodExecOptions object (request.namespace/request.name + object.container/
   command/tty/stdin/stdout/stderr) with no parent-Pod metadata;
+* resources contract: requests/limits are optional map fields and must be
+  has()-guarded (has(c.resources.requests), has(c.resources.limits)) before
+  any access (ACK v1.34.1 typeChecking flags unguarded access as
+  undefined-field), with size() == 3 and exact cpu/memory/ephemeral-storage
+  keys+values on both maps, plus the missing/extra mutation semantics
+  mirror;
 * scheduling bypass/control field rejections (nodeName, suspend,
   schedulerName, priorityClassName, priority, affinity, schedulingGates);
 * structural sync between the VAP allowlists and the trusted controller's
@@ -143,6 +149,42 @@ def cel_env_names_unique(env: list[dict]) -> bool:
     """
     names = [e["name"] for e in env]
     return all(names.count(name) == 1 for name in names)
+
+
+# The exact benchmark resources contract (must equal the controller-rendered
+# Job manifest and the CEL values pinned in the tests below; a drift in any
+# of the three is a test failure).
+RESOURCE_CONTRACT = {
+    "requests": {"cpu": "4", "memory": "12Gi", "ephemeral-storage": "20Gi"},
+    "limits": {"cpu": "8", "memory": "16Gi", "ephemeral-storage": "40Gi"},
+}
+
+
+def cel_resources_conform(container: dict) -> bool:
+    """Python mirror of the VAP resources CEL expression semantics.
+
+    Mirrors the exact chain in the policy: has(c.resources) &&
+    has(c.resources.requests) && requests.size() == 3 &&
+    has(c.resources.limits) && limits.size() == 3, then the
+    'key' in <map> && <map>[key] == value membership+value checks for
+    cpu/memory/ephemeral-storage in both maps. The combination is airtight:
+    a missing key fails the membership check, a renamed key fails it too, an
+    extra key pushes the size past 3, and a wrong value fails the equality
+    check -- so each map must be exactly the three canonical entries. The
+    tests assert the CEL text itself; this mirror pins the semantics so a
+    rewrite that keeps the text but changes meaning is caught.
+    """
+    resources = container.get("resources")
+    if not isinstance(resources, dict):
+        return False
+    for side in ("requests", "limits"):
+        resource_map = resources.get(side)
+        if not isinstance(resource_map, dict) or len(resource_map) != 3:
+            return False
+        for key, expected in RESOURCE_CONTRACT[side].items():
+            if key not in resource_map or resource_map[key] != expected:
+                return False
+    return True
 
 
 @unittest.skipIf(yaml is None, "PyYAML not available")
@@ -429,6 +471,111 @@ class PolicyManifestTest(unittest.TestCase):
         # by test_workload_vap_env_contract_matches_controller_constants) is
         # what denies an empty/missing env, keeping the policy fail-closed.
         self.assertTrue(cel_env_names_unique([]))
+
+    def test_workload_vap_resources_contract_is_guarded_and_exact(self) -> None:
+        """The resources validation must be typed-CEL-safe on ACK v1.34.1 and
+        pin the exact benchmark contract.
+
+        ACK v1.34.1 type checking flags unguarded access to the optional
+        requests/limits map fields under c.resources as undefined-field:
+        has(c.resources) alone does not make c.resources.requests.cpu
+        type-checkable because requests/limits are themselves optional. The
+        fixed expression guards each optional level in one && chain --
+        has(c.resources), has(c.resources.requests), has(c.resources.limits)
+        -- with the guard state propagating left-to-right through the chain
+        (the same pattern the securityContext/volumes checks in this policy
+        already use) -- then pins size() == 3 on each map and the exact
+        cpu/memory/ephemeral-storage membership+value pairs ('key' in <map>
+        is the API-server-acceptable presence check for map entries).
+        size() == 3 plus the three membership+value checks is airtight: a
+        missing key fails the membership check, a renamed key fails it too,
+        an extra key pushes the size past 3, and a wrong value fails the
+        equality check, so strictly no extra resource key can pass.
+        """
+        doc = next(
+            d
+            for d in load_all(ACK_DIR / "validatingadmissionpolicy.yaml")
+            if d["metadata"]["name"] == "query-regression-workload"
+        )
+        resource_expr = next(
+            v["expression"]
+            for v in doc["spec"]["validations"]
+            if "has(c.resources)" in v["expression"]
+        )
+        for needle in (
+            # Optional-field guards: each has() precedes every access of the
+            # guarded field within the same && chain.
+            "has(c.resources) &&",
+            "has(c.resources.requests) && c.resources.requests.size() == 3",
+            "has(c.resources.limits) && c.resources.limits.size() == 3",
+            # Exact keys + values for both maps (size()==3 + these three
+            # membership+value pairs forbid any extra/renamed/missing key).
+            "'cpu' in c.resources.requests && c.resources.requests.cpu == '4'",
+            "'memory' in c.resources.requests && c.resources.requests.memory == '12Gi'",
+            "'ephemeral-storage' in c.resources.requests && c.resources.requests['ephemeral-storage'] == '20Gi'",
+            "'cpu' in c.resources.limits && c.resources.limits.cpu == '8'",
+            "'memory' in c.resources.limits && c.resources.limits.memory == '16Gi'",
+            "'ephemeral-storage' in c.resources.limits && c.resources.limits['ephemeral-storage'] == '40Gi'",
+        ):
+            self.assertIn(needle, resource_expr, f"resources CEL missing: {needle}")
+        # The old unguarded shape (requests/limits dereferenced directly after
+        # has(c.resources)) must be gone from the whole workload policy.
+        expressions = "\n".join(v["expression"] for v in doc["spec"]["validations"])
+        self.assertNotIn("has(c.resources) && c.resources.requests", expressions)
+        self.assertNotIn(".distinct(", resource_expr)
+
+    def test_workload_vap_resources_missing_extra_mutation_semantics(self) -> None:
+        """Resources mutations (missing/extra/renamed/wrong-value keys) must
+        fail closed, mirroring the exact CEL semantics.
+
+        cel_resources_conform() mirrors the policy's resources expression
+        (guards + size() == 3 + membership/value checks) so a rewrite that
+        keeps the CEL text but changes meaning is caught. The canonical
+        controller-rendered resources pass; every mutation -- missing
+        resources/requests/limits, an extra key in either map, a renamed key,
+        a missing canonical key, a wrong value, and empty maps -- fails.
+        RESOURCE_CONTRACT is additionally pinned against the controller-
+        rendered manifest, so the CEL text (asserted in
+        test_workload_vap_resources_contract_is_guarded_and_exact), the
+        mirror, and the controller cannot drift apart.
+        """
+        controller = load_controller()
+        rendered = render_manifest(controller)["spec"]["template"]["spec"]["containers"][0]["resources"]
+        self.assertEqual(rendered, RESOURCE_CONTRACT)
+
+        def canonical() -> dict:
+            return {
+                "resources": {
+                    side: dict(entries) for side, entries in RESOURCE_CONTRACT.items()
+                }
+            }
+
+        self.assertTrue(cel_resources_conform(canonical()))
+        # Missing resources / requests / limits.
+        self.assertFalse(cel_resources_conform({}))
+        self.assertFalse(cel_resources_conform({"resources": {"limits": dict(RESOURCE_CONTRACT["limits"])}}))
+        self.assertFalse(cel_resources_conform({"resources": {"requests": dict(RESOURCE_CONTRACT["requests"])}}))
+        # Extra key in either map (size() == 3 must fail closed).
+        extra_requests = canonical()
+        extra_requests["resources"]["requests"]["hugepages-2Mi"] = "1Gi"
+        self.assertFalse(cel_resources_conform(extra_requests))
+        extra_limits = canonical()
+        extra_limits["resources"]["limits"]["hugepages-2Mi"] = "1Gi"
+        self.assertFalse(cel_resources_conform(extra_limits))
+        # Renamed key (same size, membership check must fail closed).
+        renamed = canonical()
+        renamed["resources"]["requests"]["cpus"] = renamed["resources"]["requests"].pop("cpu")
+        self.assertFalse(cel_resources_conform(renamed))
+        # Missing canonical key.
+        missing_key = canonical()
+        del missing_key["resources"]["requests"]["memory"]
+        self.assertFalse(cel_resources_conform(missing_key))
+        # Wrong value.
+        wrong_value = canonical()
+        wrong_value["resources"]["limits"]["cpu"] = "16"
+        self.assertFalse(cel_resources_conform(wrong_value))
+        # Empty maps.
+        self.assertFalse(cel_resources_conform({"resources": {"requests": {}, "limits": {}}}))
 
     def test_pods_vap_denies_direct_pods(self) -> None:
         doc = next(
