@@ -284,10 +284,6 @@ pub struct FileMeta {
     pub primary_key_max: Option<Bytes>,
     /// Whether the file preserves per-row sequence numbers usable for exact
     /// row-level sequence filtering.
-    ///
-    /// Set when the file is written by a flush or compaction of a region with
-    /// `preserve_row_sequence` enabled (append-only tables). Absent
-    /// or `false` in legacy files, which must not be row-level sequence filtered.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
 }
