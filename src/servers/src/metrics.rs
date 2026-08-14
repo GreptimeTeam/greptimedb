@@ -44,6 +44,7 @@ pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
 pub(crate) const METRIC_RESULT_LABEL: &str = "result";
+pub(crate) const METRIC_VERSION_LABEL: &str = "version";
 
 pub(crate) const METRIC_SUCCESS_VALUE: &str = "success";
 pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
@@ -100,39 +101,33 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    /// Http prometheus write duration per database.
+    /// Http prometheus write duration per database and remote write protocol version.
     pub static ref METRIC_HTTP_PROM_STORE_WRITE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_write_elapsed",
         "servers http prometheus write elapsed",
-        &[METRIC_DB_LABEL],
+        &[METRIC_DB_LABEL, METRIC_VERSION_LABEL],
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
-    /// Prometheus remote write codec duration.
+    /// Prometheus remote write codec duration per protocol version.
     pub static ref METRIC_HTTP_PROM_STORE_CODEC_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_codec_elapsed",
         "servers http prometheus request codec duration",
-        &["type"],
+        &["type", METRIC_VERSION_LABEL],
     )
     .unwrap();
-    /// Decode duration of prometheus write request.
-    pub static ref METRIC_HTTP_PROM_STORE_DECODE_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
-        .with_label_values(&["decode"]);
-    /// Duration to convert prometheus write request to gRPC request.
-    pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
-        .with_label_values(&["convert"]);
-    /// The samples count of Prometheus remote write.
+    /// The samples count of Prometheus remote write per protocol version.
     pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_samples",
         "frontend prometheus remote write samples",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
     )
     .unwrap();
-    /// The native histograms count of Prometheus remote write.
+    /// The native histograms count of Prometheus remote write per protocol version.
     pub static ref PROM_STORE_REMOTE_WRITE_HISTOGRAMS: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_histograms",
         "frontend prometheus remote write native histograms",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
     )
     .unwrap();
     pub static ref PENDING_BATCHES: IntGauge = register_int_gauge!(
