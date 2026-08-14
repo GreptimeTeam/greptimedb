@@ -132,7 +132,7 @@ Compatibility is per protocol, and query-side coverage is narrower than ingestio
 
 Cluster deployment, object storage, the Flow engine, and every ingestion protocol listed above are in the Apache-2.0 build. Repartitioning, region migration, and index creation are manual operations there.
 
-**Read replicas, workload isolation, automated repartitioning and region balancing, RBAC/LDAP, audit logging, and Elasticsearch QueryDSL compatibility are GreptimeDB Enterprise features.** See [pricing](https://www.greptime.com/pricing#differences) for the full edition comparison.
+Read replicas, workload isolation, and automated repartitioning are **GreptimeDB Enterprise** features, along with enterprise security and governance. The [Enterprise overview](https://docs.greptime.com/enterprise/overview/) has the current list, and [pricing](https://www.greptime.com/pricing#differences) has the edition comparison.
 
 ## Architecture
 
@@ -252,8 +252,8 @@ that license carry an explicit Enterprise License header.
 ## Commercial Support
 
 Scaling observability on your infrastructure?
-GreptimeDB Enterprise adds workload isolation, read replicas, automated repartitioning,
-security and governance, and SLA-backed support.
+[GreptimeDB Enterprise](https://docs.greptime.com/enterprise/overview/) adds the operational,
+security, and support layer for production deployments.
 [Contact us](https://greptime.com/contactus) for details.
 
 ## Contributing
