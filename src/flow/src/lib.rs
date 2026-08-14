@@ -38,6 +38,14 @@ mod server;
 mod transform;
 mod utils;
 
+// Re-export the reserved checkpoint-persistence contract so internal
+// producers of the sink state schema (e.g. the enterprise incremental flow
+// state table) can reference the exact epoch column name and sentinel window
+// timestamp without duplicating literals. The definitions themselves live in
+// the private `batching_mode` module; see its docs for the sentinel safety
+// caveat.
+pub use batching_mode::{CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS, INTERNAL_FLOW_EPOCH_COL_NAME};
+
 #[cfg(test)]
 mod test_utils;
 
