@@ -988,7 +988,10 @@ mod tests {
                          SELECT '2026-08-12 12:00:00.001' AS c\
                      ) AS t1\
                  ) AS t2",
-                &["TimestampMillisecond(1786507200001, None)", "note:Utf8"][..],
+                &[
+                    "TimestampMillisecond(1786507200001, None)",
+                    "[a:Utf8, b:Utf8]",
+                ][..],
             ),
             (
                 "INSERT INTO timestamps (ts, ts_ns) SELECT a, b FROM (\
