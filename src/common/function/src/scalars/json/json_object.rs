@@ -28,7 +28,8 @@ const NAME: &str = "json_object";
 /// Builds a `JSONB` object from interleaved `(key, value, key, value, ...)`
 /// arguments, like MySQL's `JSON_OBJECT`; called with no arguments it returns
 /// `{}`. Values are written into the binary directly, so they need no JSON
-/// text escaping. Keys must be non-NULL strings; values may be strings,
+/// text escaping. Keys must be non-NULL and are converted to strings (so a
+/// numeric key like `1` becomes `"1"`, as in MySQL); values may be strings,
 /// integers, floats, booleans, or NULL (rendered as JSON null). Other types —
 /// including decimals, which JSONB numbers cannot represent exactly — are
 /// rejected; cast them explicitly. A duplicate key keeps the last value.
@@ -137,7 +138,7 @@ impl Function for JsonObjectFunction {
             .map(|pair| {
                 let keys = compute::cast(&pair[0], &DataType::Utf8View).map_err(|_| {
                     DataFusionError::Execution(format!(
-                        "{NAME} expects string keys, got {}",
+                        "{NAME} cannot convert keys of type {} to string",
                         pair[0].data_type()
                     ))
                 })?;
@@ -207,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_objects_from_mixed_types_without_escaping() {
+    fn test_builds_objects_from_mixed_types_without_escaping() {
         let texts = invoke(
             vec![
                 key("host"),
@@ -235,12 +236,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_call_builds_one_empty_object_per_row() {
+    fn test_empty_call_builds_one_empty_object_per_row() {
         assert_eq!(invoke(vec![], 3).unwrap(), vec!["{}", "{}", "{}"]);
     }
 
     #[test]
-    fn rejects_odd_arguments_null_keys_and_unsupported_values() {
+    fn test_numeric_key_converts_to_string() {
+        let texts = invoke(
+            vec![
+                ColumnarValue::Scalar(datafusion_common::ScalarValue::Int64(Some(7))),
+                key("v"),
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(texts, vec![r#"{"7":"v"}"#]);
+    }
+
+    #[test]
+    fn test_rejects_odd_arguments_null_keys_and_unsupported_values() {
         let err = invoke(vec![key("a")], 1).unwrap_err();
         assert!(err.to_string().contains("(key, value) argument pairs"));
 
