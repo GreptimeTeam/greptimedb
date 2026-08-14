@@ -31,7 +31,6 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::functions::{NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -298,21 +297,6 @@ impl Categorizer {
     }
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
-        let has_annotated_histogram_helper = expr
-            .exists(|expr| {
-                Ok(matches!(
-                    expr,
-                    Expr::ScalarFunction(udf)
-                        if udf.name() == NativeHistogramQuantile::name()
-                            || udf.name() == NativeHistogramFraction::name()
-                            || NativeHistogramDrop::is_annotation_udf(udf.name())
-                ))
-            })
-            .unwrap_or(true);
-        if has_annotated_histogram_helper {
-            return Commutativity::NonCommutative;
-        }
-
         #[allow(deprecated)]
         match expr {
             Expr::Column(_)
@@ -331,6 +315,8 @@ impl Categorizer {
             | Expr::Exists(_)
             | Expr::InList(_)
             | Expr::Case(_) => Commutativity::Commutative,
+            // Annotation collection must not affect distribution. Keep scalar UDFs pushdownable;
+            // distributed annotations require a separate return path from datanodes.
             Expr::ScalarFunction(_) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
@@ -394,6 +380,9 @@ mod tests {
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_functions::core::coalesce;
+    use promql::functions::{
+        NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
+    };
 
     use super::*;
 
@@ -416,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn annotated_histogram_helpers_stay_on_frontend() {
+    fn annotated_histogram_helpers_do_not_block_pushdown() {
         for udf in [
             NativeHistogramQuantile::scalar_udf(),
             NativeHistogramFraction::scalar_udf(),
@@ -426,7 +415,7 @@ mod tests {
             let expr = Expr::ScalarFunction(ScalarFunction::new_udf(coalesce(), vec![helper]));
             assert!(matches!(
                 Categorizer::check_expr(&expr),
-                Commutativity::NonCommutative
+                Commutativity::Commutative
             ));
         }
     }

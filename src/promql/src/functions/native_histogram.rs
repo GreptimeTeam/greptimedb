@@ -226,13 +226,6 @@ impl NativeHistogramDrop {
         "prom_native_histogram_keep_bool"
     }
 
-    /// Returns whether `name` identifies a collector-backed annotation UDF.
-    pub fn is_annotation_udf(name: &str) -> bool {
-        name == Self::float_null_name()
-            || name == Self::bool_false_name()
-            || name == Self::bool_true_name()
-    }
-
     pub fn float_null_udf(
         message: String,
         collector: Option<PromqlAnnotationCollector>,
