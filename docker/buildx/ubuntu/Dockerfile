@@ -1,8 +1,8 @@
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
-ARG CARGO_PROFILE
-ARG FEATURES
-ARG OUTPUT_DIR
+ARG CARGO_PROFILE=debug
+ARG FEATURES=
+ARG OUTPUT_DIR=debug
 
 ENV LANG=en_US.utf8
 WORKDIR /greptimedb
@@ -35,7 +35,7 @@ RUN --mount=target=. \
 
 # Export the binary to the clean image.
 # TODO(zyy17): Maybe should use the more secure container image.
-FROM ubuntu:22.04 AS base
+FROM ubuntu:24.04 AS base
 
 ARG OUTPUT_DIR
 
