@@ -89,14 +89,20 @@ impl FlatBatchConverter {
     }
 }
 
+/// Result of splitting a batch at the next series boundary.
 enum SeriesBoundarySplit {
+    /// The whole batch belongs to the current series and stays in the current file.
     Continue(RecordBatch),
+    /// The batch crosses a series boundary.
     Split {
+        /// Remaining rows of the current series, appended to the current file.
         current_file_tail: Option<RecordBatch>,
+        /// Rows of the following series that start the next file.
         next_file_head: RecordBatch,
     },
 }
 
+/// Returns the dictionary keys and values of the encoded `__primary_key` column.
 fn encoded_primary_keys(batch: &RecordBatch) -> Result<(&UInt32Array, &BinaryArray)> {
     let column = batch.column(primary_key_column_index(batch.num_columns()));
     let primary_keys = column
@@ -121,6 +127,14 @@ fn encoded_primary_keys(batch: &RecordBatch) -> Result<(&UInt32Array, &BinaryArr
     Ok((primary_keys.keys(), values))
 }
 
+/// Splits `batch` at the first row whose encoded primary key differs from
+/// `current_primary_key`, the last primary key written to the current file.
+///
+/// The writer finishes an oversized file at such a series boundary so that the
+/// primary key ranges of output files never overlap, which allows pickers like
+/// TWCS to detect overlapping files by their time and primary key ranges. A
+/// series is never split in the middle: if no row starts a new series, the whole
+/// batch stays in the current file even if it already exceeds the size limit.
 fn split_at_next_series(
     batch: RecordBatch,
     current_primary_key: &[u8],
@@ -324,6 +338,13 @@ where
 
     /// Iterates FlatSource and writes all RecordBatch in flat format to Parquet file.
     ///
+    /// The source must yield batches globally sorted by the encoded primary key.
+    /// `opts.max_file_size` is a soft limit for regions with a primary key: the
+    /// current file is finished at the next series boundary after exceeding the
+    /// limit (see [split_at_next_series]), so a series larger than the limit
+    /// stays in one file. Regions without a primary key are split at batch
+    /// boundaries.
+    ///
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all_flat(
         &mut self,
@@ -358,6 +379,9 @@ where
     }
 
     /// Iterates FlatSource and writes all RecordBatch in primary-key format to Parquet file.
+    ///
+    /// The source must yield batches globally sorted by the encoded primary key.
+    /// See [Self::write_all_flat] for the `opts.max_file_size` semantics.
     ///
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all_flat_as_primary_key(
