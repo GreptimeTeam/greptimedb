@@ -1,0 +1,19 @@
+src/mito2/src/manifest/recovery.rs
+  s_8b303b46a38c84::t_07918fa03d4b33 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "137589d83800b11b5eb5f89ae305867fafbf664c",
+  "prompts": {},
+  "sessions": {
+    "s_8b303b46a38c84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea61-c84d-7091-8f30-ff6275e94ed9",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
