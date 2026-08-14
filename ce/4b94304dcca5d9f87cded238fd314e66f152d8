@@ -1,0 +1,26 @@
+src/mito2/src/manifest/tests/checkpoint.rs
+  s_8b303b46a38c84::t_1774dd1b607762 932,964-984,991,996-998
+  s_8b303b46a38c84::t_29739c29aff0b0 985-990
+  s_8b303b46a38c84::t_fe45d2de9ada62 992-995
+  s_8b303b46a38c84::t_fce66af086cad6 999-1001
+  s_8b303b46a38c84::t_cc8a53cf522612 1002-1007
+src/mito2/src/manifest/recovery.rs
+  s_8b303b46a38c84::t_985df47d7f0d5f 471-472
+  s_8b303b46a38c84::t_1774dd1b607762 474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "ce4b94304dcca5d9f87cded238fd314e66f152d8",
+  "prompts": {},
+  "sessions": {
+    "s_8b303b46a38c84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea61-c84d-7091-8f30-ff6275e94ed9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
