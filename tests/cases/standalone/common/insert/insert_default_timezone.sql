@@ -16,8 +16,26 @@ SELECT * FROM test2 ORDER BY j;
 
 SELECT * FROM test1 ORDER BY j;
 
+CREATE TABLE test3 (ts TIMESTAMP TIME INDEX, st TIMESTAMP, ts_ns TIMESTAMP(9));
+
+INSERT INTO test3 (ts) VALUES ('2026-08-01 12:00:00.001');
+
+INSERT INTO test3 (ts, st) VALUES ('2026-08-02 12:00:00.001', now());
+
+INSERT INTO test3 (ts, st) SELECT '2026-08-03 12:00:00.001', now();
+
+INSERT INTO test3 (ts, st, ts_ns) VALUES (
+    '2026-08-04 12:00:00.001',
+    now(),
+    '2026-08-04 12:00:00.123456789'
+);
+
+SELECT ts, ts_ns FROM test3 ORDER BY ts;
+
 SET time_zone = 'UTC';
 
 DROP TABLE test1;
 
 DROP TABLE test2;
+
+DROP TABLE test3;
