@@ -1304,15 +1304,16 @@ async fn trigger_migration_by_grpc(
     from_peer_id: u64,
     to_peer_id: u64,
 ) -> String {
-    let OutputData::RecordBatches(recordbatches) = database
+    let output = database
         .sql(format!(
             "admin migrate_region({region_id}, {from_peer_id}, {to_peer_id})"
         ))
         .await
-        .unwrap()
-        .data
-    else {
-        unreachable!();
+        .unwrap();
+    let recordbatches = match output.data {
+        OutputData::RecordBatches(recordbatches) => recordbatches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
     };
 
     let record_batch = &recordbatches.take()[0];
@@ -1462,12 +1463,22 @@ async fn check_region_migration_events_system_table(
         .await
         .remove(0);
 
-    let expected = "\
+    let expected = if actor == Some(PROCEDURE_ACTOR) {
+        "\
++---------------------------------+-----------------+-------------------+---------------------------------------+
+| region_migration_trigger_reason | procedure_state | procedure_trigger | event_context                         |
++---------------------------------+-----------------+-------------------+---------------------------------------+
+| Manual                          | Running         | Submitted         | {\"protocol\":\"grpc\",\"reason\":\"manual\"} |
+| Manual                          | Done            | Succeeded         |                                       |
++---------------------------------+-----------------+-------------------+---------------------------------------+"
+    } else {
+        "\
 +---------------------------------+-----------------+-------------------+---------------------+
 | region_migration_trigger_reason | procedure_state | procedure_trigger | event_context       |
 +---------------------------------+-----------------+-------------------+---------------------+
 | Manual                          | Running         | Submitted         | {\"reason\":\"manual\"} |
 | Manual                          | Done            | Succeeded         |                     |
-+---------------------------------+-----------------+-------------------+---------------------+";
++---------------------------------+-----------------+-------------------+---------------------+"
+    };
     check_output_stream(result.unwrap().data, expected).await;
 }
