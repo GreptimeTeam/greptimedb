@@ -43,8 +43,8 @@ use table::requests::{
 
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
-use crate::prom_remote_write::try_decompress;
 use crate::prom_remote_write::validation::validate_label_name;
+use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, try_decompress};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
@@ -128,7 +128,9 @@ pub(crate) fn decode_remote_write_v2(
     body: Bytes,
     native_histograms_enabled: bool,
 ) -> Result<RemoteWriteV2WriteRequests> {
-    let decode_timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
+    let decode_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["decode", REMOTE_WRITE_V2_VERSION])
+        .start_timer();
 
     // Match the v1 decoder's VictoriaMetrics fallback: some clients may send a
     // mismatched content-encoding header, so try the other compression on failure.
@@ -140,7 +142,9 @@ pub(crate) fn decode_remote_write_v2(
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
     drop(decode_timer);
 
-    let _convert_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+    let _convert_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["convert", REMOTE_WRITE_V2_VERSION])
+        .start_timer();
     convert_remote_write_v2(request, native_histograms_enabled)
 }
 
