@@ -41,9 +41,9 @@ use query::QueryEngineRef;
 use query::options::FLOW_INCREMENTAL_MODE;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
-use store_api::mito_engine_options::MERGE_MODE_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -248,19 +248,14 @@ struct ExecuteOnceOutcome {
     result: Result<Option<(usize, Duration)>, Error>,
 }
 
-/// True when `data_type` is a plain integer type (signed or unsigned).
-fn is_integer_type(data_type: &ConcreteDataType) -> bool {
-    matches!(
-        data_type,
-        ConcreteDataType::Int8(_)
-            | ConcreteDataType::Int16(_)
-            | ConcreteDataType::Int32(_)
-            | ConcreteDataType::Int64(_)
-            | ConcreteDataType::UInt8(_)
-            | ConcreteDataType::UInt16(_)
-            | ConcreteDataType::UInt32(_)
-            | ConcreteDataType::UInt64(_)
-    )
+/// True when the table options enable append mode (no upsert merge on the
+/// primary key). Checkpoint persistence requires a mito upsert sink: the
+/// singleton sentinel row must overwrite itself in place, so an append-mode
+/// sink fails closed.
+fn is_append_mode(options: &HashMap<String, String>) -> bool {
+    options
+        .get(APPEND_MODE_KEY)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 /// Returns a copy of the sink schema without the reserved internal epoch column
@@ -1696,9 +1691,17 @@ impl BatchingTask {
     }
 
     /// Upsert the singleton checkpoint row through the frontend write
-    /// machinery: one row whose window/time-index column is the sentinel, epoch
-    /// column is the cycle epoch, and the BINARY state column holds the encoded
-    /// versioned checkpoint record. Other sink columns are left to defaults.
+    /// machinery: one row whose logical key is `(typed NULL for every
+    /// primary-key/dimension column, sentinel window)`, epoch column is the
+    /// cycle epoch, and the BINARY state column holds the encoded versioned
+    /// checkpoint record. Other sink columns are left to defaults.
+    ///
+    /// Every primary-key column is projected explicitly as a typed NULL so the
+    /// canonical sentinel key never depends on omitted columns or defaults. The
+    /// write must affect exactly one row; anything else (a no-op append, a
+    /// duplicate, a failure) is returned as an error so the caller walks the
+    /// existing `CheckpointPersistFailure` fallback instead of pretending the
+    /// checkpoint is durable.
     async fn write_checkpoint_row(
         &self,
         frontend_client: &Arc<FrontendClient>,
@@ -1736,11 +1739,29 @@ impl BatchingTask {
                 ),
             })?;
 
-        let mut exprs = vec![
-            lit(checkpoint_sentinel_scalar(window_col)?).alias(&persistence.window_col_name),
-            lit(ScalarValue::UInt64(Some(epoch))).alias(&persistence.epoch_col_name),
-            lit(ScalarValue::Binary(Some(encoded))).alias(&persistence.state_col_name),
-        ];
+        let mut exprs = Vec::with_capacity(3 + persistence.primary_key_columns.len());
+        // Canonical sentinel logical key: typed NULL for every primary-key
+        // (dimension) column, then the sentinel window.
+        for pk_name in &persistence.primary_key_columns {
+            let pk_col = sink_schema
+                .column_schema_by_name(pk_name)
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!("Sink table lost checkpoint primary-key column {}", pk_name),
+                })?;
+            let null_scalar = Value::Null
+                .try_to_scalar_value(&pk_col.data_type)
+                .with_context(|_| DatatypesSnafu {
+                    extra: format!(
+                        "Failed to build typed NULL for checkpoint primary-key column {}",
+                        pk_col.name
+                    ),
+                })?;
+            exprs.push(lit(null_scalar).alias(pk_name));
+        }
+        exprs
+            .push(lit(checkpoint_sentinel_scalar(window_col)?).alias(&persistence.window_col_name));
+        exprs.push(lit(ScalarValue::UInt64(Some(epoch))).alias(&persistence.epoch_col_name));
+        exprs.push(lit(ScalarValue::Binary(Some(encoded))).alias(&persistence.state_col_name));
         // Keep the auto-created update_at column fresh on the checkpoint row
         // when the sink has one; any other sink column is filled with its
         // default (or NULL) by the insert machinery.
@@ -1772,9 +1793,18 @@ impl BatchingTask {
         let catalog = &self.config.sink_table_name[0];
         let schema = &self.config.sink_table_name[1];
         let mut peer_desc = None;
-        frontend_client
+        let res = frontend_client
             .query_with_terminal_metrics(catalog, schema, req, &[], &HashMap::new(), &mut peer_desc)
             .await?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        ensure!(
+            affected_rows == 1,
+            UnexpectedSnafu {
+                reason: format!(
+                    "checkpoint row write affected {affected_rows} row(s), expected exactly 1; refusing to treat the checkpoint as durable"
+                ),
+            }
+        );
         debug!(
             "Flow {} persisted checkpoint row with epoch {} and {} regions",
             self.config.flow_id,
@@ -1841,8 +1871,25 @@ impl BatchingTask {
     }
 
     /// Resolve the checkpoint persistence layout. Activated only when the
-    /// batching mode is `SequenceRange` and the sink schema contains the
-    /// reserved internal epoch column plus exactly one BINARY state column.
+    /// batching mode is `SequenceRange` and the sink schema satisfies the
+    /// persistence contract; every broken-contract case fails closed (returns
+    /// `None`) so the task starts from full snapshot instead of pretending a
+    /// checkpoint is durable:
+    ///
+    /// - the sink must be a mito, non-append (upsert) table;
+    /// - the reserved internal epoch column must exist, be strictly `UInt64`
+    ///   and never part of the primary key;
+    /// - the primary key must be safely constructible for the sentinel row:
+    ///   every PK column must be nullable and distinct from the epoch/state/
+    ///   window/`update_at` columns (the sentinel row's logical key is
+    ///   `(typed NULL for every PK column, sentinel window)`, so an
+    ///   un-NULL-able or colliding PK column would silently corrupt it);
+    /// - the state column must be the explicitly configured
+    ///   [`BatchingModeOptions::state_col_name`] (validated against the sink
+    ///   schema) or, when no explicit name was injected, the unique
+    ///   non-primary-key BINARY column — never "the unique BINARY column", so
+    ///   flows with BINARY dimension keys stay unambiguous;
+    /// - the window column must be the sink's timestamp time-index column.
     async fn detect_checkpoint_persistence(&self) -> Result<Option<CheckpointPersistence>, Error> {
         if self.config.batch_opts.incremental_mode != IncrementalMode::SequenceRange {
             return Ok(None);
@@ -1852,34 +1899,127 @@ impl BatchingTask {
             self.config.sink_table_name.clone(),
         )
         .await?;
-        let schema = table.table_info().meta.schema.clone();
+        let table_meta = &table.table_info().meta;
+        let schema = table_meta.schema.clone();
+
+        // Checkpoint persistence writes the singleton sentinel row through
+        // upsert-on-primary-key semantics; an append-mode or non-mito sink
+        // would accumulate duplicate sentinel rows instead of overwriting the
+        // one canonical row.
+        if table_meta.engine != "mito" {
+            debug!(
+                "Flow {} sink engine {} is not mito; checkpoint persistence inactive",
+                self.config.flow_id, table_meta.engine
+            );
+            return Ok(None);
+        }
+        if is_append_mode(&table_meta.options.extra_options) {
+            debug!(
+                "Flow {} sink is append-mode; checkpoint persistence inactive",
+                self.config.flow_id
+            );
+            return Ok(None);
+        }
+
         let epoch_col = match schema.column_schema_by_name(INTERNAL_FLOW_EPOCH_COL_NAME) {
             Some(column) => column,
             None => return Ok(None),
         };
-        if !is_integer_type(&epoch_col.data_type) {
+        if epoch_col.data_type != ConcreteDataType::uint64_datatype() {
             debug!(
-                "Flow {} checkpoint epoch column {} has non-integer type {:?}; persistence inactive",
+                "Flow {} checkpoint epoch column {} has type {:?}, expected strict UInt64; persistence inactive",
                 self.config.flow_id, epoch_col.name, epoch_col.data_type
             );
             return Ok(None);
         }
-        let state_cols = schema
-            .column_schemas()
-            .iter()
-            .filter(|column| column.data_type == ConcreteDataType::binary_datatype())
-            .collect::<Vec<_>>();
-        if state_cols.len() != 1 {
-            return Ok(None);
-        }
+
         let Some(ts_idx) = schema.timestamp_index() else {
             return Ok(None);
         };
         let window_col = &schema.column_schemas()[ts_idx];
+
+        // The primary key must be safely constructible: every PK column is
+        // nullable (the sentinel row writes typed NULL into each one) and none
+        // of them is the reserved epoch/state/window/`update_at` machinery.
+        let primary_key_columns = table_meta
+            .primary_key_indices
+            .iter()
+            .filter_map(|idx| schema.column_schemas().get(*idx))
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        if primary_key_columns.contains(&INTERNAL_FLOW_EPOCH_COL_NAME.to_string()) {
+            debug!(
+                "Flow {} sink epoch column is part of the primary key; checkpoint persistence inactive",
+                self.config.flow_id
+            );
+            return Ok(None);
+        }
+        for pk_name in &primary_key_columns {
+            let Some(pk_col) = schema.column_schema_by_name(pk_name) else {
+                return Ok(None);
+            };
+            if !pk_col.is_nullable() {
+                debug!(
+                    "Flow {} sink primary-key column {} is not nullable; checkpoint persistence inactive",
+                    self.config.flow_id, pk_col.name
+                );
+                return Ok(None);
+            }
+            if pk_col.name == AUTO_CREATED_UPDATE_AT_TS_COL || pk_col.name == window_col.name {
+                debug!(
+                    "Flow {} sink primary-key column {} collides with a reserved machinery column; checkpoint persistence inactive",
+                    self.config.flow_id, pk_col.name
+                );
+                return Ok(None);
+            }
+        }
+
+        // State column: prefer the explicitly injected name; otherwise fall
+        // back to the schema contract (the unique non-PK BINARY column).
+        let state_col = match &self.config.batch_opts.state_col_name {
+            Some(name) => match schema.column_schema_by_name(name) {
+                Some(column) if column.data_type == ConcreteDataType::binary_datatype() => column,
+                _ => {
+                    debug!(
+                        "Flow {} configured state column '{name}' is missing or not BINARY in the sink schema; persistence inactive",
+                        self.config.flow_id
+                    );
+                    return Ok(None);
+                }
+            },
+            None => {
+                let candidates = schema
+                    .column_schemas()
+                    .iter()
+                    .filter(|column| {
+                        column.data_type == ConcreteDataType::binary_datatype()
+                            && !primary_key_columns.contains(&column.name)
+                    })
+                    .collect::<Vec<_>>();
+                if candidates.len() != 1 {
+                    debug!(
+                        "Flow {} sink has {} non-primary-key BINARY column(s); checkpoint persistence inactive",
+                        self.config.flow_id,
+                        candidates.len()
+                    );
+                    return Ok(None);
+                }
+                candidates[0]
+            }
+        };
+        if primary_key_columns.contains(&state_col.name) {
+            debug!(
+                "Flow {} sink state column {} is part of the primary key; checkpoint persistence inactive",
+                self.config.flow_id, state_col.name
+            );
+            return Ok(None);
+        }
+
         Ok(Some(CheckpointPersistence {
             epoch_col_name: INTERNAL_FLOW_EPOCH_COL_NAME.to_string(),
-            state_col_name: state_cols[0].name.clone(),
+            state_col_name: state_col.name.clone(),
             window_col_name: window_col.name.clone(),
+            primary_key_columns,
         }))
     }
 
@@ -1890,10 +2030,18 @@ impl BatchingTask {
     /// requests) rather than the local query engine, so the sink table is
     /// resolved from DistTable-backed catalog metadata on the frontend.
     ///
-    /// Trust requires exactly one sentinel row, a decodable v1 record with a
-    /// non-empty checkpoint map, and `max_non_sentinel_epoch <= record.epoch`.
-    /// NULL epoch rows (pre-upgrade data) make the state untrusted unless
-    /// there are no state rows at all.
+    /// A row at the sentinel window only counts as the canonical sentinel when
+    /// every primary-key (dimension) column is typed NULL, matching the
+    /// logical key `(NULL x dimensions, sentinel window)` the writer projects.
+    /// Any visible sentinel-window row with a non-NULL primary key is
+    /// foreign/corrupt data: ignoring it could mask a missing canonical
+    /// sentinel, so it makes the whole checkpoint untrusted.
+    ///
+    /// Trust requires exactly one canonical sentinel row whose physical epoch
+    /// column is non-NULL and equals the encoded record epoch, a decodable v1
+    /// record with a non-empty checkpoint map, and
+    /// `max_non_sentinel_epoch <= record.epoch`. NULL epoch rows (pre-upgrade
+    /// data) make the state untrusted unless there are no state rows at all.
     async fn read_checkpoint_state(
         &self,
         frontend_client: &Arc<FrontendClient>,
@@ -1917,15 +2065,20 @@ impl BatchingTask {
         // The sentinel query projects the window column too, because the
         // sentinel filter is applied as a logical Filter node on top of the
         // scan (the local test engine's MemTable does not apply scan filters).
+        // The primary-key (dimension) columns are projected as well so restore
+        // can require the canonical sentinel key `(typed NULL for every PK
+        // column, sentinel window)`.
+        let mut sentinel_projection = vec![
+            persistence.window_col_name.clone(),
+            persistence.epoch_col_name.clone(),
+            persistence.state_col_name.clone(),
+        ];
+        sentinel_projection.extend(persistence.primary_key_columns.iter().cloned());
         let sentinel_plan = sink_scan_plan(
             &self.config.sink_table_name,
             table.clone(),
             &df_schema,
-            &[
-                persistence.window_col_name.clone(),
-                persistence.epoch_col_name.clone(),
-                persistence.state_col_name.clone(),
-            ],
+            &sentinel_projection,
         )?;
         let sentinel_plan = LogicalPlanBuilder::from(sentinel_plan)
             .filter(col(&persistence.window_col_name).eq(lit(sentinel.clone())))
@@ -1939,13 +2092,52 @@ impl BatchingTask {
         let sentinel_batches = self
             .execute_sink_scan(frontend_client, sentinel_plan)
             .await?;
-        let mut sentinel_states = Vec::new();
+        // `(physical sentinel epoch, state bytes)` per canonical sentinel row.
+        // The epoch column is projected too so restore can require the physical
+        // sentinel epoch to be non-NULL and equal to the encoded record epoch.
+        let mut sentinel_rows = Vec::new();
         for batch in sentinel_batches.iter() {
+            let epoch_vector =
+                Helper::try_into_vector(batch.column(1)).with_context(|_| DatatypesSnafu {
+                    extra: "Failed to convert sentinel row epoch column".to_string(),
+                })?;
             let state_vector =
                 Helper::try_into_vector(batch.column(2)).with_context(|_| DatatypesSnafu {
                     extra: "Failed to convert sentinel row state column".to_string(),
                 })?;
+            let mut pk_vectors = Vec::with_capacity(persistence.primary_key_columns.len());
+            for (offset, name) in persistence.primary_key_columns.iter().enumerate() {
+                pk_vectors.push(
+                    Helper::try_into_vector(batch.column(3 + offset)).with_context(|_| {
+                        DatatypesSnafu {
+                            extra: format!(
+                                "Failed to convert sentinel row primary-key column {name}"
+                            ),
+                        }
+                    })?,
+                );
+            }
             for row in 0..batch.num_rows() {
+                // The canonical sentinel logical key is `(typed NULL for every
+                // primary-key/dimension column, sentinel window)`. Any visible
+                // row at the sentinel window whose primary key is not fully
+                // NULL is foreign/corrupt data: it must never be silently
+                // ignored, because that could mask a missing canonical
+                // sentinel and restore a stale checkpoint as if it were fresh.
+                if let Some(non_null_pk) = persistence
+                    .primary_key_columns
+                    .iter()
+                    .zip(&pk_vectors)
+                    .find(|(_, vector)| !vector.is_null(row))
+                    .map(|(name, _)| name)
+                {
+                    debug!(
+                        "Flow {} sentinel window row has non-NULL primary-key column {}, checkpoint untrusted",
+                        self.config.flow_id, non_null_pk
+                    );
+                    return Ok(None);
+                }
+                let physical_epoch = value_as_u64(Value::from(epoch_vector.get_ref(row)));
                 let state_bytes = state_vector
                     .get_ref(row)
                     .try_into_binary()
@@ -1953,14 +2145,14 @@ impl BatchingTask {
                         extra: "Failed to convert sentinel row state".to_string(),
                     })?
                     .map(|bytes| bytes.to_vec());
-                sentinel_states.push(state_bytes);
+                sentinel_rows.push((physical_epoch, state_bytes));
             }
         }
-        if sentinel_states.len() > 1 {
+        if sentinel_rows.len() > 1 {
             debug!(
-                "Flow {} found {} sentinel checkpoint rows, untrusted",
+                "Flow {} found {} canonical sentinel checkpoint rows, untrusted",
                 self.config.flow_id,
-                sentinel_states.len()
+                sentinel_rows.len()
             );
             return Ok(None);
         }
@@ -2042,7 +2234,7 @@ impl BatchingTask {
             return Ok(None);
         }
 
-        let [state_bytes] = sentinel_states.as_slice() else {
+        let [(physical_epoch, state_bytes)] = sentinel_rows.as_slice() else {
             return Ok(None);
         };
         let Some(state_bytes) = state_bytes.as_ref() else {
@@ -2059,6 +2251,24 @@ impl BatchingTask {
             );
             return Ok(None);
         };
+        // The physical sentinel row's epoch column must be non-NULL and match
+        // the encoded record epoch: a mismatch means the state column and the
+        // epoch column were not written by the same checkpoint write, so the
+        // row cannot be trusted as the durable record.
+        let Some(physical_epoch) = physical_epoch else {
+            debug!(
+                "Flow {} sentinel row has NULL epoch, untrusted",
+                self.config.flow_id
+            );
+            return Ok(None);
+        };
+        if *physical_epoch != record.epoch {
+            debug!(
+                "Flow {} sentinel row epoch {} != encoded record epoch {}, untrusted",
+                self.config.flow_id, physical_epoch, record.epoch
+            );
+            return Ok(None);
+        }
         if record.checkpoints.is_empty() {
             debug!(
                 "Flow {} checkpoint record has an empty map, untrusted",

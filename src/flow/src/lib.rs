@@ -44,7 +44,9 @@ mod utils;
 // timestamp without duplicating literals. The definitions themselves live in
 // the private `batching_mode` module; see its docs for the sentinel safety
 // caveat.
-pub use batching_mode::{CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS, INTERNAL_FLOW_EPOCH_COL_NAME};
+pub use batching_mode::{
+    CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS, INTERNAL_FLOW_EPOCH_COL_NAME, INTERNAL_FLOW_STATE_COL_KEY,
+};
 
 #[cfg(test)]
 mod test_utils;

@@ -33,7 +33,9 @@ use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
 use common_meta::SchemaOptions;
-use common_meta::ddl::create_flow::{FlowType, INTERNAL_INCREMENTAL_MODE_KEY};
+use common_meta::ddl::create_flow::{
+    FlowType, INTERNAL_FLOW_STATE_COL_KEY, INTERNAL_INCREMENTAL_MODE_KEY,
+};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_query::prelude::greptime_timestamp;
@@ -1079,7 +1081,11 @@ pub fn show_create_flow(
         comment,
         flow_options: OptionMap::from_filtered_string_map(
             flow_val.options(),
-            &[FlowType::FLOW_TYPE_KEY, INTERNAL_INCREMENTAL_MODE_KEY],
+            &[
+                FlowType::FLOW_TYPE_KEY,
+                INTERNAL_INCREMENTAL_MODE_KEY,
+                INTERNAL_FLOW_STATE_COL_KEY,
+            ],
         ),
         query,
     };
@@ -1389,7 +1395,8 @@ mod test {
 
     use chrono::Utc;
     use common_meta::ddl::create_flow::{
-        DEFER_ON_MISSING_SOURCE_KEY, FlowType, INTERNAL_INCREMENTAL_MODE_KEY,
+        DEFER_ON_MISSING_SOURCE_KEY, FlowType, INTERNAL_FLOW_STATE_COL_KEY,
+        INTERNAL_INCREMENTAL_MODE_KEY,
     };
     use common_meta::key::flow::flow_info::{FlowInfoValue, FlowStatus};
     use common_query::{Output, OutputData};
@@ -1560,6 +1567,7 @@ mod test {
                     INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
                     "sequence_range".to_string(),
                 ),
+                (INTERNAL_FLOW_STATE_COL_KEY.to_string(), "state".to_string()),
             ]),
             status: FlowStatus::Active,
             created_time: Utc::now(),
@@ -1589,5 +1597,6 @@ mod test {
         assert!(sql.contains("defer_on_missing_source = 'true'"));
         assert!(!sql.contains(FlowType::FLOW_TYPE_KEY));
         assert!(!sql.contains(INTERNAL_INCREMENTAL_MODE_KEY));
+        assert!(!sql.contains(INTERNAL_FLOW_STATE_COL_KEY));
     }
 }

@@ -51,7 +51,7 @@ use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::batching_mode::{BatchingModeOptions, IncrementalMode};
+use crate::batching_mode::{BatchingModeOptions, INTERNAL_FLOW_STATE_COL_KEY, IncrementalMode};
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
@@ -501,6 +501,22 @@ impl BatchingEngine {
                     .build());
                 }
             };
+        }
+
+        // Explicit sink BINARY state-column name for checkpoint persistence,
+        // injected by the internal producer of the state schema. A bad value
+        // is a broken internal contract, not a user input error.
+        if let Some(state_col_name) = flow_options.get(INTERNAL_FLOW_STATE_COL_KEY) {
+            let state_col_name = state_col_name.trim();
+            if state_col_name.is_empty() {
+                return Err(InternalSnafu {
+                    reason: format!(
+                        "Invalid internal flow option {INTERNAL_FLOW_STATE_COL_KEY}: empty value"
+                    ),
+                }
+                .build());
+            }
+            batch_opts.state_col_name = Some(state_col_name.to_string());
         }
 
         Ok(Arc::new(batch_opts))
@@ -1133,6 +1149,7 @@ mod tests {
 
         let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
         assert_eq!(IncrementalMode::MemtableOnly, default_opts.incremental_mode);
+        assert_eq!(None, default_opts.state_col_name);
 
         let sequence_range_opts = engine
             .batch_opts_for_flow_options(&HashMap::from([(
@@ -1149,6 +1166,40 @@ mod tests {
             .batch_opts_for_flow_options(&HashMap::from([(
                 INTERNAL_INCREMENTAL_MODE_KEY.to_string(),
                 "bogus".to_string(),
+            )]))
+            .unwrap_err();
+        assert!(matches!(err, Error::Internal { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_flow_option_parses_internal_state_col_name() {
+        let engine = new_test_engine().await;
+
+        let with_state_col = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                INTERNAL_FLOW_STATE_COL_KEY.to_string(),
+                "percentile_state".to_string(),
+            )]))
+            .unwrap();
+        assert_eq!(
+            Some("percentile_state".to_string()),
+            with_state_col.state_col_name
+        );
+
+        // Surrounding whitespace is tolerated; an empty value is a broken
+        // internal contract and fails closed.
+        let trimmed = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                INTERNAL_FLOW_STATE_COL_KEY.to_string(),
+                " state ".to_string(),
+            )]))
+            .unwrap();
+        assert_eq!(Some("state".to_string()), trimmed.state_col_name);
+
+        let err = engine
+            .batch_opts_for_flow_options(&HashMap::from([(
+                INTERNAL_FLOW_STATE_COL_KEY.to_string(),
+                "  ".to_string(),
             )]))
             .unwrap_err();
         assert!(matches!(err, Error::Internal { .. }), "{err}");

@@ -56,6 +56,25 @@ pub const INTERNAL_FLOW_EPOCH_COL_NAME: &str = "__greptime_internal_flow_epoch";
 /// unaffected.
 pub const CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS: i64 = 253_402_300_799_999;
 
+/// Reserved internal flow option key carrying the exact sink BINARY state
+/// column name of an incremental flow. Defined in `common-meta` (the flow
+/// metadata validator must accept it) and re-exported here for the runtime and
+/// the enterprise layer.
+///
+/// It is injected into the underlying flow's `flow_options` by the internal
+/// producer of the state schema (the enterprise layer), alongside
+/// [`common_meta::ddl::create_flow::INTERNAL_INCREMENTAL_MODE_KEY`], and is
+/// read by the batching engine into
+/// [`BatchingModeOptions::state_col_name`]. It is not a user option: the
+/// enterprise option validator rejects unknown keys, so a user-supplied value
+/// fails closed at CREATE time.
+///
+/// The checkpoint-persistence layout resolves the state column from this
+/// explicit name (validated against the sink schema) instead of guessing it
+/// from "the unique BINARY column", so flows with BINARY dimension group keys
+/// stay unambiguous.
+pub use common_meta::ddl::create_flow::INTERNAL_FLOW_STATE_COL_KEY;
+
 /// Incremental read mode for a batching flow, selected only through the
 /// reserved internal flow option
 /// [`common_meta::ddl::create_flow::INTERNAL_INCREMENTAL_MODE_KEY`].
@@ -102,6 +121,12 @@ pub struct BatchingModeOptions {
     /// [`common_meta::ddl::create_flow::INTERNAL_INCREMENTAL_MODE_KEY`].
     #[serde(skip)]
     pub incremental_mode: IncrementalMode,
+    /// Explicit sink BINARY state-column name for checkpoint persistence,
+    /// injected only through the reserved internal flow option
+    /// [`INTERNAL_FLOW_STATE_COL_KEY`]. `None` falls back to the schema
+    /// contract: the unique non-primary-key BINARY sink column.
+    #[serde(skip)]
+    pub state_col_name: Option<String>,
     /// Read preference of the Frontend client.
     pub read_preference: ReadPreference,
     /// TLS option for client connections to frontends.
@@ -121,6 +146,7 @@ impl Default for BatchingModeOptions {
             experimental_time_window_merge_threshold: 3,
             experimental_enable_incremental_read: false,
             incremental_mode: IncrementalMode::default(),
+            state_col_name: None,
             read_preference: Default::default(),
             frontend_tls: None,
         }
@@ -133,14 +159,18 @@ mod tests {
 
     #[test]
     fn test_incremental_mode_not_exposed_by_options_serialization() {
-        // `#[serde(skip)]`: the runtime-only field never appears in
-        // serialized options, and injected input is ignored.
+        // `#[serde(skip)]`: the runtime-only fields (incremental mode and the
+        // explicit state-column name) never appear in serialized options, and
+        // injected input is ignored.
         let serialized = serde_json::to_string(&BatchingModeOptions::default()).unwrap();
         assert!(!serialized.contains("incremental_mode"));
+        assert!(!serialized.contains("state_col_name"));
 
         let mut json = serde_json::to_value(BatchingModeOptions::default()).unwrap();
         json["incremental_mode"] = serde_json::json!("sequence_range");
+        json["state_col_name"] = serde_json::json!("state");
         let opts: BatchingModeOptions = serde_json::from_value(json).unwrap();
         assert_eq!(opts.incremental_mode, IncrementalMode::default());
+        assert_eq!(opts.state_col_name, None);
     }
 }

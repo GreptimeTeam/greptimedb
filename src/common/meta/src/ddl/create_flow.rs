@@ -477,6 +477,16 @@ pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule"
 /// injected only by internal producers and persisted with flow metadata for recovery.
 pub const INTERNAL_INCREMENTAL_MODE_KEY: &str = "__greptime_internal_incremental_mode";
 
+/// Reserved internal flow option carrying the exact sink BINARY state-column
+/// name of an incremental flow, injected only by internal producers (the
+/// enterprise state schema/view) and persisted with flow metadata for
+/// recovery. The checkpoint-persistence layout resolves the state column from
+/// this explicit name instead of guessing it from "the unique BINARY column",
+/// so flows with BINARY dimension group keys stay unambiguous. It must never
+/// be accepted as a user-provided option: the enterprise option validator
+/// rejects unknown keys.
+pub const INTERNAL_FLOW_STATE_COL_KEY: &str = "__greptime_internal_flow_state_col";
+
 const FLOW_SCHEDULED_TIME_MILLIS_EXTENSION_KEY: &str = "flow.scheduled_time_millis";
 
 fn without_scheduled_time_extension(mut query_context: QueryContext) -> QueryContext {
@@ -524,6 +534,7 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
             | INTERNAL_INCREMENTAL_MODE_KEY
+            | INTERNAL_FLOW_STATE_COL_KEY
             | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
                 return UnexpectedSnafu {
@@ -848,7 +859,7 @@ mod tests {
 
     use table::table_name::TableName;
 
-    use super::validate_flow_options;
+    use super::{INTERNAL_FLOW_STATE_COL_KEY, validate_flow_options};
     use crate::rpc::ddl::CreateFlowTask;
 
     fn test_create_flow_task() -> CreateFlowTask {
@@ -882,6 +893,27 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Unknown flow option 'ee_test_option'")
+        );
+    }
+
+    #[test]
+    fn test_validate_flow_options_accepts_internal_flow_state_col_key() {
+        // The internal sink BINARY state-column key is injected by the
+        // enterprise `create_underlying_flow` path (never by users) and must be
+        // accepted by the OSS validator so the CREATE FLOW procedure does not
+        // fail with "Unknown flow option" and roll back. Unknown keys must
+        // still be rejected.
+        let mut task = test_create_flow_task();
+        task.flow_options
+            .insert(INTERNAL_FLOW_STATE_COL_KEY.to_string(), "state".to_string());
+        validate_flow_options(&task).expect("internal flow state col key must be accepted");
+
+        task.flow_options
+            .insert("not_an_internal_key".to_string(), "value".to_string());
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unknown flow option 'not_an_internal_key'")
         );
     }
 }

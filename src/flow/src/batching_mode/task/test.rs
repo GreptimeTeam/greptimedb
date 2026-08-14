@@ -18,12 +18,12 @@ use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema};
@@ -37,6 +37,7 @@ use query::options::{
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::DFLogicalSubstraitConvertor;
 use table::test_util::MemTable;
 
@@ -2677,6 +2678,251 @@ fn register_persistence_sink(
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+/// The exact EE-like sink schema with a nullable `host` primary-key dimension
+/// in front of the BINARY state column (checkpoint persistence must resolve
+/// the state column explicitly, never by "the unique BINARY column").
+fn persistence_sink_schema_with_dimension() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", CDT::string_datatype(), true),
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::uint64_datatype(),
+            true,
+        ),
+    ]))
+}
+
+/// A persistence-sink row for the dimension sink:
+/// `(host, window ms, epoch, state)`.
+type DimensionSinkRow = (Option<String>, Option<i64>, Option<u64>, Option<Vec<u8>>);
+
+/// Builds a record batch for `persistence_sink_schema_with_dimension`.
+fn dimension_persistence_sink_recordbatch(rows: Vec<DimensionSinkRow>) -> RecordBatch {
+    let schema = persistence_sink_schema_with_dimension();
+    let mut hosts = datatypes::vectors::StringVectorBuilder::with_capacity(rows.len());
+    let mut states = datatypes::vectors::BinaryVectorBuilder::with_capacity(rows.len());
+    let mut windows =
+        datatypes::vectors::TimestampMillisecondVectorBuilder::with_capacity(rows.len());
+    let mut epochs = datatypes::vectors::UInt64VectorBuilder::with_capacity(rows.len());
+    let mut update_at =
+        datatypes::vectors::TimestampMillisecondVectorBuilder::with_capacity(rows.len());
+    for (host, window, epoch, state) in rows {
+        hosts.push(host.as_deref());
+        states.push(state.as_deref());
+        windows.push(window.map(datatypes::timestamp::TimestampMillisecond::new));
+        epochs.push(epoch);
+        update_at.push(Some(datatypes::timestamp::TimestampMillisecond::new(0)));
+    }
+    RecordBatch::new(
+        schema,
+        vec![
+            hosts.to_vector(),
+            states.to_vector(),
+            windows.to_vector(),
+            update_at.to_vector(),
+            epochs.to_vector(),
+        ],
+    )
+    .unwrap()
+}
+
+/// A data source serving one record batch with projection/limit support,
+/// mirroring the table crate's `MemtableDataSource` for tables whose metadata
+/// (primary-key indices) must be under the test's control.
+struct SingleBatchDataSource {
+    batch: RecordBatch,
+}
+
+impl store_api::data_source::DataSource for SingleBatchDataSource {
+    fn get_stream(
+        &self,
+        request: store_api::storage::ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+        let df_recordbatch = if let Some(indices) = request.projection.as_deref() {
+            self.batch
+                .df_record_batch()
+                .project(indices)
+                .map_err(|err| {
+                    BoxedError::new(PlainError::new(err.to_string(), StatusCode::Internal))
+                })?
+        } else {
+            self.batch.df_record_batch().clone()
+        };
+        let rows = df_recordbatch.num_rows();
+        let limit = if let Some(limit) = request.limit {
+            limit.min(rows)
+        } else {
+            rows
+        };
+        let df_recordbatch = df_recordbatch.slice(0, limit);
+        let recordbatch = RecordBatch::from_df_record_batch(
+            Arc::new(Schema::try_from(df_recordbatch.schema()).map_err(|err| {
+                BoxedError::new(PlainError::new(err.to_string(), StatusCode::Internal))
+            })?),
+            df_recordbatch,
+        );
+        Ok(Box::pin(SingleBatchStream {
+            schema: recordbatch.schema.clone(),
+            recordbatch: Some(recordbatch),
+        }))
+    }
+}
+
+struct SingleBatchStream {
+    schema: Arc<Schema>,
+    recordbatch: Option<RecordBatch>,
+}
+
+impl futures::Stream for SingleBatchStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.recordbatch.take() {
+            Some(records) => std::task::Poll::Ready(Some(Ok(records))),
+            None => std::task::Poll::Ready(None),
+        }
+    }
+}
+
+impl common_recordbatch::RecordBatchStream for SingleBatchStream {
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
+}
+
+/// Registers a data-bearing sink table whose metadata (engine, primary-key
+/// indices, append mode) is fully under the test's control, so checkpoint
+/// restore can be exercised against a sink with a nullable `host` dimension
+/// primary key.
+fn register_dimension_persistence_sink(
+    query_engine: &QueryEngineRef,
+    table_name: &str,
+    rows: Vec<DimensionSinkRow>,
+    table_id: u32,
+) {
+    use table::Table;
+    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder, TableType};
+
+    let batch = dimension_persistence_sink_recordbatch(rows);
+    let meta = TableMetaBuilder::empty()
+        .schema(batch.schema.clone())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![])
+        .engine("mito".to_string())
+        .next_column_id(0)
+        .options(Default::default())
+        .created_on(Default::default())
+        .build()
+        .unwrap();
+    let info = Arc::new(
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .table_version(0)
+            .name(table_name)
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .desc(None)
+            .table_type(TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap(),
+    );
+    let data_source = Arc::new(SingleBatchDataSource { batch });
+    let table = Arc::new(Table::new(
+        info,
+        FilterPushDownType::Unsupported,
+        data_source,
+    ));
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
+/// Registers a sink table whose metadata is fully under the test's control
+/// (engine, primary-key indices, table options), so detection can be exercised
+/// against every fail-closed contract. The table carries no data.
+fn register_sink_table_with_meta(
+    query_engine: &QueryEngineRef,
+    table_name: &str,
+    table_id: u32,
+    schema: Arc<Schema>,
+    primary_key_indices: Vec<usize>,
+    engine: &str,
+    append_mode: bool,
+) {
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
+
+    let mut extra_options = HashMap::new();
+    if append_mode {
+        extra_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+    }
+    let options = table::requests::TableOptions {
+        extra_options,
+        ..Default::default()
+    };
+    let meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .primary_key_indices(primary_key_indices)
+        .value_indices(vec![])
+        .engine(engine.to_string())
+        .next_column_id(0)
+        .options(options)
+        .created_on(Default::default())
+        .build()
+        .unwrap();
+    let info = TableInfoBuilder::default()
+        .table_id(table_id)
+        .table_version(0)
+        .name(table_name)
+        .catalog_name(DEFAULT_CATALOG_NAME)
+        .schema_name(DEFAULT_SCHEMA_NAME)
+        .desc(None)
+        .table_type(table::metadata::TableType::Base)
+        .meta(meta)
+        .build()
+        .unwrap();
+    let table = EmptyTable::from_table_info(&info);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
 fn sequence_range_batch_opts() -> Arc<BatchingModeOptions> {
     Arc::new(BatchingModeOptions {
         experimental_enable_incremental_read: true,
@@ -2756,6 +3002,18 @@ fn test_persistence() -> CheckpointPersistence {
         epoch_col_name: crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME.to_string(),
         state_col_name: "state".to_string(),
         window_col_name: "window".to_string(),
+        primary_key_columns: vec![],
+    }
+}
+
+/// A `CheckpointPersistence` whose sink has a nullable `host` primary-key
+/// (dimension) column, exercising the typed-NULL sentinel key projection.
+fn test_persistence_with_dimension() -> CheckpointPersistence {
+    CheckpointPersistence {
+        epoch_col_name: crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME.to_string(),
+        state_col_name: "state".to_string(),
+        window_col_name: "window".to_string(),
+        primary_key_columns: vec!["host".to_string()],
     }
 }
 
@@ -2806,6 +3064,286 @@ async fn test_detect_checkpoint_persistence_requires_sequence_range_and_epoch_co
             .unwrap()
             .is_none(),
         "sink without epoch column must not activate persistence"
+    );
+}
+
+#[tokio::test]
+async fn test_detect_checkpoint_persistence_fails_closed_on_broken_contracts() {
+    // The epoch column must be strictly UInt64; any other integer type fails
+    // closed instead of silently pretending durability.
+    let sink_table = "persistence_detect_i64_epoch";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let i64_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::int64_datatype(),
+            true,
+        ),
+    ]));
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9200,
+        i64_schema,
+        vec![],
+        "mito",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-UInt64 epoch column must fail closed"
+    );
+
+    // An append-mode sink would accumulate duplicate sentinel rows instead of
+    // overwriting the singleton; persistence must be inactive.
+    let sink_table = "persistence_detect_append_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9201,
+        persistence_sink_schema(),
+        vec![],
+        "mito",
+        true,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "an append-mode sink must fail closed"
+    );
+
+    // A non-mito sink engine must fail closed.
+    let sink_table = "persistence_detect_non_mito";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9202,
+        persistence_sink_schema(),
+        vec![],
+        "file",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-mito sink must fail closed"
+    );
+
+    // The epoch column must never be part of the primary key.
+    let sink_table = "persistence_detect_epoch_pk";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let epoch_pk_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::uint64_datatype(),
+            false,
+        ),
+    ]));
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9203,
+        epoch_pk_schema,
+        vec![2],
+        "mito",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "an epoch column in the primary key must fail closed"
+    );
+
+    // A non-nullable primary-key column cannot carry the typed-NULL sentinel
+    // key; persistence must fail closed.
+    let sink_table = "persistence_detect_non_nullable_pk";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let non_nullable_pk_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", CDT::string_datatype(), false),
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::uint64_datatype(),
+            true,
+        ),
+    ]));
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9204,
+        non_nullable_pk_schema,
+        vec![0],
+        "mito",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-nullable primary-key column must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn test_detect_checkpoint_persistence_resolves_state_column_explicitly() {
+    // A sink with a BINARY *dimension* primary key plus the BINARY state
+    // column must still resolve the state column. With the explicit internal
+    // state-column name injected by the enterprise layer, the configured name
+    // wins; without it the schema contract (unique non-PK BINARY column)
+    // applies. It must never guess by "the unique BINARY column", which would
+    // be ambiguous here.
+    let sink_table = "persistence_detect_dimension_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9205,
+        persistence_sink_schema_with_dimension(),
+        vec![0],
+        "mito",
+        false,
+    );
+
+    let persistence = task
+        .detect_checkpoint_persistence()
+        .await
+        .unwrap()
+        .expect("schema contract must resolve the state column");
+    assert_eq!(test_persistence_with_dimension(), persistence);
+
+    // The explicit internal option overrides the schema contract.
+    let sink_table = "persistence_detect_dimension_sink_config";
+    let explicit_opts = Arc::new(BatchingModeOptions {
+        experimental_enable_incremental_read: true,
+        incremental_mode: IncrementalMode::SequenceRange,
+        state_col_name: Some("state".to_string()),
+        ..Default::default()
+    });
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+        explicit_opts,
+    )
+    .await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9206,
+        persistence_sink_schema_with_dimension(),
+        vec![0],
+        "mito",
+        false,
+    );
+    let persistence = task
+        .detect_checkpoint_persistence()
+        .await
+        .unwrap()
+        .expect("explicit state column name must activate persistence");
+    assert_eq!(test_persistence_with_dimension(), persistence);
+
+    // A configured state-column name that does not exist in the sink schema
+    // (or is not BINARY) fails closed.
+    let sink_table = "persistence_detect_missing_state_col";
+    let missing_opts = Arc::new(BatchingModeOptions {
+        experimental_enable_incremental_read: true,
+        incremental_mode: IncrementalMode::SequenceRange,
+        state_col_name: Some("does_not_exist".to_string()),
+        ..Default::default()
+    });
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        sink_table,
+        missing_opts,
+    )
+    .await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9207,
+        persistence_sink_schema_with_dimension(),
+        vec![0],
+        "mito",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "a missing configured state column must fail closed"
+    );
+
+    // Without the explicit name, two non-PK BINARY columns are ambiguous and
+    // must fail closed.
+    let sink_table = "persistence_detect_ambiguous_state_col";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let ambiguous_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("state", CDT::binary_datatype(), true),
+        ColumnSchema::new("payload", CDT::binary_datatype(), true),
+        ColumnSchema::new("window", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+        ColumnSchema::new("update_at", CDT::timestamp_millisecond_datatype(), true),
+        ColumnSchema::new(
+            crate::batching_mode::INTERNAL_FLOW_EPOCH_COL_NAME,
+            CDT::uint64_datatype(),
+            true,
+        ),
+    ]));
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9208,
+        ambiguous_schema,
+        vec![],
+        "mito",
+        false,
+    );
+    assert!(
+        task.detect_checkpoint_persistence()
+            .await
+            .unwrap()
+            .is_none(),
+        "two non-PK BINARY columns without an explicit name must fail closed"
     );
 }
 
@@ -3038,7 +3576,9 @@ async fn test_restore_falls_back_on_untrusted_records() {
 
 #[tokio::test]
 async fn test_restore_accepts_record_without_state_data() {
-    // NULL epochs are acceptable when there is no non-sentinel state data.
+    // NULL epochs are acceptable when there is no non-sentinel state data, as
+    // long as the physical sentinel row's epoch is non-NULL and equals the
+    // encoded record epoch.
     let sink_table = "persistence_no_state_data";
     let TestTaskParts {
         task, query_engine, ..
@@ -3054,7 +3594,7 @@ async fn test_restore_accepts_record_without_state_data() {
         sink_table,
         vec![(
             Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS),
-            None,
+            Some(7),
             Some(encoded),
         )],
         9108,
@@ -3066,6 +3606,156 @@ async fn test_restore_accepts_record_without_state_data() {
     assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
     assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
     assert_eq!(state.persisted_epoch(), 7);
+}
+
+#[tokio::test]
+async fn test_restore_rejects_sentinel_epoch_mismatch() {
+    // The physical sentinel row's epoch column must be non-NULL and equal the
+    // encoded record epoch. A mismatch (state column written by a different
+    // checkpoint write than the epoch column) makes the record untrusted.
+    let sentinel = Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS);
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 3,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+    // Physical sentinel epoch 2 != encoded record epoch 3.
+    assert_restore_falls_back(
+        "persistence_sentinel_epoch_mismatch",
+        9120,
+        vec![(sentinel, Some(2), Some(encoded.clone()))],
+    )
+    .await;
+    // Physical sentinel epoch is NULL while the record carries epoch 3.
+    assert_restore_falls_back(
+        "persistence_sentinel_epoch_null",
+        9121,
+        vec![(sentinel, None, Some(encoded))],
+    )
+    .await;
+}
+
+/// Runs one untrusted-restore scenario against the dimension sink (a nullable
+/// `host` primary-key column) and asserts the task falls back to full snapshot
+/// with persistence still armed.
+async fn assert_dimension_restore_falls_back(
+    table_name: &str,
+    table_id: u32,
+    rows: Vec<DimensionSinkRow>,
+) {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(table_name).await;
+    register_dimension_persistence_sink(&query_engine, table_name, rows, table_id);
+
+    let (frontend_client, _captured, _handler) = restore_frontend_client(&query_engine);
+    task.try_enable_checkpoint_persistence(&frontend_client)
+        .await;
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+    assert_eq!(state.persisted_epoch(), 0);
+    assert!(state.checkpoints().is_empty());
+    // Persistence stays armed so later cycles can persist fresh checkpoints.
+    assert!(state.checkpoint_persistence().is_some());
+}
+
+#[tokio::test]
+async fn test_restore_rejects_sentinel_row_with_non_null_dimension_pk() {
+    // The canonical sentinel logical key is `(typed NULL for every
+    // primary-key/dimension column, sentinel window)`. A visible row at the
+    // sentinel window whose physical epoch matches the encoded record epoch
+    // and whose state decodes to a valid v1 record is still untrusted when at
+    // least one dimension primary key is non-NULL: it is not the canonical
+    // sentinel, and silently ignoring it could mask a missing canonical
+    // sentinel (restoring a stale checkpoint as if it were fresh).
+    let sentinel = Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS);
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 3,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+
+    // A single sentinel-window row, decodable and epoch-consistent, but with a
+    // non-NULL `host` dimension key: FullSnapshot fallback.
+    assert_dimension_restore_falls_back(
+        "persistence_non_null_dimension_sentinel",
+        9122,
+        vec![(
+            Some("not_the_canonical_sentinel".to_string()),
+            sentinel,
+            Some(3),
+            Some(encoded.clone()),
+        )],
+    )
+    .await;
+
+    // Even next to a canonical all-NULL sentinel, any sentinel-window row with
+    // a non-NULL primary key makes the whole record untrusted.
+    assert_dimension_restore_falls_back(
+        "persistence_mixed_dimension_sentinel",
+        9123,
+        vec![
+            (
+                Some("foreign_row".to_string()),
+                sentinel,
+                Some(3),
+                Some(encoded.clone()),
+            ),
+            (None, sentinel, Some(3), Some(encoded)),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_restore_accepts_canonical_all_null_dimension_sentinel() {
+    // The canonical sentinel row `(NULL host, sentinel window)` with a
+    // decodable record and matching physical epoch must restore successfully
+    // through the dimension sink: the restore scan projects the primary-key
+    // column and requires every dimension to be NULL.
+    let sink_table = "persistence_all_null_dimension_sentinel";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    let record = CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 3,
+        checkpoints: BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]),
+    };
+    let encoded = encode_checkpoint_record(&record).unwrap();
+    register_dimension_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![
+            (None, Some(1_000), Some(3), None),
+            (
+                None,
+                Some(crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS),
+                Some(3),
+                Some(encoded),
+            ),
+        ],
+        9124,
+    );
+
+    let (frontend_client, _captured, _handler) = restore_frontend_client(&query_engine);
+    task.try_enable_checkpoint_persistence(&frontend_client)
+        .await;
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+    assert_eq!(state.persisted_epoch(), 3);
+    assert_eq!(
+        Some(&test_persistence_with_dimension()),
+        state.checkpoint_persistence()
+    );
 }
 
 #[tokio::test]
@@ -3434,6 +4124,175 @@ async fn test_checkpoint_row_write_failure_is_reported() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::External { .. }), "{err}");
+}
+
+/// A frontend handler that captures the insert request and returns a canned
+/// affected-rows count.
+struct CaptureInsertWithRowsHandler {
+    captured: Arc<std::sync::Mutex<Option<api::v1::QueryRequest>>>,
+    affected_rows: usize,
+}
+
+#[async_trait::async_trait]
+impl GrpcQueryHandlerWithBoxedError for CaptureInsertWithRowsHandler {
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        if let api::v1::greptime_request::Request::Query(q) = &query {
+            *self.captured.lock().unwrap() = Some(q.clone());
+        }
+        Ok(Output::new_with_affected_rows(self.affected_rows))
+    }
+}
+
+#[tokio::test]
+async fn test_write_checkpoint_row_projects_typed_null_primary_keys() {
+    // The canonical sentinel logical key is `(typed NULL for every
+    // primary-key/dimension column, sentinel window)`. The checkpoint writer
+    // must explicitly project each PK column as a typed NULL instead of
+    // relying on omitted columns/defaults.
+    let sink_table = "persistence_write_dimension_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_sink_table_with_meta(
+        &query_engine,
+        sink_table,
+        9114,
+        persistence_sink_schema_with_dimension(),
+        vec![0],
+        "mito",
+        false,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence_with_dimension()));
+
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(CaptureInsertWithRowsHandler {
+        captured: captured.clone(),
+        affected_rows: 1,
+    });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    task.write_checkpoint_row(&frontend_client, 7, &BTreeMap::from([(1_u64, 11_u64)]))
+        .await
+        .expect("checkpoint row write should succeed");
+
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler captured the request");
+    let api::v1::query_request::Query::InsertIntoPlan(insert) =
+        captured.query.expect("insert plan")
+    else {
+        panic!("expected InsertIntoPlan");
+    };
+    let session_state = query_engine.engine_state().session_state();
+    let plan = DFLogicalSubstraitConvertor {}
+        .decode(bytes::Bytes::from(insert.logical_plan), session_state)
+        .await
+        .unwrap();
+    let LogicalPlan::Projection(projection) = &plan else {
+        panic!("expected projection over empty relation, got {plan:?}");
+    };
+    // typed NULL host + window + epoch + state + auto update_at.
+    assert_eq!(5, projection.expr.len(), "{projection:?}");
+
+    // The primary-key column must be projected first as a typed NULL string.
+    let host_expr = &projection.expr[0];
+    let host_sql = format!("{host_expr:?}");
+    assert!(
+        host_sql.contains("\"host\""),
+        "host primary key must be projected explicitly, got {host_sql}"
+    );
+    assert!(
+        host_sql.contains("NULL") && host_sql.contains("Utf8"),
+        "host must be a typed NULL string literal, got {host_sql}"
+    );
+
+    // window column -> sentinel timestamp.
+    let window_expr = &projection.expr[1];
+    let window_sql = format!("{window_expr:?}");
+    assert!(
+        window_sql
+            .contains(&crate::batching_mode::CHECKPOINT_SENTINEL_WINDOW_TS_MILLIS.to_string()),
+        "sentinel window literal expected, got {window_sql}"
+    );
+    // epoch column -> 7.
+    let epoch_expr = &projection.expr[2];
+    assert!(
+        format!("{epoch_expr:?}").contains("UInt64(7)"),
+        "epoch literal expected, got {epoch_expr:?}"
+    );
+    // state column -> the encoded v1 record bytes must appear verbatim.
+    let expected = encode_checkpoint_record(&CheckpointRecord {
+        format_version: CHECKPOINT_RECORD_FORMAT_VERSION,
+        epoch: 7,
+        checkpoints: BTreeMap::from([(1_u64, 11_u64)]),
+    })
+    .unwrap();
+    let state_bytes = match &projection.expr[3] {
+        Expr::Alias(alias) => match alias.expr.as_ref() {
+            Expr::Literal(ScalarValue::Binary(Some(bytes)), _) => bytes,
+            other => panic!("expected binary literal for state column, got {other:?}"),
+        },
+        other => panic!("expected alias for state column, got {other:?}"),
+    };
+    assert_eq!(
+        &expected, state_bytes,
+        "checkpoint record bytes must be stored verbatim"
+    );
+}
+
+#[tokio::test]
+async fn test_checkpoint_row_write_requires_exactly_one_affected_row() {
+    // A checkpoint write that reports any affected-rows count other than
+    // exactly 1 must be reported as a failure so the caller walks the existing
+    // CheckpointPersistFailure fallback (full snapshot + dirty restore) instead
+    // of pretending the checkpoint is durable.
+    let sink_table = "persistence_write_rows_sink";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_sequence_range_test_task(sink_table).await;
+    register_persistence_sink(
+        &query_engine,
+        sink_table,
+        vec![(Some(0), Some(1), None)],
+        9115,
+    );
+    task.state
+        .write()
+        .unwrap()
+        .set_checkpoint_persistence(Some(test_persistence()));
+
+    for affected_rows in [0_usize, 2] {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+            Arc::new(CaptureInsertWithRowsHandler {
+                captured: captured.clone(),
+                affected_rows,
+            });
+        let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+            Arc::downgrade(&handler),
+            QueryOptions::default(),
+        ));
+        let err = task
+            .write_checkpoint_row(&frontend_client, 7, &BTreeMap::from([(1_u64, 11_u64)]))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("expected exactly 1"),
+            "affected_rows={affected_rows} must be reported as a persist failure, got: {err}"
+        );
+    }
 }
 
 /// A minimal record-batch stream that reports region watermarks through its
