@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_time::Timezone;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
@@ -109,8 +111,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 let Ok(schema) = join.left.schema().join(join.right.schema()) else {
                     return Ok(Transformed::no(LogicalPlan::Join(join)));
                 };
-                let mut converter =
-                    TypeConverter::new(std::sync::Arc::new(schema), ctx.query_ctx());
+                let mut converter = TypeConverter::new(Arc::new(schema), ctx.query_ctx());
                 let plan = LogicalPlan::Join(join);
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
@@ -123,7 +124,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             }
 
             LogicalPlan::Dml(mut dml) if matches!(dml.op, WriteOp::Insert(_)) => {
-                dml.input = std::sync::Arc::new(rewrite_insert_assignments(
+                dml.input = Arc::new(rewrite_insert_assignments(
                     dml.input.as_ref().clone(),
                     ctx.query_ctx(),
                 )?);
