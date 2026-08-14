@@ -1,6 +1,5 @@
 -- Test altering preserve_row_sequence on an append-only table, including
 -- persistence across a restart.
--- Create an append-only table
 CREATE TABLE test_alter_preserve_row_sequence(
     host STRING,
     ts TIMESTAMP TIME INDEX,
@@ -10,7 +9,6 @@ CREATE TABLE test_alter_preserve_row_sequence(
 
 Affected Rows: 0
 
--- Insert some data
 INSERT INTO test_alter_preserve_row_sequence VALUES ('host1', 0, 1.0), ('host2', 1, 2.0);
 
 Affected Rows: 2
@@ -98,7 +96,6 @@ SHOW CREATE TABLE test_alter_preserve_row_sequence;
 |                                  | )                                                               |
 +----------------------------------+-----------------------------------------------------------------+
 
--- Clean up
 DROP TABLE test_alter_preserve_row_sequence;
 
 Affected Rows: 0
@@ -119,7 +116,6 @@ ALTER TABLE test_alter_preserve_no_append SET 'preserve_row_sequence' = 'true';
 
 Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Invalid region options, preserve_row_sequence is only supported for append-only tables (append_mode must be true)
 
--- Clean up
 DROP TABLE test_alter_preserve_no_append;
 
 Affected Rows: 0
