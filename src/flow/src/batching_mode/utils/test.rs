@@ -22,7 +22,7 @@ use datafusion_expr::GroupingSet;
 use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::timestamp::TimestampMillisecond;
-use datatypes::vectors::TimestampMillisecondVectorBuilder;
+use datatypes::vectors::{BinaryVectorBuilder, TimestampMillisecondVectorBuilder};
 use pretty_assertions::assert_eq;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContext;
@@ -79,6 +79,117 @@ fn time_window_u32_table(table_name: &str) -> TableRef {
     )
     .unwrap();
     MemTable::table(table_name, recordbatch)
+}
+
+/// A (ts: timestamp millisecond, state: binary) table used as the UDDSketch
+/// state sink / state source in tests.
+fn binary_state_table(table_name: &str, rows: &[(i64, Option<&[u8]>)]) -> TableRef {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("state", ConcreteDataType::binary_datatype(), true),
+    ]));
+
+    let mut ts_builder = TimestampMillisecondVectorBuilder::with_capacity(rows.len());
+    let mut state_builder = BinaryVectorBuilder::with_capacity(rows.len());
+    for (ts, state) in rows {
+        ts_builder.push(Some(TimestampMillisecond::new(*ts)));
+        state_builder.push(*state);
+    }
+    let recordbatch = RecordBatch::new(
+        schema,
+        vec![
+            ts_builder.to_vector_cloned(),
+            state_builder.to_vector_cloned(),
+        ],
+    )
+    .unwrap();
+    MemTable::table(table_name, recordbatch)
+}
+
+/// Serializes a UDDSketch state from the given values using the real
+/// `uddsketch_state` accumulator.
+fn make_uddsketch_state_bytes(bucket_size: u64, error_rate: f64, values: &[f64]) -> Vec<u8> {
+    use common_function::aggrs::approximate::uddsketch::UddSketchState;
+    use datafusion::logical_expr::Accumulator as _;
+    use datatypes::arrow::array::{ArrayRef, Float64Array};
+
+    let mut acc = UddSketchState::new(bucket_size, error_rate);
+    let values: ArrayRef = Arc::new(Float64Array::from(values.to_vec()));
+    acc.update_batch(&[values.clone(), values.clone(), values])
+        .unwrap();
+    let ScalarValue::Binary(Some(bytes)) = acc.evaluate().unwrap() else {
+        panic!("expected binary UDDSketch state")
+    };
+    bytes
+}
+
+/// Builds a call to the registered `uddsketch_calc` scalar function, resolved
+/// by name from the same registry the frontend uses at execution time.
+fn uddsketch_calc_expr(percentile: f64, state: Expr) -> Expr {
+    use common_function::function::FunctionContext;
+    use common_function::function_registry::FUNCTION_REGISTRY;
+    use datafusion_expr::expr::ScalarFunction;
+
+    let factory = FUNCTION_REGISTRY
+        .scalar_functions()
+        .into_iter()
+        .find(|func| func.name() == "uddsketch_calc")
+        .expect("uddsketch_calc must be registered");
+    Expr::ScalarFunction(ScalarFunction::new_udf(
+        Arc::new(factory.provide(FunctionContext::default())),
+        vec![lit(percentile), state],
+    ))
+}
+
+/// Computes the estimated quantile of a serialized UDDSketch state by invoking
+/// the registered `uddsketch_calc` scalar directly, so tests validate merged
+/// states through the public final result instead of bincode internals.
+fn uddsketch_calc_value(state_bytes: &[u8], percentile: f64) -> f64 {
+    use arrow_schema::Field;
+    use common_function::function::FunctionContext;
+    use common_function::function_registry::FUNCTION_REGISTRY;
+    use datafusion_common::arrow::array::{AsArray, BinaryArray, Float64Array};
+    use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, Float64Type};
+    use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
+
+    let factory = FUNCTION_REGISTRY
+        .scalar_functions()
+        .into_iter()
+        .find(|func| func.name() == "uddsketch_calc")
+        .expect("uddsketch_calc must be registered");
+    let udf = factory.provide(FunctionContext::default());
+    let result = udf
+        .invoke_with_args(ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Float64Array::from(vec![percentile]))),
+                ColumnarValue::Array(Arc::new(BinaryArray::from(vec![state_bytes]))),
+            ],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("p", ArrowDataType::Float64, false)),
+            config_options: Arc::new(Default::default()),
+        })
+        .expect("uddsketch_calc must succeed on a valid state");
+    let ColumnarValue::Array(array) = result else {
+        panic!("expected array result from uddsketch_calc");
+    };
+    array.as_primitive::<Float64Type>().value(0)
+}
+
+fn uddsketch_merge_expr(field_name: &str, bucket_size: i64, error_rate: f64) -> Expr {
+    let left = qualified_col("__flow_delta", field_name);
+    let right = qualified_col("__flow_sink", field_name);
+    // The scalar itself validates the state bytes against the merge parameters
+    // and handles NULL sides, so the rewrite emits the merge call directly
+    // without NULL short-circuiting.
+    uddsketch_merge_state_expr(bucket_size, error_rate, left, right)
+        .unwrap()
+        .alias(field_name)
 }
 
 fn assert_same_logical_plan(actual: &LogicalPlan, expected: &LogicalPlan) {
@@ -1592,6 +1703,569 @@ async fn test_analyze_incremental_aggregate_plan_rejects_distinct() {
 
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(!analysis.unsupported_exprs.is_empty());
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_uddsketch_state() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql =
+        "SELECT uddsketch_state(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "uddsketch_state should be incrementally mergeable: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert!(analysis.group_key_names.contains(&"ts".to_string()));
+    assert_eq!(analysis.merge_columns.len(), 1);
+    assert_eq!(analysis.merge_columns[0].output_field_name, "state");
+    assert_eq!(
+        analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::UddSketchState {
+            bucket_size: 10,
+            error_rate: 0.01,
+        }
+    );
+    assert_eq!(
+        analysis.output_field_names,
+        vec!["state".to_string(), "ts".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_uddsketch_merge_state_source() {
+    let query_engine = create_test_query_engine();
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "state_source".to_string(),
+            table_id: 9100,
+            table: binary_state_table("state_source", &[(1, Some(b"state"))]),
+        })
+        .unwrap();
+
+    let ctx = QueryContext::arc();
+    // `uddsketch_merge` merges a column of already-serialized states; its output
+    // is also a state that can be pairwise-merged with the sink state.
+    let sql = "SELECT uddsketch_merge(10, 0.01, state) AS state, ts FROM state_source GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "uddsketch_merge over a binary state column should be mergeable: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert_eq!(analysis.merge_columns.len(), 1);
+    assert_eq!(
+        analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::UddSketchState {
+            bucket_size: 10,
+            error_rate: 0.01,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_rejects_incompatible_uddsketch() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let testcases = [
+        // bucket size is not an Int64 literal
+        "SELECT uddsketch_state(10.0, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        // bucket size is not a literal
+        "SELECT uddsketch_state(number, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        // error rate is not a Float64 literal
+        "SELECT uddsketch_state(10, number, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        // value argument is not numeric (timestamp)
+        "SELECT uddsketch_state(10, 0.01, ts) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        // uddsketch_merge requires a binary state column, not raw numbers
+        "SELECT uddsketch_merge(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+    ];
+
+    for sql in testcases {
+        // Parameter/type incompatibility must surface before any incremental
+        // rewrite: either the planner clearly fails to plan the SQL (the
+        // exact-signature UDAF rejects the wrong types at plan time), or the
+        // plan succeeds but the flow analyzer marks the expression as
+        // unsupported (disabling incremental with the safe full-snapshot
+        // fallback). Both are acceptable per contract; never a silent rewrite.
+        match sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false).await {
+            Ok(plan) => {
+                let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+                assert!(
+                    !analysis.unsupported_exprs.is_empty(),
+                    "expected UDDSketch parameter/type incompatibility to be unsupported for SQL: {sql}"
+                );
+                assert!(
+                    analysis.merge_columns.is_empty(),
+                    "unsupported UDDSketch analysis should disable merge columns for SQL: {sql}"
+                );
+            }
+            Err(_) => {
+                // Planner rejected the SQL: incremental rewrite never happens.
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_rejects_non_literal_uddsketch_params() {
+    // Pin down the analyzer's own parameter-incompatibility path with a plan
+    // the SQL planner would never produce: the aggregate arguments already have
+    // the exact signature types (so no planner coercion error) but the bucket
+    // size is a column reference instead of an Int64 literal. The analyzer must
+    // mark it unsupported, disabling incremental mode with the safe
+    // full-snapshot fallback.
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx,
+        query_engine,
+        "SELECT max(number) AS x, ts FROM numbers_with_ts GROUP BY ts",
+        false,
+    )
+    .await
+    .unwrap();
+    let LogicalPlan::Projection(projection) = plan else {
+        panic!("expected projection over aggregate");
+    };
+    let LogicalPlan::Aggregate(aggregate) = projection.input.as_ref() else {
+        panic!("expected aggregate below projection");
+    };
+
+    let state_udaf =
+        common_function::aggrs::approximate::uddsketch::UddSketchState::state_udf_impl();
+    let aggr_expr = Expr::AggregateFunction(datafusion_expr::expr::AggregateFunction::new_udf(
+        Arc::new(state_udaf),
+        vec![
+            unqualified_col("number"),
+            lit(0.01f64),
+            unqualified_col("number"),
+        ],
+        false,
+        None,
+        vec![],
+        None,
+    ))
+    .alias("state");
+    let aggregate = datafusion_expr::logical_plan::Aggregate::try_new(
+        aggregate.input.clone(),
+        aggregate.group_expr.clone(),
+        vec![aggr_expr],
+    )
+    .unwrap();
+    let plan = LogicalPlan::Aggregate(aggregate);
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert_unsupported(&analysis, "bucket size");
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_rejects_uddsketch_calc_finalize() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    // A flow that finalizes the state (uddsketch_calc) stores plain quantiles,
+    // not mergeable states; it must not be incrementally rewritten.
+    let sql = "SELECT uddsketch_calc(0.95, uddsketch_state(10, 0.01, number)) AS p95, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        !analysis.unsupported_exprs.is_empty(),
+        "uddsketch_calc finalize output must not be incrementally mergeable: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert!(analysis.merge_columns.is_empty());
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_uddsketch_state() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql =
+        "SELECT uddsketch_state(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+
+    let sink_table = binary_state_table("uddsketch_state_sink", &[(1, Some(b"existing"))]);
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "uddsketch_state_sink".to_string(),
+    ];
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table.clone(),
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let expected = expected_left_join_rewrite(
+        &plan,
+        sink_table,
+        &sink_table_name,
+        vec![unqualified_col("ts"), unqualified_col("state")],
+        vec![unqualified_col("ts"), unqualified_col("state")],
+        (
+            vec![qualified_column("__flow_delta", "ts")],
+            vec![qualified_column("__flow_sink", "ts")],
+        ),
+        vec![
+            uddsketch_merge_expr("state", 10, 0.01),
+            qualified_col("__flow_delta", "ts").alias("ts"),
+        ],
+    );
+    assert_same_logical_plan(&rewritten, &expected);
+    let rewritten_fields = rewritten
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rewritten_fields, analysis.output_field_names);
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_uddsketch_state_with_regular_aggregates() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT uddsketch_state(10, 0.01, number) AS state, max(number) AS max_num, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "mixed UDDSketch and regular aggregates should be supported: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert_eq!(analysis.merge_columns.len(), 2);
+    assert!(analysis.merge_columns.iter().any(|col| {
+        col.output_field_name == "state"
+            && col.merge_op
+                == IncrementalAggregateMergeOp::UddSketchState {
+                    bucket_size: 10,
+                    error_rate: 0.01,
+                }
+    }));
+    assert!(analysis.merge_columns.iter().any(|col| {
+        col.output_field_name == "max_num" && col.merge_op == IncrementalAggregateMergeOp::Max
+    }));
+
+    // sink table with a binary state column and a uint32 max column
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("state", ConcreteDataType::binary_datatype(), true),
+        ColumnSchema::new("max_num", ConcreteDataType::uint32_datatype(), true),
+    ]));
+    let mut ts_builder = TimestampMillisecondVectorBuilder::with_capacity(1);
+    ts_builder.push(Some(TimestampMillisecond::new(0)));
+    let mut state_builder = BinaryVectorBuilder::with_capacity(1);
+    state_builder.push(Some(b"state"));
+    let max_builder: VectorRef = Arc::new(<u32 as Scalar>::VectorType::from_vec(vec![1_u32]));
+    let recordbatch = RecordBatch::new(
+        schema,
+        vec![
+            ts_builder.to_vector_cloned(),
+            state_builder.to_vector_cloned(),
+            max_builder,
+        ],
+    )
+    .unwrap();
+    let sink_table = MemTable::table("uddsketch_mixed_sink", recordbatch);
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "uddsketch_mixed_sink".to_string(),
+    ];
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let rewritten_fields = rewritten
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rewritten_fields, analysis.output_field_names);
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_rejects_uddsketch_non_binary_sink_state() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql =
+        "SELECT uddsketch_state(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+
+    // sink state column is Float64 instead of Binary -> the rewrite must fail
+    // clearly instead of producing a broken merge.
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("state", ConcreteDataType::float64_datatype(), true),
+    ]));
+    let mut ts_builder = TimestampMillisecondVectorBuilder::with_capacity(1);
+    ts_builder.push(Some(TimestampMillisecond::new(0)));
+    let state_builder: VectorRef = Arc::new(<f64 as Scalar>::VectorType::from_vec(vec![1.0_f64]));
+    let recordbatch =
+        RecordBatch::new(schema, vec![ts_builder.to_vector_cloned(), state_builder]).unwrap();
+    let sink_table = MemTable::table("uddsketch_bad_sink", recordbatch);
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "uddsketch_bad_sink".to_string(),
+    ];
+
+    let err = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("must be Binary"),
+        "expected a clear sink state type error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_uddsketch_incremental_rewrite_survives_substrait_roundtrip() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql =
+        "SELECT uddsketch_state(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+
+    // The sink must be registered in the catalog so the Substrait consumer can
+    // resolve the sink scan on decode.
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap();
+    let sink_table = binary_state_table("uddsketch_roundtrip_sink", &[(1, Some(b"existing"))]);
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "uddsketch_roundtrip_sink".to_string(),
+            table_id: 9101,
+            table: sink_table.clone(),
+        })
+        .unwrap();
+
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "uddsketch_roundtrip_sink".to_string(),
+    ];
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The rewritten plan travels from the flownode to the frontend as
+    // Substrait. Decode it exactly like the frontend's `handle_insert_plan`:
+    // a DefaultPlanDecoder whose session state registers the FUNCTION_REGISTRY
+    // functions, plus a DummyCatalogList that delegates table resolution to the
+    // real catalog manager (so both the source and the sink scans resolve).
+    // Replicate the production encode path (`BatchingTask::execute_logical_plan_unlocked`):
+    // every table scan is rewritten to a fully qualified reference
+    // ("catalog.schema.table") before the plan is encoded to Substrait, so the
+    // frontend's `DummyCatalogList` can resolve both the source and the sink
+    // scans against the real catalog manager on decode.
+    let rewritten = rewritten
+        .transform_down_with_subqueries(|plan| {
+            if let LogicalPlan::TableScan(mut table_scan) = plan {
+                let resolved = table_scan.table_name.resolve("greptime", "public");
+                table_scan.table_name = resolved.into();
+                Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+            } else {
+                Ok(Transformed::no(plan))
+            }
+        })
+        .unwrap()
+        .data;
+
+    let bytes = DFLogicalSubstraitConvertor {}
+        .encode(&rewritten, DefaultSerializer)
+        .unwrap();
+    let decoder = query_engine
+        .engine_context(ctx.clone())
+        .new_plan_decoder()
+        .unwrap();
+    let catalog_list = Arc::new(
+        catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
+            catalog_manager.clone(),
+            ctx.clone(),
+        ),
+    );
+    let decoded = decoder.decode(bytes, catalog_list, false).await.unwrap();
+
+    let decoded_text = format!("{}", decoded.display_indent());
+    assert!(
+        decoded_text.contains("uddsketch_merge_state"),
+        "decoded plan should keep the uddsketch_merge_state call: {decoded_text}"
+    );
+    assert_eq!(
+        decoded.schema().fields().len(),
+        rewritten.schema().fields().len(),
+        "decoded plan schema field count should match: {decoded_text}"
+    );
+}
+
+#[tokio::test]
+async fn test_uddsketch_state_incremental_merge_executes() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+
+    // Existing sink state for ts=1 built from value 100.0.
+    let existing_state = make_uddsketch_state_bytes(10, 0.01, &[100.0]);
+    let sink_table = binary_state_table(
+        "uddsketch_exec_sink",
+        &[(1, Some(existing_state.as_slice()))],
+    );
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "uddsketch_exec_sink".to_string(),
+            table_id: 9102,
+            table: sink_table.clone(),
+        })
+        .unwrap();
+
+    // Delta: numbers_with_ts has one value per ts (ts=i, number=i for i in 1..=10).
+    let sql =
+        "SELECT uddsketch_state(10, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "uddsketch_exec_sink".to_string(),
+    ];
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &plan,
+        &analysis,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Finalize the merged states through the registered `uddsketch_calc`
+    // scalar (the same registry the frontend resolves functions from), so the
+    // test validates the merged state via public final results instead of
+    // decoding bincode internals with a direct `uddsketch` dependency.
+    let finalize = LogicalPlanBuilder::from(rewritten)
+        .project(vec![
+            uddsketch_calc_expr(0.5, unqualified_col("state")).alias("p50"),
+            unqualified_col("ts"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    let output = query_engine.execute(finalize, ctx).await.unwrap();
+    let common_query::OutputData::Stream(stream) = output.data else {
+        panic!("expected record stream output, got {:?}", output.data);
+    };
+    let batches = common_recordbatch::util::collect_batches(stream)
+        .await
+        .unwrap();
+
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let ts_col = batch.column_by_name("ts").unwrap();
+        let p50_col = batch.column_by_name("p50").unwrap();
+        let ts_arr = ts_col
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+            .unwrap();
+        let p50_arr = p50_col
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::Float64Array>()
+            .unwrap();
+        for i in 0..ts_arr.len() {
+            rows.push((ts_arr.value(i), p50_arr.value(i)));
+        }
+    }
+
+    assert_eq!(rows.len(), 10, "merged plan should emit one row per group");
+    let mut p50_by_ts = std::collections::HashMap::new();
+    for (ts, p50) in rows {
+        p50_by_ts.insert(ts, p50);
+    }
+    // ts=1: delta value 1.0 merged with the existing sink state {100.0}; the
+    // merged state must match a state built directly from {1.0, 100.0}.
+    let expected_ts1 = make_uddsketch_state_bytes(10, 0.01, &[1.0, 100.0]);
+    assert!(
+        (p50_by_ts[&1] - uddsketch_calc_value(&expected_ts1, 0.5)).abs() < 1e-9,
+        "ts=1 p50 should match the {{1.0, 100.0}} reference state"
+    );
+    // Other groups only have their delta value.
+    for k in 2..=10 {
+        let expected = make_uddsketch_state_bytes(10, 0.01, &[k as f64]);
+        assert!(
+            (p50_by_ts[&k] - uddsketch_calc_value(&expected, 0.5)).abs() < 1e-9,
+            "ts={k} p50 should match the {{{k}}} reference state"
+        );
+    }
 }
 
 #[tokio::test]

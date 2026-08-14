@@ -40,7 +40,7 @@ use crate::scalars::math::MathFunction;
 use crate::scalars::primary_key::DecodePrimaryKeyFunction;
 use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
-use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
+use crate::scalars::uddsketch_calc::{UddSketchCalcFunction, UddSketchMergeStateFunction};
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
 use crate::system::SystemFunction;
 
@@ -209,6 +209,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
+    UddSketchMergeStateFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
 
