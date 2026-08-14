@@ -28,6 +28,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
@@ -238,6 +239,10 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
+    /// Memory pool shared by internal scan operators across all queries.
+    scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Whether to enable the experimental two-phase metric series scan.
+    experimental_series_scan_v2: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -269,6 +274,8 @@ impl ScanRegion {
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+            experimental_series_scan_v2: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -294,6 +301,20 @@ impl ScanRegion {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets the memory pool shared by internal scan operators.
+    #[must_use]
+    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
+        self.scan_memory_pool = scan_memory_pool;
+        self
+    }
+
+    /// Sets whether eligible metric series scans use the two-phase implementation.
+    #[must_use]
+    pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
+        self.experimental_series_scan_v2 = enabled;
         self
     }
 
@@ -387,8 +408,9 @@ impl ScanRegion {
     /// Scans by series.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let experimental_series_scan_v2 = self.experimental_series_scan_v2;
         let input = self.scan_input().await?;
-        Ok(SeriesScan::new(input))
+        Ok(SeriesScan::new(input, experimental_series_scan_v2))
     }
 
     /// Returns true if the region can use unordered scan for current request.
@@ -541,6 +563,7 @@ impl ScanRegion {
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
+            .with_scan_memory_pool(self.scan_memory_pool)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -899,6 +922,8 @@ pub struct ScanInput {
     ignore_file_not_found: bool,
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
+    /// Memory pool shared by internal scan operators across all queries.
+    pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
@@ -950,6 +975,7 @@ impl ScanInput {
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
@@ -1034,6 +1060,13 @@ impl ScanInput {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets the memory pool shared by internal scan operators.
+    #[must_use]
+    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
+        self.scan_memory_pool = scan_memory_pool;
         self
     }
 
