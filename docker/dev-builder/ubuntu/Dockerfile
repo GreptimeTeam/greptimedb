@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # The root path under which contains all the dependencies to build this Dockerfile.
 ARG DOCKER_BUILD_ROOT=.
 
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 WORKDIR /greptimedb
 
 RUN apt-get update && \
@@ -50,11 +50,11 @@ RUN git config --global --add safe.directory '*'
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /root/.cargo/bin/:$PATH
+ENV PATH=/root/.cargo/bin/:$PATH
 
 # Install Rust toolchains.
-ARG RUST_TOOLCHAIN
-RUN rustup toolchain install ${RUST_TOOLCHAIN}
+ARG RUST_TOOLCHAIN=nightly-2026-03-21
+RUN rustup toolchain install "${RUST_TOOLCHAIN}" && rustup default "${RUST_TOOLCHAIN}"
 
 # Install cargo-binstall with a specific version to adapt the current rust toolchain.
 # Note: if we use the latest version, we may encounter the following `use of unstable library feature 'io_error_downcast'` error.

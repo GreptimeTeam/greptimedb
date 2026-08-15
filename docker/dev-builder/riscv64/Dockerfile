@@ -50,6 +50,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-mo
 ENV PATH=/root/.cargo/bin/:$PATH
 
 # Install Rust toolchains and the riscv64 target std.
-ARG RUST_TOOLCHAIN
-RUN rustup toolchain install ${RUST_TOOLCHAIN}
-RUN rustup target add --toolchain ${RUST_TOOLCHAIN} riscv64gc-unknown-linux-gnu
+ARG RUST_TOOLCHAIN=nightly-2026-03-21
+RUN rustup toolchain install "${RUST_TOOLCHAIN}" && rustup default "${RUST_TOOLCHAIN}"
+RUN rustup target add --toolchain "${RUST_TOOLCHAIN}" riscv64gc-unknown-linux-gnu

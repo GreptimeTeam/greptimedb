@@ -1,6 +1,6 @@
 FROM centos:7 as builder
 
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 
 # Note: CentOS 7 has reached EOL since 2024-07-01 thus `mirror.centos.org` is no longer available and we need to use `vault.centos.org` instead.
 RUN sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
@@ -42,11 +42,11 @@ RUN mv protoc3/include/* /usr/local/include/
 # Install Rust
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /usr/local/bin:/root/.cargo/bin/:$PATH
+ENV PATH=/usr/local/bin:/root/.cargo/bin/:$PATH
 
 # Install Rust toolchains.
-ARG RUST_TOOLCHAIN
-RUN rustup toolchain install ${RUST_TOOLCHAIN}
+ARG RUST_TOOLCHAIN=nightly-2026-03-21
+RUN rustup toolchain install "${RUST_TOOLCHAIN}" && rustup default "${RUST_TOOLCHAIN}"
 
 
 # Install cargo-binstall with a specific version to adapt the current rust toolchain.

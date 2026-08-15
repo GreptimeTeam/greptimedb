@@ -1,6 +1,6 @@
 FROM --platform=linux/amd64 saschpe/android-ndk:34-jdk17.0.8_7-ndk25.2.9519653-cmake3.22.1
 
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 WORKDIR /greptimedb
 
 # Rename libunwind to libgcc
@@ -31,16 +31,16 @@ RUN git config --global --add safe.directory /greptimedb
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /root/.cargo/bin/:$PATH
+ENV PATH=/root/.cargo/bin/:$PATH
 
 # Add android toolchains
-ARG RUST_TOOLCHAIN
-RUN rustup toolchain install ${RUST_TOOLCHAIN}
+ARG RUST_TOOLCHAIN=nightly-2026-03-21
+RUN rustup toolchain install "${RUST_TOOLCHAIN}" && rustup default "${RUST_TOOLCHAIN}"
 RUN rustup target add aarch64-linux-android
 
 # Install cargo-ndk
 RUN cargo install cargo-ndk@3.5.4
-ENV ANDROID_NDK_HOME $NDK_ROOT
+ENV ANDROID_NDK_HOME=$NDK_ROOT
 
 # Builder entrypoint.
 CMD ["cargo", "ndk", "--platform", "23", "-t", "aarch64-linux-android", "build", "--bin", "greptime", "--profile", "release", "--no-default-features"]
