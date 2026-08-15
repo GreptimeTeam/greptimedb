@@ -26,12 +26,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-mo
 ENV PATH=/root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
+ARG CARGO_BUILD_EXTRA_OPTS=--jobs 2
+
 RUN --mount=target=. \
     --mount=type=cache,target=/root/.cargo/registry \
     make build \
     CARGO_PROFILE=${CARGO_PROFILE} \
     FEATURES=${FEATURES} \
-    TARGET_DIR=/out/target
+    TARGET_DIR=/out/target \
+    CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}"
 
 # Export the binary to the clean image.
 # TODO(zyy17): Maybe should use the more secure container image.
