@@ -19,6 +19,26 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::data_type::ConcreteDataType;
+
+/// Formats the shared error message used when a time index column's type
+/// change is rejected because it is not a widening timestamp unit change
+/// (see [`ConcreteDataType::is_timestamp_unit_widening_to`]).
+///
+/// Both the region layer (`store-api`) and the table layer (`table`) validate
+/// this rule; sharing one message keeps the two validations from drifting
+/// apart.
+pub fn time_index_not_widening_error(
+    column_name: &str,
+    from_type: &ConcreteDataType,
+    to_type: &ConcreteDataType,
+) -> String {
+    format!(
+        "time index column '{column_name}' only supports widening its timestamp \
+         unit, cannot change type from '{from_type}' to '{to_type}'"
+    )
+}
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]

@@ -2063,9 +2063,16 @@ impl SimpleFilterContext {
                         {
                             MaybeFilter::Filter(filter)
                         } else {
-                            // Altering tag or timestamp column types is not allowed,
-                            // so only field columns can reach this branch.
-                            debug_assert_eq!(column.semantic_type, SemanticType::Field);
+                            // Schema evolution can make columns with the same id
+                            // have different concrete data types across SSTs:
+                            // altering a field column's type, or widening the
+                            // time index unit. Evaluating this simple filter
+                            // against such an SST may raise an invalid
+                            // cross-type comparison error (e.g. Float64 == Utf8,
+                            // or microsecond literal vs millisecond column), so
+                            // we conservatively skip it for this SST; the
+                            // predicate is still applied to the compat-cast
+                            // batches by the scan pipeline.
                             return None;
                         };
                         (column, maybe_filter)

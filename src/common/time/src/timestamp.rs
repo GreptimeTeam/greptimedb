@@ -566,8 +566,12 @@ impl fmt::Debug for Timestamp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum TimeUnit {
+    // The declaration order (Second < Millisecond < Microsecond < Nanosecond) is
+    // the precision order; the derived ordering intentionally reflects it.
     Second,
     #[default]
     Millisecond,
