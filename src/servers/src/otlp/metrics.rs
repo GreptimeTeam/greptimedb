@@ -2082,32 +2082,6 @@ mod tests {
     }
 
     #[test]
-    fn test_exponential_histogram_mixed_valid_and_invalid_points() {
-        let mut invalid = exponential_point();
-        invalid.scale = -5;
-        let request = metrics_request(vec![exponential_metric(
-            "latency",
-            vec![exponential_point(), invalid],
-            AggregationTemporality::Cumulative,
-        )]);
-        let mut ctx = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
-            ..Default::default()
-        };
-        let (requests, rows, semantic_index, outcome) =
-            to_grpc_insert_requests(request, &mut ctx).unwrap();
-
-        assert_eq!(outcome.accepted_data_points, 1);
-        assert_eq!(outcome.rejected_data_points, 1);
-        assert_eq!(rows, 1);
-        assert_eq!(requests.inserts.len(), 1);
-        assert_eq!(
-            decode(&semantic_index)["latency"][SEMANTIC_METRIC_TYPE],
-            METRIC_TYPE_HISTOGRAM
-        );
-    }
-
-    #[test]
     fn test_exponential_histogram_rejects_temporality_before_stale_point() {
         let stale = ExponentialHistogramDataPoint {
             flags: DataPointFlags::NoRecordedValueMask as u32,

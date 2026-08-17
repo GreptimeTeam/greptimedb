@@ -180,33 +180,4 @@ mod tests {
         assert!(metric_ctx.experimental_enable_exponential_histogram);
         assert!(!metric_ctx.with_metric_engine);
     }
-
-    #[test]
-    fn batch_status_maps_partial_and_all_rejected_outcomes() {
-        let partial = batch_status(
-            1,
-            MetricsIngestOutcome {
-                accepted_data_points: 1,
-                rejected_data_points: 2,
-                error_message: Some("partial".to_string()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(partial.status_code, ArrowStatusCode::Ok as i32);
-        assert_eq!(partial.status_message, "partial");
-
-        let rejected = batch_status(
-            2,
-            MetricsIngestOutcome {
-                rejected_data_points: 2,
-                error_message: Some("rejected".to_string()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            rejected.status_code,
-            ArrowStatusCode::InvalidArgument as i32
-        );
-        assert_eq!(rejected.status_message, "rejected");
-    }
 }

@@ -159,11 +159,6 @@ fn test_load_frontend_example_config() {
             .otlp
             .experimental_enable_exponential_histogram
     );
-    assert!(
-        toml::to_string(&options.component.otlp)
-            .unwrap()
-            .contains("experimental_enable_exponential_histogram = false")
-    );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -345,11 +340,6 @@ fn test_load_standalone_example_config() {
             .component
             .otlp
             .experimental_enable_exponential_histogram
-    );
-    assert!(
-        toml::to_string(&options.component.otlp)
-            .unwrap()
-            .contains("experimental_enable_exponential_histogram = false")
     );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {

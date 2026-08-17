@@ -770,6 +770,7 @@ async fn setup_grpc_server_for_instance(
         user_provider,
         grpc_config,
         memory_limiter,
+        experimental_enable_exponential_histogram,
     )
     .await;
     (instance, grpc_server)
@@ -780,7 +781,7 @@ pub async fn setup_grpc_server_for_frontend_instance(
     instance: Arc<Instance>,
     user_provider: Option<UserProviderRef>,
 ) -> Arc<GrpcServer> {
-    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None).await
+    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None, false).await
 }
 
 /// Starts a gRPC server backed by `instance` and returns a client authenticated
@@ -809,6 +810,7 @@ async fn setup_grpc_server_for_frontend_instance_with(
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
+    experimental_enable_exponential_histogram: bool,
 ) -> Arc<GrpcServer> {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
