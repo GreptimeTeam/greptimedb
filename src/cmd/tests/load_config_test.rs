@@ -153,6 +153,17 @@ fn test_load_frontend_example_config() {
     let options =
         GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+    assert!(
+        toml::to_string(&options.component.otlp)
+            .unwrap()
+            .contains("experimental_enable_exponential_histogram = false")
+    );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -329,6 +340,17 @@ fn test_load_standalone_example_config() {
     let options =
         GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(
+        !options
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+    assert!(
+        toml::to_string(&options.component.otlp)
+            .unwrap()
+            .contains("experimental_enable_exponential_histogram = false")
+    );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
@@ -378,6 +400,43 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_otlp_exponential_histogram_option() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[otlp]\nexperimental_enable_exponential_histogram = true\n",
+    )
+    .unwrap();
+
+    let frontend =
+        GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        frontend
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+
+    let standalone =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(
+        standalone
+            .component
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
+    assert!(
+        standalone
+            .component
+            .frontend_options()
+            .otlp
+            .experimental_enable_exponential_histogram
+    );
 }
 
 #[test]

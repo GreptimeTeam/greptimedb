@@ -12,9 +12,9 @@ evaluates it as a first-class PromQL sample. This document records the supported
 protocols, the storage invariant, and the compatibility decisions needed to make
 that path predictable.
 
-Native histograms are experimental. Prometheus Remote Write 2.0 is the only
-supported native-histogram ingestion protocol. Remote Write 1.0 histogram
-payloads are rejected instead of being acknowledged and dropped.
+Native histograms are experimental. Prometheus Remote Write 2.0 and cumulative
+OTLP exponential histograms are supported behind separate configuration gates.
+Remote Write 1.0 histogram payloads are rejected instead of being acknowledged and dropped.
 Native-histogram Remote Read is deferred; the existing Remote Read path
 continues to return scalar samples only.
 
@@ -32,7 +32,6 @@ continues to return scalar samples only.
 - Supporting native histograms in Remote Write 1.0.
 - Returning native histograms through Prometheus Remote Read.
 - Persisting Remote Write metric metadata.
-- Ingesting OTLP exponential histograms.
 - Persisting exemplars.
 - Removing mixed float/histogram handling from PromQL expressions.
 - Propagating PromQL annotations produced on datanodes back to the frontend.
@@ -78,7 +77,7 @@ that send native histograms must use Remote Write 2.0.
 ## Remote Write 2.0
 
 Remote Write 2.0 accepts integer and float native histograms while
-`http.experimental_enable_prometheus_native_histogram` is enabled. Supported
+`prom_store.experimental_enable_prometheus_native_histogram` is enabled. Supported
 exponential schemas are `-4` through `8`; schema `-53` represents native
 histograms with custom buckets.
 
@@ -103,11 +102,42 @@ explicit if sampled responses are implemented.
 
 ## OTLP
 
-OTLP exponential histograms are not converted in this version. The ingestion
-branch intentionally remains deferred until it can map temporality, scale,
-reset behavior, attributes, and rejected-point reporting into the canonical
-native-histogram path. The code carries an explicit TODO rather than a partial
-encoder.
+OTLP exponential histograms are accepted when
+`otlp.experimental_enable_exponential_histogram` is enabled. The option defaults
+to false and applies to OTLP/HTTP and OTel Arrow. Disabled points are rejected
+rather than silently acknowledged. Cumulative temporality is required; delta
+and unspecified exponential histograms are rejected before their points are
+converted. Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and
+`_count` representation, including their existing delta behavior.
+
+OTLP scales `-4` through `8` map directly to Prometheus schemas. Higher scales
+are exactly downscaled to schema `8`: dense counts that collide are merged
+before the OTLP lower-bound index is shifted by one to the Prometheus
+upper-bound index. Lower scales are rejected. OTLP counts always populate the
+integer histogram family. The transmitted non-negative finite zero threshold,
+zero count, attributes, point timestamp, and start timestamp are preserved; the
+Struct start timestamp is stored in milliseconds and the reset hint is unknown.
+Legacy mode retains its normalized name, attribute rules, and nanosecond row
+timestamp. Non-legacy mode retains Prometheus-compatible translation and its
+millisecond row timestamp. Both modes write the same canonical Struct.
+
+An absent sum is stored as an ordinary quiet NaN, so the sample remains
+selectable while `histogram_sum` is unknown. Any NaN sum on a point without
+`NoRecordedValue` is normalized to the same value, even if its payload has the
+Prometheus stale-marker bits. Only an exponential-histogram point carrying OTLP
+`NoRecordedValue` becomes an empty schema-0 integer histogram with the canonical
+Prometheus stale-NaN sum; its attributes and timestamps remain. This
+interpretation intentionally does not change gauges, sums, or explicit histograms.
+
+Invalid points are skipped while unrelated valid points continue. Mixed
+accepted/rejected OTLP/HTTP requests return partial success; a request with only
+rejected points returns `InvalidArgument`. OTel Arrow uses an `OK` batch status
+for mixed batches and `INVALID_ARGUMENT` when all points are rejected. Rejection
+details are bounded, and metric metadata is emitted only for a metric that
+produced an accepted row.
+
+Minimum, maximum, and exemplars are not persisted. Delta accumulation,
+zero-run span compaction, and a dedicated rejection metric remain deferred.
 
 # PromQL Compatibility Decisions
 
@@ -208,20 +238,22 @@ boundary already recorded in
 
 # Testing and Compatibility
 
-Compatibility coverage includes protocol rejection, kind exclusivity,
+Compatibility coverage includes protocol rejection, OTLP scale conversion and
+partial-success behavior, kind exclusivity,
 stale-marker selector semantics, synthetic-zero rates, incompatible empty
 layouts, overflow-safe averages, layout-sensitive equality, infinite custom
 midpoints, and exponential overflow indices for schemas `-4`, `0`, and `8`.
 Behavioral coverage also verifies frontend PromQL warning and info responses.
 
-This work does not change GreptimeDB's persisted Struct, protobuf dependencies,
-or public configuration. Existing native-histogram data remains readable.
+This work does not change GreptimeDB's persisted Struct or protobuf
+dependencies. It adds the disabled-by-default public OTLP gate; existing
+native-histogram data remains readable.
 
 # Future Work
 
 - Native-histogram Remote Read, including exact integer round-trips and streamed
   chunks with start timestamps.
-- OTLP exponential-histogram conversion with partial-success reporting.
+- OTLP exponential-histogram delta accumulation and deferred field persistence.
 - Persistent Remote Write metadata and accurate help/unit updates.
 - Native-histogram exemplars and exemplar query APIs.
 - Start-timestamp overlap annotations.
