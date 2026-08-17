@@ -1065,7 +1065,7 @@ impl EngineInner {
         // `sequence_range` mode requests exactness; historical `memtable_only`
         // scans never set `exact_sequence_range` and therefore keep every fence
         // below regardless of region options.
-        let exact_sequence_range = exact_sequence_range(&request, &version);
+        let exact_sequence_range = exact_sequence_range(&request, &version)?;
 
         // An extension range provider may contribute ranges on a follower
         // region, and extension streams are returned without a row-level

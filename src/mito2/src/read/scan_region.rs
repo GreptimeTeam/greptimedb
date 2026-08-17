@@ -57,7 +57,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
 use crate::error::{
-    InvalidPartitionExprSnafu, InvalidRequestSnafu, Result, SequenceRangeUnsupportedSnafu,
+    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionSequenceDomainBrokenSnafu, Result,
+    SequenceRangeUnsupportedSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -446,7 +447,7 @@ impl ScanRegion {
         // exceed it (e.g. `(5, 10]` with `sst_min_sequence = 8` drops a file
         // with max = 8, losing sequences 6..8), so the conflicting combination
         // is rejected explicitly instead of being silently approximated.
-        if sst_min_sequence.is_some() && self.exact_sequence_range().is_some() {
+        if sst_min_sequence.is_some() && self.exact_sequence_range()?.is_some() {
             return SequenceRangeUnsupportedSnafu {
                 region_id: self.region_id(),
                 min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
@@ -483,7 +484,7 @@ impl ScanRegion {
         // marked files (no in-range rows) and to unmarked files already proven
         // disjoint by `files_allow_exact_sequence_range` (their rows must not
         // pass through unfiltered).
-        let sequence_range = self.exact_sequence_range();
+        let sequence_range = self.exact_sequence_range()?;
         let exact_min_sequence = match &sequence_range {
             Some(SequenceRange::GtLtEq { min, .. }) => Some(*min),
             _ => None,
@@ -781,7 +782,7 @@ impl ScanRegion {
         self.version.metadata.region_id
     }
 
-    fn exact_sequence_range(&self) -> Option<SequenceRange> {
+    fn exact_sequence_range(&self) -> Result<Option<SequenceRange>> {
         exact_sequence_range(&self.request, &self.version)
     }
 
@@ -1679,14 +1680,30 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// `(min_seq, max]` scan: it must carry a known max sequence not exceeding the
 /// lower bound `min_seq`, so none of its rows can fall inside the range.
 /// Marked files always qualify (the reader filters their rows row-level);
-/// unmarked files with an unknown max sequence fail closed.
-pub(crate) fn files_allow_exact_sequence_range(ssts: &SstVersion, min_seq: SequenceNumber) -> bool {
-    ssts.levels().iter().all(|level| {
-        level.files.values().all(|file| {
+/// unmarked files with an unknown max sequence fail closed. Files belonging to
+/// another region are a broken sequence domain and return an error.
+pub(crate) fn files_allow_exact_sequence_range(
+    ssts: &SstVersion,
+    region_id: RegionId,
+    min_seq: SequenceNumber,
+) -> Result<bool> {
+    for level in ssts.levels() {
+        for file in level.files.values() {
             let meta = file.meta_ref();
-            meta.preserve_row_sequence || meta.sequence.is_some_and(|seq| seq.get() <= min_seq)
-        })
-    })
+            if meta.region_id != region_id {
+                return RegionSequenceDomainBrokenSnafu {
+                    region_id,
+                    file_region_id: meta.region_id,
+                    file_id: meta.file_id,
+                }
+                .fail();
+            }
+            if !meta.preserve_row_sequence && meta.sequence.is_none_or(|seq| seq.get() > min_seq) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Single source of truth for the exact row-level sequence-range capability.
@@ -1702,23 +1719,32 @@ pub(crate) fn files_allow_exact_sequence_range(ssts: &SstVersion, min_seq: Seque
 ///   bound `min`, so it cannot contribute rows to `(min, max]`.
 ///
 /// Returns `None` otherwise. Callers must keep main's fences/fallback semantics
-/// and never silently approximate.
+/// and never silently approximate. An SST belonging to another region is not a
+/// fail-closed `None` condition; it returns a sequence-domain error.
 pub(crate) fn exact_sequence_range(
     request: &ScanRequest,
     version: &crate::region::version::Version,
-) -> Option<SequenceRange> {
-    if !request.exact_sequence_range
-        || request.skip_sst_files
-        || !version.options.preserve_row_sequence
-    {
-        return None;
+) -> Result<Option<SequenceRange>> {
+    if !request.exact_sequence_range || request.skip_sst_files {
+        return Ok(None);
     }
-    let min = request.memtable_min_sequence?;
-    let max = request.memtable_max_sequence?;
-    if !files_allow_exact_sequence_range(&version.ssts, min) {
-        return None;
+    let Some(min) = request.memtable_min_sequence else {
+        return Ok(None);
+    };
+    // Check the domain before capability conditions that would otherwise return
+    // `None`, so a corrupt manifest can never be treated as fallback-safe.
+    let files_allow_exact_range =
+        files_allow_exact_sequence_range(&version.ssts, version.metadata.region_id, min)?;
+    if !version.options.preserve_row_sequence {
+        return Ok(None);
     }
-    Some(SequenceRange::GtLtEq { min, max })
+    let Some(max) = request.memtable_max_sequence else {
+        return Ok(None);
+    };
+    if !files_allow_exact_range {
+        return Ok(None);
+    }
+    Ok(Some(SequenceRange::GtLtEq { min, max }))
 }
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
@@ -2838,7 +2864,9 @@ mod tests {
         use crate::test_util::new_noop_file_purger;
 
         let purger = new_noop_file_purger();
+        let region_id = RegionId::new(1, 1);
         let file = |sequence: Option<NonZeroU64>, marked: bool| FileMeta {
+            region_id,
             sequence,
             preserve_row_sequence: marked,
             ..Default::default()
@@ -2856,13 +2884,26 @@ mod tests {
             .into_iter(),
         );
         // C=5: the unmarked file with max 9 overlaps (5, H] -> not allowed.
-        assert!(!files_allow_exact_sequence_range(&ssts, 5));
+        assert!(!files_allow_exact_sequence_range(&ssts, region_id, 5).unwrap());
         // C=9: every unmarked file's max <= C -> allowed.
-        assert!(files_allow_exact_sequence_range(&ssts, 9));
+        assert!(files_allow_exact_sequence_range(&ssts, region_id, 9).unwrap());
 
         // Unknown max sequence fails closed even when C is large.
         let mut ssts = SstVersion::new();
-        ssts.add_files(purger, [file(None, false)].into_iter());
-        assert!(!files_allow_exact_sequence_range(&ssts, 100));
+        ssts.add_files(purger.clone(), [file(None, false)].into_iter());
+        assert!(!files_allow_exact_sequence_range(&ssts, region_id, 100).unwrap());
+
+        // A file from another region breaks the sequence domain even if marked.
+        let mut ssts = SstVersion::new();
+        ssts.add_files(
+            purger,
+            [FileMeta {
+                region_id: RegionId::new(1, 2),
+                preserve_row_sequence: true,
+                ..Default::default()
+            }]
+            .into_iter(),
+        );
+        assert!(files_allow_exact_sequence_range(&ssts, region_id, 100).is_err());
     }
 }

@@ -288,6 +288,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -1467,7 +1481,8 @@ impl ErrorExt for Error {
 
             SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
 
-            RegionMetadataNotFound { .. }
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }

@@ -32,7 +32,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, SequenceRange};
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, RegionSequenceDomainBrokenSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -1511,14 +1511,26 @@ pub(crate) async fn scan_flat_file_ranges(
 ///
 /// `file_preserves_sequence` is the per-file `preserve_row_sequence` marker:
 /// only marked files may be row-level sequence filtered. Without it, rows pass
-/// through untouched to keep main's file-level semantics.
+/// through untouched to keep main's file-level semantics. An active range also
+/// rejects files from another region instead of passing them through.
 fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
     file_preserves_sequence: bool,
+    region_id: RegionId,
+    file_region_id: RegionId,
+    file_id: store_api::storage::FileId,
 ) -> Result<Option<RecordBatch>> {
     let Some(sequence) = sequence_range else {
         return Ok(Some(record_batch));
+    };
+    if file_region_id != region_id {
+        return RegionSequenceDomainBrokenSnafu {
+            region_id,
+            file_region_id,
+            file_id,
+        }
+        .fail();
     };
     if !file_preserves_sequence {
         return Ok(Some(record_batch));
@@ -1603,10 +1615,14 @@ pub fn build_flat_file_range_scan_stream(
                     record_batch
                 };
 
+                let file_meta = range.file_handle().meta_ref();
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,
-                    range.file_handle().meta_ref().preserve_row_sequence,
+                    file_meta.preserve_row_sequence,
+                    stream_ctx.input.region_metadata().region_id,
+                    file_meta.region_id,
+                    file_meta.file_id,
                 )? else {
                     continue;
                 };
@@ -2104,7 +2120,7 @@ mod sequence_filter_tests {
     use datatypes::arrow::array::{Int64Array, StringArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
-    use store_api::storage::SequenceRange;
+    use store_api::storage::{FileId, RegionId, SequenceRange};
 
     use super::filter_flat_batch_by_sequence;
 
@@ -2159,13 +2175,20 @@ mod sequence_filter_tests {
     fn test_filter_flat_batch_by_sequence_no_range_or_legacy_file() {
         let b = batch(&[1, 2, 3, 4]);
 
-        let out = filter_flat_batch_by_sequence(b.clone(), None, true).unwrap();
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+        let out =
+            filter_flat_batch_by_sequence(b.clone(), None, true, region_id, region_id, file_id)
+                .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
 
         let out = filter_flat_batch_by_sequence(
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
             false,
+            region_id,
+            region_id,
+            file_id,
         )
         .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
@@ -2174,11 +2197,16 @@ mod sequence_filter_tests {
     #[test]
     fn test_filter_flat_batch_by_sequence_exact_range() {
         let b = batch(&[1, 2, 3, 4]);
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
 
         let out = filter_flat_batch_by_sequence(
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
             true,
+            region_id,
+            region_id,
+            file_id,
         )
         .unwrap();
         assert_eq!(remaining_tags(&out.unwrap()), vec!["2"]);
@@ -2187,6 +2215,9 @@ mod sequence_filter_tests {
             b.clone(),
             Some(SequenceRange::GtLtEq { min: 10, max: 20 }),
             true,
+            region_id,
+            region_id,
+            file_id,
         )
         .unwrap();
         assert!(out.is_none());
@@ -2196,8 +2227,25 @@ mod sequence_filter_tests {
             empty,
             Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
             true,
+            region_id,
+            region_id,
+            file_id,
         )
         .unwrap();
         assert_eq!(out.unwrap().num_rows(), 0);
+
+        let err = filter_flat_batch_by_sequence(
+            b,
+            Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
+            true,
+            region_id,
+            RegionId::new(1, 2),
+            file_id,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::RegionSequenceDomainBroken { .. }
+        ));
     }
 }
