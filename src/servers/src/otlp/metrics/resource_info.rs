@@ -92,7 +92,10 @@ impl ResourceInfoData {
             return;
         }
 
-        let entry = self.rows.entry(tags.into_iter().collect()).or_insert(i64::MIN);
+        let entry = self
+            .rows
+            .entry(tags.into_iter().collect())
+            .or_insert(i64::MIN);
         *entry = (*entry).max(max_ts_nanos);
     }
 

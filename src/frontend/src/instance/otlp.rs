@@ -129,8 +129,12 @@ impl OpenTelemetryProtocolHandler for Instance {
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
         if let Some(resource_info) = &resource_info {
-            self.check_row_insert_permission(resource_info, &ctx, PermissionReq::Action(OTLP_WRITE))
-                .context(AuthSnafu)?;
+            self.check_row_insert_permission(
+                resource_info,
+                &ctx,
+                PermissionReq::Action(OTLP_WRITE),
+            )
+            .context(AuthSnafu)?;
         }
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
@@ -175,7 +179,9 @@ impl OpenTelemetryProtocolHandler for Instance {
         // warning.
         let mut warning = None;
         if let Some(resource_info) = resource_info
-            && let Err(e) = self.handle_row_inserts(resource_info, ctx, false, false).await
+            && let Err(e) = self
+                .handle_row_inserts(resource_info, ctx, false, false)
+                .await
         {
             OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
             common_telemetry::warn!(e; "Failed to write the OTLP resource descriptor table");

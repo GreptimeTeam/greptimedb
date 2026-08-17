@@ -986,7 +986,13 @@ mod tests {
             .collect();
         assert_eq!(
             types,
-            vec!["container", "host", "k8s.pod", "service", "service.instance"]
+            vec![
+                "container",
+                "host",
+                "k8s.pod",
+                "service",
+                "service.instance"
+            ]
         );
         // host identity is host.id only; host.name stays descriptive
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
@@ -1027,8 +1033,7 @@ mod tests {
         let mut stamps = OTEL_STAMPS.to_vec();
         stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
         assert!(
-            sorted_declarations(&prom_table_info("otel_resource_info", labels, &stamps))
-                .is_empty()
+            sorted_declarations(&prom_table_info("otel_resource_info", labels, &stamps)).is_empty()
         );
         // drift guard: the ingestion-side table name must stay whitelisted
         assert!(

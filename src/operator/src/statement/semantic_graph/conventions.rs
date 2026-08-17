@@ -291,9 +291,7 @@ mod tests {
             .contains("descriptive_rest")
         );
         // the otel map runs through the same per-table validation
-        assert!(
-            err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type")
-        );
+        assert!(err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type"));
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
             parse(&broken(

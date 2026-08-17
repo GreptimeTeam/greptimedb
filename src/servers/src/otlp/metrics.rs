@@ -1004,8 +1004,7 @@ mod tests {
             vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
             "my_gauge",
         );
-        let conversion =
-            to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+        let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
 
         // descriptor keeps raw OTel keys while the metric table's labels went
         // through the (default underscore-escaping) translation strategy
@@ -1022,7 +1021,10 @@ mod tests {
 
         let decoded = decode(&conversion.semantic_index);
         let t = &decoded[OTEL_RESOURCE_INFO_TABLE_NAME];
-        assert_eq!(t.get(SEMANTIC_METRIC_TYPE).map(String::as_str), Some("info"));
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("info")
+        );
         assert_eq!(
             t.get(SEMANTIC_METRIC_METADATA_QUALITY).map(String::as_str),
             Some("declared")
@@ -1048,8 +1050,7 @@ mod tests {
             vec![keyvalue("service.name", "api")],
             OTEL_RESOURCE_INFO_TABLE_NAME,
         );
-        let conversion =
-            to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+        let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
         assert!(conversion.resource_info.is_none());
         // the metric itself still goes through the main path
         assert!(
@@ -1112,10 +1113,7 @@ mod tests {
             is_legacy: true,
             ..Default::default()
         };
-        let mut attrs = vec![
-            keyvalue("service.name", "api"),
-            keyvalue("host.id", "h-1"),
-        ];
+        let mut attrs = vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")];
         process_resource_attrs(&mut attrs, &ctx);
         assert_eq!(attr_value(&attrs, "job"), None);
         assert_eq!(attr_value(&attrs, "host.id").as_deref(), Some("h-1"));
