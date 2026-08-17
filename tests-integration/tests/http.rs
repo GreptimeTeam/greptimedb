@@ -50,7 +50,9 @@ use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
@@ -160,6 +162,7 @@ macro_rules! http_tests {
                 test_pipeline_index_options,
 
                 test_otlp_metrics_new,
+                test_otlp_exponential_histogram,
                 test_otlp_metric_translation_strategies,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
@@ -6709,6 +6712,140 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
+    };
+    use tests_integration::test_util::setup_test_http_app_with_otlp_exponential_histogram;
+
+    common_telemetry::init_default_ut_logging();
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "otlp.exponential.latency".to_string(),
+                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                        data_points: vec![
+                            ExponentialHistogramDataPoint {
+                                start_time_unix_nano: 1_000_000_000,
+                                time_unix_nano: 3_000_000_000,
+                                count: 4,
+                                sum: Some(8.0),
+                                scale: 0,
+                                zero_count: 1,
+                                positive: Some(exponential_histogram_data_point::Buckets {
+                                    offset: -1,
+                                    bucket_counts: vec![1, 2],
+                                }),
+                                ..Default::default()
+                            },
+                            ExponentialHistogramDataPoint {
+                                start_time_unix_nano: 1_000_000_000,
+                                time_unix_nano: 4_000_000_000,
+                                scale: -5,
+                                ..Default::default()
+                            },
+                        ],
+                        aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = req.encode_to_vec();
+    let headers = || {
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )]
+    };
+
+    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
+        store_type,
+        "test_otlp_exponential_histogram_disabled",
+        false,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let res = send_req(
+        &client,
+        headers(),
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
+    assert_eq!(3, status.code);
+    assert!(
+        status
+            .message
+            .contains("otlp.experimental_enable_exponential_histogram")
+    );
+    validate_data(
+        "otlp_exponential_histogram_disabled_no_table",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency';",
+        "[[0]]",
+    )
+    .await;
+    guard.remove_all().await;
+
+    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
+        store_type,
+        "test_otlp_exponential_histogram_enabled",
+        true,
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+    let response = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = response.partial_success.unwrap();
+    assert_eq!(1, partial_success.rejected_data_points);
+    assert!(partial_success.error_message.contains("scale -5"));
+
+    validate_data(
+        "otlp_exponential_histogram_row",
+        &client,
+        "select greptime_timestamp, greptime_native_histogram from otlp_exponential_latency;",
+        "[[3000,{\"count_f64\":null,\"count_i64\":4,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,2],\"positive_span_lengths\":[2],\"positive_span_offsets\":[0],\"reset_hint\":0,\"schema\":0,\"start_timestamp\":1000,\"sum\":8.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.0}]]",
+    )
+    .await;
+    validate_data(
+        "otlp_exponential_histogram_metadata",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency' and create_options like '%greptime.semantic.metric.type=histogram%' and create_options like '%greptime.semantic.metric.temporality=cumulative%';",
+        "[[1]]",
+    )
+    .await;
+
+    for query in [
+        "histogram_count(otlp_exponential_latency)",
+        "histogram_sum(otlp_exponential_latency)",
+        "histogram_quantile(0.5,otlp_exponential_latency)",
+        "histogram_count(rate(otlp_exponential_latency[5s]))",
+    ] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=3",
+                encode(query)
+            ))
+            .send()
+            .await;
+        assert_eq!(StatusCode::OK, res.status(), "query: {query}");
+        let body = res.text().await;
+        assert!(body.contains("otlp_exponential_latency"), "{query}: {body}");
+    }
+
+    guard.remove_all().await;
+}
+
 pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -10624,6 +10761,7 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
+        false,
     )
     .await;
 

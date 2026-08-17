@@ -71,6 +71,15 @@ pub struct TraceIngestOutcome {
     pub error_message: Option<String>,
 }
 
+/// Result of ingesting one OTLP metrics request or Arrow batch.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsIngestOutcome {
+    pub write_cost: usize,
+    pub accepted_data_points: i64,
+    pub rejected_data_points: i64,
+    pub error_message: Option<String>,
+}
+
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
@@ -136,7 +145,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request
     async fn traces(

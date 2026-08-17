@@ -158,8 +158,11 @@ where
         }
 
         if opts.otlp.enable {
-            builder = builder
-                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
+            builder = builder.with_otlp_handler(
+                self.instance.clone(),
+                opts.prom_store.with_metric_engine,
+                opts.otlp.experimental_enable_exponential_histogram,
+            );
         }
 
         if opts.jaeger.enable {
@@ -213,6 +216,7 @@ where
         name: Option<String>,
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
+        experimental_enable_exponential_histogram: bool,
     ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
@@ -254,6 +258,7 @@ where
             .otel_arrow_handler(OtelArrowServiceHandler::new(
                 self.instance.clone(),
                 user_provider.clone(),
+                experimental_enable_exponential_histogram,
             ))
             .flight_handler(flight_handler)
             .add_layer(axum::middleware::from_fn_with_state(
@@ -321,6 +326,7 @@ where
                 None,
                 true,
                 self.server_memory_limiter.clone(),
+                opts.otlp.experimental_enable_exponential_histogram,
             )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
@@ -334,6 +340,7 @@ where
                 Some("INTERNAL_GRPC_SERVER".to_string()),
                 false,
                 self.server_memory_limiter.clone(),
+                opts.otlp.experimental_enable_exponential_histogram,
             )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
