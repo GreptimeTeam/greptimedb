@@ -117,14 +117,6 @@ impl JsonSettings {
         })
     }
 
-    #[cfg(test)]
-    fn new(type_hints: Vec<JsonTypeHint>) -> Self {
-        Self {
-            type_hints,
-            max_auto_expanded_paths: None,
-        }
-    }
-
     pub fn type_hints(&self) -> &[JsonTypeHint] {
         &self.type_hints
     }
@@ -199,12 +191,12 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
                 .fail();
             }
         };
-        insert_type_hint(&mut object, &hint.path, data_type)?;
+        validate_type_hint(&mut object, &hint.path, data_type)?;
     }
     Ok(())
 }
 
-fn insert_type_hint(
+fn validate_type_hint(
     object: &mut JsonObjectType,
     path: &[String],
     data_type: JsonNativeType,
@@ -234,7 +226,7 @@ fn insert_type_hint(
         }
         .fail();
     };
-    insert_type_hint(child, path, data_type)
+    validate_type_hint(child, path, data_type)
 }
 
 impl<'a> JsonContext<'a> {
@@ -618,7 +610,8 @@ mod tests {
     }
 
     #[test]
-    fn test_json_settings_forward_compatibility() {
+    fn test_json_settings_forward_compatibility()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let json_str = r#"{
             "type_hints": [
                 {
@@ -647,11 +640,10 @@ mod tests {
             ]
         }"#;
 
-        let deserialized = serde_json::from_str::<JsonSettings>(json_str).unwrap();
+        let deserialized = serde_json::from_str::<JsonSettings>(json_str)?;
 
-        assert_eq!(
-            deserialized,
-            JsonSettings::new(vec![
+        let expected = JsonSettings::try_new(
+            vec![
                 JsonTypeHint {
                     path: vec!["user".to_string(), "age".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
@@ -666,8 +658,11 @@ mod tests {
                     default_constraint: None,
                     inverted_index: false,
                 },
-            ])
-        );
+            ],
+            None,
+        )?;
+        assert_eq!(deserialized, expected);
+        Ok(())
     }
 
     #[test]
@@ -901,14 +896,15 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_respects_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_respects_type_hint() -> Result<()> {
+        let type_hints = vec![JsonTypeHint {
             path: vec!["age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
         let result = settings
             .encode(json!({
@@ -930,17 +926,19 @@ mod tests {
             }))
             .unwrap_err();
         assert!(err.to_string().contains("does not match JSON2 type hint"));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_respects_unsigned_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_respects_unsigned_type_hint() -> Result<()> {
+        let type_hints = vec![JsonTypeHint {
             path: vec!["count".to_string()],
             data_type: ConcreteDataType::uint64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
         let result = settings
             .encode(json!({
@@ -964,17 +962,19 @@ mod tests {
             }))
             .unwrap_err();
         assert!(err.to_string().contains("does not match JSON2 type hint"));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_fills_missing_type_hint_with_default() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_fills_missing_type_hint_with_default() -> Result<()> {
+        let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
             inverted_index: false,
-        }]);
+        }];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
         let result = settings
             .encode(json!({}))
@@ -989,17 +989,19 @@ mod tests {
             panic!("Expected user Struct value");
         };
         assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_fills_missing_nullable_type_hint_with_null() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_fills_missing_nullable_type_hint_with_null() -> Result<()> {
+        let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "name".to_string()],
             data_type: ConcreteDataType::string_datatype(),
             nullable: true,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
         let result = settings
             .encode(json!({ "user": {} }))
@@ -1014,28 +1016,31 @@ mod tests {
             panic!("Expected user Struct value");
         };
         assert_eq!(struct_field_value(user, "name"), &Value::Null);
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_rejects_missing_non_null_type_hint() {
-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    fn test_encode_json_rejects_missing_non_null_type_hint() -> Result<()> {
+        let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             nullable: false,
             default_constraint: None,
             inverted_index: false,
-        }]);
+        }];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
         let err = settings.encode(json!({})).unwrap_err();
         assert!(
             err.to_string()
                 .contains("missing non-null JSON2 type hint path user.age")
         );
+        Ok(())
     }
 
     #[test]
-    fn test_encode_json_merges_missing_type_hint_prefix() {
-        let settings = JsonSettings::new(vec![
+    fn test_encode_json_merges_missing_type_hint_prefix() -> Result<()> {
+        let type_hints = vec![
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
@@ -1052,13 +1057,10 @@ mod tests {
                 ))),
                 inverted_index: false,
             },
-        ]);
+        ];
+        let settings = JsonSettings::try_new(type_hints, None)?;
 
-        let result = settings
-            .encode(json!({}))
-            .unwrap()
-            .into_json_inner()
-            .unwrap();
+        let result = settings.encode(json!({}))?.into_json_inner().unwrap();
 
         let Value::Struct(root) = result else {
             panic!("Expected Struct value");
@@ -1071,6 +1073,7 @@ mod tests {
             struct_field_value(user, "name"),
             &Value::String("unknown".into())
         );
+        Ok(())
     }
 
     #[test]
