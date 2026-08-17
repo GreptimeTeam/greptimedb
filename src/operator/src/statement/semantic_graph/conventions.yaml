@@ -127,12 +127,13 @@ prometheus_info_metrics:
       descriptive_rest: true
 
 # Implicit declarations for the OTLP resource descriptor synthesized at
-# metrics ingestion, gated on source=opentelemetry. Columns are the raw OTel
-# attribute keys; job/instance are the derived Prometheus-compatible service
-# identity, so services line up with target_info-sourced entities. Every
-# descriptive column is explicit: the descriptor's attribute set is a known
-# allowlist, and identifying attributes of other entities must not leak into
-# service.instance the way target_info's descriptive_rest would.
+# metrics ingestion, gated on source=opentelemetry and metric.type=info.
+# Columns are the raw OTel attribute keys; job/instance are the derived
+# Prometheus-compatible service identity, so services line up with
+# target_info-sourced entities. Every descriptive column is explicit: the
+# descriptor's attribute set is a known allowlist, and identifying attributes
+# of other entities must not leak into service.instance the way target_info's
+# descriptive_rest would.
 otel_info_metrics:
   otel_resource_info:
     - entity: service

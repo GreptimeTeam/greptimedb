@@ -60,8 +60,9 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
-    EntityRole, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
-    SOURCE_PROMETHEUS, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
+    EntityRole, SEMANTIC_METRIC_TYPE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC,
+    SOURCE_OPENTELEMETRY, SOURCE_PROMETHEUS, is_trace_v1_table, parse_entity_columns,
+    parse_entity_option_key,
 };
 
 use crate::error;
@@ -209,12 +210,14 @@ impl EntityGraphProviderImpl {
             table_info,
             &conventions.prometheus_info_metrics,
             SOURCE_PROMETHEUS,
+            None,
             &mut declarations,
         );
         Self::extend_with_info_metric_conventions(
             table_info,
             &conventions.otel_info_metrics,
             SOURCE_OPENTELEMETRY,
+            Some(servers::semantic::METRIC_TYPE_INFO),
             &mut declarations,
         );
         declarations
@@ -231,13 +234,15 @@ impl EntityGraphProviderImpl {
     /// Implicit declarations of the well-known entity-descriptor metrics
     /// (the `prometheus_info_metrics` / `otel_info_metrics` whitelists of
     /// `conventions.yaml`), gated on the ingest-stamped `signal_type=metric`
-    /// option plus the whitelist's expected `source`, and keyed by table
-    /// name. The metric engine's physical table aggregates every logical
-    /// table's columns and must not contribute a duplicate source.
+    /// option plus the whitelist's expected `source`; OTel descriptors also
+    /// require `metric.type=info`. The metric engine's physical table
+    /// aggregates every logical table's columns and must not contribute a
+    /// duplicate source.
     fn extend_with_info_metric_conventions(
         table_info: &TableInfo,
         whitelist: &BTreeMap<String, Vec<ImplicitEntity>>,
         expected_source: &str,
+        expected_metric_type: Option<&str>,
         declarations: &mut Vec<EntityDeclaration>,
     ) {
         let Some(implicit_entities) = whitelist.get(&table_info.name) else {
@@ -246,11 +251,14 @@ impl EntityGraphProviderImpl {
         let options = &table_info.meta.options.extra_options;
         if options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) != Some(SIGNAL_TYPE_METRIC)
             || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(expected_source)
+            || expected_metric_type.is_some_and(|expected| {
+                options.get(SEMANTIC_METRIC_TYPE).map(String::as_str) != Some(expected)
+            })
             || table_info.is_physical_table()
         {
             debug!(
-                "Table `{}` matches the info-metric whitelist but is not a `{expected_source}` \
-                 logical metric table; skipping its implicit declarations",
+                "Table `{}` matches the info-metric whitelist but is not an eligible \
+                 `{expected_source}` info-metric source; skipping its implicit declarations",
                 table_info.name
             );
             return;
@@ -958,6 +966,7 @@ mod tests {
     const OTEL_STAMPS: &[(&str, &str)] = &[
         (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
         (SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY),
+        (SEMANTIC_METRIC_TYPE, servers::semantic::METRIC_TYPE_INFO),
     ];
 
     #[test]
@@ -1041,6 +1050,16 @@ mod tests {
                 .unwrap()
                 .otel_info_metrics
                 .contains_key(servers::otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME)
+        );
+
+        let wrong_type = [
+            (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+            (SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY),
+            (SEMANTIC_METRIC_TYPE, servers::semantic::METRIC_TYPE_GAUGE),
+        ];
+        assert!(
+            sorted_declarations(&prom_table_info("otel_resource_info", labels, &wrong_type))
+                .is_empty()
         );
     }
 

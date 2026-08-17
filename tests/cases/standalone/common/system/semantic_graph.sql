@@ -389,7 +389,7 @@ drop table target_info;
 drop table http_requests_total;
 
 -- OTel conventions: the ingestion-synthesized otel_resource_info descriptor
--- (stamped signal_type=metric + source=opentelemetry) gets implicit
+-- (stamped signal_type=metric + source=opentelemetry + metric.type=info) gets implicit
 -- declarations under the raw OTel column names. host/container identities are
 -- the stable ids only, so rows with an empty host.id / container.id link no
 -- infrastructure, and a row without an instance value declares no
@@ -410,7 +410,8 @@ create table otel_resource_info (
     "host.id", "host.name", "container.id", "container.name")
 ) with (
   'greptime.semantic.signal_type' = 'metric',
-  'greptime.semantic.source' = 'opentelemetry'
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.metric.type' = 'info'
 );
 
 insert into otel_resource_info values

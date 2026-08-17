@@ -6571,12 +6571,16 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         "[[\"claude-code\",\"claude-code\",1.0,1753780559836]]",
     )
     .await;
+    // All four ownership markers must land on auto-create: the descriptor
+    // write path refuses tables that miss any of them, so a missing stamp
+    // here would silently stop every follow-up descriptor write.
     validate_data(
         "otlp_metrics_resource_info_options",
         &client,
         "select count(*) from information_schema.tables where table_name = 'otel_resource_info' \
          and engine = 'mito' \
          and create_options like '%greptime.semantic.metric.type=info%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%' \
          and create_options like '%greptime.semantic.signal_type=metric%' \
          and create_options like '%greptime.semantic.source=opentelemetry%';",
         "[[1]]",
@@ -6965,6 +6969,78 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
         &client,
         "select greptime_value from conflict_gauge;",
         "[[7.0]]",
+    )
+    .await;
+
+    let res = execute_sql(&client, "drop table otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = execute_sql(
+        &client,
+        "create table otel_resource_info (\
+         greptime_timestamp timestamp time index, greptime_value double, \
+         job string, \"service.name\" string, primary key(job, \"service.name\"));",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A schema-compatible user table is still not descriptor-owned. Writing
+    // into it would appear successful while its missing semantic stamps keep
+    // it out of the entity graph, so reject only the derived write and warn.
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![content_type()],
+        "/v1/otlp/v1/metrics",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_data_points, 0);
+    assert!(
+        partial_success.error_message.contains("semantic ownership"),
+        "unexpected warning: {}",
+        partial_success.error_message
+    );
+    validate_data(
+        "otlp_metrics_compatible_foreign_table_untouched",
+        &client,
+        "select count(*) from otel_resource_info;",
+        "[[0]]",
+    )
+    .await;
+
+    // Once the foreign table is gone, the descriptor is auto-created and a
+    // follow-up write into the now-existing owned table passes the ownership
+    // check without degrading — guards against a marker drift that would
+    // silently stop every descriptor write after the first request.
+    let res = execute_sql(&client, "drop table otel_resource_info;").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    for round in 0..2 {
+        let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
+        let res = send_req(
+            &client,
+            vec![content_type()],
+            "/v1/otlp/v1/metrics",
+            req.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        let body = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+        assert!(
+            body.partial_success.is_none(),
+            "round {round} unexpectedly degraded: {:?}",
+            body.partial_success
+        );
+    }
+    validate_data(
+        "otlp_metrics_owned_descriptor_keeps_accepting",
+        &client,
+        "select count(*) from otel_resource_info;",
+        "[[1]]",
     )
     .await;
 

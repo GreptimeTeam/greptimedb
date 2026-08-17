@@ -73,7 +73,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                let batch_status = BatchStatus {
+                let mut batch_status = BatchStatus {
                     batch_id: batch.batch_id,
                     status_code: 0,
                     status_message: Default::default(),
@@ -101,10 +101,12 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                 // use metric engine by default
                 match handler.metrics(request, query_ctx.clone()).await {
                     Ok(outcome) => {
-                        // BatchStatus has no partial-success channel; a
-                        // derived-write warning is only logged here.
                         if let Some(warning) = outcome.warning {
                             warn!("otel-arrow metrics ingestion warning: {warning}");
+                            // OTAP has no rejected-count field. Keep the batch
+                            // successful and carry the derived-write warning in
+                            // its diagnostic message.
+                            batch_status.status_message = warning;
                         }
                     }
                     Err(e) => {

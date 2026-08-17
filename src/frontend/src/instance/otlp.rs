@@ -24,7 +24,7 @@ use auth::{
     PermissionTableTargets,
 };
 use client::Output;
-use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
+use common_catalog::consts::{MITO_ENGINE, trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
@@ -43,7 +43,8 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{
-    OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
+    METADATA_QUALITY_DECLARED, OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM,
+    SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_TYPE, SEMANTIC_PER_TABLE_INDEX_KEY,
     SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
     SOURCE_OPENTELEMETRY,
 };
@@ -81,6 +82,19 @@ fn trace_permission_targets(
     }
 
     PermissionTableTargets::resolved(targets)
+}
+
+fn is_owned_resource_info_table(table: &table::metadata::TableInfo) -> bool {
+    let options = &table.meta.options.extra_options;
+    table.meta.engine == MITO_ENGINE
+        && options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) == Some(SIGNAL_TYPE_METRIC)
+        && options.get(SEMANTIC_SOURCE).map(String::as_str) == Some(SOURCE_OPENTELEMETRY)
+        && options.get(SEMANTIC_METRIC_TYPE).map(String::as_str)
+            == Some(servers::semantic::METRIC_TYPE_INFO)
+        && options
+            .get(SEMANTIC_METRIC_METADATA_QUALITY)
+            .map(String::as_str)
+            == Some(METADATA_QUALITY_DECLARED)
 }
 
 #[async_trait]
@@ -148,7 +162,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         // If the user uses the legacy path, it is by default without metric engine.
-        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+        let mut output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx.clone(), false, false)
                 .await
                 .map_err(BoxedError::new)
@@ -171,26 +185,49 @@ impl OpenTelemetryProtocolHandler for Instance {
         // already-accepted data; both degrade to a partial-success warning.
         let mut warning = None;
         if let Some(resource_info) = resource_info {
-            let written = match self.check_row_insert_permission(
-                &resource_info,
-                &ctx,
-                PermissionReq::Action(OTLP_WRITE),
-            ) {
-                Ok(_) => self
-                    .handle_row_inserts(resource_info, ctx, false, false)
-                    .await
-                    .map(|_| ())
-                    .map_err(BoxedError::new),
-                Err(e) => Err(BoxedError::new(e)),
+            let existing = self
+                .catalog_manager()
+                .table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME,
+                    None,
+                )
+                .await;
+            let written = match existing {
+                Ok(Some(table)) if !is_owned_resource_info_table(&table.table_info()) => {
+                    Err(format!(
+                        "table `{}` already exists without the descriptor's semantic ownership markers",
+                        otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
+                    ))
+                }
+                Ok(_) => match self.check_row_insert_permission(
+                    &resource_info,
+                    &ctx,
+                    PermissionReq::Action(OTLP_WRITE),
+                ) {
+                    Ok(_) => self
+                        .handle_row_inserts(resource_info, ctx, false, false)
+                        .await
+                        .map_err(BoxedError::new)
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
             };
-            if let Err(e) = written {
-                OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
-                common_telemetry::warn!(e; "Failed to write the OTLP resource descriptor table");
-                warning = Some(format!(
-                    "metric data was accepted, but writing the resource \
-                     descriptor table `{}` failed: {e}",
-                    otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
-                ));
+            match written {
+                Ok(descriptor_output) => output.meta.cost += descriptor_output.meta.cost,
+                Err(e) => {
+                    OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
+                    common_telemetry::warn!(
+                        "Failed to write the OTLP resource descriptor table: {e}"
+                    );
+                    warning = Some(format!(
+                        "metric data was accepted, but writing the resource \
+                         descriptor table `{}` failed: {e}",
+                        otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
+                    ));
+                }
             }
         }
 
