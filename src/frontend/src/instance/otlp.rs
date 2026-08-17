@@ -128,14 +128,6 @@ impl OpenTelemetryProtocolHandler for Instance {
         } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
-        if let Some(resource_info) = &resource_info {
-            self.check_row_insert_permission(
-                resource_info,
-                &ctx,
-                PermissionReq::Action(OTLP_WRITE),
-            )
-            .context(AuthSnafu)?;
-        }
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
@@ -173,23 +165,33 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         // The descriptor is derived enrichment written after the main data is
-        // committed: a failure here (e.g. a conflicting pre-existing table, or
-        // auto-create disabled) must not fail the request and trigger client
-        // retries of already-accepted data; it degrades to a partial-success
-        // warning.
+        // committed: neither a permission denial on its table nor a write
+        // failure (e.g. a conflicting pre-existing table, or auto-create
+        // disabled) must fail the request and trigger client retries of
+        // already-accepted data; both degrade to a partial-success warning.
         let mut warning = None;
-        if let Some(resource_info) = resource_info
-            && let Err(e) = self
-                .handle_row_inserts(resource_info, ctx, false, false)
-                .await
-        {
-            OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
-            common_telemetry::warn!(e; "Failed to write the OTLP resource descriptor table");
-            warning = Some(format!(
-                "metric data was accepted, but writing the resource \
-                 descriptor table `{}` failed: {e}",
-                otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
-            ));
+        if let Some(resource_info) = resource_info {
+            let written = match self.check_row_insert_permission(
+                &resource_info,
+                &ctx,
+                PermissionReq::Action(OTLP_WRITE),
+            ) {
+                Ok(_) => self
+                    .handle_row_inserts(resource_info, ctx, false, false)
+                    .await
+                    .map(|_| ())
+                    .map_err(BoxedError::new),
+                Err(e) => Err(BoxedError::new(e)),
+            };
+            if let Err(e) = written {
+                OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
+                common_telemetry::warn!(e; "Failed to write the OTLP resource descriptor table");
+                warning = Some(format!(
+                    "metric data was accepted, but writing the resource \
+                     descriptor table `{}` failed: {e}",
+                    otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
+                ));
+            }
         }
 
         Ok(OtlpMetricsOutcome { output, warning })
