@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::reconciliation::reconcile_catalog::end::ReconcileCatalogEnd;
-use crate::reconciliation::reconcile_catalog::{ReconcileCatalogContext, State};
+use crate::reconciliation::reconcile_catalog::{CatalogPhase, ReconcileCatalogContext, State};
 use crate::reconciliation::reconcile_database::ReconcileDatabaseProcedure;
 use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
@@ -58,7 +58,10 @@ impl State for ReconcileDatabases {
             return Self::schedule_reconcile_database(ctx, catalog);
         }
 
-        Ok((Box::new(ReconcileCatalogEnd), Status::executing(false)))
+        ctx.persistent_ctx
+            .result_summary
+            .mark_phase_completed(CatalogPhase::Databases);
+        Ok((Box::new(ReconcileCatalogEnd), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -98,7 +101,7 @@ impl ReconcileDatabases {
 
         Ok((
             Box::new(ReconcileDatabases),
-            Status::suspended(vec![procedure_with_id], false),
+            Status::suspended(vec![procedure_with_id], true),
         ))
     }
 }

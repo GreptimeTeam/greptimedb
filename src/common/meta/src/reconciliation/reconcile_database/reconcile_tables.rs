@@ -25,7 +25,7 @@ use table::table_reference::TableReference;
 use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::reconciliation::reconcile_database::reconcile_logical_tables::ReconcileLogicalTables;
-use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
+use crate::reconciliation::reconcile_database::{DatabasePhase, ReconcileDatabaseContext, State};
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
 use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
@@ -47,7 +47,8 @@ impl State for ReconcileTables {
             ctx.volatile_ctx.inflight_subprocedures.len()
         );
         // Waits for inflight subprocedures first.
-        ctx.wait_for_inflight_subprocedures(procedure_ctx).await?;
+        ctx.wait_for_inflight_subprocedures(procedure_ctx, DatabasePhase::PhysicalTables)
+            .await?;
 
         let catalog = &ctx.persistent_ctx.catalog;
         let schema = &ctx.persistent_ctx.schema;
@@ -91,6 +92,9 @@ impl State for ReconcileTables {
             return Self::schedule_reconcile_tables(ctx);
         }
         ctx.volatile_ctx.tables.take();
+        ctx.persistent_ctx
+            .result_summary
+            .mark_phase_completed(DatabasePhase::PhysicalTables);
         Ok((Box::new(ReconcileLogicalTables), Status::executing(true)))
     }
 
@@ -111,7 +115,7 @@ impl ReconcileTables {
         ctx.volatile_ctx.inflight_subprocedures.extend(meta);
         Ok((
             Box::new(ReconcileTables),
-            Status::suspended(procedures, false),
+            Status::suspended(procedures, true),
         ))
     }
 
