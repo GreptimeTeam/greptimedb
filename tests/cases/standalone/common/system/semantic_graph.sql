@@ -387,3 +387,69 @@ drop table kube_service_info;
 drop table target_info;
 
 drop table http_requests_total;
+
+-- OTel conventions: the ingestion-synthesized otel_resource_info descriptor
+-- (stamped signal_type=metric + source=opentelemetry) gets implicit
+-- declarations under the raw OTel column names. host/container identities are
+-- the stable ids only, so rows with an empty host.id / container.id link no
+-- infrastructure, and a row without an instance value declares no
+-- service.instance. The same table name stamped source=prometheus is not
+-- whitelisted.
+create table otel_resource_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  "service.name" string,
+  "service.namespace" string,
+  "host.id" string,
+  "host.name" string,
+  "container.id" string,
+  "container.name" string,
+  greptime_value double,
+  primary key (job, instance, "service.name", "service.namespace",
+    "host.id", "host.name", "container.id", "container.name")
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry'
+);
+
+insert into otel_resource_info values
+  (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', 1),
+  (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', 1),
+  (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', 1);
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, source_tables
+from greptime_private.semantic_entities
+order by entity_type, entity_id, source_tables;
+
+-- SQLNESS PROTOCOL MYSQL
+select src_type, src_id, dst_type, dst_id, rel_type, provenance
+from greptime_private.semantic_relationships
+order by rel_type, src_id, dst_id;
+
+drop table otel_resource_info;
+
+-- The descriptor whitelist is gated on source=opentelemetry: the same table
+-- shape stamped as a prometheus source contributes nothing.
+create table otel_resource_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  "host.id" string,
+  greptime_value double,
+  primary key (job, instance, "host.id")
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+insert into otel_resource_info values
+  (now(), 'shop/api', 'inst-1', 'h-1', 1);
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id
+from greptime_private.semantic_entities
+order by entity_type, entity_id;
+
+drop table otel_resource_info;

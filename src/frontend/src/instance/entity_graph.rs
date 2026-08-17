@@ -23,7 +23,7 @@
 //! the query engine. Injected into the catalog manager after the engine is built,
 //! breaking the `catalog -> query` cycle.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Weak;
 
 use async_trait::async_trait;
@@ -60,8 +60,8 @@ use table::TableRef;
 use table::metadata::TableInfo;
 use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
-    EntityRole, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
-    is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
+    EntityRole, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_OPENTELEMETRY,
+    SOURCE_PROMETHEUS, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
 };
 
 use crate::error;
@@ -188,10 +188,11 @@ impl EntityGraphProviderImpl {
     /// All entity declarations of one table: the explicit options plus the
     /// zero-configuration conventions (`otlp_trace_entities` for trace-v1
     /// tables — including the `service` identity of tables created before the
-    /// ingest-side auto-stamp — and the Prometheus descriptor whitelist). An
-    /// explicit declaration of a type always suppresses the implicit one, even
-    /// when the explicit declaration is invalid and skipped: silently falling
-    /// back would change entity identity behind the user's back.
+    /// ingest-side auto-stamp — and the Prometheus/OTel descriptor
+    /// whitelists). An explicit declaration of a type always suppresses the
+    /// implicit one, even when the explicit declaration is invalid and
+    /// skipped: silently falling back would change entity identity behind the
+    /// user's back.
     fn declarations_for(
         table_info: &TableInfo,
         conventions: &Conventions,
@@ -204,7 +205,18 @@ impl EntityGraphProviderImpl {
                 &mut declarations,
             );
         }
-        Self::extend_with_prometheus_conventions(table_info, conventions, &mut declarations);
+        Self::extend_with_info_metric_conventions(
+            table_info,
+            &conventions.prometheus_info_metrics,
+            SOURCE_PROMETHEUS,
+            &mut declarations,
+        );
+        Self::extend_with_info_metric_conventions(
+            table_info,
+            &conventions.otel_info_metrics,
+            SOURCE_OPENTELEMETRY,
+            &mut declarations,
+        );
         declarations
     }
 
@@ -216,29 +228,29 @@ impl EntityGraphProviderImpl {
         })
     }
 
-    /// Implicit declarations of the well-known Prometheus entity-descriptor
-    /// metrics (the `prometheus_info_metrics` whitelist of `conventions.yaml`),
-    /// gated on the ingest-stamped `signal_type=metric` + `source=prometheus`
-    /// options and keyed by table name. The metric engine's physical table
-    /// aggregates every logical table's columns and must not contribute a
-    /// duplicate source.
-    fn extend_with_prometheus_conventions(
+    /// Implicit declarations of the well-known entity-descriptor metrics
+    /// (the `prometheus_info_metrics` / `otel_info_metrics` whitelists of
+    /// `conventions.yaml`), gated on the ingest-stamped `signal_type=metric`
+    /// option plus the whitelist's expected `source`, and keyed by table
+    /// name. The metric engine's physical table aggregates every logical
+    /// table's columns and must not contribute a duplicate source.
+    fn extend_with_info_metric_conventions(
         table_info: &TableInfo,
-        conventions: &Conventions,
+        whitelist: &BTreeMap<String, Vec<ImplicitEntity>>,
+        expected_source: &str,
         declarations: &mut Vec<EntityDeclaration>,
     ) {
-        let Some(implicit_entities) = conventions.prometheus_info_metrics.get(&table_info.name)
-        else {
+        let Some(implicit_entities) = whitelist.get(&table_info.name) else {
             return;
         };
         let options = &table_info.meta.options.extra_options;
         if options.get(SEMANTIC_SIGNAL_TYPE).map(String::as_str) != Some(SIGNAL_TYPE_METRIC)
-            || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(SOURCE_PROMETHEUS)
+            || options.get(SEMANTIC_SOURCE).map(String::as_str) != Some(expected_source)
             || table_info.is_physical_table()
         {
             debug!(
-                "Table `{}` matches the info-metric whitelist but is not a prometheus logical \
-                 metric table; skipping its implicit declarations",
+                "Table `{}` matches the info-metric whitelist but is not a `{expected_source}` \
+                 logical metric table; skipping its implicit declarations",
                 table_info.name
             );
             return;
@@ -857,6 +869,49 @@ mod tests {
     }
 
     #[test]
+    fn trace_table_host_and_container_require_stable_ids() {
+        let with_ids = table_info(
+            &[
+                "service_name",
+                "resource_attributes.host.id",
+                "resource_attributes.host.name",
+                "resource_attributes.container.id",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = sorted_declarations(&with_ids);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(types, vec!["container", "host", "service"]);
+        assert_eq!(
+            declarations[1].id_columns,
+            vec!["resource_attributes.host.id"]
+        );
+        assert_eq!(
+            declarations[1].descriptive_columns,
+            vec!["resource_attributes.host.name"]
+        );
+
+        // Names alone synthesize nothing: host.name/container.name are not
+        // stable identities across SDKs and resource detectors.
+        let names_only = table_info(
+            &[
+                "service_name",
+                "resource_attributes.host.name",
+                "resource_attributes.container.name",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let types: Vec<String> = sorted_declarations(&names_only)
+            .into_iter()
+            .map(|d| d.entity_type)
+            .collect();
+        assert_eq!(types, vec!["service"]);
+    }
+
+    #[test]
     fn prometheus_implicit_declarations_are_gated() {
         let labels: &[&str] = &["namespace", "pod", "node"];
         // A non-Prometheus source.
@@ -898,6 +953,90 @@ mod tests {
         assert_eq!(declarations[1].entity_type, "k8s.pod");
         // The explicit identity wins over the conventional [namespace, pod].
         assert_eq!(declarations[1].id_columns, vec!["pod"]);
+    }
+
+    const OTEL_STAMPS: &[(&str, &str)] = &[
+        (SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC),
+        (SEMANTIC_SOURCE, SOURCE_OPENTELEMETRY),
+    ];
+
+    #[test]
+    fn otel_resource_info_gets_implicit_declarations() {
+        let info = prom_table_info(
+            "otel_resource_info",
+            &[
+                "job",
+                "instance",
+                "service.name",
+                "service.namespace",
+                "host.id",
+                "host.name",
+                "container.id",
+                "container.name",
+                "k8s.pod.uid",
+                "k8s.pod.name",
+                "k8s.namespace.name",
+            ],
+            OTEL_STAMPS,
+        );
+        let declarations = sorted_declarations(&info);
+        let types: Vec<&str> = declarations
+            .iter()
+            .map(|d| d.entity_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["container", "host", "k8s.pod", "service", "service.instance"]
+        );
+        // host identity is host.id only; host.name stays descriptive
+        assert_eq!(declarations[1].id_columns, vec!["host.id"]);
+        assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
+        assert_eq!(declarations[3].id_columns, vec!["job"]);
+        assert_eq!(
+            declarations[3].descriptive_columns,
+            vec!["service.name", "service.namespace"]
+        );
+        // no descriptive_rest: other entities' identifying attributes must
+        // not leak into service.instance
+        assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
+        assert!(declarations[4].descriptive_columns.is_empty());
+    }
+
+    #[test]
+    fn otel_resource_info_missing_id_columns_drop_entities() {
+        let info = prom_table_info(
+            "otel_resource_info",
+            &["job", "service.name", "host.id"],
+            OTEL_STAMPS,
+        );
+        let types: Vec<String> = sorted_declarations(&info)
+            .into_iter()
+            .map(|d| d.entity_type)
+            .collect();
+        assert_eq!(types, vec!["host", "service"]);
+    }
+
+    #[test]
+    fn otel_implicit_declarations_are_gated() {
+        let labels: &[&str] = &["job", "instance", "host.id"];
+        // a prometheus-stamped table under the otel-whitelisted name
+        assert!(
+            sorted_declarations(&prom_table_info("otel_resource_info", labels, PROM_STAMPS))
+                .is_empty()
+        );
+        let mut stamps = OTEL_STAMPS.to_vec();
+        stamps.push((PHYSICAL_TABLE_METADATA_KEY, "true"));
+        assert!(
+            sorted_declarations(&prom_table_info("otel_resource_info", labels, &stamps))
+                .is_empty()
+        );
+        // drift guard: the ingestion-side table name must stay whitelisted
+        assert!(
+            conventions()
+                .unwrap()
+                .otel_info_metrics
+                .contains_key(servers::otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME)
+        );
     }
 
     #[test]

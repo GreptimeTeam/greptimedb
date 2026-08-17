@@ -43,8 +43,8 @@ pub struct VirtualDstCandidate {
     pub connection_type: String,
 }
 
-/// One implicit entity declaration: of a whitelisted Prometheus info metric,
-/// or of a trace-v1 table's flattened resource attributes.
+/// One implicit entity declaration: of a whitelisted Prometheus or OTel info
+/// metric, or of a trace-v1 table's flattened resource attributes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImplicitEntity {
@@ -71,6 +71,10 @@ pub struct Conventions {
     pub virtual_dst_candidates: Vec<VirtualDstCandidate>,
     pub otlp_trace_entities: Vec<ImplicitEntity>,
     pub prometheus_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
+    /// Implicit declarations of OTLP-sourced descriptor tables (the
+    /// ingestion-synthesized `otel_resource_info`), gated on
+    /// `source = opentelemetry` instead of `prometheus`.
+    pub otel_info_metrics: BTreeMap<String, Vec<ImplicitEntity>>,
 }
 
 /// The built-in entity-type vocabulary. User-declared types are open-ended;
@@ -78,6 +82,7 @@ pub struct Conventions {
 pub const ENTITY_TYPE_SERVICE: &str = "service";
 pub const ENTITY_TYPE_SERVICE_INSTANCE: &str = "service.instance";
 pub const ENTITY_TYPE_HOST: &str = "host";
+pub const ENTITY_TYPE_CONTAINER: &str = "container";
 pub const ENTITY_TYPE_PROCESS: &str = "process";
 pub const ENTITY_TYPE_K8S_POD: &str = "k8s.pod";
 pub const ENTITY_TYPE_K8S_NODE: &str = "k8s.node";
@@ -88,10 +93,11 @@ pub const ENTITY_TYPE_GEN_AI_AGENT: &str = "gen_ai.agent";
 pub const ENTITY_TYPE_GEN_AI_MODEL: &str = "gen_ai.model";
 pub const ENTITY_TYPE_GEN_AI_TOOL: &str = "gen_ai.tool";
 
-const ENTITY_TYPES: [&str; 12] = [
+const ENTITY_TYPES: [&str; 13] = [
     ENTITY_TYPE_SERVICE,
     ENTITY_TYPE_SERVICE_INSTANCE,
     ENTITY_TYPE_HOST,
+    ENTITY_TYPE_CONTAINER,
     ENTITY_TYPE_PROCESS,
     ENTITY_TYPE_K8S_POD,
     ENTITY_TYPE_K8S_NODE,
@@ -200,6 +206,7 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
     let per_table = conventions
         .prometheus_info_metrics
         .iter()
+        .chain(&conventions.otel_info_metrics)
         .map(|(table, entities)| (table.as_str(), entities))
         .chain(std::iter::once((
             "otlp traces",
@@ -249,25 +256,28 @@ mod tests {
 
     /// Each case must fail on exactly the rule it names, so the shared
     /// boilerplate is valid and the mutated part is inside the vocabulary.
-    fn broken(edges: &str, info_metrics: &str) -> String {
+    fn broken(edges: &str, info_metrics: &str, otel_metrics: &str) -> String {
         format!(
             "co_declared_edges: [{edges}]\ntrace_co_declared_edges: []\n\
              virtual_dst_candidates: []\notlp_trace_entities: []\n\
-             prometheus_info_metrics: {{{info_metrics}}}"
+             prometheus_info_metrics: {{{info_metrics}}}\n\
+             otel_info_metrics: {{{otel_metrics}}}"
         )
     }
 
     #[test]
     fn validation_rejects_broken_conventions() {
-        let err = |edges, info| parse(&broken(edges, info)).unwrap_err();
+        let err = |edges, info, otel| parse(&broken(edges, info, otel)).unwrap_err();
 
-        assert!(err("{src: host, dst: service, rel: pets}", "").contains("unknown rel_type"));
+        assert!(err("{src: host, dst: service, rel: pets}", "", "").contains("unknown rel_type"));
         assert!(
-            err("{src: k8s.pods, dst: k8s.node, rel: runs_on}", "").contains("unknown entity type")
+            err("{src: k8s.pods, dst: k8s.node, rel: runs_on}", "", "")
+                .contains("unknown entity type")
         );
         assert!(
             err(
                 "{src: host, dst: service, rel: uses}, {src: host, dst: service, rel: uses}",
+                "",
                 ""
             )
             .contains("duplicate edge rule")
@@ -275,14 +285,20 @@ mod tests {
         assert!(
             err(
                 "",
-                "t: [{entity: host, id: [x], descriptive: [y], descriptive_rest: true}]"
+                "t: [{entity: host, id: [x], descriptive: [y], descriptive_rest: true}]",
+                ""
             )
             .contains("descriptive_rest")
+        );
+        // the otel map runs through the same per-table validation
+        assert!(
+            err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type")
         );
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
             parse(&broken(
                 "{src: host, dst: service, rel: uses, direction: down}",
+                "",
                 ""
             ))
             .is_err()
