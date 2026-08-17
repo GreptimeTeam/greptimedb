@@ -798,6 +798,24 @@ impl TableMeta {
                     },
                 );
 
+                // A dropped column may leave a stale entity declaration behind;
+                // re-adding it must not hand the declaration a type without a
+                // stable string form.
+                if !has_stable_string_form(&col_to_add.column_schema.data_type)
+                    && let Some(key) =
+                        entity_option_referencing(&self.options, &col_to_add.column_schema.name)
+                {
+                    return error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column `{}` is referenced by entity option `{key}` and must \
+                             keep a type that renders as a string, got `{}`",
+                            col_to_add.column_schema.name, col_to_add.column_schema.data_type
+                        ),
+                    }
+                    .fail();
+                }
+
                 new_columns.push(col_to_add.clone());
             }
         }
@@ -984,9 +1002,18 @@ impl TableMeta {
         for col_to_change in requests {
             let change_column_name = &col_to_change.column_name;
 
+            let index = table_schema
+                .column_index_by_name(change_column_name)
+                .with_context(|| error::ColumnNotExistsSnafu {
+                    column_name: change_column_name,
+                    table_name,
+                })?;
+
             // A column referenced by an entity declaration may be dropped (the
             // read-time derivation skips the stale declaration), but must not
-            // change to a type without a stable string form.
+            // change to a type without a stable string form. Checked after the
+            // existence lookup so a missing column keeps reporting
+            // `ColumnNotExists` regardless of stale declarations.
             if !has_stable_string_form(&col_to_change.target_type)
                 && let Some(key) = entity_option_referencing(&self.options, change_column_name)
             {
@@ -1000,13 +1027,6 @@ impl TableMeta {
                 }
                 .fail();
             }
-
-            let index = table_schema
-                .column_index_by_name(change_column_name)
-                .with_context(|| error::ColumnNotExistsSnafu {
-                    column_name: change_column_name,
-                    table_name,
-                })?;
 
             let column = &table_schema.column_schemas()[index];
 
@@ -2946,6 +2966,57 @@ mod tests {
             }],
         };
         meta.builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_stale_entity_declaration_guards_readd_and_reports_missing_column() {
+        // A stale declaration: `gone` was dropped after being declared.
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "gone".to_string(),
+        );
+
+        // MODIFY on the missing column keeps the ColumnNotExists contract
+        // (4002), stale declaration or not.
+        let modify = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "gone".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &modify)
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&err)
+        );
+
+        // Re-adding the declared column must not hand the declaration a
+        // non-string type...
+        let add = |ty: ConcreteDataType| AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("gone", ty, true),
+                is_key: false,
+                location: None,
+                add_if_not_exists: false,
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &add(ConcreteDataType::binary_datatype()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // ...while a string re-add re-satisfies it.
+        meta.builder_with_alter_kind("my_table", &add(ConcreteDataType::string_datatype()))
             .unwrap();
     }
 }
