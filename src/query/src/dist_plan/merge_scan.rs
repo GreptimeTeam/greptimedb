@@ -1237,14 +1237,14 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(&self.arrow_schema));
+            return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 
         let mut statistics = Statistics::new_unknown(&self.arrow_schema);
         statistics.num_rows = self.estimated_num_rows();
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {

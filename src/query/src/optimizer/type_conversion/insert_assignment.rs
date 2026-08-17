@@ -217,11 +217,8 @@ impl InsertAssignmentConverter {
                 return Ok(None);
             };
 
-            if let Expr::Cast(Cast {
-                expr: inner,
-                data_type,
-            }) = expr
-                && data_type == target_type
+            if let Expr::Cast(Cast { expr: inner, field }) = expr
+                && field.data_type() == target_type
                 && let Expr::Literal(value, _) = inner.as_ref()
                 && let Some(value) = self.convert_literal(value, target_type)
             {
