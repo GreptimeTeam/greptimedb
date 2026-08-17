@@ -1040,8 +1040,7 @@ mod tests {
                 .build(),
         );
         let engine = create_timestamp_test_engine().await;
-        // `st` is Timestamp vs Null across branches until TypeCoercion runs;
-        // rebuilding the union strictly rejected this legal plan.
+        // `st` stays Timestamp vs Null across branches until TypeCoercion runs.
         let sql = "INSERT INTO timestamps (ts, st) \
                    SELECT '2026-08-06 12:00:00.001', now() \
                    UNION ALL \

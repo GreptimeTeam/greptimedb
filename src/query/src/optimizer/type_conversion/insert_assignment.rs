@@ -62,8 +62,7 @@ pub(super) fn rewrite_insert_assignments(
             continue;
         }
 
-        // SQL INSERT maps each target column to its own source position, but a
-        // hand-built DML plan (e.g. from flow) may share one source column
+        // A hand-built DML plan (e.g. from flow) may share one source column
         // between targets; rewriting it in place would retype every reader.
         if assignment
             .expr
@@ -145,11 +144,9 @@ impl InsertAssignmentConverter {
             LogicalPlan::Union(union) => self.rewrite_union(union, output_idx, target_type),
             // Filter and Sort are excluded here: their predicates and keys read
             // the retyped column, which would change the source query. Constants
-            // still reach the assignment through `lineage_literal`.
-            // Distinct::All is allowed: it holds no expressions, and every
-            // surviving row feeds the same timestamp cast anyway. Deduplication
-            // then keys on parsed instants instead of raw strings, collapsing
-            // different spellings of one instant.
+            // still reach the assignment through `lineage_literal`. Distinct::All
+            // holds no expressions; allowing it shifts dedup keys from raw
+            // strings to parsed instants.
             LogicalPlan::Limit(_)
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Distinct(Distinct::All(_)) => {
@@ -258,9 +255,8 @@ impl InsertAssignmentConverter {
             inputs.push(Arc::new(rewritten));
         }
 
-        // This rule runs before TypeCoercion, where untouched columns may still
-        // have mismatched branch types (the SQL planner builds unions with loose
-        // types). The strict constructor would reject those legal plans.
+        // Untouched columns may still have mismatched branch types before
+        // TypeCoercion runs, so rebuild loosely like the SQL planner does.
         Union::try_new_with_loose_types(inputs)
             .map(LogicalPlan::Union)
             .map(Some)
