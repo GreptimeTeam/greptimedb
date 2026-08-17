@@ -196,6 +196,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid JSON2 layout: {reason}"))]
+    InvalidJson2Layout {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid Vector: {}", msg))]
     InvalidVector {
         msg: String,
@@ -318,6 +325,7 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | InvalidJson2Layout { .. }
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
