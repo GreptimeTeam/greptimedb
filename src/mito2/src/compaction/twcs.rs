@@ -265,69 +265,69 @@ fn pick_count_first(
     // A multi-SST FileGroup is a compaction output that already exceeded the output size target
     // and was split. Recompacting it cannot reduce physical files, so automatic TWCS treats it as
     // stable. It remains in the original Window for tombstone overlap checks.
-    groups.retain(|group| group.group.num_files() == 1);
-
     let mut best = None;
-    for left in 0..groups.len() {
-        let mut total_size = 0;
-        let mut largest_group_size = 0;
-        let mut overlap_participants = 0;
-        let right_bound = (left + MAX_INPUT_FILE_GROUPS).min(groups.len());
-        let mut participants: Vec<bool> = Vec::with_capacity(right_bound - left);
-        for right in left..right_bound {
-            let right_group = &groups[right];
-            let group_size = right_group.group.size();
-            total_size += group_size;
-            largest_group_size = largest_group_size.max(group_size);
+    for segment in groups
+        .split(|group| group.group.num_files() != 1)
+        .filter(|segment| !segment.is_empty())
+    {
+        for left in 0..segment.len() {
+            let mut total_size = 0;
+            let mut largest_group_size = 0;
+            let mut overlap_participants = 0;
+            let right_bound = (left + MAX_INPUT_FILE_GROUPS).min(segment.len());
+            let mut participants: Vec<bool> = Vec::with_capacity(right_bound - left);
+            for right in left..right_bound {
+                let right_group = &segment[right];
+                let group_size = right_group.group.size();
+                total_size += group_size;
+                largest_group_size = largest_group_size.max(group_size);
 
-            let mut right_participates = false;
-            for (offset, other) in groups[left..right].iter().enumerate() {
-                if right_group.run_id != other.run_id
-                    && right_group.group.overlap_inclusive(other.group)
-                {
-                    if !participants[offset] {
-                        participants[offset] = true;
-                        overlap_participants += 1;
+                let mut right_participates = false;
+                for (offset, other) in segment[left..right].iter().enumerate() {
+                    if right_group.run_id != other.run_id
+                        && right_group.group.overlap_inclusive(other.group)
+                    {
+                        if !participants[offset] {
+                            participants[offset] = true;
+                            overlap_participants += 1;
+                        }
+                        right_participates = true;
                     }
-                    right_participates = true;
                 }
-            }
-            participants.push(right_participates);
-            if right_participates {
-                overlap_participants += 1;
-            }
+                participants.push(right_participates);
+                if right_participates {
+                    overlap_participants += 1;
+                }
 
-            let num_file_groups = right + 1 - left;
-            if num_file_groups < trigger_file_num || num_file_groups < 2 {
-                continue;
-            }
-            // A historical group is only rewritten after peers contribute at least the same
-            // amount of data, so every rewrite moves it into a larger size tier.
-            if largest_group_size > total_size - largest_group_size {
-                continue;
-            }
+                let num_file_groups = right + 1 - left;
+                if num_file_groups < trigger_file_num || num_file_groups < 2 {
+                    continue;
+                }
+                // A historical group is only rewritten after peers contribute at least the same
+                // amount of data, so every rewrite moves it into a larger size tier.
+                if largest_group_size > total_size - largest_group_size {
+                    continue;
+                }
 
-            let score = CandidateScore {
-                num_file_groups,
-                overlap_participants,
-                size: total_size,
-            };
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _, _)| score.is_better_than(best_score))
-            {
-                best = Some((score, left, right));
+                let score = CandidateScore {
+                    num_file_groups,
+                    overlap_participants,
+                    size: total_size,
+                };
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score.is_better_than(best_score))
+                {
+                    best = Some((score, &segment[left..=right]));
+                }
             }
         }
     }
 
-    let Some((_, left, right)) = best else {
+    let Some((_, best)) = best else {
         return vec![];
     };
-    groups[left..=right]
-        .iter()
-        .map(|group| group.group.clone())
-        .collect()
+    best.iter().map(|group| group.group.clone()).collect()
 }
 
 fn selected_overlaps_unselected(selected: &[FileGroup], window: &Window) -> bool {
@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn test_count_first_ignores_multi_sst_groups_between_singletons() {
+    fn test_count_first_does_not_cross_multi_sst_group() {
         let picked = pick_count_first(
             vec![SortedRun::from(vec![
                 new_file_group(0, 9, 1, 1, 10),
@@ -1982,7 +1982,71 @@ mod tests {
             2,
         );
 
-        assert_eq!(vec![(0, 9), (20, 29)], picked_ranges(&picked));
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_count_first_compares_candidates_on_each_side_of_barrier() {
+        let cases = [
+            ([1, 1, 2, 1, 1, 1], vec![(30, 39), (40, 49), (50, 59)]),
+            ([1, 1, 1, 2, 1, 1], vec![(0, 9), (10, 19), (20, 29)]),
+        ];
+
+        let (expected, actual): (Vec<_>, Vec<_>) = cases
+            .into_iter()
+            .map(|(groups, expected)| {
+                let groups: Vec<_> = groups
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, num_files)| {
+                        let start = idx as i64 * 10;
+                        new_file_group(start, start + 9, idx as u64 + 1, num_files, 10)
+                    })
+                    .collect();
+                let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+                (expected, picked_ranges(&picked))
+            })
+            .unzip();
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_count_first_multi_sst_barrier_boundaries() {
+        struct TestCase {
+            group_file_nums: &'static [usize],
+            expected_ranges: &'static [(i64, i64)],
+        }
+
+        let cases = [
+            TestCase {
+                group_file_nums: &[2, 1, 1],
+                expected_ranges: &[(10, 19), (20, 29)],
+            },
+            TestCase {
+                group_file_nums: &[1, 1, 2],
+                expected_ranges: &[(0, 9), (10, 19)],
+            },
+            TestCase {
+                group_file_nums: &[1, 2, 1, 2, 1],
+                expected_ranges: &[],
+            },
+        ];
+
+        for case in cases {
+            let groups: Vec<_> = case
+                .group_file_nums
+                .iter()
+                .enumerate()
+                .map(|(idx, &num_files)| {
+                    let start = idx as i64 * 10;
+                    new_file_group(start, start + 9, idx as u64 + 1, num_files, 10)
+                })
+                .collect();
+            let picked = pick_count_first(vec![SortedRun::from(groups)], 2);
+
+            assert_eq!(case.expected_ranges, picked_ranges(&picked));
+        }
     }
 
     #[test]
