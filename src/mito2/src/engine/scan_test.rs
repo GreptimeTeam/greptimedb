@@ -57,7 +57,7 @@ use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
@@ -1715,9 +1715,9 @@ async fn test_exact_sequence_range_ignores_time_pruned_unmarked_sst() {
 }
 
 /// Regression for #8865: a legacy (unmarked) SST written before the preserve
-/// option was enabled permanently disables exact scans. Its file sequence may
-/// be synthesized by an edit path and is never trusted for disjoint skipping;
-/// normal scans still return everything.
+/// option was enabled is excluded from exact scans once Flow's cursor reaches
+/// its admission barrier. A newer barrier still fails closed; normal scans
+/// continue to return every row.
 #[tokio::test]
 async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     let mut env =
@@ -1787,9 +1787,9 @@ async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     markers.sort_unstable();
     assert_eq!(vec![false, true, true], markers);
 
-    // Exact scans fail closed even though C=9 is after the unmarked file's
-    // apparent sequence (3).
-    let err = engine
+    // The legacy file's barrier is 3, so C=9 excludes it and the marked SSTs
+    // are row-level filtered normally.
+    let scanner = engine
         .scanner(
             region_id,
             ScanRequest {
@@ -1800,12 +1800,8 @@ async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
             },
         )
         .await
-        .err()
-        .expect("expected sequence-range unsupported error");
-    assert!(
-        matches!(err, Error::SequenceRangeUnsupported { .. }),
-        "unexpected err: {err}"
-    );
+        .expect("barrier should permit the exact scan");
+    assert_eq!(0, scanner.num_files(), "barrier file must be skipped");
 
     // Normal scans still return everything.
     let stream = engine
@@ -2294,10 +2290,9 @@ async fn test_bulk_write_sequence_not_committed_before_install() {
     }
 }
 
-/// Compaction must not launder a legacy (unmarked) input SST into a trusted
-/// output: with the region option ON but an input lacking the preserved-sequence
-/// marker, the rewritten output must stay unmarked and exact scans must keep
-/// returning the structured unsupported error (never silent data).
+/// Compaction rewrites a legacy (unmarked) input as a sequence-less output
+/// with the region-local admission barrier. Exact scans skip it once C reaches
+/// that barrier and fail closed while C is below it.
 #[tokio::test]
 async fn test_compaction_output_not_laundered_from_legacy_input() {
     let mut env =
@@ -2406,28 +2401,74 @@ async fn test_compaction_output_not_laundered_from_legacy_input() {
         "legacy input must not be laundered into a marked output"
     );
 
-    // The compacted output remains unmarked. Its sequence may have been
-    // synthesized by the region-edit handler, so exact scans fail closed for
-    // any lower bound.
-    for (min, max) in [(7, 8), (6, 7)] {
-        let err = engine
-            .scanner(
-                region_id,
-                ScanRequest {
-                    memtable_min_sequence: Some(min),
-                    memtable_max_sequence: Some(max),
-                    exact_sequence_range: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .err()
-            .expect("expected sequence-range unsupported error for unmarked file");
-        assert!(
-            matches!(err, Error::SequenceRangeUnsupported { .. }),
-            "unexpected err: {err}"
-        );
-    }
+    // The compacted output is sequence-less and carries the current region's
+    // admission barrier rather than any source-domain sequence.
+    let barrier = outputs[0]
+        .meta_ref()
+        .sequence
+        .expect("compaction output barrier")
+        .get();
+    assert_eq!(8, barrier);
+
+    // The sequence-less parquet is encoded as all zeroes. Its physical column
+    // therefore must not retain a source-domain sequence; legacy reads use the
+    // reader's existing all-zero compatibility override from FileMeta.
+    let mut sequence_less_meta = outputs[0].meta_ref().clone();
+    sequence_less_meta.sequence = None;
+    let sequence_less_handle = FileHandle::new(
+        sequence_less_meta,
+        Arc::new(crate::sst::file_purger::NoopFilePurger),
+    );
+    let mut reader = region
+        .access_layer
+        .read_sst(sequence_less_handle)
+        .build()
+        .await
+        .unwrap()
+        .expect("compaction output reader");
+    let batch = reader
+        .next_record_batch()
+        .await
+        .unwrap()
+        .expect("compaction output batch");
+    let sequence = batch
+        .column(batch.num_columns() - 2)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .expect("sequence column");
+    assert!(sequence.values().iter().all(|sequence| *sequence == 0));
+
+    // A cursor before the barrier must fail closed.
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(barrier - 1),
+                memtable_max_sequence: Some(barrier),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("newer barrier must disable exact scanning");
+    assert!(matches!(err, Error::SequenceRangeUnsupported { .. }));
+
+    // Once C reaches the barrier the sequence-less file is skipped, so exact
+    // capability is restored without attempting row-level filtering.
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(barrier),
+                memtable_max_sequence: Some(barrier + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("barrier should restore exact capability");
+    assert_eq!(0, scanner.num_files());
 }
 
 /// Multi-input primary-key-format compaction: two preserved pk-format files
