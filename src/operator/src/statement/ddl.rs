@@ -98,8 +98,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, AnnotationCx, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
-    check_annotation_options,
+    AlterKind, AlterTableRequest, AnnotationContext, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
+    TableOptions, validate_and_normalize_annotation_options,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -2401,7 +2401,7 @@ pub fn create_table_info(
 
     validate_json2_columns_append_mode(&schema, &table_options)?;
 
-    check_annotations(&mut table_options, &schema, &partition_key_indices)?;
+    validate_and_normalize_annotations(&mut table_options, &schema, &partition_key_indices)?;
 
     let meta = TableMeta {
         schema,
@@ -2497,17 +2497,17 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
 /// CREATE-side annotation validation: one rule source in the table crate,
 /// mapped onto this crate's existing error variants so client-visible codes
 /// and messages stay put.
-fn check_annotations(
+fn validate_and_normalize_annotations(
     options: &mut TableOptions,
     schema: &Schema,
     partition_key_indices: &[usize],
 ) -> Result<()> {
-    use table::requests::AnnotationCheckError as CheckError;
-    let cx = AnnotationCx {
+    use table::requests::AnnotationValidationError as CheckError;
+    let cx = AnnotationContext {
         schema,
         partition_key_indices,
     };
-    check_annotation_options(options, &cx).map_err(|e| match e {
+    validate_and_normalize_annotation_options(options, &cx).map_err(|e| match e {
         CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
         e @ (CheckError::UnknownKey { .. }
         | CheckError::InvalidValue { .. }
@@ -3048,7 +3048,7 @@ mod test {
     }
 
     #[test]
-    fn test_check_annotations() {
+    fn test_validate_and_normalize_annotations() {
         let schema = Schema::new(vec![
             ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
@@ -3064,7 +3064,7 @@ mod test {
         };
         let check = |pairs: &[(&str, &str)]| {
             let mut options = opts(pairs);
-            check_annotations(&mut options, &schema, &[]).map(|()| options)
+            validate_and_normalize_annotations(&mut options, &schema, &[]).map(|()| options)
         };
 
         // Any existing column with a string form may be an id, tag or field.

@@ -37,10 +37,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, AnnotationCheckError, AnnotationCx, AnnotationFamily,
+    AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
     ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption,
-    TableOptions, UnsetIndexOption, check_annotation, has_stable_string_form, parse_entity_columns,
-    parse_entity_option_key,
+    TableOptions, UnsetIndexOption, has_stable_string_form, parse_entity_columns,
+    parse_entity_option_key, validate_and_normalize_annotation,
 };
 use crate::table_reference::TableReference;
 
@@ -443,7 +443,7 @@ impl TableMeta {
                 err: family.mixed_batch_error(),
             }
         );
-        let cx = AnnotationCx {
+        let cx = AnnotationContext {
             schema: &self.schema,
             partition_key_indices: &self.partition_key_indices,
         };
@@ -459,18 +459,22 @@ impl TableMeta {
                     ),
                 }
             );
-            let checked = check_annotation(family, &cx, key, value).map_err(|e| match e {
-                AnnotationCheckError::ColumnNotFound { column } => error::ColumnNotExistsSnafu {
-                    column_name: column,
-                    table_name,
-                }
-                .build(),
-                other => error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: other.to_string(),
-                }
-                .build(),
-            })?;
+            let checked = validate_and_normalize_annotation(family, &cx, key, value).map_err(
+                |e| match e {
+                    AnnotationValidationError::ColumnNotFound { column } => {
+                        error::ColumnNotExistsSnafu {
+                            column_name: column,
+                            table_name,
+                        }
+                        .build()
+                    }
+                    other => error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: other.to_string(),
+                    }
+                    .build(),
+                },
+            )?;
             new_options.extra_options.insert(key.clone(), checked);
         }
         let mut builder = self.new_meta_builder();

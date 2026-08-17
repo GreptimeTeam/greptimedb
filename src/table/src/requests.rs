@@ -363,7 +363,7 @@ impl AnnotationFamily {
 }
 
 /// Table shape an annotation option is validated against.
-pub struct AnnotationCx<'a> {
+pub struct AnnotationContext<'a> {
     pub schema: &'a Schema,
     pub partition_key_indices: &'a [usize],
 }
@@ -373,7 +373,7 @@ pub struct AnnotationCx<'a> {
 /// missing columns as `TableColumnNotFound` (4002), CREATE keeps its
 /// `InvalidArguments` family — the rules converge, the contracts do not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnnotationCheckError {
+pub enum AnnotationValidationError {
     UnknownKey {
         key: String,
     },
@@ -394,7 +394,7 @@ pub enum AnnotationCheckError {
     TimeIndexConflict,
 }
 
-impl fmt::Display for AnnotationCheckError {
+impl fmt::Display for AnnotationValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownKey { key } => write!(f, "unknown semantic option `{key}`"),
@@ -426,21 +426,21 @@ impl fmt::Display for AnnotationCheckError {
 /// Validates one annotation option and returns the value to store — the
 /// repartition hint is trimmed to the bare column name, semantic values pass
 /// through unchanged.
-pub(crate) fn check_annotation(
+pub(crate) fn validate_and_normalize_annotation(
     family: AnnotationFamily,
-    cx: &AnnotationCx<'_>,
+    cx: &AnnotationContext<'_>,
     key: &str,
     value: &str,
-) -> std::result::Result<String, AnnotationCheckError> {
+) -> std::result::Result<String, AnnotationValidationError> {
     match family {
         AnnotationFamily::Semantic => {
             if !is_semantic_option_key(key) {
-                return Err(AnnotationCheckError::UnknownKey {
+                return Err(AnnotationValidationError::UnknownKey {
                     key: key.to_string(),
                 });
             }
             if !validate_semantic_option(key, value) {
-                return Err(AnnotationCheckError::InvalidValue {
+                return Err(AnnotationValidationError::InvalidValue {
                     key: key.to_string(),
                     value: value.to_string(),
                 });
@@ -448,12 +448,12 @@ pub(crate) fn check_annotation(
             if parse_entity_option_key(key).is_some() {
                 for column in parse_entity_columns(value) {
                     let schema = cx.schema.column_schema_by_name(&column).ok_or_else(|| {
-                        AnnotationCheckError::ColumnNotFound {
+                        AnnotationValidationError::ColumnNotFound {
                             column: column.clone(),
                         }
                     })?;
                     if !has_stable_string_form(&schema.data_type) {
-                        return Err(AnnotationCheckError::ColumnNotStringForm {
+                        return Err(AnnotationValidationError::ColumnNotStringForm {
                             key: key.to_string(),
                             column,
                             ty: schema.data_type.clone(),
@@ -466,18 +466,18 @@ pub(crate) fn check_annotation(
         AnnotationFamily::RepartitionHint => {
             let column_name = value.trim();
             if column_name.is_empty() || column_name.contains(',') {
-                return Err(AnnotationCheckError::NotSingleColumn);
+                return Err(AnnotationValidationError::NotSingleColumn);
             }
             if !cx.partition_key_indices.is_empty() {
-                return Err(AnnotationCheckError::PartitionMetadataConflict);
+                return Err(AnnotationValidationError::PartitionMetadataConflict);
             }
             let column_index = cx.schema.column_index_by_name(column_name).ok_or_else(|| {
-                AnnotationCheckError::ColumnNotFound {
+                AnnotationValidationError::ColumnNotFound {
                     column: column_name.to_string(),
                 }
             })?;
             if cx.schema.timestamp_index() == Some(column_index) {
-                return Err(AnnotationCheckError::TimeIndexConflict);
+                return Err(AnnotationValidationError::TimeIndexConflict);
             }
             Ok(column_name.to_string())
         }
@@ -486,16 +486,16 @@ pub(crate) fn check_annotation(
 
 /// CREATE-side entry: validates every annotation option present in `options`
 /// and writes normalized values back in place.
-pub fn check_annotation_options(
+pub fn validate_and_normalize_annotation_options(
     options: &mut TableOptions,
-    cx: &AnnotationCx<'_>,
-) -> std::result::Result<(), AnnotationCheckError> {
+    cx: &AnnotationContext<'_>,
+) -> std::result::Result<(), AnnotationValidationError> {
     let mut normalized = Vec::new();
     for (key, value) in &options.extra_options {
         let Some(family) = AnnotationFamily::of_key(key) else {
             continue;
         };
-        let checked = check_annotation(family, cx, key, value)?;
+        let checked = validate_and_normalize_annotation(family, cx, key, value)?;
         if checked != *value {
             normalized.push((key.clone(), checked));
         }
