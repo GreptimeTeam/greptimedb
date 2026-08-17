@@ -769,8 +769,6 @@ mod tests {
 
     #[test]
     fn test_annotation_alter_family() {
-        // A mixed batch is propagated as an error, never as "not an
-        // annotation alter".
         let mixed = Kind::SetTableOptions(SetTableOptions {
             table_options: vec![
                 PbOption {
