@@ -2204,6 +2204,11 @@ default_merge_mode = "last_non_null"
 [jaeger]
 enable = true
 
+[otlp]
+enable = true
+experimental_enable_exponential_histogram = false
+trace_ingest_chunk_size = 512
+
 [prom_store]
 enable = true
 with_metric_engine = true
