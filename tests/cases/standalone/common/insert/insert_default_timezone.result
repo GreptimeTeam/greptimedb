@@ -93,6 +93,13 @@ SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now();
 
 Affected Rows: 2
 
+INSERT INTO test3 (ts, st)
+SELECT '2026-08-16 12:00:00.001', now()
+UNION
+SELECT '2026-08-17 12:00:00.001', now();
+
+Affected Rows: 2
+
 INSERT INTO test3 (ts, ts_ns) SELECT a, b FROM (
     SELECT c AS a, c AS b FROM (SELECT '2026-08-12 12:00:00.123456789' AS c) AS t1
 ) AS t2;
@@ -123,6 +130,8 @@ SELECT ts, ts_ns FROM test3 ORDER BY ts;
 | 2026-08-10T12:00:00.001 |                               |
 | 2026-08-11T12:00:00.001 |                               |
 | 2026-08-12T04:00:00.123 | 2026-08-12T04:00:00.123456789 |
+| 2026-08-16T04:00:00.001 |                               |
+| 2026-08-17T04:00:00.001 |                               |
 +-------------------------+-------------------------------+
 
 SET time_zone = 'UTC';

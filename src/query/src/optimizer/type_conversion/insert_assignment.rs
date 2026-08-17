@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion_common::{DFSchema, Result, ScalarValue};
+use datafusion_common::{Column, Result, ScalarValue};
 use datafusion_expr::expr::{Alias, Cast};
 use datafusion_expr::{Distinct, Expr, ExprSchemable, LogicalPlan, Projection, Union, Values};
 use datatypes::arrow::datatypes::DataType;
@@ -45,7 +45,10 @@ pub(super) fn rewrite_insert_assignments(
             continue;
         }
 
-        let Some(input_idx) = assignment_input_index(expr, input.schema()) else {
+        let Some(column) = assignment_input_column(expr) else {
+            continue;
+        };
+        let Some(input_idx) = input.schema().maybe_index_of_column(column) else {
             continue;
         };
 
@@ -59,6 +62,17 @@ pub(super) fn rewrite_insert_assignments(
             continue;
         }
 
+        // SQL INSERT maps each target column to its own source position, but a
+        // hand-built DML plan (e.g. from flow) may share one source column
+        // between targets; rewriting it in place would retype every reader.
+        if assignment
+            .expr
+            .iter()
+            .enumerate()
+            .any(|(idx, other)| idx != output_idx && other.column_refs().contains(column))
+        {
+            continue;
+        }
         if let Some(rewritten) = converter.rewrite_output_column(&input, input_idx, target_type)? {
             input = rewritten;
             changed = true;
@@ -129,10 +143,16 @@ impl InsertAssignmentConverter {
                 self.rewrite_projection(projection, output_idx, target_type)
             }
             LogicalPlan::Union(union) => self.rewrite_union(union, output_idx, target_type),
-            // Filter, Sort and Distinct are excluded here: retyping a column
-            // they read would change the source query. Constants still reach
-            // the assignment through `lineage_literal`, which mutates nothing.
-            LogicalPlan::Limit(_) | LogicalPlan::SubqueryAlias(_) => {
+            // Filter and Sort are excluded here: their predicates and keys read
+            // the retyped column, which would change the source query. Constants
+            // still reach the assignment through `lineage_literal`.
+            // Distinct::All is allowed: it holds no expressions, and every
+            // surviving row feeds the same timestamp cast anyway. Deduplication
+            // then keys on parsed instants instead of raw strings, collapsing
+            // different spellings of one instant.
+            LogicalPlan::Limit(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Distinct(Distinct::All(_)) => {
                 self.rewrite_passthrough(plan, output_idx, target_type)
             }
             _ => Ok(None),
@@ -238,7 +258,12 @@ impl InsertAssignmentConverter {
             inputs.push(Arc::new(rewritten));
         }
 
-        Union::try_new(inputs).map(LogicalPlan::Union).map(Some)
+        // This rule runs before TypeCoercion, where untouched columns may still
+        // have mismatched branch types (the SQL planner builds unions with loose
+        // types). The strict constructor would reject those legal plans.
+        Union::try_new_with_loose_types(inputs)
+            .map(LogicalPlan::Union)
+            .map(Some)
     }
 
     fn rewrite_passthrough(
@@ -271,7 +296,7 @@ impl InsertAssignmentConverter {
     }
 }
 
-fn assignment_input_index(expr: &Expr, input_schema: &DFSchema) -> Option<usize> {
+fn assignment_input_column(expr: &Expr) -> Option<&Column> {
     let expr = match unalias(expr) {
         Expr::Cast(Cast { expr, .. }) => expr.as_ref(),
         expr => expr,
@@ -279,7 +304,7 @@ fn assignment_input_index(expr: &Expr, input_schema: &DFSchema) -> Option<usize>
     let Expr::Column(column) = expr else {
         return None;
     };
-    input_schema.maybe_index_of_column(column)
+    Some(column)
 }
 
 fn unalias(expr: &Expr) -> &Expr {

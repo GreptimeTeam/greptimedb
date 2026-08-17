@@ -907,6 +907,19 @@ mod tests {
             ),
             (
                 "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-16 12:00:00.001', now() \
+                 UNION \
+                 SELECT '2026-08-17 12:00:00.001', now()",
+                &[1_786_852_800_001_i64, 1_786_939_200_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
+                 SELECT '2026-08-18 12:00:00.001', max(st) \
+                 FROM timestamps GROUP BY note",
+                &[1_787_025_600_001_i64][..],
+            ),
+            (
+                "INSERT INTO timestamps (ts, st) \
                  SELECT c, s FROM (\
                      SELECT '2026-08-13 12:00:00.001' AS c, now() AS s\
                  ) AS t WHERE c > '2026-01-01'",
@@ -1016,6 +1029,37 @@ mod tests {
             for expected in expected {
                 assert!(plan.contains(expected), "{plan}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_union_tolerates_uncoerced_untouched_column() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                .build(),
+        );
+        let engine = create_timestamp_test_engine().await;
+        // `st` is Timestamp vs Null across branches until TypeCoercion runs;
+        // rebuilding the union strictly rejected this legal plan.
+        let sql = "INSERT INTO timestamps (ts, st) \
+                   SELECT '2026-08-06 12:00:00.001', now() \
+                   UNION ALL \
+                   SELECT '2026-08-07 12:00:00.001', NULL";
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .unwrap()
+            .display_indent()
+            .to_string();
+
+        for expected_timestamp in [1_785_988_800_001_i64, 1_786_075_200_001_i64] {
+            assert!(
+                plan.contains(&format!("TimestampMillisecond({expected_timestamp}, None)")),
+                "{plan}"
+            );
         }
     }
 
