@@ -843,11 +843,7 @@ mod tests {
         );
     }
 
-    /// A trace-like table in the fixed `greptime_trace_v1` shape (ns
-    /// timestamps). `duration_nano` is deliberately UInt64 to model a table
-    /// created before the built-in models' unsigned→signed transition: both
-    /// shapes exist in the fleet indefinitely, and the derivation below must
-    /// work for either (its sum/cast expressions are type-agnostic).
+    /// A trace-like table in the fixed `greptime_trace_v1` shape (ns timestamps).
     fn trace_table_ctx() -> SessionContext {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
