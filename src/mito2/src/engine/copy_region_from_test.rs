@@ -430,6 +430,9 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
 
     // The copied file in the target must NOT be trusted: its physical per-row
     // sequences belong to the source region's independent sequence domain.
+    // Both the `preserve_row_sequence` marker and the source-domain max
+    // `sequence` hint must be cleared, so exact reads fail closed instead of
+    // silently skipping the file as "proven disjoint".
     let target_manifest = engine
         .get_region(target_region_id)
         .unwrap()
@@ -443,6 +446,13 @@ async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
             .values()
             .all(|meta| !meta.preserve_row_sequence),
         "copied files must have the preserve_row_sequence marker cleared"
+    );
+    assert!(
+        target_manifest
+            .files
+            .values()
+            .all(|meta| meta.sequence.is_none()),
+        "copied files must have their source-domain sequence hint cleared"
     );
 
     // An exact sequence-range request intersecting the copied rows' sequences

@@ -177,12 +177,16 @@ impl<S> RegionWorkerLoop<S> {
                 // physical per-row sequences in the copied file belong to the
                 // source region, so they must not be trusted for exact
                 // sequence-range reads on the target. Clear the
-                // `preserve_row_sequence` marker to fail closed until the scan
-                // provably cannot intersect the copied rows (see
+                // `preserve_row_sequence` marker and the source-domain max
+                // sequence to fail closed until the scan provably cannot
+                // intersect the copied rows (see
                 // `files_allow_exact_sequence_range`); otherwise an exact
                 // request would replay source-domain rows as if they were
-                // target sequences.
+                // target sequences, and an unmarked file with a stale
+                // source-domain `sequence` hint could be silently skipped as
+                // "proven disjoint".
                 new_file_meta.preserve_row_sequence = false;
+                new_file_meta.sequence = None;
                 files_to_copy.push(new_file_meta);
             }
         }
