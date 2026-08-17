@@ -154,9 +154,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
-        // If the user uses the legacy path, it is by default without metric engine.
+        // OTLP tables have one sample field in both the legacy and physical paths.
         let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-            self.handle_row_inserts(requests, ctx, false, false)
+            self.handle_row_inserts(requests, ctx, false, true)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)

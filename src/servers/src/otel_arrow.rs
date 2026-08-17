@@ -33,30 +33,18 @@ use crate::error;
 use crate::grpc::context_auth;
 use crate::query_handler::{MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef};
 
+const EXPONENTIAL_HISTOGRAM_UNSUPPORTED: &str = "OTel Arrow exponential histograms are unsupported because the Arrow wire format omits zero_threshold";
+
 pub struct OtelArrowServiceHandler<T> {
     handler: T,
     user_provider: Option<UserProviderRef>,
-    experimental_enable_exponential_histogram: bool,
 }
 
 impl<T> OtelArrowServiceHandler<T> {
-    pub fn new(
-        handler: T,
-        user_provider: Option<UserProviderRef>,
-        experimental_enable_exponential_histogram: bool,
-    ) -> Self {
+    pub fn new(handler: T, user_provider: Option<UserProviderRef>) -> Self {
         Self {
             handler,
             user_provider,
-            experimental_enable_exponential_histogram,
-        }
-    }
-
-    fn metric_ctx(&self) -> OtlpMetricCtx {
-        OtlpMetricCtx {
-            experimental_enable_exponential_histogram: self
-                .experimental_enable_exponential_histogram,
-            ..Default::default()
         }
     }
 }
@@ -67,10 +55,20 @@ fn batch_status(batch_id: i64, outcome: MetricsIngestOutcome) -> BatchStatus {
     } else {
         ArrowStatusCode::Ok
     };
+    let status_message = outcome
+        .error_message
+        .map(|message| {
+            if message.contains("otlp.experimental_enable_exponential_histogram") {
+                EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
+            } else {
+                message
+            }
+        })
+        .unwrap_or_default();
     BatchStatus {
         batch_id,
         status_code: status_code as i32,
-        status_message: outcome.error_message.unwrap_or_default(),
+        status_message,
     }
 }
 
@@ -89,7 +87,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
         let query_ctx = {
             let mut ctx = query_ctx.fork();
-            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(self.metric_ctx()));
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx::default()));
             Arc::new(ctx)
         };
 
@@ -173,11 +171,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_metric_context_preserves_metric_engine_choice() {
-        let handler = OtelArrowServiceHandler::new((), None, true);
-        let metric_ctx = handler.metric_ctx();
+    fn batch_status_explains_arrow_exponential_histogram_limit() {
+        let status = batch_status(
+            7,
+            MetricsIngestOutcome {
+                rejected_data_points: 1,
+                error_message: Some(
+                    "set otlp.experimental_enable_exponential_histogram = true".to_string(),
+                ),
+                ..Default::default()
+            },
+        );
 
-        assert!(metric_ctx.experimental_enable_exponential_histogram);
-        assert!(!metric_ctx.with_metric_engine);
+        assert_eq!(7, status.batch_id);
+        assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
+        assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
     }
 }

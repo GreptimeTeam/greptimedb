@@ -982,8 +982,8 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
     /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
-    /// When `accommodate_existing_schema` is true and `is_single_value` is true, it also consider fields when modifying the
-    /// input `req`.
+    /// When `is_single_value` is true, it also rejects native-histogram/float kind changes.
+    /// When both options are true, it considers fields when modifying the input `req`.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &mut RowInsertRequest,
@@ -1018,8 +1018,7 @@ impl Inserter {
             return Ok(None);
         };
 
-        // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
-        if accommodate_existing_schema {
+        if is_single_value {
             let request_is_native_histogram = request_is_native_histogram(request_schema);
             let table_is_native_histogram = table_is_native_histogram(table);
             ensure!(
@@ -1030,6 +1029,10 @@ impl Inserter {
                     ),
                 }
             );
+        }
+
+        // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
+        if accommodate_existing_schema {
             let table_schema = table.schema();
             // Find timestamp column name
             let ts_col_name = table_schema.timestamp_column().map(|c| c.name.clone());
@@ -1638,7 +1641,7 @@ mod tests {
             }),
         };
         let error = inserter
-            .get_alter_table_expr_on_demand(&mut histogram_req, &table, &ctx, true, true, true)
+            .get_alter_table_expr_on_demand(&mut histogram_req, &table, &ctx, false, true, true)
             .unwrap_err();
         assert!(
             error
@@ -1666,7 +1669,7 @@ mod tests {
                 &mut sample_req,
                 &histogram_table,
                 &ctx,
-                true,
+                false,
                 true,
                 true,
             )

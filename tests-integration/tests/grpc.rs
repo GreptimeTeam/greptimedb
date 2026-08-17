@@ -59,8 +59,7 @@ use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
     StorageType, setup_grpc_server, setup_grpc_server_with,
-    setup_grpc_server_with_auto_create_table_disabled,
-    setup_grpc_server_with_otlp_exponential_histogram, setup_grpc_server_with_user_provider,
+    setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -560,12 +559,8 @@ fn exponential_histogram_arrow_batch(batch_id: i64, scales: &[i32]) -> BatchArro
 }
 
 pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {
-    let (_instance, server) = setup_grpc_server_with_otlp_exponential_histogram(
-        store_type,
-        "test_otel_arrow_exponential_histogram_disabled",
-        false,
-    )
-    .await;
+    let (_instance, server) =
+        setup_grpc_server(store_type, "test_otel_arrow_exponential_histogram").await;
     let addr = server.bind_addr().unwrap().to_string();
     let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
         .await
@@ -576,66 +571,7 @@ pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {
     let status = response.message().await.unwrap().unwrap();
     assert_eq!(0, status.batch_id);
     assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
-    assert!(
-        status
-            .status_message
-            .contains("otlp.experimental_enable_exponential_histogram")
-    );
-    let _ = server.shutdown().await;
-
-    let (_instance, server) = setup_grpc_server_with_otlp_exponential_histogram(
-        store_type,
-        "test_otel_arrow_exponential_histogram_enabled",
-        true,
-    )
-    .await;
-    let addr = server.bind_addr().unwrap().to_string();
-    let batches = [
-        exponential_histogram_arrow_batch(0, &[0, -5]),
-        exponential_histogram_arrow_batch(1, &[-5]),
-    ];
-    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
-        .await
-        .unwrap();
-    let mut response = client
-        .arrow_metrics(Request::new(futures::stream::iter(batches)))
-        .await
-        .unwrap()
-        .into_inner();
-
-    let mixed = response.message().await.unwrap().unwrap();
-    assert_eq!(0, mixed.batch_id);
-    assert_eq!(ArrowStatusCode::Ok as i32, mixed.status_code);
-    assert!(mixed.status_message.contains("scale -5"));
-
-    let rejected = response.message().await.unwrap().unwrap();
-    assert_eq!(1, rejected.batch_id);
-    assert_eq!(
-        ArrowStatusCode::InvalidArgument as i32,
-        rejected.status_code
-    );
-    assert!(rejected.status_message.contains("scale -5"));
-
-    let db = Database::new_with_dbname(
-        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-        Client::with_urls(vec![addr]),
-    );
-    let output = db
-        .sql("select greptime_native_histogram from otel_arrow_exponential_latency")
-        .await
-        .unwrap();
-    let record_batches = match output.data {
-        OutputData::RecordBatches(record_batches) => record_batches,
-        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
-        OutputData::AffectedRows(_) => unreachable!(),
-    };
-    assert_eq!(
-        1,
-        record_batches
-            .iter()
-            .map(|batch| batch.num_rows())
-            .sum::<usize>()
-    );
+    assert!(status.status_message.contains("omits zero_threshold"));
     let _ = server.shutdown().await;
 }
 
