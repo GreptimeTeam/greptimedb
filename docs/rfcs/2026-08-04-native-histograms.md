@@ -7,10 +7,11 @@ Author: codex
 
 # Summary
 
-GreptimeDB stores a Prometheus native histogram in one Struct-valued field and
-evaluates it as a first-class PromQL sample. This document records the supported
-protocols, the storage invariant, and the compatibility decisions needed to make
-that path predictable.
+GreptimeDB stores native histograms in one Prometheus-compatible Struct-valued
+field and evaluates them as first-class PromQL samples. Prometheus Remote Write
+2.0 supplies native histograms directly. OTLP `ExponentialHistogram` is an
+ingestion transport: accepted cumulative points are normalized into the same
+Struct before persistence and are queried only as native histograms.
 
 Native histograms are experimental. Prometheus Remote Write 2.0 and cumulative
 OTLP exponential histograms are supported behind separate configuration gates.
@@ -21,8 +22,8 @@ continues to return scalar samples only.
 # Goals
 
 1. Prevent silent native-histogram data loss at protocol boundaries.
-2. Keep one stable persisted representation for integer, float, exponential,
-   and custom-bucket native histograms.
+2. Keep one stable Prometheus-compatible persisted representation across
+   Prometheus and OTLP ingestion.
 3. Match Prometheus query behavior where it is observable and practical.
 4. State intentional limitations explicitly so incomplete behavior is not
    mistaken for support.
@@ -33,18 +34,36 @@ continues to return scalar samples only.
 - Returning native histograms through Prometheus Remote Read.
 - Persisting Remote Write metric metadata.
 - Persisting exemplars.
+- Providing an OTLP-specific histogram query surface or reconstructing and
+  re-exporting the original OTLP point after persistence.
 - Removing mixed float/histogram handling from PromQL expressions.
 - Propagating PromQL annotations produced on datanodes back to the frontend.
 
 # Data Model and Invariants
 
-Each native histogram is stored in the configured native-histogram field
-(`greptime_native_histogram` by default), a Struct whose children preserve the
-wire-level schema, zero threshold, sum, reset hint, start timestamp, custom
-bounds, spans, and either the integer or float count family.
-Integer bucket deltas are converted to absolute integer counts for storage;
-float bucket counts are already absolute. No separate sample-kind discriminator
-is stored because the populated count family identifies it.
+Each accepted native histogram, whether received directly through Remote Write
+2.0 or normalized from OTLP `ExponentialHistogram`, is stored in the configured
+native-histogram field (`greptime_native_histogram` by default) as the same
+canonical Struct. The persistence boundary admits only values accepted by the
+shared native-histogram validation.
+
+## Prometheus Remote Write 2.0
+
+Remote Write 2.0 native histograms enter the persistence path in Prometheus
+format. The Struct preserves the validated schema, zero threshold, sum, reset
+hint, start timestamp, custom bounds, spans, and either the integer or float
+count family. Integer bucket deltas are converted to absolute integer counts
+for storage; float bucket counts are already absolute. No separate sample-kind
+discriminator is stored because the populated count family identifies it.
+
+## OTLP ExponentialHistogram
+
+OTLP `ExponentialHistogram` does not introduce a second persisted format.
+Accepted cumulative points are normalized into a valid Prometheus native
+histogram and then pass through the same validator and Struct encoder. The
+Struct does not retain the raw OTLP point or a source-protocol discriminator,
+and queries use only the native-histogram PromQL behavior. Detailed conversion
+and rejection rules are listed under [OTLP](#otlp).
 
 Within one resolved catalog, schema, and physical-table routing context, a
 metric name has exactly one persisted sample kind:
@@ -113,15 +132,17 @@ converted. Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and
 `_count` representation, including their existing delta behavior.
 
 OTLP scales `-4` through `8` map directly to Prometheus schemas. Higher scales
-are exactly downscaled to schema `8`: dense counts that collide are merged
-before the OTLP lower-bound index is shifted by one to the Prometheus
-upper-bound index. Lower scales are rejected. OTLP counts always populate the
-integer histogram family. The transmitted non-negative finite zero threshold,
-zero count, attributes, point timestamp, and start timestamp are preserved; the
-Struct start timestamp is stored in milliseconds and the reset hint is unknown.
-Legacy mode retains its normalized name, attribute rules, and nanosecond row
-timestamp. Non-legacy mode retains Prometheus-compatible translation and its
-millisecond row timestamp. Both modes write the same canonical Struct.
+are downscaled to schema `8`: dense counts that collide are merged before the
+OTLP lower-bound index is shifted by one to the Prometheus upper-bound index.
+This preserves count mass but irreversibly loses distinctions between source
+buckets that merge. Lower scales are rejected. OTLP counts always populate the
+integer histogram family. The transmitted non-negative finite zero threshold
+and zero count are preserved; the Struct start timestamp is stored in
+milliseconds and the reset hint is unknown. Point timestamps and attributes
+retain their existing mode-specific conversion rules. Legacy mode retains its
+normalized name, attribute rules, and nanosecond row timestamp. Non-legacy mode
+retains Prometheus-compatible translation and its millisecond row timestamp.
+Both modes write the same canonical Struct.
 
 An absent sum is stored as an ordinary quiet NaN, so the sample remains
 selectable while `histogram_sum` is unknown. Any NaN sum on a point without
@@ -255,7 +276,7 @@ native-histogram data remains readable.
 
 - Native-histogram Remote Read, including exact integer round-trips and streamed
   chunks with start timestamps.
-- OTLP exponential-histogram delta accumulation and deferred field persistence.
+- OTLP exponential-histogram delta accumulation.
 - Persistent Remote Write metadata and accurate help/unit updates.
 - Native-histogram exemplars and exemplar query APIs.
 - Start-timestamp overlap annotations.
