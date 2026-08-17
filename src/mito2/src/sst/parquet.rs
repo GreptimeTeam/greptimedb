@@ -1338,7 +1338,7 @@ mod tests {
         let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
         // Regions without a primary key encode it as empty bytes.
         for _ in 0..num_rows {
-            pk_builder.append(Vec::<u8>::new()).unwrap();
+            pk_builder.append([]).unwrap();
         }
 
         RecordBatch::try_new(
