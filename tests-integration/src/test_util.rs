@@ -732,7 +732,7 @@ pub async fn setup_grpc_server_with_auto_create_table_disabled(
         .with_auto_create_table(false)
         .build()
         .await;
-    setup_grpc_server_for_instance(instance, None, None, None, false).await
+    setup_grpc_server_for_instance(instance, None, None, None).await
 }
 
 pub async fn setup_grpc_server_with(
@@ -743,17 +743,7 @@ pub async fn setup_grpc_server_with(
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
-    setup_grpc_server_for_instance(instance, user_provider, grpc_config, memory_limiter, false)
-        .await
-}
-
-pub async fn setup_grpc_server_with_otlp_exponential_histogram(
-    store_type: StorageType,
-    name: &str,
-    enabled: bool,
-) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
-    let instance = setup_standalone_instance(name, store_type).await;
-    setup_grpc_server_for_instance(instance, None, None, None, enabled).await
+    setup_grpc_server_for_instance(instance, user_provider, grpc_config, memory_limiter).await
 }
 
 /// Builds and starts a gRPC server on top of an already-constructed standalone
@@ -763,14 +753,12 @@ async fn setup_grpc_server_for_instance(
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
-    experimental_enable_exponential_histogram: bool,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let grpc_server = setup_grpc_server_for_frontend_instance_with(
         instance.fe_instance().clone(),
         user_provider,
         grpc_config,
         memory_limiter,
-        experimental_enable_exponential_histogram,
     )
     .await;
     (instance, grpc_server)
@@ -781,7 +769,7 @@ pub async fn setup_grpc_server_for_frontend_instance(
     instance: Arc<Instance>,
     user_provider: Option<UserProviderRef>,
 ) -> Arc<GrpcServer> {
-    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None, false).await
+    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None).await
 }
 
 /// Starts a gRPC server backed by `instance` and returns a client authenticated
@@ -810,7 +798,6 @@ async fn setup_grpc_server_for_frontend_instance_with(
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
-    experimental_enable_exponential_histogram: bool,
 ) -> Arc<GrpcServer> {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
@@ -838,11 +825,7 @@ async fn setup_grpc_server_for_frontend_instance_with(
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
         .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
-        .otel_arrow_handler(OtelArrowServiceHandler::new(
-            fe_instance_ref,
-            user_provider,
-            experimental_enable_exponential_histogram,
-        ))
+        .otel_arrow_handler(OtelArrowServiceHandler::new(fe_instance_ref, user_provider))
         .with_tls_config(grpc_config.tls)
         .unwrap();
 

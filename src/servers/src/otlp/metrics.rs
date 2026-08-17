@@ -18,8 +18,9 @@ use api::greptime_proto::io::prometheus::write::v2::histogram::{
 };
 use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram as PromHistogram};
 use api::v1::value::ValueData;
-use api::v1::{RowInsertRequests, Value};
+use api::v1::{RowInsertRequests, SemanticType, Value};
 use common_grpc::precision::Precision;
+use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use lazy_static::lazy_static;
@@ -147,7 +148,39 @@ pub fn to_grpc_insert_requests(
     }
 
     let (requests, rows) = table_writer.into_row_insert_requests();
+    validate_sample_kinds(&requests)?;
     Ok((requests, rows, semantic_index, outcome))
+}
+
+fn validate_sample_kinds(requests: &RowInsertRequests) -> Result<()> {
+    for request in &requests.inserts {
+        let Some(rows) = &request.rows else {
+            continue;
+        };
+        let field_count = rows
+            .schema
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Field as i32)
+            .count();
+        let has_native_histogram = rows.schema.iter().any(|column| {
+            column.semantic_type == SemanticType::Field as i32
+                && api::helper::is_column_type_value_eq(
+                    column.datatype,
+                    column.datatype_extension.clone(),
+                    native_histogram_value_type(),
+                )
+        });
+        if has_native_histogram && field_count != 1 {
+            return Err(error::InvalidParameterSnafu {
+                reason: format!(
+                    "OTLP metric `{}` cannot mix native histogram and float sample fields",
+                    request.table_name
+                ),
+            }
+            .build());
+        }
+    }
+    Ok(())
 }
 
 /// The tables a metric emits and their per-table `metric.type`. Histogram fans
@@ -2079,6 +2112,38 @@ mod tests {
             to_grpc_insert_requests(empty, &mut OtlpMetricCtx::default()).unwrap();
         assert_eq!(outcome.rejected_data_points, 0);
         assert_eq!(outcome.error_message, None);
+    }
+
+    #[test]
+    fn test_exponential_histogram_cannot_share_table_with_scalar_metric() {
+        let request = metrics_request(vec![
+            Metric {
+                name: "latency".to_string(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![NumberDataPoint {
+                        value: Some(number_data_point::Value::AsDouble(1.0)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            },
+            exponential_metric(
+                "latency",
+                vec![exponential_point()],
+                AggregationTemporality::Cumulative,
+            ),
+        ]);
+        let mut ctx = OtlpMetricCtx {
+            experimental_enable_exponential_histogram: true,
+            ..Default::default()
+        };
+
+        let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
     }
 
     #[test]

@@ -104,9 +104,11 @@ explicit if sampled responses are implemented.
 
 OTLP exponential histograms are accepted when
 `otlp.experimental_enable_exponential_histogram` is enabled. The option defaults
-to false and applies to OTLP/HTTP and OTel Arrow. Disabled points are rejected
-rather than silently acknowledged. Cumulative temporality is required; delta
-and unspecified exponential histograms are rejected before their points are
+to false and applies to OTLP/HTTP. Disabled points are rejected rather than
+silently acknowledged. OTel Arrow exponential histograms are rejected because
+the current Arrow wire format omits `zero_threshold`; accepting them would
+silently change the distribution. Cumulative temporality is required; delta and
+unspecified exponential histograms are rejected before their points are
 converted. Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and
 `_count` representation, including their existing delta behavior.
 
