@@ -30,7 +30,7 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, AnnotationFamily, ModifyColumnTypeRequest,
-    REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption, UnsetIndexOption,
+    SetDefaultRequest, SetIndexOption, UnsetIndexOption,
 };
 
 use crate::error::{
@@ -55,38 +55,43 @@ fn annotation_family_of_keys<'a>(
         return Ok(None);
     };
     let family = AnnotationFamily::of_key(first);
+    let mut count = 1usize;
     for key in keys {
+        count += 1;
         let this = AnnotationFamily::of_key(key);
         if this != family {
-            let prefix = family.or(this).unwrap().prefix();
             return error::InvalidTableOptionRequestSnafu {
-                err_msg: format!(
-                    "`{prefix}*` options must be altered separately from other table options"
-                ),
+                err_msg: family.or(this).unwrap().mixed_batch_error(),
             }
             .fail();
         }
+    }
+    if let Some(family) = family
+        && family.requires_single_key()
+        && count > 1
+    {
+        return error::InvalidTableOptionRequestSnafu {
+            err_msg: family.mixed_batch_error(),
+        }
+        .fail();
     }
     Ok(family)
 }
 
 /// Returns the annotation family when `kind` is a SET/UNSET whose keys all
 /// belong to one family — the alters that only rewrite table metadata and skip
-/// region dispatch. Mixed batches answer `None`; [`alter_expr_to_request`]
-/// rejects them with a precise error.
-pub fn annotation_alter_family(kind: &Kind) -> Option<AnnotationFamily> {
+/// region dispatch. A mixed batch is an error; never interpret it as "not an
+/// annotation alter", or the batch falls through to a path that reports a
+/// misleading error (or dispatches to regions).
+pub fn annotation_alter_family(kind: &Kind) -> Result<Option<AnnotationFamily>> {
     match kind {
         Kind::SetTableOptions(api::v1::SetTableOptions { table_options }) => {
             annotation_family_of_keys(table_options.iter().map(|option| option.key.as_str()))
-                .ok()
-                .flatten()
         }
         Kind::UnsetTableOptions(api::v1::UnsetTableOptions { keys }) => {
             annotation_family_of_keys(keys.iter().map(|key| key.as_str()))
-                .ok()
-                .flatten()
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -210,29 +215,14 @@ pub fn alter_expr_to_request(
             AlterKind::RenameTable { new_table_name }
         }
         Kind::SetTableOptions(api::v1::SetTableOptions { table_options }) => {
-            let repartition_column_hint = table_options
-                .iter()
-                .find(|option| option.key == REPARTITION_COLUMN_HINT_KEY);
-            if let Some(option) = repartition_column_hint {
-                ensure!(
-                    table_options.len() == 1,
-                    error::InvalidTableOptionRequestSnafu {
-                        err_msg: format!(
-                            "{REPARTITION_COLUMN_HINT_KEY} must be altered separately"
-                        ),
-                    }
-                );
-                AlterKind::SetRepartitionColumnHint {
-                    column_name: option.value.clone(),
-                }
-            } else if let Some(family) = annotation_family_of_keys(
+            if let Some(family) = annotation_family_of_keys(
                 table_options.iter().map(|option| option.key.as_str()),
             )? {
                 AlterKind::SetAnnotations {
                     family,
                     options: table_options
-                        .iter()
-                        .map(|option| (option.key.clone(), option.value.clone()))
+                        .into_iter()
+                        .map(|option| (option.key, option.value))
                         .collect(),
                 }
             } else {
@@ -246,26 +236,8 @@ pub fn alter_expr_to_request(
             }
         }
         Kind::UnsetTableOptions(api::v1::UnsetTableOptions { keys }) => {
-            let unset_repartition_column_hint = keys
-                .iter()
-                .any(|key| key.as_str() == REPARTITION_COLUMN_HINT_KEY);
-            if unset_repartition_column_hint {
-                ensure!(
-                    keys.len() == 1,
-                    error::InvalidTableOptionRequestSnafu {
-                        err_msg: format!(
-                            "{REPARTITION_COLUMN_HINT_KEY} must be altered separately"
-                        ),
-                    }
-                );
-                AlterKind::UnsetRepartitionColumnHint
-            } else if let Some(family) =
-                annotation_family_of_keys(keys.iter().map(|key| key.as_str()))?
-            {
-                AlterKind::UnsetAnnotations {
-                    family,
-                    keys: keys.clone(),
-                }
+            if let Some(family) = annotation_family_of_keys(keys.iter().map(|key| key.as_str()))? {
+                AlterKind::UnsetAnnotations { family, keys }
             } else {
                 AlterKind::UnsetTableOptions {
                     keys: keys
@@ -422,6 +394,7 @@ mod tests {
         Option as PbOption, SemanticType, SetTableOptions, UnsetTableOptions,
     };
     use datatypes::prelude::ConcreteDataType;
+    use table::requests::REPARTITION_COLUMN_HINT_KEY;
 
     use super::*;
 
@@ -626,8 +599,12 @@ mod tests {
 
         let alter_request = alter_expr_to_request(1, expr, None).unwrap();
         match alter_request.alter_kind {
-            AlterKind::SetRepartitionColumnHint { column_name } => {
-                assert_eq!("host", column_name);
+            AlterKind::SetAnnotations { family, options } => {
+                assert_eq!(AnnotationFamily::RepartitionHint, family);
+                assert_eq!(
+                    vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "host".to_string())],
+                    options
+                );
             }
             _ => unreachable!(),
         }
@@ -658,6 +635,30 @@ mod tests {
             err.to_string()
                 .contains("repartition.column.hint must be altered separately")
         );
+
+        // Duplicate hint entries are not a meaningful batch either.
+        let dup = AlterTableExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![
+                    PbOption {
+                        key: REPARTITION_COLUMN_HINT_KEY.to_string(),
+                        value: "host".to_string(),
+                    },
+                    PbOption {
+                        key: REPARTITION_COLUMN_HINT_KEY.to_string(),
+                        value: "region".to_string(),
+                    },
+                ],
+            })),
+        };
+        let err = alter_expr_to_request(1, dup, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint must be altered separately")
+        );
     }
 
     #[test]
@@ -672,10 +673,13 @@ mod tests {
         };
 
         let alter_request = alter_expr_to_request(1, expr, None).unwrap();
-        assert!(matches!(
-            alter_request.alter_kind,
-            AlterKind::UnsetRepartitionColumnHint
-        ));
+        match alter_request.alter_kind {
+            AlterKind::UnsetAnnotations { family, keys } => {
+                assert_eq!(AnnotationFamily::RepartitionHint, family);
+                assert_eq!(vec![REPARTITION_COLUMN_HINT_KEY.to_string()], keys);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -765,8 +769,8 @@ mod tests {
 
     #[test]
     fn test_annotation_alter_family() {
-        // Mixed batches are not metadata-only; the converter rejects them,
-        // while this routing helper answers `None`.
+        // A mixed batch is propagated as an error, never as "not an
+        // annotation alter".
         let mixed = Kind::SetTableOptions(SetTableOptions {
             table_options: vec![
                 PbOption {
@@ -779,6 +783,29 @@ mod tests {
                 },
             ],
         });
-        assert_eq!(annotation_alter_family(&mixed), None);
+        let err = annotation_alter_family(&mixed).unwrap_err();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
+
+        // Two annotation families cannot share a batch either.
+        let cross = Kind::SetTableOptions(SetTableOptions {
+            table_options: vec![
+                PbOption {
+                    key: "greptime.semantic.signal_type".to_string(),
+                    value: "trace".to_string(),
+                },
+                PbOption {
+                    key: REPARTITION_COLUMN_HINT_KEY.to_string(),
+                    value: "host".to_string(),
+                },
+            ],
+        });
+        let err = annotation_alter_family(&cross).unwrap_err();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
     }
 }

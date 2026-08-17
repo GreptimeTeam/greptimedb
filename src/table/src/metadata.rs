@@ -37,10 +37,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, AnnotationFamily, ModifyColumnTypeRequest,
-    REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
-    has_stable_string_form, is_semantic_option_key, parse_entity_columns, parse_entity_option_key,
-    validate_semantic_option,
+    AddColumnRequest, AlterKind, AnnotationCheckError, AnnotationCx, AnnotationFamily,
+    ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, SetDefaultRequest, SetIndexOption,
+    TableOptions, UnsetIndexOption, check_annotation, has_stable_string_form, parse_entity_columns,
+    parse_entity_option_key,
 };
 use crate::table_reference::TableReference;
 
@@ -333,10 +333,6 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetRepartitionColumnHint { column_name } => {
-                self.set_repartition_column_hint(table_name, column_name)
-            }
-            AlterKind::UnsetRepartitionColumnHint => self.unset_repartition_column_hint(),
             AlterKind::SetAnnotations { family, options } => {
                 self.set_annotations(table_name, *family, options)
             }
@@ -440,45 +436,42 @@ impl TableMeta {
         family: AnnotationFamily,
         options: &[(String, String)],
     ) -> Result<TableMetaBuilder> {
-        let AnnotationFamily::Semantic = family;
+        ensure!(
+            !family.requires_single_key() || options.len() == 1,
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: family.mixed_batch_error(),
+            }
+        );
+        let cx = AnnotationCx {
+            schema: &self.schema,
+            partition_key_indices: &self.partition_key_indices,
+        };
         let mut new_options = self.options.clone();
         for (key, value) in options {
             ensure!(
-                is_semantic_option_key(key),
+                AnnotationFamily::of_key(key) == Some(family),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
-                    err: format!("unknown semantic option `{key}`"),
+                    err: format!(
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.namespace()
+                    ),
                 }
             );
-            ensure!(
-                validate_semantic_option(key, value),
-                error::InvalidAlterRequestSnafu {
+            let checked = check_annotation(family, &cx, key, value).map_err(|e| match e {
+                AnnotationCheckError::ColumnNotFound { column } => error::ColumnNotExistsSnafu {
+                    column_name: column,
+                    table_name,
+                }
+                .build(),
+                other => error::InvalidAlterRequestSnafu {
                     table: table_name,
-                    err: format!("invalid value `{value}` for semantic option `{key}`"),
+                    err: other.to_string(),
                 }
-            );
-            if parse_entity_option_key(key).is_some() {
-                for col in parse_entity_columns(value) {
-                    let column = self.schema.column_schema_by_name(&col).with_context(|| {
-                        error::ColumnNotExistsSnafu {
-                            column_name: &col,
-                            table_name,
-                        }
-                    })?;
-                    ensure!(
-                        has_stable_string_form(&column.data_type),
-                        error::InvalidAlterRequestSnafu {
-                            table: table_name,
-                            err: format!(
-                                "entity column `{col}` (option `{key}`) has type \
-                                 `{}`, which cannot render as a string",
-                                column.data_type
-                            ),
-                        }
-                    );
-                }
-            }
-            new_options.extra_options.insert(key.clone(), value.clone());
+                .build(),
+            })?;
+            new_options.extra_options.insert(key.clone(), checked);
         }
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
@@ -494,86 +487,27 @@ impl TableMeta {
         family: AnnotationFamily,
         keys: &[String],
     ) -> Result<TableMetaBuilder> {
+        ensure!(
+            !family.requires_single_key() || keys.len() == 1,
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: family.mixed_batch_error(),
+            }
+        );
         let mut new_options = self.options.clone();
         for key in keys {
             ensure!(
-                key.starts_with(family.prefix()),
+                AnnotationFamily::of_key(key) == Some(family),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
                         "`{key}` is outside the `{}` annotation namespace",
-                        family.prefix()
+                        family.namespace()
                     ),
                 }
             );
             new_options.extra_options.remove(key);
         }
-        let mut builder = self.new_meta_builder();
-        builder.options(new_options);
-        Ok(builder)
-    }
-
-    fn set_repartition_column_hint(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> Result<TableMetaBuilder> {
-        let column_name = column_name.trim();
-        ensure!(
-            !column_name.is_empty() && !column_name.contains(','),
-            error::InvalidAlterRequestSnafu {
-                table: table_name,
-                err: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
-            }
-        );
-
-        ensure!(
-            self.partition_key_indices.is_empty(),
-            error::InvalidAlterRequestSnafu {
-                table: table_name,
-                err: format!(
-                    "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
-                ),
-            }
-        );
-
-        let column_index = self
-            .schema
-            .column_index_by_name(column_name)
-            .with_context(|| error::ColumnNotExistsSnafu {
-                column_name,
-                table_name,
-            })?;
-
-        if let Some(time_index) = self.schema.timestamp_index() {
-            ensure!(
-                column_index != time_index,
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
-                    ),
-                }
-            );
-        }
-
-        let mut new_options = self.options.clone();
-        new_options.extra_options.insert(
-            REPARTITION_COLUMN_HINT_KEY.to_string(),
-            column_name.to_string(),
-        );
-
-        let mut builder = self.new_meta_builder();
-        builder.options(new_options);
-        Ok(builder)
-    }
-
-    fn unset_repartition_column_hint(&self) -> Result<TableMetaBuilder> {
-        let mut new_options = self.options.clone();
-        new_options
-            .extra_options
-            .remove(REPARTITION_COLUMN_HINT_KEY);
-
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
         Ok(builder)
@@ -1854,8 +1788,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " col1 ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                " col1 ".to_string(),
+            )],
         };
         let new_meta = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1883,8 +1821,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), " ".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1907,8 +1846,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1,col2".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "col1,col2".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1931,8 +1874,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "missing".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "missing".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1952,8 +1899,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "ts".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "ts".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1977,8 +1925,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -2007,7 +1956,13 @@ mod tests {
             .unwrap();
 
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &AlterKind::UnsetRepartitionColumnHint)
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::UnsetAnnotations {
+                    family: AnnotationFamily::RepartitionHint,
+                    keys: vec![REPARTITION_COLUMN_HINT_KEY.to_string()],
+                },
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -2809,6 +2764,51 @@ mod tests {
     }
 
     #[test]
+    fn test_repartition_hint_batch_must_be_single_key() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Direct gRPC can hand the mutation layer a duplicated batch the
+        // converter never saw; last-write-wins must not silently apply.
+        let dup_set = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string()),
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col2".to_string()),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_set)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
+
+        let dup_unset = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            keys: vec![
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_unset)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("must be altered separately"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_set_semantic_annotations_rejects_invalid() {
         let meta = semantic_test_meta();
         let cases = [
@@ -2843,6 +2843,26 @@ mod tests {
                 "key `{key}`: unexpected error `{err}`"
             );
         }
+
+        // ALTER keeps missing columns on the 4002 contract (pinned by sqlness);
+        // the shared validator must not collapse it into InvalidArguments.
+        let missing = meta
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::SetAnnotations {
+                    family: AnnotationFamily::Semantic,
+                    options: vec![(
+                        "greptime.semantic.entity.host.id".to_string(),
+                        "no_such_column".to_string(),
+                    )],
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&missing)
+        );
     }
 
     #[test]

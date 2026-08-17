@@ -31,7 +31,6 @@ use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
-use table::requests::AnnotationFamily;
 use table::table_name::TableName;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
@@ -54,7 +53,7 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
+    self, ConvertAlterTableRequestSnafu, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
     PersistRepartitionGcRequirementSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
     RegisterRepartitionProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu,
     TableNotFoundSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
@@ -1072,18 +1071,17 @@ async fn handle_alter_table_task(
         .get(table_id)
         .await?
         .context(TableRouteNotFoundSnafu { table_id })?;
-    // Semantic annotation alters only rewrite the logical table's own
-    // metadata (no region dispatch), so they may target logical tables.
-    let semantic_annotation_alter =
-        alter_table_task
-            .alter_table
-            .kind
-            .as_ref()
-            .is_some_and(|kind| {
-                common_grpc_expr::annotation_alter_family(kind) == Some(AnnotationFamily::Semantic)
-            });
+    // Classify before the route guard: a mixed annotation batch must surface
+    // its own error here, not a misleading "non-physical route" one. Families
+    // that only rewrite the logical table's metadata may target logical tables.
+    let annotation_family = match alter_table_task.alter_table.kind.as_ref() {
+        Some(kind) => common_grpc_expr::annotation_alter_family(kind)
+            .context(ConvertAlterTableRequestSnafu)?,
+        None => None,
+    };
     ensure!(
-        table_route_value.is_physical() || semantic_annotation_alter,
+        table_route_value.is_physical()
+            || annotation_family.is_some_and(|family| family.allows_logical_tables()),
         UnexpectedLogicalRouteTableSnafu {
             err_msg: format!("{:?} is a non-physical TableRouteValue.", table_ref),
         }
@@ -1528,7 +1526,9 @@ mod tests {
     use common_event_recorder::{PersistentEventContext, ProcedureEventInput, TriggerReason};
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
-    use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
+    use common_procedure::{
+        BoxedProcedure, ProcedureContext, ProcedureManager, ProcedureManagerRef,
+    };
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
@@ -1929,4 +1929,5 @@ mod tests {
             assert!(matches!(err, crate::error::Error::Unsupported { .. }));
         }
     }
+
 }
