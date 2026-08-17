@@ -1179,12 +1179,12 @@ async fn test_series_scan_flat_small_permits() {
     }
 }
 
-// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
-// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
-// predicates with different `a` values can both extract to ranges that cover
-// the same partition while selecting different (or no) rows. The previous
-// cover check would strip both predicates from the cache key, letting the
-// second scan return the first scan's cached row.
+/// Regression test: `ts = a OR ts = b` extracts to a `TimestampRange` that
+/// `GenericRange::or` widens into `[min(a, b), max(a, b) + 1)`. Two such
+/// predicates with different `a` values can both extract to ranges that cover
+/// the same partition while selecting different (or no) rows. The previous
+/// cover check would strip both predicates from the cache key, letting the
+/// second scan return the first scan's cached row.
 #[tokio::test]
 async fn test_range_cache_separates_or_equality_time_filters() {
     let mut env = TestEnv::new().await;
@@ -1353,11 +1353,11 @@ async fn test_exact_sequence_read_compacted_sst_with_preserve_row_sequence() {
     );
 }
 
-// P0 regression: historical MemtableOnly reads must keep every fence even when
-// the region preserves per-row sequences. The exact capability is only granted
-// to the explicit `sequence_range` mode; a memtable-only scan whose checkpoint
-// is behind the flushed frontier must stay stale instead of silently returning
-// an incomplete delta.
+/// P0 regression: historical MemtableOnly reads must keep every fence even when
+/// the region preserves per-row sequences. The exact capability is only granted
+/// to the explicit `sequence_range` mode; a memtable-only scan whose checkpoint
+/// is behind the flushed frontier must stay stale instead of silently returning
+/// an incomplete delta.
 #[tokio::test]
 async fn test_exact_sequence_read_memtable_only_keeps_fences_with_preserve_option() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_memtable_only_keeps_fences").await;
@@ -1401,9 +1401,9 @@ async fn test_exact_sequence_read_memtable_only_keeps_fences_with_preserve_optio
     );
 }
 
-// SequenceRange mode on a region without preserve_row_sequence:
-// the exact capability is unavailable, both bounds are enforceable, so the
-// engine must return a structured unsupported error instead of approximating.
+/// SequenceRange mode on a region without preserve_row_sequence:
+/// the exact capability is unavailable, both bounds are enforceable, so the
+/// engine must return a structured unsupported error instead of approximating.
 #[tokio::test]
 async fn test_exact_sequence_range_unsupported_when_option_off() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_range_unsupported_option_off").await;
@@ -1468,8 +1468,8 @@ async fn test_exact_sequence_range_unsupported_when_option_off() {
     );
 }
 
-// SequenceRange mode when a legacy file without the preserved-sequence marker
-// is present: exact capability unavailable -> structured unsupported error.
+/// SequenceRange mode when a legacy file without the preserved-sequence marker
+/// is present: exact capability unavailable -> structured unsupported error.
 #[tokio::test]
 async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_range_unsupported_legacy_file").await;
@@ -1553,13 +1553,13 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
-// Regression for #8865: a legacy (unmarked) SST written before the preserve
-// option was enabled must not permanently block exact scans. Once the option
-// is enabled, an exact `(C, H]` scan whose lower bound C is at/after the
-// unmarked file's max sequence is disjoint from it: the unmarked file is
-// pruned at file selection (its rows must never pass through unfiltered) and
-// only the new marked rows are returned, while normal scans still return
-// everything.
+/// Regression for #8865: a legacy (unmarked) SST written before the preserve
+/// option was enabled must not permanently block exact scans. Once the option
+/// is enabled, an exact `(C, H]` scan whose lower bound C is at/after the
+/// unmarked file's max sequence is disjoint from it: the unmarked file is
+/// pruned at file selection (its rows must never pass through unfiltered) and
+/// only the new marked rows are returned, while normal scans still return
+/// everything.
 #[tokio::test]
 async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     let mut env =
@@ -1672,10 +1672,10 @@ async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     assert_eq!(9, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 }
 
-// Exact sequence-range mode must read every time-matching SST, so the legacy
-// `sst_min_sequence` file-pruning hint is incompatible: it could silently skip
-// a preserved file that still contains rows inside `(min, max]`. The request
-// must be rejected with the structured unsupported error, not approximated.
+/// Exact sequence-range mode must read every time-matching SST, so the legacy
+/// `sst_min_sequence` file-pruning hint is incompatible: it could silently skip
+/// a preserved file that still contains rows inside `(min, max]`. The request
+/// must be rejected with the structured unsupported error, not approximated.
 #[tokio::test]
 async fn test_exact_sequence_range_rejects_sst_min_sequence_hint() {
     let mut env =
@@ -1742,10 +1742,10 @@ async fn test_exact_sequence_range_rejects_sst_min_sequence_hint() {
     assert_eq!(1, row_count, "expected seq 1 only");
 }
 
-// Exact `(0, 1]` scans must not let the row-group-level `LastRow` shortcut drop
-// in-range rows: a series with seq 1 at t1 and seq 2 at t2 must return seq 1
-// (t1) instead of being reduced to seq 2 (t2) and then filtered out. Non-exact
-// `LastRow` scans keep their existing behavior (only the last row per series).
+/// Exact `(0, 1]` scans must not let the row-group-level `LastRow` shortcut drop
+/// in-range rows: a series with seq 1 at t1 and seq 2 at t2 must return seq 1
+/// (t1) instead of being reduced to seq 2 (t2) and then filtered out. Non-exact
+/// `LastRow` scans keep their existing behavior (only the last row per series).
 #[tokio::test]
 async fn test_exact_sequence_read_with_last_row_selector_keeps_in_range_rows() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_with_last_row_selector").await;
@@ -1813,9 +1813,9 @@ async fn test_exact_sequence_read_with_last_row_selector_keeps_in_range_rows() {
     );
 }
 
-// Exact delta spanning both SSTs and the memtable: rows after C that are partly
-// flushed and partly still in the memtable must all be returned, with the H
-// watermark respected.
+/// Exact delta spanning both SSTs and the memtable: rows after C that are partly
+/// flushed and partly still in the memtable must all be returned, with the H
+/// watermark respected.
 #[tokio::test]
 async fn test_exact_sequence_read_partial_sst_partial_memtable() {
     let mut env =
@@ -1927,9 +1927,9 @@ fn build_bulk_insert_request(
     }
 }
 
-// Bulk parts fold per-part sequences (commit-unit granularity): an exact range
-// keeps or drops each whole part. The same set must hold before flush, after
-// flush, and after compaction.
+/// Bulk parts fold per-part sequences (commit-unit granularity): an exact range
+/// keeps or drops each whole part. The same set must hold before flush, after
+/// flush, and after compaction.
 #[tokio::test]
 async fn test_exact_sequence_read_bulk_parts() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_bulk_parts").await;
@@ -2016,11 +2016,11 @@ async fn test_exact_sequence_read_bulk_parts() {
     assert_eq!(scan_exact(Some(2), Some(100)).await, scan);
 }
 
-// Bulk commit publication ordering: the committed sequence must never cover a
-// bulk part before its rows are physically installed in the memtable. A scan
-// opening in the window between ordinary-memtable handling and bulk
-// installation binds H to the pre-bulk committed sequence, sees no bulk rows,
-// and a follow-up exact scan over the fresh range returns the bulk rows once.
+/// Bulk commit publication ordering: the committed sequence must never cover a
+/// bulk part before its rows are physically installed in the memtable. A scan
+/// opening in the window between ordinary-memtable handling and bulk
+/// installation binds H to the pre-bulk committed sequence, sees no bulk rows,
+/// and a follow-up exact scan over the fresh range returns the bulk rows once.
 #[tokio::test]
 async fn test_bulk_write_sequence_not_committed_before_install() {
     let mut env =
@@ -2150,10 +2150,10 @@ async fn test_bulk_write_sequence_not_committed_before_install() {
     }
 }
 
-// Compaction must not launder a legacy (unmarked) input SST into a trusted
-// output: with the region option ON but an input lacking the preserved-sequence
-// marker, the rewritten output must stay unmarked and exact scans must keep
-// returning the structured unsupported error (never silent data).
+/// Compaction must not launder a legacy (unmarked) input SST into a trusted
+/// output: with the region option ON but an input lacking the preserved-sequence
+/// marker, the rewritten output must stay unmarked and exact scans must keep
+/// returning the structured unsupported error (never silent data).
 #[tokio::test]
 async fn test_compaction_output_not_laundered_from_legacy_input() {
     let mut env =
@@ -2306,9 +2306,9 @@ async fn test_compaction_output_not_laundered_from_legacy_input() {
     );
 }
 
-// Multi-input primary-key-format compaction: two preserved pk-format files
-// rewrite into one output that still carries the marker, and an exact scan
-// over the compacted output returns every row in range.
+/// Multi-input primary-key-format compaction: two preserved pk-format files
+/// rewrite into one output that still carries the marker, and an exact scan
+/// over the compacted output returns every row in range.
 #[tokio::test]
 async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
     let mut env =
@@ -2396,9 +2396,9 @@ async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
     );
 }
 
-// Exact sequence-range reads through the active production `PerSeries` series
-// scan path: row-level filtering must hold across the flushed SST and the
-// memtable regardless of the requested time-series distribution.
+/// Exact sequence-range reads through the active production `PerSeries` series
+/// scan path: row-level filtering must hold across the flushed SST and the
+/// memtable regardless of the requested time-series distribution.
 #[tokio::test]
 async fn test_exact_sequence_read_series_scan_per_series() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_series_scan_per_series").await;
@@ -2470,9 +2470,9 @@ async fn test_exact_sequence_read_series_scan_per_series() {
     );
 }
 
-// Range-cache fingerprint: identical files and filters with different (C, H]
-// sequence ranges must never share a cache entry, otherwise the second scan
-// would replay the first scan's filtered rows.
+/// Range-cache fingerprint: identical files and filters with different (C, H]
+/// sequence ranges must never share a cache entry, otherwise the second scan
+/// would replay the first scan's filtered rows.
 #[tokio::test]
 async fn test_range_cache_key_separates_sequence_ranges() {
     let mut env = TestEnv::new().await;
