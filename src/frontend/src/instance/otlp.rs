@@ -38,7 +38,7 @@ use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtoc
 use servers::otlp;
 use servers::otlp::trace::span::TraceSpanGroup;
 use servers::query_handler::{
-    OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
+    OpenTelemetryProtocolHandler, OtlpMetricsOutcome, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -50,7 +50,7 @@ use table::requests::{
 
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
-use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS};
+use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};
 
 fn trace_permission_targets(
     table_name: &str,
@@ -90,7 +90,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<OtlpMetricsOutcome> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -120,10 +120,18 @@ impl OpenTelemetryProtocolHandler for Instance {
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
 
-        let (requests, rows, semantic_index) =
-            otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+        let otlp::metrics::MetricsConversion {
+            requests,
+            rows,
+            semantic_index,
+            resource_info,
+        } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
+        if let Some(resource_info) = &resource_info {
+            self.check_row_insert_permission(resource_info, &ctx, PermissionReq::Action(OTLP_WRITE))
+                .context(AuthSnafu)?;
+        }
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
@@ -144,21 +152,41 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         // If the user uses the legacy path, it is by default without metric engine.
-        if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-            self.handle_row_inserts(requests, ctx, false, false)
+        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+            self.handle_row_inserts(requests, ctx.clone(), false, false)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
+                .context(error::ExecuteGrpcQuerySnafu)?
         } else {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
-            self.handle_metric_row_inserts(requests, ctx, physical_table.clone())
+            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table.clone())
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
+                .context(error::ExecuteGrpcQuerySnafu)?
+        };
+
+        // The descriptor is derived enrichment written after the main data is
+        // committed: a failure here (e.g. a conflicting pre-existing table, or
+        // auto-create disabled) must not fail the request and trigger client
+        // retries of already-accepted data; it degrades to a partial-success
+        // warning.
+        let mut warning = None;
+        if let Some(resource_info) = resource_info
+            && let Err(e) = self.handle_row_inserts(resource_info, ctx, false, false).await
+        {
+            OTLP_RESOURCE_INFO_WRITE_ERRORS.inc();
+            common_telemetry::warn!(e; "Failed to write the OTLP resource descriptor table");
+            warning = Some(format!(
+                "metric data was accepted, but writing the resource \
+                 descriptor table `{}` failed: {e}",
+                otlp::metrics::OTEL_RESOURCE_INFO_TABLE_NAME
+            ));
         }
+
+        Ok(OtlpMetricsOutcome { output, warning })
     }
 
     #[tracing::instrument(skip_all)]

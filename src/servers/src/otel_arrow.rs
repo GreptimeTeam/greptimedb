@@ -15,7 +15,7 @@
 use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::status_to_tonic_code;
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use futures::SinkExt;
 use otel_arrow_rust::Consumer;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsService;
@@ -99,15 +99,24 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     }
                 };
                 // use metric engine by default
-                if let Err(e) = handler.metrics(request, query_ctx.clone()).await {
-                    let _ = sender
-                        .send(Err(Status::new(
-                            status_to_tonic_code(e.status_code()),
-                            e.to_string(),
-                        )))
-                        .await;
-                    error!(e; "Failed to ingest metrics from otel-arrow");
-                    return;
+                match handler.metrics(request, query_ctx.clone()).await {
+                    Ok(outcome) => {
+                        // BatchStatus has no partial-success channel; a
+                        // derived-write warning is only logged here.
+                        if let Some(warning) = outcome.warning {
+                            warn!("otel-arrow metrics ingestion warning: {warning}");
+                        }
+                    }
+                    Err(e) => {
+                        let _ = sender
+                            .send(Err(Status::new(
+                                status_to_tonic_code(e.status_code()),
+                                e.to_string(),
+                            )))
+                            .await;
+                        error!(e; "Failed to ingest metrics from otel-arrow");
+                        return;
+                    }
                 }
                 let _ = sender.send(Ok(batch_status)).await;
             }

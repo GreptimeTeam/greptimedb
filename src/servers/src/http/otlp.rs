@@ -27,7 +27,9 @@ use mime_guess::mime;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceResponse;
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsPartialSuccess, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
@@ -123,9 +125,14 @@ pub async fn metrics(
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportMetricsServiceResponse {
-                partial_success: None,
+                // rejected_data_points = 0: all metric data was accepted, the
+                // message only carries a derived-write warning.
+                partial_success: o.warning.map(|error_message| ExportMetricsPartialSuccess {
+                    rejected_data_points: 0,
+                    error_message,
+                }),
             },
-            write_cost: o.meta.cost,
+            write_cost: o.output.meta.cost,
         })
 }
 

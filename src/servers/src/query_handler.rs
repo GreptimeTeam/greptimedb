@@ -129,6 +129,15 @@ pub trait PromStoreProtocolHandler {
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
+/// Outcome of an OTLP metrics ingestion: the main write output plus an
+/// optional warning for the OTLP `partial_success` response (with
+/// `rejected_data_points = 0`) when a derived write — the resource
+/// descriptor — failed after the main data was committed.
+pub struct OtlpMetricsOutcome {
+    pub output: Output,
+    pub warning: Option<String>,
+}
+
 #[async_trait]
 pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     /// Handling opentelemetry metrics request
@@ -136,7 +145,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<OtlpMetricsOutcome>;
 
     /// Handling opentelemetry traces request
     async fn traces(

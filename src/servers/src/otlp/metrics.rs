@@ -16,6 +16,7 @@ use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
+use common_telemetry::warn;
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -35,8 +36,11 @@ use crate::semantic::{
     METRIC_TYPE_UPDOWN_COUNTER,
 };
 
+mod resource_info;
 mod translator;
 
+pub use resource_info::OTEL_RESOURCE_INFO_TABLE_NAME;
+use resource_info::ResourceInfoData;
 pub use translator::legacy_normalize_otlp_name;
 pub(crate) use translator::ucum_to_openmetrics_unit;
 use translator::{translate_label_name, translate_metric_name};
@@ -83,22 +87,41 @@ const OTEL_SCOPE_NAME: &str = "name";
 const OTEL_SCOPE_VERSION: &str = "version";
 const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 
+/// Result of converting one OTLP metrics request.
+pub struct MetricsConversion {
+    pub requests: RowInsertRequests,
+    /// Row count of `requests` (the resource descriptor is not counted).
+    pub rows: usize,
+    /// Per-table semantic index for the auto-create path to stamp as table
+    /// options; covers the descriptor table too.
+    pub semantic_index: SemanticIndex,
+    /// The synthesized resource descriptor insert. `None` in legacy mode,
+    /// when no resource projected any allowlisted attribute, or when the
+    /// request itself writes a metric named like the descriptor table.
+    pub resource_info: Option<RowInsertRequests>,
+}
+
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
 /// See
 /// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto>
 /// for data structure of OTLP metrics.
-///
-/// Returns `InsertRequests`, total number of rows to ingest, and the per-table
-/// semantic index for the auto-create path to stamp as table options.
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
     metric_ctx: &mut OtlpMetricCtx,
-) -> Result<(RowInsertRequests, usize, SemanticIndex)> {
+) -> Result<MetricsConversion> {
     let mut table_writer = MultiTableData::default();
     let mut semantic_index = SemanticIndex::default();
+    let mut resource_info = ResourceInfoData::default();
 
     for resource in &request.resource_metrics {
+        if !metric_ctx.is_legacy
+            && let Some(r) = resource.resource.as_ref()
+            && let Some(max_ts) = resource_info::max_data_point_time_nanos(resource)
+        {
+            resource_info.observe(&r.attributes, max_ts);
+        }
+
         let resource_attrs = resource.resource.as_ref().map(|r| {
             let mut attrs = r.attributes.clone();
             process_resource_attrs(&mut attrs, metric_ctx);
@@ -129,7 +152,42 @@ pub fn to_grpc_insert_requests(
     }
 
     let (requests, rows) = table_writer.into_row_insert_requests();
-    Ok((requests, rows, semantic_index))
+
+    // A metric emitting a table named like the descriptor would fight over
+    // the table (metric engine vs plain mito); the metric wins, synthesis is
+    // suppressed for the whole request.
+    let resource_info = if requests
+        .inserts
+        .iter()
+        .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
+    {
+        warn!(
+            "Skipping OTLP resource descriptor synthesis: the request writes \
+             a metric named `{OTEL_RESOURCE_INFO_TABLE_NAME}`"
+        );
+        None
+    } else {
+        resource_info.into_row_insert_requests()?
+    };
+    if resource_info.is_some() {
+        semantic_index.record_scalar(
+            OTEL_RESOURCE_INFO_TABLE_NAME,
+            SEMANTIC_METRIC_TYPE,
+            crate::semantic::METRIC_TYPE_INFO,
+        );
+        semantic_index.record_scalar(
+            OTEL_RESOURCE_INFO_TABLE_NAME,
+            SEMANTIC_METRIC_METADATA_QUALITY,
+            METADATA_QUALITY_DECLARED,
+        );
+    }
+
+    Ok(MetricsConversion {
+        requests,
+        rows,
+        semantic_index,
+        resource_info,
+    })
 }
 
 /// The tables a metric emits and their per-table `metric.type`. Histogram fans
@@ -892,6 +950,115 @@ mod tests {
             .iter()
             .find(|kv| kv.key == key)
             .and_then(|kv| scalar_value_string(kv.value.as_ref()))
+    }
+
+    fn gauge_request(
+        resource_attrs: Vec<KeyValue>,
+        metric_name: &str,
+    ) -> ExportMetricsServiceRequest {
+        use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: resource_attrs,
+                    ..Default::default()
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: metric_name.to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                time_unix_nano: 1_000_000,
+                                value: Some(Value::AsInt(1)),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn column_names(request: &RowInsertRequests, table: &str) -> Vec<String> {
+        request
+            .inserts
+            .iter()
+            .find(|r| r.table_name == table)
+            .unwrap_or_else(|| panic!("missing table {table}"))
+            .rows
+            .as_ref()
+            .unwrap()
+            .schema
+            .iter()
+            .map(|c| c.column_name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn test_conversion_synthesizes_resource_descriptor() {
+        set_default_prefix(None).unwrap();
+        let request = gauge_request(
+            vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
+            "my_gauge",
+        );
+        let conversion =
+            to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+
+        // descriptor keeps raw OTel keys while the metric table's labels went
+        // through the (default underscore-escaping) translation strategy
+        let resource_info = conversion.resource_info.expect("descriptor synthesized");
+        let descriptor_cols = column_names(&resource_info, OTEL_RESOURCE_INFO_TABLE_NAME);
+        assert!(descriptor_cols.contains(&"host.id".to_string()));
+        assert!(descriptor_cols.contains(&"service.name".to_string()));
+        assert!(descriptor_cols.contains(&"job".to_string()));
+        let metric_cols = column_names(&conversion.requests, "my_gauge");
+        assert!(metric_cols.contains(&"service_name".to_string()));
+        assert!(!metric_cols.contains(&"service.name".to_string()));
+        // host.id is not in the promote list: only the descriptor keeps it
+        assert!(!metric_cols.contains(&"host_id".to_string()));
+
+        let decoded = decode(&conversion.semantic_index);
+        let t = &decoded[OTEL_RESOURCE_INFO_TABLE_NAME];
+        assert_eq!(t.get(SEMANTIC_METRIC_TYPE).map(String::as_str), Some("info"));
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_METADATA_QUALITY).map(String::as_str),
+            Some("declared")
+        );
+    }
+
+    #[test]
+    fn test_conversion_skips_descriptor_for_legacy_mode() {
+        set_default_prefix(None).unwrap();
+        let request = gauge_request(vec![keyvalue("service.name", "api")], "my_gauge");
+        let mut ctx = OtlpMetricCtx {
+            is_legacy: true,
+            ..Default::default()
+        };
+        let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
+        assert!(conversion.resource_info.is_none());
+    }
+
+    #[test]
+    fn test_conversion_skips_descriptor_on_metric_name_collision() {
+        set_default_prefix(None).unwrap();
+        let request = gauge_request(
+            vec![keyvalue("service.name", "api")],
+            OTEL_RESOURCE_INFO_TABLE_NAME,
+        );
+        let conversion =
+            to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+        assert!(conversion.resource_info.is_none());
+        // the metric itself still goes through the main path
+        assert!(
+            conversion
+                .requests
+                .inserts
+                .iter()
+                .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
+        );
     }
 
     #[test]
