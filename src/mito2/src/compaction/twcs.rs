@@ -309,12 +309,25 @@ fn pick_count_first(
 }
 
 fn selected_overlaps_unselected(selected: &[FileGroup], window: &Window) -> bool {
+    // The overall time span of the selection: a group outside it cannot overlap any
+    // selected group (ranges are inclusive), so it needs no precise overlap check.
+    let Some((span_start, span_end)) = selected
+        .iter()
+        .map(Ranged::range)
+        .reduce(|(start_a, end_a), (start_b, end_b)| (start_a.min(start_b), end_a.max(end_b)))
+    else {
+        return false;
+    };
     let selected_file_ids = selected
         .iter()
         .flat_map(FileGroup::file_ids)
         .collect::<HashSet<_>>();
     window
         .files()
+        .filter(|group| {
+            let (start, end) = group.range();
+            start <= span_end && span_start <= end
+        })
         .filter(|group| {
             !group
                 .file_ids()
