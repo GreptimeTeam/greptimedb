@@ -98,8 +98,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, AnnotationContext, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
+    TableOptions, validate_and_normalize_annotation_options,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -1881,8 +1881,20 @@ impl StatementExecutor {
 
             (req, invalidate_keys)
         } else {
-            // This is logical table
-            let req = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(vec![expr]));
+            // This is logical table. Annotation alters only rewrite its own
+            // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            let annotation_alter = match expr.kind.as_ref() {
+                Some(kind) => common_grpc_expr::annotation_alter_family(kind)
+                    .context(AlterExprToRequestSnafu)?
+                    .is_some_and(|family| family.allows_logical_tables()),
+                None => false,
+            };
+            let task = if annotation_alter {
+                DdlTask::new_alter_table(expr)
+            } else {
+                DdlTask::new_alter_logical_tables(vec![expr])
+            };
+            let req = SubmitDdlTaskRequest::new(task);
 
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
@@ -2338,19 +2350,6 @@ pub fn verify_alter(
         .context(error::BuildTableMetaSnafu { table_name })?;
 
     validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
-    // A column referenced by an entity declaration may be dropped (the
-    // read-time derivation skips the stale declaration), but must not change
-    // to a type without a stable string form.
-    for (key, value) in &new_meta.options.extra_options {
-        if parse_entity_option_key(key).is_none() {
-            continue;
-        }
-        for col in &parse_entity_columns(value) {
-            if let Some(column) = new_meta.schema.column_schema_by_name(col) {
-                ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
-            }
-        }
-    }
 
     Ok(true)
 }
@@ -2402,14 +2401,7 @@ pub fn create_table_info(
 
     validate_json2_columns_append_mode(&schema, &table_options)?;
 
-    validate_repartition_column_hint(
-        &mut table_options,
-        &column_name_to_index_map,
-        &partition_key_indices,
-        &create_table.time_index,
-    )?;
-
-    validate_entity_semantic_options(&table_options, &schema)?;
+    validate_and_normalize_annotations(&mut table_options, &schema, &partition_key_indices)?;
 
     let meta = TableMeta {
         schema,
@@ -2469,61 +2461,6 @@ fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOpti
     Ok(())
 }
 
-fn validate_repartition_column_hint(
-    table_options: &mut TableOptions,
-    column_name_to_index_map: &HashMap<String, usize>,
-    partition_key_indices: &[usize],
-    time_index: &str,
-) -> Result<()> {
-    let Some(column_name) = table_options
-        .extra_options
-        .get(REPARTITION_COLUMN_HINT_KEY)
-        .map(|value| value.trim().to_string())
-    else {
-        return Ok(());
-    };
-
-    ensure!(
-        !column_name.is_empty(),
-        InvalidPartitionRuleSnafu {
-            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
-        }
-    );
-
-    ensure!(
-        !column_name.contains(','),
-        InvalidPartitionRuleSnafu {
-            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
-        }
-    );
-
-    ensure!(
-        partition_key_indices.is_empty(),
-        InvalidPartitionRuleSnafu {
-            reason: format!(
-                "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
-            ),
-        }
-    );
-
-    column_name_to_index_map
-        .get(&column_name)
-        .context(ColumnNotFoundSnafu { msg: &column_name })?;
-
-    ensure!(
-        column_name != time_index,
-        InvalidPartitionRuleSnafu {
-            reason: format!("cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"),
-        }
-    );
-
-    table_options
-        .extra_options
-        .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
-
-    Ok(())
-}
-
 /// Rejects DDL against read-only schemas and computed entity-graph tables.
 fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
@@ -2557,57 +2494,34 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `CAST(column AS Utf8)` yields a stable entity-id string — the
-/// binary-backed and nested types do not, and without the DDL check the
-/// failure would surface only when the graph is scanned.
-fn has_stable_string_form(data_type: &datatypes::prelude::ConcreteDataType) -> bool {
-    use datatypes::prelude::ConcreteDataType;
-    !matches!(
-        data_type,
-        ConcreteDataType::Binary(_)
-            | ConcreteDataType::Json(_)
-            | ConcreteDataType::Vector(_)
-            | ConcreteDataType::List(_)
-            | ConcreteDataType::Struct(_)
-            | ConcreteDataType::Dictionary(_)
-            | ConcreteDataType::Null(_)
-    )
-}
-
-fn ensure_entity_column_renders_as_string(
-    key: &str,
-    col: &str,
-    data_type: &datatypes::prelude::ConcreteDataType,
+/// CREATE-side annotation validation: one rule source in the table crate,
+/// mapped onto this crate's existing error variants so client-visible codes
+/// and messages stay put.
+fn validate_and_normalize_annotations(
+    options: &mut TableOptions,
+    schema: &Schema,
+    partition_key_indices: &[usize],
 ) -> Result<()> {
-    ensure!(
-        has_stable_string_form(data_type),
-        InvalidSqlSnafu {
-            err_msg: format!(
-                "entity column `{col}` (option `{key}`) has type `{data_type}`, which cannot \
-                 render as a string",
-            ),
+    use table::requests::AnnotationValidationError as CheckError;
+    let cx = AnnotationContext {
+        schema,
+        partition_key_indices,
+    };
+    validate_and_normalize_annotation_options(options, &cx).map_err(|e| match e {
+        CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
+        e @ (CheckError::UnknownKey { .. }
+        | CheckError::InvalidValue { .. }
+        | CheckError::ColumnNotStringForm { .. }) => InvalidSqlSnafu {
+            err_msg: e.to_string(),
         }
-    );
-    Ok(())
-}
-
-/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist (tag or field) and
-/// have a stable string form — the derivation renders id, scope and
-/// descriptive values as strings.
-fn validate_entity_semantic_options(table_options: &TableOptions, schema: &Schema) -> Result<()> {
-    for (key, value) in &table_options.extra_options {
-        if parse_entity_option_key(key).is_none() {
-            continue;
-        };
-        for col in &parse_entity_columns(value) {
-            let column = schema
-                .column_schema_by_name(col)
-                .context(ColumnNotFoundSnafu { msg: col })?;
-            ensure_entity_column_renders_as_string(key, col, &column.data_type)?;
+        .build(),
+        e @ (CheckError::NotSingleColumn
+        | CheckError::PartitionMetadataConflict
+        | CheckError::TimeIndexConflict) => InvalidPartitionRuleSnafu {
+            reason: e.to_string(),
         }
-    }
-    Ok(())
+        .build(),
+    })
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
@@ -2904,6 +2818,7 @@ mod test {
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
     use sqlparser::parser::Parser;
+    use table::requests::REPARTITION_COLUMN_HINT_KEY;
 
     use super::*;
     use crate::expr_helper;
@@ -3133,7 +3048,7 @@ mod test {
     }
 
     #[test]
-    fn test_validate_entity_semantic_options() {
+    fn test_validate_and_normalize_annotations() {
         let schema = Schema::new(vec![
             ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
@@ -3147,6 +3062,10 @@ mod test {
                 .collect(),
             ..Default::default()
         };
+        let check = |pairs: &[(&str, &str)]| {
+            let mut options = opts(pairs);
+            validate_and_normalize_annotations(&mut options, &schema, &[]).map(|()| options)
+        };
 
         // Any existing column with a string form may be an id, tag or field.
         for pairs in [
@@ -3156,22 +3075,27 @@ mod test {
             )][..],
             &[("greptime.semantic.entity.service.id", "value")][..],
         ] {
-            assert!(validate_entity_semantic_options(&opts(pairs), &schema).is_ok());
+            assert!(check(pairs).is_ok());
         }
 
-        let missing = validate_entity_semantic_options(
-            &opts(&[("greptime.semantic.entity.service.id", "nope")]),
-            &schema,
-        )
-        .unwrap_err();
+        // Missing columns keep this crate's error variant and status code.
+        let missing = check(&[("greptime.semantic.entity.service.id", "nope")]).unwrap_err();
         assert!(matches!(missing, error::Error::ColumnNotFound { .. }));
+        assert_eq!(
+            common_error::status_code::StatusCode::InvalidArguments,
+            common_error::ext::ErrorExt::status_code(&missing)
+        );
 
-        let binary_id = validate_entity_semantic_options(
-            &opts(&[("greptime.semantic.entity.service.id", "payload")]),
-            &schema,
-        )
-        .unwrap_err();
+        let binary_id = check(&[("greptime.semantic.entity.service.id", "payload")]).unwrap_err();
         assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
+
+        // The SQL parser checks keys and value domains, but gRPC expressions
+        // bypass it.
+        let bad_value = check(&[("greptime.semantic.signal_type", "garbage")]).unwrap_err();
+        assert!(matches!(bad_value, error::Error::InvalidSql { .. }));
+
+        let unknown_key = check(&[("greptime.semantic.nonsense", "x")]).unwrap_err();
+        assert!(matches!(unknown_key, error::Error::InvalidSql { .. }));
     }
 
     #[test]
@@ -3559,9 +3483,10 @@ WITH ('repartition.column.hint' = ' host ')",
             }],
         }));
         let err = verify_alter(1, table_info.clone(), modify).unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
         assert!(
-            err.to_string().contains("cannot render as a string"),
-            "{err}"
+            msg.contains("must keep a type that renders as a string"),
+            "{msg}"
         );
 
         // Dropping a declared column stays allowed: the derivation skips the

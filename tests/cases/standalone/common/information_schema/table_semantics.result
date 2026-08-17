@@ -86,3 +86,121 @@ DROP TABLE plain_table;
 
 Affected Rows: 0
 
+-- ALTER TABLE manages semantic declarations on existing tables: SET appears in
+-- the view, UNSET disappears from it.
+CREATE TABLE altered_semantics (
+  ts TIMESTAMP TIME INDEX,
+  svc STRING,
+  payload BINARY,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+ALTER TABLE altered_semantics SET 'greptime.semantic.signal_type' = 'metric', 'greptime.semantic.entity.service.id' = 'svc';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'altered_semantics';
+
++-------------------+-------------+-----------------------------+
+| table_name        | signal_type | semantic_options            |
++-------------------+-------------+-----------------------------+
+| altered_semantics | metric      | {"entity.service.id":"svc"} |
++-------------------+-------------+-----------------------------+
+
+-- Semantic options never share a statement with regular table options.
+ALTER TABLE altered_semantics SET 'greptime.semantic.source' = 'prometheus', 'ttl' = '7d';
+
+Error: 1004(InvalidArguments), Invalid table option request: `greptime.semantic.*` options must be altered separately from other table options
+
+-- Unknown semantic keys are rejected on SET.
+ALTER TABLE altered_semantics SET 'greptime.semantic.nonsense' = 'x';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: unknown semantic option `greptime.semantic.nonsense`
+
+-- Values outside the key's domain are rejected.
+ALTER TABLE altered_semantics SET 'greptime.semantic.signal_type' = 'garbage';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: invalid value `garbage` for semantic option `greptime.semantic.signal_type`
+
+-- Entity columns must exist.
+ALTER TABLE altered_semantics SET 'greptime.semantic.entity.host.id' = 'no_such_column';
+
+Error: 4002(TableColumnNotFound), Column no_such_column not exists in table altered_semantics
+
+-- Entity columns must render as strings.
+ALTER TABLE altered_semantics SET 'greptime.semantic.entity.host.id' = 'payload';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: entity column `payload` (option `greptime.semantic.entity.host.id`) has type `Binary`, which cannot render as a string
+
+ALTER TABLE altered_semantics UNSET 'greptime.semantic.entity.service.id';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'altered_semantics';
+
++-------------------+-------------+------------------+
+| table_name        | signal_type | semantic_options |
++-------------------+-------------+------------------+
+| altered_semantics | metric      |                  |
++-------------------+-------------+------------------+
+
+DROP TABLE altered_semantics;
+
+Affected Rows: 0
+
+-- Logical metric tables take the same metadata-only path.
+CREATE TABLE phy_sem (ts TIMESTAMP TIME INDEX, val DOUBLE) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE logical_sem (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) engine=metric with ("on_physical_table" = "phy_sem");
+
+Affected Rows: 0
+
+ALTER TABLE logical_sem SET 'greptime.semantic.signal_type' = 'metric', 'greptime.semantic.entity.host.id' = 'host';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'logical_sem';
+
++-------------+-------------+---------------------------+
+| table_name  | signal_type | semantic_options          |
++-------------+-------------+---------------------------+
+| logical_sem | metric      | {"entity.host.id":"host"} |
++-------------+-------------+---------------------------+
+
+-- Regular options still cannot be altered on logical tables.
+ALTER TABLE logical_sem SET 'ttl' = '7d';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+ALTER TABLE logical_sem UNSET 'greptime.semantic.entity.host.id';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'logical_sem';
+
++-------------+-------------+------------------+
+| table_name  | signal_type | semantic_options |
++-------------+-------------+------------------+
+| logical_sem | metric      |                  |
++-------------+-------------+------------------+
+
+DROP TABLE logical_sem;
+
+Affected Rows: 0
+
+DROP TABLE phy_sem;
+
+Affected Rows: 0
+

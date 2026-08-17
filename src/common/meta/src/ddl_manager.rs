@@ -53,7 +53,7 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
+    self, ConvertAlterTableRequestSnafu, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
     PersistRepartitionGcRequirementSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
     RegisterRepartitionProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu,
     TableNotFoundSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
@@ -554,8 +554,26 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
-        let procedure =
-            AlterLogicalTablesProcedure::new(alter_table_tasks, physical_table_id, context);
+        // Resolve the logical table ids up front: procedure locks are fixed
+        // at submission, so `lock_key` cannot derive them during `Prepare`.
+        let logical_table_ids = {
+            let table_refs = alter_table_tasks
+                .iter()
+                .map(|task| task.table_ref())
+                .collect::<Vec<_>>();
+            utils::table_id::get_all_table_ids_by_names(
+                self.table_metadata_manager().table_name_manager(),
+                &table_refs,
+            )
+            .await?
+        };
+
+        let procedure = AlterLogicalTablesProcedure::new(
+            alter_table_tasks,
+            physical_table_id,
+            logical_table_ids,
+            context,
+        );
 
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
@@ -1053,8 +1071,17 @@ async fn handle_alter_table_task(
         .get(table_id)
         .await?
         .context(TableRouteNotFoundSnafu { table_id })?;
+    // Classify before the route guard: a mixed annotation batch must surface
+    // its own error here, not a misleading "non-physical route" one. Families
+    // that only rewrite the logical table's metadata may target logical tables.
+    let annotation_family = match alter_table_task.alter_table.kind.as_ref() {
+        Some(kind) => common_grpc_expr::annotation_alter_family(kind)
+            .context(ConvertAlterTableRequestSnafu)?,
+        None => None,
+    };
     ensure!(
-        table_route_value.is_physical(),
+        table_route_value.is_physical()
+            || annotation_family.is_some_and(|family| family.allows_logical_tables()),
         UnexpectedLogicalRouteTableSnafu {
             err_msg: format!("{:?} is a non-physical TableRouteValue.", table_ref),
         }
@@ -1499,7 +1526,9 @@ mod tests {
     use common_event_recorder::{PersistentEventContext, ProcedureEventInput, TriggerReason};
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
-    use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
+    use common_procedure::{
+        BoxedProcedure, ProcedureContext, ProcedureManager, ProcedureManagerRef,
+    };
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
@@ -1899,5 +1928,128 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, crate::error::Error::Unsupported { .. }));
         }
+    }
+
+    async fn ddl_manager_with_context(ddl_context: DdlContext) -> DdlManager {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            Default::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        ));
+        procedure_manager.start().await.unwrap();
+        let ddl_manager = DdlManager::new(
+            ddl_context,
+            procedure_manager,
+            Arc::new(DummyRepartitionProcedureFactory),
+        );
+        ddl_manager.register_loaders().unwrap();
+        ddl_manager
+    }
+
+    fn set_options_expr(table_name: &str, options: &[(&str, &str)]) -> api::v1::AlterTableExpr {
+        api::v1::AlterTableExpr {
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(api::v1::alter_table_expr::Kind::SetTableOptions(
+                api::v1::SetTableOptions {
+                    table_options: options
+                        .iter()
+                        .map(|(key, value)| api::v1::Option {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                        })
+                        .collect(),
+                },
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logical_table_annotation_alter_routing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let node_manager = Arc::new(crate::test_util::MockDatanodeManager::new(
+            crate::ddl::test_util::datanode_handler::DatanodeWatcher::new(tx),
+        ));
+        let ddl_context = crate::test_util::new_ddl_context(node_manager);
+        let phy_id = crate::ddl::test_util::create_physical_table(&ddl_context, "phy").await;
+        let logical_id =
+            crate::ddl::test_util::create_logical_table(ddl_context.clone(), phy_id, "logical")
+                .await;
+        let ddl_manager = ddl_manager_with_context(ddl_context.clone()).await;
+
+        // A semantic alter on a logical table passes the route guard, updates
+        // only the logical table's metadata, and dispatches nothing.
+        ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("greptime.semantic.signal_type", "metric")],
+                ))),
+            )
+            .await
+            .unwrap();
+        rx.try_recv().unwrap_err();
+        let table_info = ddl_manager
+            .table_metadata_manager()
+            .table_info_manager()
+            .get(logical_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner()
+            .table_info;
+        assert_eq!(
+            table_info
+                .meta
+                .options
+                .extra_options
+                .get("greptime.semantic.signal_type"),
+            Some(&"metric".to_string())
+        );
+
+        // A mixed batch fails with its own error, not the route guard's.
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("greptime.semantic.source", "prometheus"), ("ttl", "7d")],
+                ))),
+            )
+            .await
+            .unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("must be altered separately"), "{msg}");
+
+        // The repartition hint drives physical repartitioning; on a logical
+        // route it stays rejected by the guard.
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("repartition.column.hint", "host")],
+                ))),
+            )
+            .await
+            .unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("non-physical TableRouteValue"), "{msg}");
     }
 }
