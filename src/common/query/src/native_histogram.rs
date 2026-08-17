@@ -664,6 +664,7 @@ impl NativeHistogram {
         };
         let bucket_total = buckets.iter().map(|bucket| bucket.count).sum::<f64>();
         let has_nan_observations = self.sum.is_nan() && bucket_total < self.count;
+        let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
         let rank = q * self.count;
         let mut count = 0.0;
         for bucket in &mut buckets {
@@ -684,17 +685,16 @@ impl NativeHistogram {
             } else if self.uses_custom_buckets() {
                 if bucket.lower == f64::NEG_INFINITY {
                     if bucket.upper <= 0.0 {
-                        return (bucket.upper, None);
+                        return (bucket.upper, info);
                     }
                     bucket.lower = 0.0;
                 } else if bucket.upper == f64::INFINITY {
-                    return (bucket.lower, None);
+                    return (bucket.lower, info);
                 }
             }
 
             let rank_in_bucket = rank - (count - bucket.count);
             let fraction = rank_in_bucket / bucket.count;
-            let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
             if self.uses_custom_buckets() || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
                 return (
                     bucket.lower + (bucket.upper - bucket.lower) * fraction,
@@ -2219,6 +2219,22 @@ mod tests {
         let (nan, info) = histogram.quantile_with_info(0.0);
         assert!(nan.is_nan());
         assert_eq!(info, Some(NativeHistogramQuantileInfo::NaNSkew));
+
+        histogram.schema = CUSTOM_BUCKETS_SCHEMA;
+        histogram.count = 10.0;
+        histogram.positive_spans = vec![Span {
+            offset: 0,
+            length: 1,
+        }];
+        histogram.positive_buckets = vec![8.0];
+        for (bound, offset, expected) in [(-1.0, 0, -1.0), (1.0, 1, 1.0)] {
+            histogram.custom_values = vec![bound];
+            histogram.positive_spans[0].offset = offset;
+            assert_eq!(
+                histogram.quantile_with_info(0.5),
+                (expected, Some(NativeHistogramQuantileInfo::NaNSkew))
+            );
+        }
     }
 
     #[test]
