@@ -1638,12 +1638,9 @@ async fn test_exact_sequence_range_rejects_foreign_region_file() {
 }
 
 /// Regression for #8865: a legacy (unmarked) SST written before the preserve
-/// option was enabled must not permanently block exact scans. Once the option
-/// is enabled, an exact `(C, H]` scan whose lower bound C is at/after the
-/// unmarked file's max sequence is disjoint from it: the unmarked file is
-/// pruned at file selection (its rows must never pass through unfiltered) and
-/// only the new marked rows are returned, while normal scans still return
-/// everything.
+/// option was enabled permanently disables exact scans. Its file sequence may
+/// be synthesized by an edit path and is never trusted for disjoint skipping;
+/// normal scans still return everything.
 #[tokio::test]
 async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     let mut env =
@@ -1713,38 +1710,24 @@ async fn test_exact_sequence_after_enable_with_old_unmarked_sst() {
     markers.sort_unstable();
     assert_eq!(vec![false, true, true], markers);
 
-    // Exact (6, 9]: C=6 is at/after the unmarked file's max (3), so the old
-    // unmarked file is pruned and only the new marked rows are returned.
-    let stream = engine
-        .scan_to_stream(
+    // Exact scans fail closed even though C=9 is after the unmarked file's
+    // apparent sequence (3).
+    let err = engine
+        .scanner(
             region_id,
             ScanRequest {
-                memtable_min_sequence: Some(6),
-                memtable_max_sequence: Some(9),
+                memtable_min_sequence: Some(9),
+                memtable_max_sequence: Some(10),
                 exact_sequence_range: true,
                 ..Default::default()
             },
         )
         .await
-        .unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let pretty = batches.pretty_print().unwrap();
-    for tag in ["6", "7", "8"] {
-        assert!(
-            pretty.contains(&format!("| {tag} ")),
-            "new row {tag} missing from exact scan:\n{pretty}"
-        );
-    }
-    for tag in ["0", "1", "2", "3", "4", "5"] {
-        assert!(
-            !pretty.contains(&format!("| {tag} ")),
-            "old row {tag} leaked into exact scan:\n{pretty}"
-        );
-    }
-    assert_eq!(
-        3,
-        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-        "exact (6, 9] rows:\n{pretty}"
+        .err()
+        .expect("expected sequence-range unsupported error");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
     );
 
     // Normal scans still return everything.
@@ -2346,48 +2329,28 @@ async fn test_compaction_output_not_laundered_from_legacy_input() {
         "legacy input must not be laundered into a marked output"
     );
 
-    // The compacted output is unmarked. The region-edit handler filled its max
-    // sequence with `committed + 1` (7). Exact scans with a lower bound C
-    // at/after 7 are disjoint from it and served (the (7, 8] range is empty),
-    // while C below 7 is unsupported because the unmarked file may still
-    // contain in-range rows.
-    let stream = engine
-        .scan_to_stream(
-            region_id,
-            ScanRequest {
-                memtable_min_sequence: Some(7),
-                memtable_max_sequence: Some(8),
-                exact_sequence_range: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    assert_eq!(
-        0,
-        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-        "exact (7, 8] must be empty:\n{}",
-        batches.pretty_print().unwrap()
-    );
-
-    let err = engine
-        .scanner(
-            region_id,
-            ScanRequest {
-                memtable_min_sequence: Some(6),
-                memtable_max_sequence: Some(7),
-                exact_sequence_range: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .err()
-        .expect("expected sequence-range unsupported error for C below unmarked max");
-    assert!(
-        matches!(err, Error::SequenceRangeUnsupported { .. }),
-        "unexpected err: {err}"
-    );
+    // The compacted output remains unmarked. Its sequence may have been
+    // synthesized by the region-edit handler, so exact scans fail closed for
+    // any lower bound.
+    for (min, max) in [(7, 8), (6, 7)] {
+        let err = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: Some(min),
+                    memtable_max_sequence: Some(max),
+                    exact_sequence_range: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .expect("expected sequence-range unsupported error for unmarked file");
+        assert!(
+            matches!(err, Error::SequenceRangeUnsupported { .. }),
+            "unexpected err: {err}"
+        );
+    }
 }
 
 /// Multi-input primary-key-format compaction: two preserved pk-format files

@@ -479,11 +479,9 @@ impl ScanRegion {
         };
 
         let ssts = &self.version.ssts;
-        // Exact `(C, H]` scans skip files whose max sequence cannot reach the
-        // lower bound C: the whole file predates the range. This applies to
-        // marked files (no in-range rows) and to unmarked files already proven
-        // disjoint by `files_allow_exact_sequence_range` (their rows must not
-        // pass through unfiltered).
+        // Exact `(C, H]` scans skip only marked files whose max sequence cannot
+        // reach the lower bound C. Unmarked files never participate in this
+        // disjoint skip because their file sequence is not trusted.
         let sequence_range = self.exact_sequence_range()?;
         let exact_min_sequence = match &sequence_range {
             Some(SequenceRange::GtLtEq { min, .. }) => Some(*min),
@@ -493,7 +491,8 @@ impl ScanRegion {
         if !self.request.skip_sst_files {
             for level in ssts.levels() {
                 for file in level.files.values() {
-                    if let Some(min) = exact_min_sequence
+                    if file.meta_ref().preserve_row_sequence
+                        && let Some(min) = exact_min_sequence
                         && let Some(file_sequence) = file.meta_ref().sequence
                         && file_sequence.get() <= min
                     {
@@ -1676,16 +1675,14 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-/// Returns true if every unmarked SST in `ssts` can be excluded from an exact
-/// `(min_seq, max]` scan: it must carry a known max sequence not exceeding the
-/// lower bound `min_seq`, so none of its rows can fall inside the range.
-/// Marked files always qualify (the reader filters their rows row-level);
-/// unmarked files with an unknown max sequence fail closed. Files belonging to
-/// another region are a broken sequence domain and return an error.
+/// Returns true if every SST in `ssts` preserves row sequences, as required
+/// for an exact sequence-range scan. Unmarked files, including files whose
+/// sequence was synthesized by edit or repartition paths, never participate in
+/// disjoint skipping because their file sequence is not trusted. Files belonging
+/// to another region are a broken sequence domain and return an error.
 pub(crate) fn files_allow_exact_sequence_range(
     ssts: &SstVersion,
     region_id: RegionId,
-    min_seq: SequenceNumber,
 ) -> Result<bool> {
     for level in ssts.levels() {
         for file in level.files.values() {
@@ -1698,7 +1695,7 @@ pub(crate) fn files_allow_exact_sequence_range(
                 }
                 .fail();
             }
-            if !meta.preserve_row_sequence && meta.sequence.is_none_or(|seq| seq.get() > min_seq) {
+            if !meta.preserve_row_sequence {
                 return Ok(false);
             }
         }
@@ -1715,8 +1712,8 @@ pub(crate) fn files_allow_exact_sequence_range(
 /// - the scan does not skip SST files (exactness requires reading them), and
 /// - the region preserves per-row sequences (`preserve_row_sequence`),
 ///   and
-/// - every unmarked SST carries a known max sequence not exceeding the lower
-///   bound `min`, so it cannot contribute rows to `(min, max]`.
+/// - every SST preserves row sequences. Unmarked SSTs, including those with
+///   edit/repartition-synthesized sequences, fail closed and disable exactness.
 ///
 /// Returns `None` otherwise. Callers must keep main's fences/fallback semantics
 /// and never silently approximate. An SST belonging to another region is not a
@@ -1734,7 +1731,7 @@ pub(crate) fn exact_sequence_range(
     // Check the domain before capability conditions that would otherwise return
     // `None`, so a corrupt manifest can never be treated as fallback-safe.
     let files_allow_exact_range =
-        files_allow_exact_sequence_range(&version.ssts, version.metadata.region_id, min)?;
+        files_allow_exact_sequence_range(&version.ssts, version.metadata.region_id)?;
     if !version.options.preserve_row_sequence {
         return Ok(None);
     }
@@ -2872,26 +2869,29 @@ mod tests {
             ..Default::default()
         };
 
-        // Marked file (always OK) + unmarked files with known max sequences.
+        // All marked files allow exact row-level filtering.
         let mut ssts = SstVersion::new();
         ssts.add_files(
             purger.clone(),
-            [
-                file(NonZeroU64::new(5), true),
-                file(NonZeroU64::new(5), false),
-                file(NonZeroU64::new(9), false),
-            ]
-            .into_iter(),
+            [file(NonZeroU64::new(5), true), file(None, true)].into_iter(),
         );
-        // C=5: the unmarked file with max 9 overlaps (5, H] -> not allowed.
-        assert!(!files_allow_exact_sequence_range(&ssts, region_id, 5).unwrap());
-        // C=9: every unmarked file's max <= C -> allowed.
-        assert!(files_allow_exact_sequence_range(&ssts, region_id, 9).unwrap());
+        assert!(files_allow_exact_sequence_range(&ssts, region_id).unwrap());
 
-        // Unknown max sequence fails closed even when C is large.
+        // An unmarked file fails closed even if its sequence is at or below C.
         let mut ssts = SstVersion::new();
-        ssts.add_files(purger.clone(), [file(None, false)].into_iter());
-        assert!(!files_allow_exact_sequence_range(&ssts, region_id, 100).unwrap());
+        ssts.add_files(
+            purger.clone(),
+            [file(NonZeroU64::new(5), false)].into_iter(),
+        );
+        assert!(!files_allow_exact_sequence_range(&ssts, region_id).unwrap());
+
+        // An unmarked file's sequence is never trusted, whatever its value.
+        let mut ssts = SstVersion::new();
+        ssts.add_files(
+            purger.clone(),
+            [file(NonZeroU64::new(100), false)].into_iter(),
+        );
+        assert!(!files_allow_exact_sequence_range(&ssts, region_id).unwrap());
 
         // A file from another region breaks the sequence domain even if marked.
         let mut ssts = SstVersion::new();
@@ -2904,6 +2904,6 @@ mod tests {
             }]
             .into_iter(),
         );
-        assert!(files_allow_exact_sequence_range(&ssts, region_id, 100).is_err());
+        assert!(files_allow_exact_sequence_range(&ssts, region_id).is_err());
     }
 }
