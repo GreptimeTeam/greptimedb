@@ -168,17 +168,9 @@ impl TwcsPicker {
         };
         let found_runs = sorted_runs.len();
         let inputs = pick_count_first(sorted_runs, self.trigger_file_num);
-        let mut filter_deleted = !self.append_mode
+        let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
             && !selected_overlaps_unselected(&inputs, files);
-
-        // The inputs are only a subset of the window: `reduce_runs` and `merge_seq_files` both
-        // narrow the selection down and the file num limit above narrows it further. A deletion
-        // marker may only be dropped when every file that can hold a row it masks is compacted
-        // along with it, so re-check the final selection against what stays in the window.
-        if filter_deleted && overlaps_files_left_behind(&inputs, &files_to_merge) {
-            filter_deleted = false;
-        }
 
         if inputs.len() > 1 {
             // If we have more than one group to compact.
@@ -195,20 +187,6 @@ impl TwcsPicker {
         }
         (inputs, filter_deleted)
     }
-}
-
-/// Returns whether any file group of `window_files` that is not part of `inputs` overlaps
-/// `inputs`. Such a group keeps rows a deletion marker in `inputs` masks, so the compaction
-/// must not filter deleted rows out.
-///
-/// Overlapping is inclusive on both boundaries here: two files that only share a boundary
-/// timestamp can still hold the same row.
-fn overlaps_files_left_behind(inputs: &[FileGroup], window_files: &[FileGroup]) -> bool {
-    let picked: HashSet<_> = inputs.iter().flat_map(|fg| fg.file_ids()).collect();
-    window_files
-        .iter()
-        .filter(|fg| !fg.file_ids().iter().any(|id| picked.contains(id)))
-        .any(|fg| inputs.iter().any(|input| input.overlap_inclusive(fg)))
 }
 
 #[derive(Debug)]
