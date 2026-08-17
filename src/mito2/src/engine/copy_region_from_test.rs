@@ -355,13 +355,13 @@ async fn test_engine_copy_region_unexpected_state_with_format(flat_format: bool)
     )
 }
 
-// Regression for #8865: `copy_region_from` must not carry the source region's
-// `FileMeta::preserve_row_sequence` trust marker into the target region, whose
-// sequence domain is independent. The copied file's physical per-row sequences
-// belong to the source region only; trusting them in the target would let an
-// exact sequence-range request replay source rows as if they were target
-// sequences. The marker must be cleared so the target fails closed with
-// `SequenceRangeUnsupported` instead.
+/// Regression for #8865: `copy_region_from` must not carry the source region's
+/// `FileMeta::preserve_row_sequence` trust marker into the target region, whose
+/// sequence domain is independent. The copied file's physical per-row sequences
+/// belong to the source region only; trusting them in the target would let an
+/// exact sequence-range request replay source rows as if they were target
+/// sequences. The marker must be cleared so the target fails closed with
+/// `SequenceRangeUnsupported` instead.
 #[tokio::test]
 async fn test_copy_region_from_clears_preserve_row_sequence_marker() {
     common_telemetry::init_default_ut_logging();
