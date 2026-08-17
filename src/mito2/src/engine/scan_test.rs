@@ -1553,6 +1553,90 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
+/// Exact sequence-range reads reject an SST from another region as a broken
+/// sequence domain instead of falling back to an unsupported scan.
+#[tokio::test]
+async fn test_exact_sequence_range_rejects_foreign_region_file() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_rejects_foreign_region_file").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(4),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("expected broken sequence domain error");
+    assert!(matches!(err, Error::RegionSequenceDomainBroken { .. }));
+    assert_eq!(err.status_code(), StatusCode::Internal);
+}
+
 /// Regression for #8865: a legacy (unmarked) SST written before the preserve
 /// option was enabled must not permanently block exact scans. Once the option
 /// is enabled, an exact `(C, H]` scan whose lower bound C is at/after the
