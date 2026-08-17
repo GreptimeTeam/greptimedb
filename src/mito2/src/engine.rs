@@ -1067,6 +1067,23 @@ impl EngineInner {
         // below regardless of region options.
         let exact_sequence_range = exact_sequence_range(&request, &version);
 
+        // An extension range provider may contribute ranges on a follower
+        // region, and extension streams are returned without a row-level
+        // sequence filter (`scan_flat_extension_range`), so exactness cannot
+        // be proven when one is attached. Treat the capability as missing so
+        // the request fails closed below instead of emitting out-of-range
+        // rows. See the injection point in `ScanRegion::scan_input`.
+        #[cfg(feature = "enterprise")]
+        let extension_provider_blocks_exact = region.is_follower()
+            && self.extension_range_provider_factory.is_some()
+            && exact_sequence_range.is_some();
+        #[cfg(feature = "enterprise")]
+        let exact_sequence_range = if extension_provider_blocks_exact {
+            None
+        } else {
+            exact_sequence_range
+        };
+
         if request.exact_sequence_range {
             // Exact `sequence_range` mode: when the capability is available the
             // requested (C, H] delta is enforced row-level on memtables and every
@@ -1100,17 +1117,28 @@ impl EngineInner {
 
                 // Both bounds are enforceable against the flushed frontier, yet the
                 // region cannot serve an exact row-level delta (preserve option off,
-                // or a file without the preserved-sequence marker). Main semantics
-                // would silently return rows outside (C, H], so fail instead.
+                // a file without the preserved-sequence marker, or a follower with
+                // an extension range provider). Main semantics would silently
+                // return rows outside (C, H], so fail instead.
                 return SequenceRangeUnsupportedSnafu {
                     region_id,
                     min_seq: request.memtable_min_sequence.unwrap_or_default(),
                     max_seq: request.memtable_max_sequence.unwrap_or_default(),
-                    reason: if version.options.preserve_row_sequence {
-                        "region has files without preserved per-row sequences".to_string()
-                    } else {
-                        "region does not preserve per-row sequences (preserve_row_sequence is off)"
-                            .to_string()
+                    reason: {
+                        #[cfg(feature = "enterprise")]
+                        let extension_reason = extension_provider_blocks_exact.then(|| {
+                            "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
+                        });
+                        #[cfg(not(feature = "enterprise"))]
+                        let extension_reason = None::<String>;
+                        extension_reason.unwrap_or_else(|| {
+                            if version.options.preserve_row_sequence {
+                                "region has files without preserved per-row sequences".to_string()
+                            } else {
+                                "region does not preserve per-row sequences (preserve_row_sequence is off)"
+                                    .to_string()
+                            }
+                        })
                     },
                 }
                 .fail();
