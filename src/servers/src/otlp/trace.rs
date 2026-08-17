@@ -46,6 +46,7 @@ pub const TRACE_STATE_COLUMN: &str = "trace_state";
 
 // const keys
 pub const KEY_SERVICE_NAME: &str = "service.name";
+pub const KEY_SERVICE_NAMESPACE: &str = "service.namespace";
 pub const KEY_SERVICE_INSTANCE_ID: &str = "service.instance.id";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 

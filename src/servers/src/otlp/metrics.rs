@@ -27,7 +27,7 @@ use table::requests::{
 };
 
 use crate::error::Result;
-use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
+use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
 use crate::row_writer::{self, MultiTableData, TableData};
 pub use crate::semantic::SemanticIndex;
 use crate::semantic::{
@@ -232,30 +232,57 @@ fn from_metric_type(data: &metric::Data) -> MetricType {
     }
 }
 
+/// Renders a scalar attribute value as a string label value. Non-scalar
+/// values (bool, arrays, maps, bytes) are not representable as tags.
+fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
+    match value.and_then(|v| v.value.as_ref())? {
+        any_value::Value::StringValue(s) => Some(s.clone()),
+        any_value::Value::IntValue(v) => Some(v.to_string()),
+        any_value::Value::DoubleValue(v) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+/// Prometheus-style service identity of a resource. `job` is
+/// `<service.namespace>/<service.name>` when the namespace is present (per
+/// the OTel Prometheus compatibility spec), bare `service.name` otherwise,
+/// `None` when `service.name` is absent (no `unknown_service` fabrication).
+/// `instance` is `service.instance.id` verbatim.
+pub(crate) fn service_identity(attrs: &[KeyValue]) -> (Option<String>, Option<String>) {
+    let mut name = None;
+    let mut namespace = None;
+    let mut instance = None;
+    for kv in attrs {
+        match kv.key.as_str() {
+            KEY_SERVICE_NAME => name = scalar_value_string(kv.value.as_ref()),
+            KEY_SERVICE_NAMESPACE => namespace = scalar_value_string(kv.value.as_ref()),
+            KEY_SERVICE_INSTANCE_ID => instance = scalar_value_string(kv.value.as_ref()),
+            _ => {}
+        }
+    }
+    let job = name.map(|name| match namespace {
+        Some(ns) if !ns.is_empty() => format!("{ns}/{name}"),
+        _ => name,
+    });
+    (job, instance)
+}
+
+fn string_key_value(key: &str, value: String) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value)),
+        }),
+    }
+}
+
 fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx) {
     if metric_ctx.is_legacy {
         return;
     }
 
-    // remap service.name and service.instance.id to job and instance
-    let mut tmp = Vec::with_capacity(2);
-    for kv in attrs.iter() {
-        match &kv.key as &str {
-            KEY_SERVICE_NAME => {
-                tmp.push(KeyValue {
-                    key: JOB_KEY.to_string(),
-                    value: kv.value.clone(),
-                });
-            }
-            KEY_SERVICE_INSTANCE_ID => {
-                tmp.push(KeyValue {
-                    key: INSTANCE_KEY.to_string(),
-                    value: kv.value.clone(),
-                });
-            }
-            _ => {}
-        }
-    }
+    // remap the service identity attributes to job and instance
+    let (job, instance) = service_identity(attrs);
 
     // if promote all, then exclude the list, else, include the list
     if metric_ctx.promote_all_resource_attrs {
@@ -267,7 +294,12 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
         });
     }
 
-    attrs.extend(tmp);
+    if let Some(job) = job {
+        attrs.push(string_key_value(JOB_KEY, job));
+    }
+    if let Some(instance) = instance {
+        attrs.push(string_key_value(INSTANCE_KEY, instance));
+    }
 }
 
 fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Option<Vec<KeyValue>> {
@@ -398,29 +430,21 @@ fn write_attributes(
     };
 
     let tags = attrs.iter().filter_map(|attr| {
-        attr.value
-            .as_ref()
-            .and_then(|v| v.value.as_ref())
-            .and_then(|val| {
-                let key = match attribute_type {
-                    AttributeType::Resource | AttributeType::DataPoint => {
-                        translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
-                    }
-                    AttributeType::Scope => {
-                        format!(
-                            "otel_scope_{}",
-                            translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
-                        )
-                    }
-                    AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
-                };
-                match val {
-                    any_value::Value::StringValue(s) => Some((key, s.clone())),
-                    any_value::Value::IntValue(v) => Some((key, v.to_string())),
-                    any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
-                    _ => None, // TODO(sunng87): allow different type of values
-                }
-            })
+        // TODO(sunng87): allow different type of values
+        let value = scalar_value_string(attr.value.as_ref())?;
+        let key = match attribute_type {
+            AttributeType::Resource | AttributeType::DataPoint => {
+                translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
+            }
+            AttributeType::Scope => {
+                format!(
+                    "otel_scope_{}",
+                    translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
+                )
+            }
+            AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
+        };
+        Some((key, value))
     });
     row_writer::write_tags(writer, tags, row)?;
 
@@ -861,6 +885,73 @@ mod tests {
                 value: Some(Val::StringValue(value.into())),
             }),
         }
+    }
+
+    fn attr_value(attrs: &[KeyValue], key: &str) -> Option<String> {
+        attrs
+            .iter()
+            .find(|kv| kv.key == key)
+            .and_then(|kv| scalar_value_string(kv.value.as_ref()))
+    }
+
+    #[test]
+    fn test_job_composition_follows_service_namespace() {
+        let mut attrs = vec![
+            keyvalue("service.name", "api"),
+            keyvalue("service.namespace", "shop"),
+        ];
+        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
+        assert_eq!(attr_value(&attrs, "job").as_deref(), Some("shop/api"));
+
+        let mut attrs = vec![keyvalue("service.name", "api")];
+        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
+        assert_eq!(attr_value(&attrs, "job").as_deref(), Some("api"));
+
+        let mut attrs = vec![
+            keyvalue("service.name", "api"),
+            keyvalue("service.namespace", ""),
+        ];
+        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
+        assert_eq!(attr_value(&attrs, "job").as_deref(), Some("api"));
+
+        // no service.name: no job is fabricated, namespace stays a plain attr
+        let mut attrs = vec![keyvalue("service.namespace", "shop")];
+        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
+        assert_eq!(attr_value(&attrs, "job"), None);
+        assert_eq!(
+            attr_value(&attrs, "service.namespace").as_deref(),
+            Some("shop")
+        );
+    }
+
+    #[test]
+    fn test_resource_attrs_remap_and_promotion() {
+        let mut attrs = vec![
+            keyvalue("service.name", "api"),
+            keyvalue("service.instance.id", "inst-1"),
+            keyvalue("host.id", "h-1"),
+        ];
+        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
+        assert_eq!(attr_value(&attrs, "instance").as_deref(), Some("inst-1"));
+        // raw identity attrs are in the default promote list and survive
+        assert_eq!(attr_value(&attrs, "service.name").as_deref(), Some("api"));
+        // non-promoted attrs are dropped
+        assert_eq!(attr_value(&attrs, "host.id"), None);
+    }
+
+    #[test]
+    fn test_legacy_mode_keeps_resource_attrs_untouched() {
+        let ctx = OtlpMetricCtx {
+            is_legacy: true,
+            ..Default::default()
+        };
+        let mut attrs = vec![
+            keyvalue("service.name", "api"),
+            keyvalue("host.id", "h-1"),
+        ];
+        process_resource_attrs(&mut attrs, &ctx);
+        assert_eq!(attr_value(&attrs, "job"), None);
+        assert_eq!(attr_value(&attrs, "host.id").as_deref(), Some("h-1"));
     }
 
     #[test]
