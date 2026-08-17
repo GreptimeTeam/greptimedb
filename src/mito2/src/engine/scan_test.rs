@@ -1637,6 +1637,83 @@ async fn test_exact_sequence_range_rejects_foreign_region_file() {
     assert_eq!(err.status_code(), StatusCode::Internal);
 }
 
+/// Exact sequence-range reads only require preserved row sequences in the
+/// SSTs selected by their time range. A legacy SST outside that range cannot
+/// contain a row in `(C, H]` for this request.
+#[tokio::test]
+async fn test_exact_sequence_range_ignores_time_pruned_unmarked_sst() {
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_ignores_time_pruned_unmarked_sst").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // The old, unmarked SST covers timestamps 0s..2s.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::PreserveRowSequence(true)],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The selected SST covers timestamps 10s..12s and carries the marker.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(10, 13),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![
+                    col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None))),
+                ],
+                memtable_min_sequence: Some(3),
+                memtable_max_sequence: Some(6),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("time-pruned unmarked SST must not disable exact reads");
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
 /// Regression for #8865: a legacy (unmarked) SST written before the preserve
 /// option was enabled permanently disables exact scans. Its file sequence may
 /// be synthesized by an edit path and is never trusted for disjoint skipping;

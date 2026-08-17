@@ -148,7 +148,9 @@ use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
 };
-use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
+use crate::read::scan_region::{
+    ScanRegion, Scanner, exact_sequence_range, exact_sequence_range_files,
+};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
@@ -1065,7 +1067,9 @@ impl EngineInner {
         // `sequence_range` mode requests exactness; historical `memtable_only`
         // scans never set `exact_sequence_range` and therefore keep every fence
         // below regardless of region options.
-        let exact_sequence_range = exact_sequence_range(&request, &version)?;
+        let exact_sequence_range_files = exact_sequence_range_files(&request, &version);
+        let exact_sequence_range =
+            exact_sequence_range(&request, &version, &exact_sequence_range_files)?;
 
         // An extension range provider may contribute ranges on a follower
         // region, and extension streams are returned without a row-level
