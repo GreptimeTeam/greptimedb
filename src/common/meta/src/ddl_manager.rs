@@ -1930,4 +1930,126 @@ mod tests {
         }
     }
 
+    async fn ddl_manager_with_context(ddl_context: DdlContext) -> DdlManager {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            Default::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        ));
+        procedure_manager.start().await.unwrap();
+        let ddl_manager = DdlManager::new(
+            ddl_context,
+            procedure_manager,
+            Arc::new(DummyRepartitionProcedureFactory),
+        );
+        ddl_manager.register_loaders().unwrap();
+        ddl_manager
+    }
+
+    fn set_options_expr(table_name: &str, options: &[(&str, &str)]) -> api::v1::AlterTableExpr {
+        api::v1::AlterTableExpr {
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(api::v1::alter_table_expr::Kind::SetTableOptions(
+                api::v1::SetTableOptions {
+                    table_options: options
+                        .iter()
+                        .map(|(key, value)| api::v1::Option {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                        })
+                        .collect(),
+                },
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logical_table_annotation_alter_routing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let node_manager = Arc::new(crate::test_util::MockDatanodeManager::new(
+            crate::ddl::test_util::datanode_handler::DatanodeWatcher::new(tx),
+        ));
+        let ddl_context = crate::test_util::new_ddl_context(node_manager);
+        let phy_id = crate::ddl::test_util::create_physical_table(&ddl_context, "phy").await;
+        let logical_id =
+            crate::ddl::test_util::create_logical_table(ddl_context.clone(), phy_id, "logical")
+                .await;
+        let ddl_manager = ddl_manager_with_context(ddl_context.clone()).await;
+
+        // A semantic alter on a logical table passes the route guard, updates
+        // only the logical table's metadata, and dispatches nothing.
+        ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("greptime.semantic.signal_type", "metric")],
+                ))),
+            )
+            .await
+            .unwrap();
+        rx.try_recv().unwrap_err();
+        let table_info = ddl_manager
+            .table_metadata_manager()
+            .table_info_manager()
+            .get(logical_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner()
+            .table_info;
+        assert_eq!(
+            table_info
+                .meta
+                .options
+                .extra_options
+                .get("greptime.semantic.signal_type"),
+            Some(&"metric".to_string())
+        );
+
+        // A mixed batch fails with its own error, not the route guard's.
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("greptime.semantic.source", "prometheus"), ("ttl", "7d")],
+                ))),
+            )
+            .await
+            .unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("must be altered separately"), "{msg}");
+
+        // The repartition hint drives physical repartitioning; on a logical
+        // route it stays rejected by the guard.
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_alter_table(set_options_expr(
+                    "logical",
+                    &[("repartition.column.hint", "host")],
+                ))),
+            )
+            .await
+            .unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("non-physical TableRouteValue"), "{msg}");
+    }
 }
