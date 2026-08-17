@@ -22,6 +22,7 @@ use arrow_schema::{ArrowError, DataType, Field};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
 use crate::json::JsonSettings;
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";

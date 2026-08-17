@@ -136,7 +136,28 @@ pub struct ColumnExtensions {
     pub inverted_index_options: Option<OptionMap>,
     /// Vector index options for HNSW-based vector similarity search.
     pub vector_index_options: Option<OptionMap>,
-    pub json_type_hints: Vec<JsonTypeHint>,
+    /// JSON2-specific column options.
+    pub json2_options: Option<Json2Options>,
+}
+
+/// JSON2-specific options represented in the SQL AST.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+pub struct Json2Options {
+    /// Maximum number of unhinted JSON2 paths expanded into Arrow fields.
+    pub(crate) max_auto_expanded_paths: Option<u32>,
+    /// Paths stored as explicitly typed JSON2 fields.
+    pub(crate) type_hints: Vec<JsonTypeHint>,
+}
+
+impl Display for Json2Options {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut options = Vec::with_capacity(self.type_hints.len() + 1);
+        if let Some(max) = self.max_auto_expanded_paths {
+            options.push(format!("max_auto_expanded_paths = {max}"));
+        }
+        options.extend(self.type_hints.iter().map(format_json_type_hint));
+        write!(f, "(\n    {}\n  )", options.iter().join(",\n    "))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
@@ -180,12 +201,8 @@ impl Display for Column {
         }
 
         write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
-        if !self.extensions.json_type_hints.is_empty() {
-            write!(
-                f,
-                "{}",
-                format_json_type_hints(&self.extensions.json_type_hints)
-            )?;
+        if let Some(options) = &self.extensions.json2_options {
+            write!(f, "{options}")?;
         }
         for option in &self.column_def.options {
             write!(f, " {option}")?;
@@ -335,29 +352,30 @@ impl ColumnExtensions {
     }
 
     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {
-        if self.json_type_hints.is_empty() {
+        let Some(options) = &self.json2_options else {
             return Ok(None);
-        }
+        };
 
-        Ok(Some(JsonSettings::new(
-            self.json_type_hints
-                .iter()
-                .map(|hint| {
-                    Ok(datatypes::json::JsonTypeHint {
-                        path: hint.path.clone(),
-                        data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
-                        nullable: hint.nullable,
-                        default_constraint: build_json_type_hint_default_constraint(hint)?,
-                        inverted_index: hint.inverted_index,
-                    })
+        let type_hints = options
+            .type_hints
+            .iter()
+            .map(|hint| {
+                Ok(datatypes::json::JsonTypeHint {
+                    path: hint.path.clone(),
+                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
+                    nullable: hint.nullable,
+                    default_constraint: build_json_type_hint_default_constraint(hint)?,
+                    inverted_index: hint.inverted_index,
                 })
-                .collect::<Result<Vec<_>>>()?,
-        )))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let settings = JsonSettings::try_new(type_hints, options.max_auto_expanded_paths)?;
+        Ok(Some(settings))
     }
 
     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {
-        self.json_type_hints = settings
-            .type_hints
+        let (type_hints, max_auto_expanded_paths) = settings.into_parts();
+        let type_hints = type_hints
             .into_iter()
             .map(|hint| {
                 let data_type = json_type_hint_sql_data_type(&hint.data_type)?;
@@ -374,6 +392,11 @@ impl ColumnExtensions {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        self.json2_options = (max_auto_expanded_paths.is_some() || !type_hints.is_empty())
+            .then_some(Json2Options {
+                max_auto_expanded_paths,
+                type_hints,
+            });
         Ok(())
     }
 }
@@ -484,13 +507,6 @@ fn format_json_type_hint(hint: &JsonTypeHint) -> String {
     format!(
         "{} {}{}{}{}",
         path, hint.data_type, nullability, default, inverted_index
-    )
-}
-
-fn format_json_type_hints(hints: &[JsonTypeHint]) -> String {
-    format!(
-        "(\n    {}\n  )",
-        hints.iter().map(format_json_type_hint).join(",\n    ")
     )
 }
 
@@ -786,6 +802,7 @@ mod tests {
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
+    use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
@@ -1066,7 +1083,7 @@ ENGINE=mito
             .build_json_settings()
             .unwrap()
             .unwrap();
-        let hints = settings.type_hints;
+        let hints = settings.type_hints();
 
         assert_eq!(hints[0].data_type, ConcreteDataType::int64_datatype());
         assert_eq!(
@@ -1118,10 +1135,10 @@ ENGINE=mito
     }
 
     #[test]
-    fn test_set_json_settings_normalizes_type_hint_sql_types() {
+    fn test_set_json_settings_normalizes_type_hint_sql_types() -> Result<()> {
         let mut extensions = super::ColumnExtensions::default();
-        extensions
-            .set_json_settings(JsonSettings::new(vec![
+        let settings = JsonSettings::try_new(
+            vec![
                 DatatypeJsonTypeHint {
                     path: vec!["i".to_string()],
                     data_type: ConcreteDataType::int32_datatype(),
@@ -1157,36 +1174,51 @@ ENGINE=mito
                     default_constraint: None,
                     inverted_index: false,
                 },
-            ]))
-            .unwrap();
+            ],
+            None,
+        )?;
+        extensions.set_json_settings(settings)?;
 
         assert_eq!(
             extensions
-                .json_type_hints
+                .json2_options
+                .unwrap()
+                .type_hints
                 .iter()
                 .map(|hint| hint.data_type.to_string())
                 .collect::<Vec<_>>(),
             vec!["BIGINT", "DOUBLE", "BIGINT UNSIGNED", "STRING", "BOOLEAN"]
         );
+        Ok(())
     }
 
     #[test]
-    fn test_set_json_settings_rejects_unsupported_type_hint_type() {
-        let mut extensions = super::ColumnExtensions::default();
-        let err = extensions
-            .set_json_settings(JsonSettings::new(vec![DatatypeJsonTypeHint {
+    fn test_set_json_settings_rejects_unsupported_type_hint_type() -> Result<()> {
+        let err = JsonSettings::try_new(
+            vec![DatatypeJsonTypeHint {
                 path: vec!["u".to_string()],
                 data_type: ConcreteDataType::date_datatype(),
                 nullable: true,
                 default_constraint: None,
                 inverted_index: false,
-            }]))
-            .unwrap_err();
+            }],
+            None,
+        )
+        .unwrap_err();
 
         assert!(
             err.to_string()
                 .contains("unsupported JSON2 type hint data type")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_empty_json_settings_omits_json2_options() -> Result<()> {
+        let mut extensions = ColumnExtensions::default();
+        extensions.set_json_settings(JsonSettings::default())?;
+        assert!(extensions.json2_options.is_none());
+        Ok(())
     }
 
     #[test]
@@ -1364,15 +1396,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
 
         // Test zero connectivity should fail
         let extensions = ColumnExtensions {
-            fulltext_index_options: None,
-            vector_options: None,
-            skipping_index_options: None,
-            inverted_index_options: None,
-            json_type_hints: vec![],
             vector_index_options: Some(OptionMap::from([(
                 "connectivity".to_string(),
                 "0".to_string(),
             )])),
+            ..Default::default()
         };
         let result = extensions.build_vector_index_options();
         assert!(result.is_err());
@@ -1385,15 +1413,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
 
         // Test zero expansion_add should fail
         let extensions = ColumnExtensions {
-            fulltext_index_options: None,
-            vector_options: None,
-            skipping_index_options: None,
-            inverted_index_options: None,
-            json_type_hints: vec![],
             vector_index_options: Some(OptionMap::from([(
                 "expansion_add".to_string(),
                 "0".to_string(),
             )])),
+            ..Default::default()
         };
         let result = extensions.build_vector_index_options();
         assert!(result.is_err());
@@ -1406,15 +1430,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
 
         // Test zero expansion_search should fail
         let extensions = ColumnExtensions {
-            fulltext_index_options: None,
-            vector_options: None,
-            skipping_index_options: None,
-            inverted_index_options: None,
-            json_type_hints: vec![],
             vector_index_options: Some(OptionMap::from([(
                 "expansion_search".to_string(),
                 "0".to_string(),
             )])),
+            ..Default::default()
         };
         let result = extensions.build_vector_index_options();
         assert!(result.is_err());
@@ -1427,16 +1447,12 @@ AS SELECT number FROM numbers_input where number > 10"#,
 
         // Test valid values should succeed
         let extensions = ColumnExtensions {
-            fulltext_index_options: None,
-            vector_options: None,
-            skipping_index_options: None,
-            inverted_index_options: None,
-            json_type_hints: vec![],
             vector_index_options: Some(OptionMap::from([
                 ("connectivity".to_string(), "32".to_string()),
                 ("expansion_add".to_string(), "200".to_string()),
                 ("expansion_search".to_string(), "100".to_string()),
             ])),
+            ..Default::default()
         };
         let result = extensions.build_vector_index_options();
         assert!(result.is_ok());
