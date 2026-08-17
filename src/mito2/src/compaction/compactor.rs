@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::{NonZero, NonZeroU64};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -455,17 +455,49 @@ impl SstMerger for DefaultSstMerger {
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let max_sequence = known_max_input_sequence(&output.inputs);
+        let input_max_sequence = known_max_input_sequence(&output.inputs);
         // The compaction output can only preserve per-row sequences when the
         // region option is enabled AND every input file carries the
-        // preserved-sequence marker. Otherwise a legacy (unmarked) input would
-        // be laundered into a trusted output and exact sequence-range scans
-        // would silently skip or wrongly filter its normalized sequences.
+        // preserved-sequence marker. Otherwise, rewrite the untrusted input as
+        // a sequence-less file. `committed_sequence + 1` is the region-local
+        // admission barrier for this compacted SST: once Flow's cursor reaches
+        // it, the input rows (which were all flushed in this snapshot) have
+        // already been consumed.
         let output_preserves_sequence = compaction_region.region_options.preserve_row_sequence
             && output
                 .inputs
                 .iter()
                 .all(|f| f.meta_ref().preserve_row_sequence);
+        let output_sequence = if output_preserves_sequence {
+            input_max_sequence
+        } else {
+            // The manifest records the region's latest accepted sequence for
+            // edit paths and its flushed frontier otherwise. Compaction only
+            // rewrites the immutable SST snapshot, so this is the same
+            // region-local admission barrier used when accepting files.
+            let manifest = compaction_region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .manifest();
+            NonZeroU64::new(
+                manifest
+                    .committed_sequence
+                    .unwrap_or(manifest.flushed_sequence)
+                    + 1,
+            )
+        };
+        // The flat/primary-key parquet formats require their three internal
+        // columns. For a sequence-less output, write the sequence column as
+        // zero instead of its file barrier. The reader recognizes all-zero
+        // sequence columns and overrides them from FileMeta for legacy reads;
+        // exact reads skip this file at file level before row filtering.
+        let write_max_sequence = if output_preserves_sequence {
+            input_max_sequence.map(NonZeroU64::get)
+        } else {
+            Some(0)
+        };
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -489,7 +521,7 @@ impl SstMerger for DefaultSstMerger {
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
                     storage,
-                    max_sequence: max_sequence.map(NonZero::get),
+                    max_sequence: write_max_sequence,
                     sst_write_format: if flat_format {
                         FormatType::Flat
                     } else {
@@ -544,7 +576,7 @@ impl SstMerger for DefaultSstMerger {
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
-                    sequence: max_sequence,
+                    sequence: output_sequence,
                     partition_expr: partition_expr.clone(),
                     num_series: sst_info.num_series,
                     primary_key_min,
