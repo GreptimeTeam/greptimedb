@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod insert_assignment;
+
 use std::sync::Arc;
 
 use common_time::Timezone;
@@ -19,7 +21,7 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
-use datafusion_expr::expr::{Cast, InList};
+use datafusion_expr::expr::InList;
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan, WriteOp,
 };
@@ -29,6 +31,7 @@ use session::context::QueryContextRef;
 
 use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::type_conversion::insert_assignment::rewrite_insert_assignments;
 use crate::plan::ExtractExpr;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
@@ -307,120 +310,6 @@ impl TreeNodeRewriter for TypeConverter {
     }
 }
 
-/// Rewrites timestamp assignment casts at the INSERT boundary. The source query
-/// is intentionally left untouched so explicit casts keep DataFusion semantics.
-fn rewrite_insert_assignments(
-    plan: LogicalPlan,
-    query_ctx: QueryContextRef,
-) -> Result<LogicalPlan> {
-    let LogicalPlan::Projection(projection) = plan else {
-        return Ok(plan);
-    };
-
-    // VALUES type coercion is performed inside the Values node. Only rewrite
-    // the direct source of the assignment projection, not nested query plans.
-    let input = rewrite_insert_values(projection.input.as_ref().clone(), query_ctx.clone())?;
-    let input_literals = projected_literals(&input);
-    let mut converter = InsertAssignmentConverter {
-        query_ctx,
-        input_literals,
-    };
-    let plan = LogicalPlan::Projection(projection);
-    let expr = plan
-        .expressions_consider_join()
-        .into_iter()
-        .map(|expr| expr.rewrite(&mut converter).map(|x| x.data))
-        .collect::<Result<Vec<_>>>()?;
-
-    plan.with_new_exprs(expr, vec![input])
-}
-
-fn rewrite_insert_values(plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-    let LogicalPlan::Values(mut values) = plan else {
-        return Ok(plan);
-    };
-    let mut converter = InsertAssignmentConverter {
-        query_ctx,
-        input_literals: None,
-    };
-    values.values = values
-        .values
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|expr| expr.rewrite(&mut converter).map(|x| x.data))
-                .collect::<Result<Vec<_>>>()
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(LogicalPlan::Values(values))
-}
-
-fn projected_literals(plan: &LogicalPlan) -> Option<(DFSchemaRef, Vec<Option<ScalarValue>>)> {
-    let LogicalPlan::Projection(projection) = plan else {
-        return None;
-    };
-    let literals = projection.expr.iter().map(projected_literal).collect();
-    Some((projection.schema.clone(), literals))
-}
-
-fn projected_literal(expr: &Expr) -> Option<ScalarValue> {
-    match expr {
-        Expr::Literal(value, _) => Some(value.clone()),
-        Expr::Alias(alias) => projected_literal(&alias.expr),
-        _ => None,
-    }
-}
-
-struct InsertAssignmentConverter {
-    query_ctx: QueryContextRef,
-    input_literals: Option<(DFSchemaRef, Vec<Option<ScalarValue>>)>,
-}
-
-impl InsertAssignmentConverter {
-    fn assignment_literal(&self, expr: &Expr) -> Option<ScalarValue> {
-        let Expr::Column(column) = expr else {
-            return expr.as_literal().cloned();
-        };
-        let (schema, literals) = self.input_literals.as_ref()?;
-        let index = schema.maybe_index_of_column(column)?;
-        literals.get(index)?.clone()
-    }
-}
-
-impl TreeNodeRewriter for InsertAssignmentConverter {
-    type Node = Expr;
-
-    fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
-        let Expr::Cast(Cast {
-            expr: inner,
-            data_type: target_type,
-        }) = expr
-        else {
-            return Ok(Transformed::no(expr));
-        };
-        let original = || {
-            Expr::Cast(Cast {
-                expr: inner.clone(),
-                data_type: target_type.clone(),
-            })
-        };
-        if !matches!(&target_type, DataType::Timestamp(_, _)) {
-            return Ok(Transformed::no(original()));
-        }
-        let Some(ScalarValue::Utf8(Some(value))) = self.assignment_literal(inner.as_ref()) else {
-            return Ok(Transformed::no(original()));
-        };
-
-        match cast_string_to_timestamp(&value, &target_type, Some(&self.query_ctx.timezone())) {
-            Ok(value) if !value.is_null() => Ok(Transformed::yes(Expr::Literal(value, None))),
-            // Preserve DataFusion's existing parser for unsupported timestamp
-            // syntax and out-of-range values.
-            Ok(_) | Err(_) => Ok(Transformed::no(original())),
-        }
-    }
-}
-
 fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     let timestamp = match unit {
         TimeUnit::Second => val * 1_000,
@@ -472,7 +361,7 @@ mod tests {
 
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{Column, DFSchema, NullEquality};
-    use datafusion_expr::expr::Exists;
+    use datafusion_expr::expr::{Cast, Exists};
     use datafusion_expr::{Join, JoinConstraint, JoinType, Literal, LogicalPlanBuilder, Subquery};
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
@@ -592,45 +481,6 @@ mod tests {
                 .unwrap()
                 .data
         );
-    }
-
-    #[test]
-    fn test_insert_assignment_uses_query_timezone_and_target_precision() {
-        use datafusion_common::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let query_ctx = QueryContext::arc();
-        query_ctx.set_timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap());
-        let mut converter = InsertAssignmentConverter {
-            query_ctx,
-            input_literals: None,
-        };
-
-        let expr = Expr::Cast(Cast {
-            expr: Box::new("2009-02-13 23:31:30.123456789".lit()),
-            data_type: DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-        });
-        assert_eq!(
-            converter.f_up(expr).unwrap().data,
-            ScalarValue::TimestampNanosecond(Some(1_234_539_090_123_456_789), None).lit()
-        );
-    }
-
-    #[test]
-    fn test_insert_assignment_falls_back_for_unsupported_literal() {
-        use datafusion_common::arrow::datatypes::TimeUnit as ArrowTimeUnit;
-
-        let mut converter = InsertAssignmentConverter {
-            query_ctx: QueryContext::arc(),
-            input_literals: None,
-        };
-        for literal in ["1970-01-01", "-8-01-01 00:00:01.5"] {
-            let expr = Expr::Cast(Cast {
-                expr: Box::new(literal.lit()),
-                data_type: DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-            });
-
-            assert_eq!(converter.f_up(expr.clone()).unwrap().data, expr);
-        }
     }
 
     #[test]

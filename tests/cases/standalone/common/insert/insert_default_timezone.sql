@@ -24,10 +24,36 @@ INSERT INTO test3 (ts, st) VALUES ('2026-08-02 12:00:00.001', now());
 
 INSERT INTO test3 (ts, st) SELECT '2026-08-03 12:00:00.001', now();
 
+INSERT INTO test3 (ts, st) SELECT '2026-08-04 12:00:00.001', now() LIMIT 1;
+
+INSERT INTO test3 (ts, st)
+SELECT '2026-08-06 12:00:00.001', now()
+UNION ALL
+SELECT '2026-08-07 12:00:00.001', now();
+
+INSERT INTO test3 (ts, st) VALUES (
+    CAST('2026-08-08 12:00:00.001' AS TIMESTAMP),
+    now()
+);
+
+INSERT INTO test3 (ts, st)
+SELECT '2026-08-10 12:00:00.001', now()
+UNION ALL
+SELECT CAST('2026-08-11 12:00:00.001' AS TIMESTAMP), now();
+
+INSERT INTO test3 (ts, st)
+SELECT '2026-08-16 12:00:00.001', now()
+UNION
+SELECT '2026-08-17 12:00:00.001', now();
+
+INSERT INTO test3 (ts, ts_ns) SELECT a, b FROM (
+    SELECT c AS a, c AS b FROM (SELECT '2026-08-12 12:00:00.123456789' AS c) AS t1
+) AS t2;
+
 INSERT INTO test3 (ts, st, ts_ns) VALUES (
-    '2026-08-04 12:00:00.001',
+    '2026-08-09 12:00:00.001',
     now(),
-    '2026-08-04 12:00:00.123456789'
+    '2026-08-09 12:00:00.123456789'
 );
 
 SELECT ts, ts_ns FROM test3 ORDER BY ts;
