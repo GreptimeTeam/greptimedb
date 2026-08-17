@@ -316,7 +316,8 @@ impl Categorizer {
             | Expr::InList(_)
             | Expr::Case(_) => Commutativity::Commutative,
             // Annotation collection must not affect distribution. Keep scalar UDFs pushdownable;
-            // distributed annotations require a separate return path from datanodes.
+            // TODO: Preserve datanode PromQL annotations through plan decoding, return them in
+            // Flight stream metadata, and merge them on the frontend.
             Expr::ScalarFunction(_) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
