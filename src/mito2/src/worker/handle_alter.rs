@@ -342,15 +342,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .build()
         })?;
         if all_options_altered {
-            // No option independently requires an empty memtable
-            // (preserve_row_sequence toggles apply in memory): apply the staged
-            // options directly without flushing.
+            // preserve_row_sequence toggles apply in memory and do not require
+            // an empty memtable.
             region.version_control.alter_options(candidate);
             Ok(None)
         } else {
-            // Some option independently requires an empty memtable (e.g.
-            // append_mode, sst_format or max_row_group_row_count): stage the
-            // complete final options and follow the existing flush path.
+            // Some options require an empty memtable (e.g. append_mode,
+            // sst_format, or max_row_group_row_count).
             Ok(Some(candidate))
         }
     }

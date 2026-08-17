@@ -1001,7 +1001,6 @@ mod tests {
 
     #[test]
     fn test_with_preserve_row_sequence() {
-        // Option requires append mode.
         let map = make_map(&[("append_mode", "false"), ("preserve_row_sequence", "true")]);
         let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -1012,7 +1011,6 @@ mod tests {
         assert!(options.append_mode);
         assert!(options.preserve_row_sequence);
 
-        // Default is false and disabled keeps main behavior.
         let map = make_map(&[("append_mode", "true")]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert!(!options.preserve_row_sequence);
