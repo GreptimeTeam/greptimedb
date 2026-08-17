@@ -26,8 +26,9 @@ use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
+use snafu::OptionExt;
 
-use crate::error::Result;
+use crate::error::{InvalidParameterSnafu, Result};
 use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::span::TraceSpan;
 use crate::otlp::trace::{
@@ -342,6 +343,27 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     write_span_to_row_inner(writer, span, row_index, &fixed_columns, None)
 }
 
+/// Computes the span duration as the signed `duration_nano` value written by
+/// the v1 data model.
+///
+/// A span whose end precedes its start (or whose duration does not fit in
+/// `i64`) is malformed: it is rejected here rather than wrapping, so new
+/// Int64 tables and existing UInt64 tables (whose coercion path uses the same
+/// checked conversion) fail the request identically instead of storing a
+/// silently wrapped duration that later breaks consumers like the Jaeger
+/// query API.
+fn span_duration_nano(span: &TraceSpan) -> Result<i64> {
+    span.end_in_nanosecond
+        .checked_sub(span.start_in_nanosecond)
+        .and_then(|duration| i64::try_from(duration).ok())
+        .context(InvalidParameterSnafu {
+            reason: format!(
+                "invalid span duration for span '{}' in trace '{}': end_time_unix_nano {} minus start_time_unix_nano {} is not a valid duration",
+                span.span_name, span.trace_id, span.end_in_nanosecond, span.start_in_nanosecond
+            ),
+        })
+}
+
 /// Writes one span and optionally records its dynamic columns for reconciliation.
 fn write_span_to_row_inner(
     writer: &mut TableData,
@@ -367,9 +389,7 @@ fn write_span_to_row_inner(
         ),
         (
             fixed_columns.duration_nano,
-            Some(ValueData::I64Value(
-                (span.end_in_nanosecond - span.start_in_nanosecond) as i64,
-            )),
+            Some(ValueData::I64Value(span_duration_nano(&span)?)),
         ),
         (
             fixed_columns.parent_span_id,
@@ -680,6 +700,36 @@ mod tests {
             start_in_nanosecond: 1,
             end_in_nanosecond: 2,
         }
+    }
+
+    #[test]
+    fn test_span_end_before_start_rejected() {
+        // A span whose end precedes its start is malformed data: it must be
+        // rejected with a clear error instead of wrapping to a negative i64
+        // (which new Int64 tables would store and existing UInt64 tables would
+        // reject mid-coercion, failing the whole request either way).
+        let mut span = make_span("svc", "trace", "span");
+        span.start_in_nanosecond = 200;
+        span.end_in_nanosecond = 100;
+
+        let err = build_trace_table_data(&[span])
+            .err()
+            .expect("span end before start must be rejected");
+        assert!(err.to_string().contains("invalid span duration"));
+    }
+
+    #[test]
+    fn test_span_duration_above_i64_max_rejected() {
+        // The other out-of-range case for the checked conversion: a duration
+        // that fits u64 but not i64 is rejected rather than wrapped.
+        let mut span = make_span("svc", "trace", "span");
+        span.start_in_nanosecond = 0;
+        span.end_in_nanosecond = u64::MAX;
+
+        let err = build_trace_table_data(&[span])
+            .err()
+            .expect("duration above i64::MAX must be rejected");
+        assert!(err.to_string().contains("invalid span duration"));
     }
 
     #[test]

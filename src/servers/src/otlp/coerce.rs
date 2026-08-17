@@ -36,13 +36,31 @@ pub enum TraceCoerceError {
 // keep accepting new signed ingest without an `ALTER TABLE`: an existing
 // UInt64/UInt32 column coerces an incoming Int64/Int32 request into the
 // existing type:
-// - Int64 to UInt64  (e.g. trace `duration_nano`): checked, so negative
-//   values are rejected rather than silently wrapping. Counts and durations
-//   are non-negative by construction; a negative request is a malformed
-//   value (e.g. a span whose end precedes its start).
+// - Int64 to UInt64  (e.g. trace `duration_nano` on the v1 path): checked,
+//   so negative values are rejected rather than silently wrapping. Counts and
+//   durations are non-negative by construction; a negative request is a
+//   malformed value (e.g. a span whose end precedes its start).
 // - Int32 to UInt32  (e.g. log `trace_flags`): bit-preserving, because
 //   `trace_flags` is a bit field whose high bits may legitimately be set
 //   (e.g. the W3C sampled flag); bit patterns must round-trip exactly.
+
+/// The signed→unsigned integer coercions that let the built-in data models
+/// move from unsigned to signed integers while existing unsigned tables keep
+/// accepting new signed ingest without an `ALTER TABLE` (see the pair
+/// descriptions in the module-level comment above). Kept as one predicate so
+/// the trace and log ingest paths share the same supported pair set and
+/// cannot drift.
+pub fn is_supported_signed_to_unsigned_coercion(
+    request_type: ColumnDataType,
+    target_type: ColumnDataType,
+) -> bool {
+    matches!(
+        (request_type, target_type),
+        (ColumnDataType::Int64, ColumnDataType::Uint64)
+            | (ColumnDataType::Int32, ColumnDataType::Uint32)
+    )
+}
+
 pub fn is_supported_trace_coercion(
     request_type: ColumnDataType,
     target_type: ColumnDataType,
@@ -56,9 +74,7 @@ pub fn is_supported_trace_coercion(
             | (ColumnDataType::String, ColumnDataType::Int64)
             | (ColumnDataType::String, ColumnDataType::Float64)
             | (ColumnDataType::String, ColumnDataType::Boolean)
-            | (ColumnDataType::Int64, ColumnDataType::Uint64)
-            | (ColumnDataType::Int32, ColumnDataType::Uint32)
-    )
+    ) || is_supported_signed_to_unsigned_coercion(request_type, target_type)
 }
 
 pub fn coerce_value_data(

@@ -43,7 +43,7 @@ use crate::error::{
     UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::http::event::PipelineIngestRequest;
-use crate::otlp::coerce::coerce_value_data;
+use crate::otlp::coerce::{coerce_value_data, is_supported_signed_to_unsigned_coercion};
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
@@ -741,11 +741,11 @@ fn coerce_log_value_data(
     // Lossless signed -> unsigned integer cast for built-in fields moving from
     // unsigned to signed types (e.g. an existing UInt64/UInt32 log column
     // receiving new Int64/Int32 ingest). Lets existing tables keep their
-    // unsigned columns without an `ALTER`; the built-in values are always
-    // non-negative. In the mutually-exclusive `else` of the String branch so
-    // the move stays local to non-String targets. Deliberately restricted to
-    // the two signed -> unsigned pairs: the generic String -> numeric
-    // coercions keep their pre-existing rejection on this path.
+    // unsigned columns without an `ALTER`. In the mutually-exclusive `else` of
+    // the String branch so the move stays local to non-String targets; the
+    // shared predicate keeps the supported pairs identical to the trace path
+    // (the generic String -> numeric coercions keep their pre-existing
+    // rejection on this path).
     if target_type == ColumnDataType::String {
         if let Ok(value_data) =
             coerce_value_data(&Some(value_data.clone()), target_type, request_type)
@@ -755,12 +755,9 @@ fn coerce_log_value_data(
         if let Some(value_data) = stringify_scalar_value(value_data) {
             return Ok(Some(value_data));
         }
-    } else if matches!(
-        (request_type, target_type),
-        (ColumnDataType::Int64, ColumnDataType::Uint64)
-            | (ColumnDataType::Int32, ColumnDataType::Uint32)
-    ) && let Ok(Some(value_data)) =
-        coerce_value_data(&Some(value_data), target_type, request_type)
+    } else if is_supported_signed_to_unsigned_coercion(request_type, target_type)
+        && let Ok(Some(value_data)) =
+            coerce_value_data(&Some(value_data), target_type, request_type)
     {
         return Ok(Some(value_data));
     }

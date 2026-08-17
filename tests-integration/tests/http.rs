@@ -6521,6 +6521,19 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     )
     .await;
 
+    // The v0 data model is frozen on the unsigned `duration_nano`: pin the
+    // schema so the unsigned→signed flip of the built-in models (which flips
+    // only v1) cannot leak into v0 and break writes into pre-existing v0
+    // tables.
+    validate_data(
+        "otlp_traces_v0_schema",
+        &client,
+        "select column_name, lower(data_type) from information_schema.columns \
+         where table_name = 'opentelemetry_traces' and column_name = 'duration_nano';",
+        r#"[["duration_nano","bigint unsigned"]]"#,
+    )
+    .await;
+
     // drop table
     let res = client
         .get("/v1/sql?sql=drop table opentelemetry_traces;")
