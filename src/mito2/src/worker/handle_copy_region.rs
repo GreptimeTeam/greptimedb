@@ -25,6 +25,7 @@ use crate::region::{
 use crate::request::{
     BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
 };
+use crate::sst::file::FileMeta;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
@@ -68,7 +69,7 @@ impl<S> RegionWorkerLoop<S> {
         let worker_sender = self.sender.clone();
 
         common_runtime::spawn_global(async move {
-            let (region_edit, file_ids) = match Self::copy_region_from(
+            let (region_edit, source_file_ids) = match Self::copy_region_from(
                 &region,
                 region_metadata_loader,
                 source_region_id,
@@ -104,7 +105,7 @@ impl<S> RegionWorkerLoop<S> {
                 }
                 None => {
                     let _ = sender.send(Ok(MitoCopyRegionFromResponse {
-                        copied_file_ids: file_ids,
+                        copied_file_ids: source_file_ids,
                     }));
                 }
             }
@@ -138,7 +139,7 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Returns the region edit and the file ids that were copied from the source region to the target region.
     ///
-    /// If no need to copy files, returns (None, file_ids).
+    /// If no need to copy files, returns (None, source_file_ids).
     async fn copy_region_from(
         region: &MitoRegionRef,
         region_metadata_loader: RegionMetadataLoader,
@@ -158,9 +159,9 @@ impl<S> RegionWorkerLoop<S> {
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
-        let mut files_to_copy = vec![];
+        let mut new_file_metas = vec![];
         let target_region_manifest = region.manifest_ctx.manifest().await;
-        let file_ids = source_region_manifest
+        let source_file_ids = source_region_manifest
             .files
             .keys()
             .cloned()
@@ -171,57 +172,16 @@ impl<S> RegionWorkerLoop<S> {
         );
         for (file_id, file_meta) in &source_region_manifest.files {
             if !target_region_manifest.files.contains_key(file_id) {
-                let mut new_file_meta = file_meta.clone();
-                new_file_meta.region_id = target_region_id;
-                // The target region has an independent sequence domain: the
-                // physical per-row sequences in the copied file belong to the
-                // source region, so they must not be trusted for exact
-                // sequence-range reads on the target. Clear the
-                // `preserve_row_sequence` marker and the source-domain max
-                // sequence to fail closed until the scan provably cannot
-                // intersect the copied rows (see
-                // `files_allow_exact_sequence_range`); otherwise an exact
-                // request would replay source-domain rows as if they were
-                // target sequences, and an unmarked file with a stale
-                // source-domain `sequence` hint could be silently skipped as
-                // "proven disjoint".
-                new_file_meta.preserve_row_sequence = false;
-                new_file_meta.sequence = None;
-                files_to_copy.push(new_file_meta);
+                new_file_metas.push(remap_copied_file_meta(file_meta, target_region_id));
             }
         }
-        if files_to_copy.is_empty() {
-            return Ok((None, file_ids));
+        if new_file_metas.is_empty() {
+            return Ok((None, source_file_ids));
         }
 
-        let file_descriptors = files_to_copy
+        let file_descriptors = new_file_metas
             .iter()
-            .flat_map(|file_meta| {
-                if file_meta.exists_index() {
-                    let region_index_id = file_meta.index_id();
-                    let file_id = region_index_id.file_id.file_id();
-                    let version = region_index_id.version;
-                    let file_size = file_meta.file_size;
-                    let index_file_size = file_meta.index_file_size();
-                    vec![
-                        FileDescriptor::Data {
-                            file_id: file_meta.file_id,
-                            size: file_size,
-                        },
-                        FileDescriptor::Index {
-                            file_id,
-                            version,
-                            size: index_file_size,
-                        },
-                    ]
-                } else {
-                    let file_size = file_meta.file_size;
-                    vec![FileDescriptor::Data {
-                        file_id: file_meta.file_id,
-                        size: file_size,
-                    }]
-                }
-            })
+            .flat_map(file_descriptors_for_meta)
             .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
         let copier = RegionFileCopier::new(region.access_layer());
@@ -235,7 +195,7 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await?;
         let edit = RegionEdit {
-            files_to_add: files_to_copy,
+            files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             compaction_time_window: None,
@@ -256,6 +216,43 @@ impl<S> RegionWorkerLoop<S> {
             "Successfully update manifest version to {version}, region: {target_region_id}, reason: CopyRegionFrom"
         );
 
-        Ok((Some(edit), file_ids))
+        Ok((Some(edit), source_file_ids))
+    }
+}
+
+fn remap_copied_file_meta(file_meta: &FileMeta, target_region_id: RegionId) -> FileMeta {
+    let mut new_file_meta = file_meta.clone();
+    new_file_meta.region_id = target_region_id;
+    // The target region has an independent sequence domain: the physical
+    // per-row sequences in the copied file belong to the source region, so they
+    // must not be trusted for exact sequence-range reads on the target. Clear
+    // the `preserve_row_sequence` marker and source-domain max sequence to fail
+    // closed until the scan provably cannot intersect the copied rows (see
+    // `files_allow_exact_sequence_range`); otherwise an exact request would
+    // replay source-domain rows as target sequences, and an unmarked file with
+    // a stale source-domain `sequence` hint could be silently skipped as
+    // "proven disjoint".
+    new_file_meta.preserve_row_sequence = false;
+    new_file_meta.sequence = None;
+    new_file_meta
+}
+
+fn file_descriptors_for_meta(file_meta: &FileMeta) -> Vec<FileDescriptor> {
+    let data = FileDescriptor::Data {
+        file_id: file_meta.file_id,
+        size: file_meta.file_size,
+    };
+    if file_meta.exists_index() {
+        let region_index_id = file_meta.index_id();
+        vec![
+            data,
+            FileDescriptor::Index {
+                file_id: region_index_id.file_id.file_id(),
+                version: region_index_id.version,
+                size: file_meta.index_file_size(),
+            },
+        ]
+    } else {
+        vec![data]
     }
 }

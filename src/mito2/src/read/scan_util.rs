@@ -1509,10 +1509,9 @@ pub(crate) async fn scan_flat_file_ranges(
 /// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
 /// projection/compat conversion that drops internal columns.
 ///
-/// `file_preserves_sequence` gates the filter per file: only files written with
-/// preserved per-row sequences (the `preserve_row_sequence` marker) may be
-/// row-level sequence filtered. Without the marker, rows are passed through
-/// untouched to keep main's file-level semantics.
+/// `file_preserves_sequence` is the per-file `preserve_row_sequence` marker:
+/// only marked files may be row-level sequence filtered. Without it, rows pass
+/// through untouched to keep main's file-level semantics.
 fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
