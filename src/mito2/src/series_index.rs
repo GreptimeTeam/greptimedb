@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Primary-key index writer.
+//! Series index writer.
 
 mod writer;
 
-pub use writer::{PkIndexWriter, PkIndexWriterMetrics, PkIndexWriterOptions, pk_columns_schema};
+pub use writer::{
+    SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
+};

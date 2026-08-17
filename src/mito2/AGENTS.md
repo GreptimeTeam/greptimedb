@@ -26,7 +26,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
-| `pk_index` | `src/mito2/src/pk_index/` | Incremental writer for aggregate primary-key index files |
+| `series_index` | `src/mito2/src/series_index/` | Incremental writer for aggregate series index files |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |
