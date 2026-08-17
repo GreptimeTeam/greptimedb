@@ -1077,108 +1077,21 @@ impl EngineInner {
         let extension_provider_blocks_exact = region.is_follower()
             && self.extension_range_provider_factory.is_some()
             && exact_sequence_range.is_some();
-        #[cfg(feature = "enterprise")]
+        #[cfg(not(feature = "enterprise"))]
+        let extension_provider_blocks_exact = false;
         let exact_sequence_range = if extension_provider_blocks_exact {
             None
         } else {
             exact_sequence_range
         };
 
-        if request.exact_sequence_range {
-            // Exact `sequence_range` mode: when the capability is available the
-            // requested (C, H] delta is enforced row-level on memtables and every
-            // SST, so the lower/upper fences can be relaxed. When it is not, we
-            // must fail with a structured stale/unsupported error so Flow falls
-            // back instead of silently reading an approximate superset.
-            if exact_sequence_range.is_none() {
-                if let Some(given_seq) = request.memtable_min_sequence {
-                    let min_readable_seq = version.flushed_sequence;
-                    ensure!(
-                        given_seq >= min_readable_seq,
-                        IncrementalQueryStaleSnafu {
-                            region_id,
-                            given_seq,
-                            min_readable_seq,
-                        }
-                    );
-                }
-
-                if let Some(given_seq) = request.memtable_max_sequence {
-                    let min_enforceable_seq = version.flushed_sequence;
-                    ensure!(
-                        given_seq >= min_enforceable_seq,
-                        SnapshotFenceStaleSnafu {
-                            region_id,
-                            given_seq,
-                            min_enforceable_seq,
-                        }
-                    );
-                }
-
-                // Both bounds are enforceable against the flushed frontier, yet the
-                // region cannot serve an exact row-level delta (preserve option off,
-                // a file without the preserved-sequence marker, or a follower with
-                // an extension range provider). Main semantics would silently
-                // return rows outside (C, H], so fail instead.
-                return SequenceRangeUnsupportedSnafu {
-                    region_id,
-                    min_seq: request.memtable_min_sequence.unwrap_or_default(),
-                    max_seq: request.memtable_max_sequence.unwrap_or_default(),
-                    reason: {
-                        #[cfg(feature = "enterprise")]
-                        let extension_reason = extension_provider_blocks_exact.then(|| {
-                            "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
-                        });
-                        #[cfg(not(feature = "enterprise"))]
-                        let extension_reason = None::<String>;
-                        extension_reason.unwrap_or_else(|| {
-                            if version.options.preserve_row_sequence {
-                                "region has files without preserved per-row sequences".to_string()
-                            } else {
-                                "region does not preserve per-row sequences (preserve_row_sequence is off)"
-                                    .to_string()
-                            }
-                        })
-                    },
-                }
-                .fail();
-            }
-        } else {
-            // Non-exact mode (including historical `memtable_only` scans): keep
-            // main's fences exactly as-is. The preserve option never relaxes them
-            // because `exact_sequence_range` is the only explicit exact intent.
-            if let Some(given_seq) = request.memtable_min_sequence {
-                let min_readable_seq = version.flushed_sequence;
-                ensure!(
-                    given_seq >= min_readable_seq,
-                    IncrementalQueryStaleSnafu {
-                        region_id,
-                        given_seq,
-                        min_readable_seq,
-                    }
-                );
-            }
-
-            if let Some(given_seq) = request.memtable_max_sequence
-                && !request.skip_sst_files
-            {
-                // Explicit snapshot fences that include SST reads are enforceable
-                // only while the requested upper bound is not older than the
-                // region's flushed frontier. If H has already been flushed into SST,
-                // mito cannot apply a memtable-only sequence upper bound to that
-                // SST scan, so fail and let Flow rebind the fenced repair instead
-                // of reading rows beyond H.
-                let min_enforceable_seq = version.flushed_sequence;
-                ensure!(
-                    given_seq >= min_enforceable_seq,
-                    SnapshotFenceStaleSnafu {
-                        region_id,
-                        given_seq,
-                        min_enforceable_seq,
-                    }
-                );
-            }
-        }
+        validate_sequence_fences(
+            &request,
+            &version,
+            region_id,
+            exact_sequence_range.is_some(),
+            extension_provider_blocks_exact,
+        )?;
 
         // Get cache.
         let cache_manager = self.workers.cache_manager();
@@ -1282,6 +1195,110 @@ impl EngineInner {
         self.workers
             .get_region(region_id)
             .map(|region| region.region_role())
+    }
+}
+
+fn validate_sequence_fences(
+    request: &ScanRequest,
+    version: &crate::region::version::Version,
+    region_id: RegionId,
+    exact_sequence_range_available: bool,
+    extension_provider_blocks_exact: bool,
+) -> Result<()> {
+    if request.exact_sequence_range {
+        // Exact `sequence_range` mode: when the capability is available the
+        // requested (C, H] delta is enforced row-level on memtables and every
+        // SST, so the lower/upper fences can be relaxed. When it is not, we
+        // must fail with a structured stale/unsupported error so Flow falls
+        // back instead of silently reading an approximate superset.
+        if !exact_sequence_range_available {
+            if let Some(given_seq) = request.memtable_min_sequence {
+                let min_readable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_readable_seq,
+                    IncrementalQueryStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_readable_seq,
+                    }
+                );
+            }
+
+            if let Some(given_seq) = request.memtable_max_sequence {
+                let min_enforceable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_enforceable_seq,
+                    SnapshotFenceStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_enforceable_seq,
+                    }
+                );
+            }
+
+            // Both bounds are enforceable against the flushed frontier, yet the
+            // region cannot serve an exact row-level delta (preserve option off,
+            // a file without the preserved-sequence marker, or a follower with
+            // an extension range provider). Main semantics would silently
+            // return rows outside (C, H], so fail instead.
+            return SequenceRangeUnsupportedSnafu {
+                region_id,
+                min_seq: request.memtable_min_sequence.unwrap_or_default(),
+                max_seq: request.memtable_max_sequence.unwrap_or_default(),
+                reason: sequence_range_unsupported_reason(version, extension_provider_blocks_exact),
+            }
+            .fail();
+        }
+    } else {
+        // Non-exact mode (including historical `memtable_only` scans): keep
+        // main's fences exactly as-is. The preserve option never relaxes them
+        // because `exact_sequence_range` is the only explicit exact intent.
+        if let Some(given_seq) = request.memtable_min_sequence {
+            let min_readable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_readable_seq,
+                IncrementalQueryStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_readable_seq,
+                }
+            );
+        }
+
+        if let Some(given_seq) = request.memtable_max_sequence
+            && !request.skip_sst_files
+        {
+            // Explicit snapshot fences that include SST reads are enforceable
+            // only while the requested upper bound is not older than the
+            // region's flushed frontier. If H has already been flushed into SST,
+            // mito cannot apply a memtable-only sequence upper bound to that
+            // SST scan, so fail and let Flow rebind the fenced repair instead
+            // of reading rows beyond H.
+            let min_enforceable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_enforceable_seq,
+                SnapshotFenceStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_enforceable_seq,
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn sequence_range_unsupported_reason(
+    version: &crate::region::version::Version,
+    extension_provider_blocks_exact: bool,
+) -> String {
+    if extension_provider_blocks_exact {
+        "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
+    } else if version.options.preserve_row_sequence {
+        "region has files without preserved per-row sequences".to_string()
+    } else {
+        "region does not preserve per-row sequences (preserve_row_sequence is off)".to_string()
     }
 }
 

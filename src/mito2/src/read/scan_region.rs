@@ -514,9 +514,6 @@ impl ScanRegion {
                     if exceed_min_sequence && file_in_range(file, &time_range) {
                         files.push(file.clone());
                     }
-                    // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
-                    // unless the timing is too good, or the sequence number wouldn't be in file.
-                    // and the batch will be filtered out by tree reader anyway.
                 }
             }
         }
@@ -1008,8 +1005,6 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
-    /// Exact sequence range to filter rows row-level on SST reads.
-    ///
     /// Set only when the region preserves per-row sequences
     /// (`preserve_row_sequence` on an append-only table) and the scan
     /// carries an explicit exact range. When set, SST readers apply the same
