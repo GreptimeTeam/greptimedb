@@ -26,6 +26,8 @@ use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::FlowExtensionRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -319,6 +321,13 @@ impl FrontendBuilder {
         #[cfg(feature = "enterprise")]
         let statement_executor = if let Some(handler) = plugins.get::<CreateDatabaseHandlerRef>() {
             statement_executor.with_create_database_handler(handler)
+        } else {
+            statement_executor
+        };
+
+        #[cfg(feature = "enterprise")]
+        let statement_executor = if let Some(extension) = plugins.get::<FlowExtensionRef>() {
+            statement_executor.with_flow_extension(extension)
         } else {
             statement_executor
         };

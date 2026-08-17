@@ -41,6 +41,8 @@ use client::inserter::{InsertOptions, Inserter};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::FlowExtensionRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
@@ -150,6 +152,8 @@ pub struct StatementExecutor {
     create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
+    #[cfg(feature = "enterprise")]
+    flow_extension: Option<FlowExtensionRef>,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
@@ -205,6 +209,8 @@ impl StatementExecutor {
             create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
+            #[cfg(feature = "enterprise")]
+            flow_extension: None,
         }
     }
 
@@ -225,6 +231,12 @@ impl StatementExecutor {
     #[cfg(feature = "enterprise")]
     pub fn with_create_database_handler(mut self, handler: CreateDatabaseHandlerRef) -> Self {
         self.create_database_handler = Some(handler);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_flow_extension(mut self, extension: FlowExtensionRef) -> Self {
+        self.flow_extension = Some(extension);
         self
     }
 

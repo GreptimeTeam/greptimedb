@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +54,8 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 #[cfg(feature = "enterprise")]
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
+#[cfg(feature = "enterprise")]
+use crate::error::ExternalSnafu;
 use crate::error::{
     self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu,
     PersistRepartitionGcRequirementSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu,
@@ -110,6 +114,8 @@ pub struct DdlManager {
     repartition_procedure_factory: RepartitionProcedureFactoryRef,
     #[cfg(feature = "enterprise")]
     trigger_ddl_manager: Option<TriggerDdlManagerRef>,
+    #[cfg(feature = "enterprise")]
+    flow_extension: Option<FlowExtensionRef>,
 }
 
 /// This trait is responsible for handling DDL tasks about triggers. e.g.,
@@ -140,6 +146,59 @@ pub trait TriggerDdlManager: Send + Sync {
 
 #[cfg(feature = "enterprise")]
 pub type TriggerDdlManagerRef = Arc<dyn TriggerDdlManager>;
+
+/// A generic extension seam for the CREATE FLOW DDL path.
+///
+/// Enterprise builds implement this trait to own enterprise-private flow
+/// option keys (batch validation/normalization) and to decide whether a CREATE
+/// FLOW task should be intercepted instead of following the ordinary OSS
+/// `CreateFlowProcedure` path. OSS never reads enterprise-private option keys.
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait FlowExtension: Send + Sync {
+    /// Batch-validates and normalizes the enterprise-owned flow options.
+    ///
+    /// `oss_options` contains the already-canonicalized OSS-owned options;
+    /// `extension_options` contains every option key that OSS does not
+    /// recognize. The caller verifies that the returned key set exactly
+    /// matches the input `extension_options` key set (fail-closed on missing,
+    /// extra or renamed keys), which also guarantees the extension can never
+    /// overwrite an OSS-owned key.
+    fn validate_and_normalize_options(
+        &self,
+        oss_options: &HashMap<String, String>,
+        extension_options: HashMap<String, String>,
+    ) -> std::result::Result<HashMap<String, String>, BoxedError>;
+
+    /// Attempts to intercept a CREATE FLOW task.
+    ///
+    /// - `Passthrough(task)`: the ordinary OSS `CreateFlowProcedure` path runs
+    ///   on the returned (possibly cleaned) task.
+    /// - `Handled(response)`: the response is returned to the caller as-is.
+    /// - `Err(error)`: fail closed; the error is propagated and the task is
+    ///   never submitted through the ordinary path.
+    async fn intercept_create_flow(
+        &self,
+        task: CreateFlowTask,
+        procedure_manager: &ProcedureManagerRef,
+        ddl_context: &DdlContext,
+        query_context: &QueryContext,
+        event_context: &PersistentEventContext,
+    ) -> std::result::Result<CreateFlowExtensionOutcome, BoxedError>;
+}
+
+/// The outcome of [`FlowExtension::intercept_create_flow`].
+#[cfg(feature = "enterprise")]
+pub enum CreateFlowExtensionOutcome {
+    /// Continue with the ordinary OSS `CreateFlowProcedure` path, using the
+    /// returned (possibly cleaned) task.
+    Passthrough(CreateFlowTask),
+    /// The extension fully handled the task; return the response as-is.
+    Handled(SubmitDdlTaskResponse),
+}
+
+#[cfg(feature = "enterprise")]
+pub type FlowExtensionRef = Arc<dyn FlowExtension>;
 
 macro_rules! procedure_loader_entry {
     ($procedure:ident) => {
@@ -235,12 +294,20 @@ impl DdlManager {
             repartition_procedure_factory,
             #[cfg(feature = "enterprise")]
             trigger_ddl_manager: None,
+            #[cfg(feature = "enterprise")]
+            flow_extension: None,
         }
     }
 
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_ddl_manager(mut self, trigger_ddl_manager: TriggerDdlManagerRef) -> Self {
         self.trigger_ddl_manager = Some(trigger_ddl_manager);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_flow_extension(mut self, flow_extension: FlowExtensionRef) -> Self {
+        self.flow_extension = Some(flow_extension);
         self
     }
 
@@ -1338,6 +1405,38 @@ async fn handle_create_flow_task(
     query_context: QueryContext,
     procedure_context: ProcedureContext,
 ) -> Result<SubmitDdlTaskResponse> {
+    // Direct DDL submissions bypass the operator layer. If an enterprise
+    // `FlowExtension` is injected, give it the first chance to intercept the
+    // task: `Handled` returns the response as-is, `Passthrough` continues with
+    // the ordinary `CreateFlowProcedure` path on the returned (possibly
+    // cleaned) task, and `Err` fails closed. Without an extension the ordinary
+    // path runs unchanged.
+    #[cfg(feature = "enterprise")]
+    // Direct DDL submissions may carry no event context; fall back to the
+    // neutral default (`TriggerReason::Unknown`) instead of misclassifying
+    // the absent context as a manual trigger.
+    let event_context = procedure_context.event_context.clone().unwrap_or_default();
+
+    #[cfg(feature = "enterprise")]
+    let create_flow_task = if let Some(extension) = ddl_manager.flow_extension.as_ref() {
+        match extension
+            .intercept_create_flow(
+                create_flow_task,
+                &ddl_manager.procedure_manager,
+                &ddl_manager.ddl_context,
+                &query_context,
+                &event_context,
+            )
+            .await
+            .context(ExternalSnafu)?
+        {
+            CreateFlowExtensionOutcome::Handled(response) => return Ok(response),
+            CreateFlowExtensionOutcome::Passthrough(task) => task,
+        }
+    } else {
+        create_flow_task
+    };
+
     let (id, output) = ddl_manager
         .submit_create_flow_task(create_flow_task.clone(), query_context, procedure_context)
         .await?;
@@ -1483,9 +1582,13 @@ async fn handle_comment_on_task(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "enterprise")]
+    use std::collections::HashMap;
     use std::sync::Arc;
     #[cfg(feature = "enterprise")]
     use std::sync::Mutex;
+    #[cfg(feature = "enterprise")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[cfg(feature = "enterprise")]
@@ -1497,6 +1600,8 @@ mod tests {
     use common_error::status_code::StatusCode;
     #[cfg(feature = "enterprise")]
     use common_event_recorder::{PersistentEventContext, ProcedureEventInput, TriggerReason};
+    #[cfg(feature = "enterprise")]
+    use common_procedure::ProcedureManager;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
     use common_procedure::{BoxedProcedure, ProcedureContext, ProcedureManagerRef};
@@ -1504,6 +1609,8 @@ mod tests {
     use table::table_name::TableName;
 
     use super::DdlManager;
+    #[cfg(feature = "enterprise")]
+    use super::{CreateFlowExtensionOutcome, FlowExtension, FlowExtensionRef};
     use crate::cache_invalidator::DummyCacheInvalidator;
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_database::{
@@ -1513,6 +1620,8 @@ mod tests {
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::flow_meta::FlowMetadataAllocator;
     use crate::ddl::table_meta::TableMetadataAllocator;
+    #[cfg(feature = "enterprise")]
+    use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
     use crate::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
@@ -1526,6 +1635,8 @@ mod tests {
     use crate::region_registry::LeaderRegionRegistry;
     #[cfg(feature = "enterprise")]
     use crate::rpc::ddl::trigger::{CreateTriggerTask, DropTriggerTask};
+    #[cfg(feature = "enterprise")]
+    use crate::rpc::ddl::{CreateFlowTask, SubmitDdlTaskResponse};
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     #[cfg(not(feature = "enterprise"))]
     use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
@@ -1533,6 +1644,8 @@ mod tests {
     use crate::rpc::ddl::{DdlTask, QueryContext, SubmitDdlTaskRequest};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
+    #[cfg(feature = "enterprise")]
+    use crate::test_util::MockFlownodeManager;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
     use crate::wal_provider::WalProvider;
 
@@ -1899,5 +2012,295 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, crate::error::Error::Unsupported { .. }));
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[derive(Clone, Copy, PartialEq)]
+    enum MockFlowExtensionOutcome {
+        Passthrough,
+        Handled,
+        Err,
+    }
+
+    #[cfg(feature = "enterprise")]
+    struct MockFlowExtension {
+        calls: Arc<AtomicUsize>,
+        last_task: Arc<Mutex<Option<CreateFlowTask>>>,
+        last_event_context: Arc<Mutex<Option<PersistentEventContext>>>,
+        outcome: MockFlowExtensionOutcome,
+    }
+
+    #[cfg(feature = "enterprise")]
+    impl MockFlowExtension {
+        fn new(outcome: MockFlowExtensionOutcome) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                last_task: Arc::new(Mutex::new(None)),
+                last_event_context: Arc::new(Mutex::new(None)),
+                outcome,
+            }
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[async_trait::async_trait]
+    impl FlowExtension for MockFlowExtension {
+        fn validate_and_normalize_options(
+            &self,
+            _oss_options: &HashMap<String, String>,
+            extension_options: HashMap<String, String>,
+        ) -> std::result::Result<HashMap<String, String>, BoxedError> {
+            Ok(extension_options)
+        }
+
+        async fn intercept_create_flow(
+            &self,
+            create_flow_task: CreateFlowTask,
+            _procedure_manager: &ProcedureManagerRef,
+            _ddl_context: &DdlContext,
+            _query_context: &QueryContext,
+            event_context: &PersistentEventContext,
+        ) -> std::result::Result<CreateFlowExtensionOutcome, BoxedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_task.lock().unwrap() = Some(create_flow_task.clone());
+            *self.last_event_context.lock().unwrap() = Some(event_context.clone());
+            match self.outcome {
+                MockFlowExtensionOutcome::Passthrough => {
+                    // Strip the fake enterprise option so the ordinary
+                    // `CreateFlowProcedure` validation accepts the task.
+                    let mut task = create_flow_task;
+                    task.flow_options.remove("ee_test_option");
+                    Ok(CreateFlowExtensionOutcome::Passthrough(task))
+                }
+                MockFlowExtensionOutcome::Handled => Ok(CreateFlowExtensionOutcome::Handled(
+                    SubmitDdlTaskResponse::default(),
+                )),
+                MockFlowExtensionOutcome::Err => Err(BoxedError::new(
+                    crate::error::UnexpectedSnafu {
+                        err_msg: "mock extension error".to_string(),
+                    }
+                    .build(),
+                )),
+            }
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn flow_extension_test_task(or_replace: bool, create_if_not_exists: bool) -> CreateFlowTask {
+        CreateFlowTask {
+            catalog_name: "greptime".to_string(),
+            flow_name: "flow".to_string(),
+            source_table_names: vec![],
+            sink_table_name: TableName::new("greptime", "public", "sink"),
+            or_replace,
+            create_if_not_exists,
+            expire_after: None,
+            eval_interval_secs: None,
+            comment: String::new(),
+            sql: "select 1".to_string(),
+            flow_options: HashMap::new(),
+            eval_schedule: None,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn build_flow_extension_test_ddl_manager(
+        extension: Option<FlowExtensionRef>,
+    ) -> DdlManager {
+        let state_store = Arc::new(KvStateStore::new(Arc::new(MemoryKvBackend::new())));
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            Default::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        ));
+        // The ordinary `CreateFlowProcedure` path submits through the procedure
+        // manager, so it must be started before any DDL task is executed.
+        procedure_manager.start().await.unwrap();
+
+        let ddl_manager = DdlManager::new(
+            new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler))),
+            procedure_manager,
+            Arc::new(DummyRepartitionProcedureFactory),
+        );
+
+        match extension {
+            Some(extension) => ddl_manager.with_flow_extension(extension),
+            None => ddl_manager,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_without_extension_rejects_unknown_ee_option() {
+        // No extension injected: a fake enterprise-private option must be
+        // rejected by the ordinary `CreateFlowProcedure` validation as an
+        // unknown option (fail-closed), not by an enterprise-specific error.
+        let ddl_manager = build_flow_extension_test_ddl_manager(None).await;
+        let mut task = flow_extension_test_task(false, false);
+        task.flow_options
+            .insert("ee_test_option".to_string(), "value".to_string());
+
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.output_msg()
+                .contains("Unknown flow option 'ee_test_option'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_extension_passthrough_runs_ordinary_path() {
+        // The extension returns `Passthrough` with a cleaned task: the ordinary
+        // `CreateFlowProcedure` path must run on that task. The fake option can
+        // only be cleaned by the extension; if the returned task were ignored,
+        // the ordinary path would reject it as an unknown option.
+        let extension = Arc::new(MockFlowExtension::new(
+            MockFlowExtensionOutcome::Passthrough,
+        ));
+        let ddl_manager = build_flow_extension_test_ddl_manager(Some(extension.clone())).await;
+        let mut task = flow_extension_test_task(false, false);
+        task.flow_options
+            .insert("ee_test_option".to_string(), "value".to_string());
+
+        let resp = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(extension.calls.load(Ordering::SeqCst), 1);
+        let received = extension.last_task.lock().unwrap().take().unwrap();
+        assert!(!received.or_replace);
+        assert!(!received.create_if_not_exists);
+        assert_eq!(
+            received
+                .flow_options
+                .get("ee_test_option")
+                .map(String::as_str),
+            Some("value")
+        );
+        // The ordinary path ran on the cleaned task and filled in a procedure id.
+        assert!(!resp.key.is_empty());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_extension_handled_skips_ordinary_path() {
+        // The extension fully handles the task (`Handled`): its response is
+        // returned as-is and the ordinary procedure path never runs.
+        let extension = Arc::new(MockFlowExtension::new(MockFlowExtensionOutcome::Handled));
+        let ddl_manager = build_flow_extension_test_ddl_manager(Some(extension.clone())).await;
+        let task = flow_extension_test_task(true, true);
+
+        let resp = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(extension.calls.load(Ordering::SeqCst), 1);
+        let received = extension.last_task.lock().unwrap().take().unwrap();
+        assert!(received.or_replace);
+        assert!(received.create_if_not_exists);
+        // The mock extension returns a default response, unlike the normal path
+        // which would fill in a procedure id.
+        assert!(resp.key.is_empty());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_extension_error_does_not_fall_back() {
+        // The extension fails (`Err`): the error must propagate and the task
+        // must never be submitted through the ordinary path.
+        let extension = Arc::new(MockFlowExtension::new(MockFlowExtensionOutcome::Err));
+        let ddl_manager = build_flow_extension_test_ddl_manager(Some(extension.clone())).await;
+        let task = flow_extension_test_task(false, false);
+
+        let err = ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(extension.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(err, crate::error::Error::External { .. }));
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_extension_observes_event_context() {
+        // Minimal assertion that the extension receives the persistent event
+        // context of the DDL task.
+        let extension = Arc::new(MockFlowExtension::new(MockFlowExtensionOutcome::Handled));
+        let ddl_manager = build_flow_extension_test_ddl_manager(Some(extension.clone())).await;
+        let task = flow_extension_test_task(false, false);
+
+        ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    event_input: Some(ProcedureEventInput::new(TriggerReason::ScheduledGc)),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap();
+
+        let received = extension.last_event_context.lock().unwrap().take().unwrap();
+        assert_eq!(received.reason, TriggerReason::ScheduledGc);
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_create_flow_extension_observes_unknown_reason_without_event_input() {
+        // An `ExecutorContext` without `event_input` must not be misclassified
+        // as a manual trigger: the adapter falls back to the neutral default
+        // persistent event context whose reason is `TriggerReason::Unknown`.
+        let extension = Arc::new(MockFlowExtension::new(MockFlowExtensionOutcome::Handled));
+        let ddl_manager = build_flow_extension_test_ddl_manager(Some(extension.clone())).await;
+        let task = flow_extension_test_task(false, false);
+
+        ddl_manager
+            .submit_ddl_task(
+                ExecutorContext {
+                    query_context: Some(QueryContext::default()),
+                    ..Default::default()
+                },
+                SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task)),
+            )
+            .await
+            .unwrap();
+
+        let received = extension.last_event_context.lock().unwrap().take().unwrap();
+        assert_eq!(received.reason, TriggerReason::Unknown);
     }
 }
