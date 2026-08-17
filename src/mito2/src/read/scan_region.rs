@@ -627,6 +627,22 @@ impl ScanRegion {
         let input = if !self.request.skip_sst_files
             && let Some(provider) = self.extension_range_provider
         {
+            if sequence_range.is_some() {
+                // Defense in depth: the engine already rejects exact
+                // sequence-range reads on follower regions with an extension
+                // provider, but if one ever reaches the reader, fail closed
+                // here rather than letting unfiltered extension streams bypass
+                // the row-level sequence filter and emit out-of-range rows.
+                return SequenceRangeUnsupportedSnafu {
+                    region_id,
+                    min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
+                    max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
+                    reason:
+                        "exact sequence-range reads are unsupported when an extension range provider is present"
+                            .to_string(),
+                }
+                .fail();
+            }
             let ranges = provider
                 .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;
