@@ -860,14 +860,12 @@ mod tests {
         ];
         assert_eq!(NonZeroU64::new(9), known_max_input_sequence(&inputs));
 
-        // Unknown input fails closed.
         let inputs = vec![
             new_file_handle(meta_with(NonZeroU64::new(9))),
             new_file_handle(meta_with(None)),
         ];
         assert_eq!(None, known_max_input_sequence(&inputs));
 
-        // Empty input has no bound.
         assert_eq!(None, known_max_input_sequence(&[]));
     }
 
