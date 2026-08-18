@@ -72,27 +72,9 @@ fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNative
 
 /// Formats a sample value for the Prometheus HTTP API.
 ///
-/// Finite values are formatted with `ryu` (shortest round-trip), which is
-/// significantly faster than `f64::to_string()` and is the hot path when
-/// building large responses. ryu prints integral values with a trailing ".0"
-/// ("1.0"), but the Prometheus wire format (like std `f64::to_string()`)
-/// expects "1", so the ".0" suffix is stripped. ryu only emits ".0" for
-/// integral values (its scientific notation never ends in ".0"), so
-/// non-integral values, negative zero (`-0.0` -> `"-0"`) and extreme values
-/// (`1e30`, `f64::MAX`) are unaffected. Non-finite values (`NaN`, `+Inf`,
-/// `-Inf`) are not supported by `ryu::Buffer::format_finite`, so they keep the
-/// previous `f64::to_string()` output (`"NaN"`, `"inf"`, `"-inf"`).
+/// Keep Rust's `f64::to_string()` output for wire compatibility.
 fn format_prometheus_sample_value(value: f64) -> String {
-    if value.is_finite() {
-        let mut buffer = ryu::Buffer::new();
-        let formatted = buffer.format_finite(value);
-        match formatted.strip_suffix(".0") {
-            Some(integral) => integral.to_string(),
-            None => formatted.to_string(),
-        }
-    } else {
-        value.to_string()
-    }
+    value.to_string()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -618,29 +600,33 @@ mod tests {
     }
 
     #[test]
-    fn format_prometheus_sample_value_matches_prometheus_wire_format() {
-        // Integral values must not carry a fractional part ("1", not "1.0"),
-        // matching std `f64::to_string()` and the Prometheus wire format.
-        assert_eq!(format_prometheus_sample_value(1.0), "1");
-        assert_eq!(format_prometheus_sample_value(0.0), "0");
-        assert_eq!(format_prometheus_sample_value(-0.0), "-0");
-        assert_eq!(format_prometheus_sample_value(100.0), "100");
-        // Non-integral values keep the ryu shortest round-trip output.
-        assert_eq!(format_prometheus_sample_value(1.5), "1.5");
-        assert_eq!(format_prometheus_sample_value(0.1), "0.1");
-        // Extreme values keep the ryu scientific notation; integral values in
-        // scientific notation ("1e30") must not be misdetected as non-integral.
-        assert_eq!(format_prometheus_sample_value(1e21), "1e21");
-        assert_eq!(format_prometheus_sample_value(1e30), "1e30");
-        assert_eq!(format_prometheus_sample_value(1e-7), "1e-7");
-        assert_eq!(
-            format_prometheus_sample_value(f64::MAX),
-            "1.7976931348623157e308"
-        );
-        // Non-finite values keep the std `f64::to_string()` output.
-        assert_eq!(format_prometheus_sample_value(f64::NAN), "NaN");
-        assert_eq!(format_prometheus_sample_value(f64::INFINITY), "inf");
-        assert_eq!(format_prometheus_sample_value(f64::NEG_INFINITY), "-inf");
+    fn format_prometheus_sample_value_matches_f64_to_string() {
+        let values = [
+            1.5,
+            0.1,
+            1.0,
+            0.0,
+            -0.0,
+            100.0,
+            1e-6,
+            1e-7,
+            1e21,
+            1e30,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            // These ordinary decimal values differ between ryu and Rust's
+            // `f64::to_string()` shortest representations.
+            f64::from_bits(0x42374876e8000400),
+            f64::from_bits(0x3ff0000800000000),
+            f64::from_bits(0x430a8e5672bc7312),
+        ];
+
+        for value in values {
+            assert_eq!(format_prometheus_sample_value(value), value.to_string());
+        }
     }
 
     #[test]
@@ -688,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn record_batches_to_data_formats_finite_values_with_ryu() {
+    fn record_batches_to_data_formats_values_with_f64_to_string() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -728,23 +714,18 @@ mod tests {
         };
 
         assert_eq!(series.len(), 1);
-        assert_eq!(
-            series[0].values,
-            vec![
-                (1.0, "0".to_string()),
-                (2.0, "-0".to_string()),
-                (3.0, "1.25".to_string()),
-                (4.0, "1e30".to_string()),
-                (5.0, "1e-7".to_string()),
-                (6.0, "1.7976931348623157e308".to_string()),
-            ]
-        );
+        let input_values = [0.0, -0.0, 1.25, 1e30, 1e-7, f64::MAX];
+        let expected = input_values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| ((index + 1) as f64, value.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(series[0].values, expected);
     }
 
     #[test]
     fn record_batches_to_data_preserves_infinity_output() {
-        // `ryu::Buffer::format_finite` only supports finite values; NaN and the
-        // infinities must keep the previous `f64::to_string()` output.
+        // NaN and infinities use Rust's `f64::to_string()` output.
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",

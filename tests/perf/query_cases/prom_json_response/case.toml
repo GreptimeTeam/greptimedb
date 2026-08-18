@@ -1,22 +1,14 @@
 # Prometheus JSON response building benchmark (issue #8805).
 #
-# Pressures the serial per-request path of
+# Exercises the serial per-request
 # `PrometheusJsonResponse::record_batches_to_data`
-# (src/servers/src/http/result/prometheus_resp.rs): per-sample float
-# formatting (`f64::to_string()` -> ryu) and per-row label-vector hashing
-# (IndexMap entry lookup -> per-series entry reuse).
+# (src/servers/src/http/result/prometheus_resp.rs) path and its per-series
+# IndexMap entry reuse.
 #
 # 256 series x 481 evaluation timestamps (2h at 15s) = ~123k output samples
-# per request. The primary `prom_http` query goes through the real Prometheus
-# HTTP range API (`/v1/prometheus/api/v1/query_range`), which is the only
-# frontend path that builds the Prometheus JSON response — `/v1/sql`
-# (including `TQL ANALYZE`) formats the SQL JSON shape instead. The TQL
-# ANALYZE control measures the query-engine half of the same workload so the
-# JSON-building delta can be attributed.
-#
-# NOTE: `kind = "prom_http"` is a runner-side extension
-# (src/cmd/src/bin/query_regression_runner) that POSTs the query/start/end/step
-# form fields to the Prometheus range API instead of `/v1/sql`.
+# per request. The primary `prom_http` query builds the Prometheus JSON
+# response. The TQL ANALYZE control runs the same workload without building the
+# Prometheus JSON response, to measure query-engine/scan variance.
 
 [case]
 name = "prom_json_response"
@@ -45,7 +37,7 @@ distribution = { kind = "cardinality", values = 16, prefix = "host" }
 name = "instance"
 type = "STRING"
 semantic = "tag"
-distribution = { kind = "cardinality", values = 16, prefix = "instance" }
+distribution = { kind = "cardinality", values = 256, prefix = "instance" }
 
 [[scenario.tables.columns]]
 name = "value"
