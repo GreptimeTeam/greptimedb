@@ -32,7 +32,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
-use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout};
+use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
 use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::{DataType as _, Value as GreptimeValue};
 use crate::value::{ListValue, StructValue};
@@ -105,23 +105,14 @@ impl JsonArray<'_> {
     }
 
     /// Projects a physical JSON2 array to a logical query type.
-    pub fn project_json2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
-        let layout = Json2PhysicalLayout::try_from_root(field)?;
-        if !layout.is_version_2() {
-            return self.project_to(target);
+    ///
+    /// TODO(LFC) Supersede `project_to_v2` to `project_to`.
+    pub fn project_to_v2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
+        if json2_remainder_field(field)?.is_some() {
+            project_json_values(self.json2_values()?, target)
+        } else {
+            self.project_to(target)
         }
-
-        let has_remainder = match field.data_type() {
-            DataType::Struct(fields) => fields
-                .iter()
-                .any(|x| x.name() == JSON2_REMAINDER_FIELD_NAME),
-            _ => false,
-        };
-        if !has_remainder {
-            return self.project_to(target);
-        }
-
-        project_json_values(self.json2_values()?, target)
     }
 
     fn json2_values(&self) -> Result<Vec<Value>> {
@@ -1085,7 +1076,7 @@ mod test {
             ]
             .into(),
         );
-        let projected = JsonArray::from(&array).project_json2(&field, &target)?;
+        let projected = JsonArray::from(&array).project_to_v2(&field, &target)?;
         assert_eq!(
             json!({"cold": 1, "count": 42}),
             JsonArray::from(&projected).try_get_value(0)?
@@ -1109,7 +1100,7 @@ mod test {
             Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
         );
 
-        let projected = JsonArray::from(&array).project_json2(&field, field.data_type())?;
+        let projected = JsonArray::from(&array).project_to_v2(&field, field.data_type())?;
         assert!(Arc::ptr_eq(&array, &projected));
         Ok(())
     }

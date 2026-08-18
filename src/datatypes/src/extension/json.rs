@@ -15,17 +15,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(test)]
-use arrow_schema::FieldRef;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
-use arrow_schema::{ArrowError, DataType, Field};
-#[cfg(test)]
+use arrow_schema::{ArrowError, DataType, Field, FieldRef};
 use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use snafu::OptionExt;
 use snafu::{ResultExt, ensure};
 
 use crate::error::InvalidJson2LayoutSnafu;
@@ -43,7 +38,17 @@ pub struct Json2PhysicalLayout {
 }
 
 impl Json2PhysicalLayout {
-    /// Parses and validates the JSON2 layout version from a root field.
+    /// Parses the JSON2 layout version from a root field.
+    ///
+    /// The version is read from the extension metadata; missing metadata
+    /// defaults to V1.
+    ///
+    /// Supported versions:
+    /// - V1
+    /// - V2
+    ///
+    /// Errors when the field is not a JSON2 extension or the version is not
+    /// one of the supported versions.
     pub fn try_from_root(field: &Field) -> crate::error::Result<Self> {
         ensure!(
             is_json2_extension_type(field),
@@ -89,36 +94,28 @@ fn parse_version(metadata: &str) -> crate::error::Result<Option<u8>> {
 }
 
 /// Returns the remainder field of a JSON2 v2 root.
-#[cfg(test)]
-fn json2_remainder_field(field: &Field) -> crate::error::Result<&FieldRef> {
-    if !Json2PhysicalLayout::try_from_root(field)?.is_version_2() {
-        return InvalidJson2LayoutSnafu {
-            reason: format!("JSON2 root '{}' is not layout v2", field.name()),
-        }
-        .fail();
+pub(crate) fn json2_remainder_field(field: &Field) -> crate::error::Result<Option<&FieldRef>> {
+    let layout = Json2PhysicalLayout::try_from_root(field)?;
+    if !layout.is_version_2() {
+        return Ok(None);
     }
 
-    let DataType::Struct(fields) = field.data_type() else {
-        return InvalidJson2LayoutSnafu {
-            reason: format!(
-                "expecting the Struct datatype, actual: '{}'",
-                field.data_type(),
-            ),
-        }
-        .fail();
+    let remainder = if let DataType::Struct(fields) = field.data_type() {
+        fields
+            .iter()
+            .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
+    } else {
+        None
     };
-    let remainder = fields
-        .iter()
-        .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
-        .context(InvalidJson2LayoutSnafu {
-            reason: "remainder field not found",
+
+    if let Some(remainder) = remainder {
+        let _ = remainder.try_extension_type::<VariantType>().map_err(|e| {
+            InvalidJson2LayoutSnafu {
+                reason: e.to_string(),
+            }
+            .build()
         })?;
-    let _ = remainder.try_extension_type::<VariantType>().map_err(|e| {
-        InvalidJson2LayoutSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
+    }
     Ok(remainder)
 }
 
@@ -439,7 +436,7 @@ mod tests {
             JsonSettings::default(),
         ))));
         assert!(Json2PhysicalLayout::try_from_root(&v2)?.is_version_2());
-        let remainder = json2_remainder_field(&v2)?;
+        let remainder = json2_remainder_field(&v2)?.unwrap();
         assert_eq!(JSON2_REMAINDER_FIELD_NAME, remainder.name());
         Ok(())
     }
