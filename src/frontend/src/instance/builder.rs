@@ -34,7 +34,7 @@ use common_meta::procedure_executor::ProcedureExecutorRef;
 use dashmap::DashMap;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
-use operator::insert::Inserter;
+use operator::insert::{InsertLimitInterceptorRef, Inserter};
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 #[cfg(feature = "enterprise")]
@@ -222,13 +222,16 @@ impl FrontendBuilder {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
 
-        let inserter = Arc::new(Inserter::new(
-            self.catalog_manager.clone(),
-            partition_manager.clone(),
-            node_manager.clone(),
-            table_flownode_cache,
-            self.options.auto_create_table,
-        ));
+        let inserter = Arc::new(
+            Inserter::new(
+                self.catalog_manager.clone(),
+                partition_manager.clone(),
+                node_manager.clone(),
+                table_flownode_cache,
+                self.options.auto_create_table,
+            )
+            .with_insert_limit_interceptor(plugins.get::<InsertLimitInterceptorRef>()),
+        );
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
