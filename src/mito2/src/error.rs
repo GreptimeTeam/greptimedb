@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -1359,6 +1373,7 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
         }
     }
@@ -1400,7 +1415,9 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
@@ -1601,7 +1618,8 @@ impl ErrorExt for Error {
             | RegionStopped { .. }
             | RegionBusy { .. }
             | ManualCompactionAlreadyRunning { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1705,5 +1723,20 @@ mod tests {
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
+    }
+
+    #[test]
+    fn test_manifest_delta_not_found_retry_hint() {
+        let error = ManifestDeltaNotFoundSnafu {
+            version: 3_u64,
+            path: "manifest/00000000000000000003.json",
+        }
+        .into_error(object_store::Error::new(ErrorKind::NotFound, "test"));
+        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+
+        let error =
+            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::NotFound, "test"));
+        assert_eq!(RetryHint::NonRetryable, error.retry_hint());
     }
 }

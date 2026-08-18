@@ -483,6 +483,7 @@ impl MitoRegion {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
+        let mut wait_for_checkpoint = false;
 
         let hook_payload: Option<PendingManifestHook> = match state {
             SettableRegionRoleState::Leader => {
@@ -568,14 +569,17 @@ impl MitoRegion {
                         );
                         self.exit_staging()?;
                         self.set_role(RegionRole::DowngradingLeader);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Starting downgrade for region {}", self.region_id);
                         self.set_role(RegionRole::DowngradingLeader);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
                         // Already in desired state - no-op
                         info!("Region {} already in downgrading mode", self.region_id);
+                        wait_for_checkpoint = true;
                     }
                     _ => {
                         warn!(
@@ -587,6 +591,13 @@ impl MitoRegion {
                 None
             }
         };
+
+        // The state is changed before waiting, so no new writable-leader work
+        // can race with the barrier. Keep the manager lock while joining to
+        // serialize the barrier with checkpoint scheduling.
+        if wait_for_checkpoint {
+            manager.wait_for_pending_checkpoint().await;
+        }
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
         let mut backfill_hook_payload: Option<PendingManifestHook> = None;
@@ -1371,10 +1382,14 @@ impl ManifestContext {
         // Clone before `action_list` is moved into `update` so the hook still
         // sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
-        let version = manager
-            .update(action_list, is_staging)
-            .await
-            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+        let version = if !is_staging
+            && self.state.load() == RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        {
+            manager.update_normal_without_checkpoint(action_list).await
+        } else {
+            manager.update(action_list, is_staging).await
+        }
+        .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
 
         Ok(PendingManifestHook::new(
             region_id,

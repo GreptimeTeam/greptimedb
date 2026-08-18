@@ -48,7 +48,9 @@ use crate::manifest::action::{
 use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::WorkerRequest;
 use crate::sst::FormatType;
-use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+use crate::test_util::{
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema,
+};
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
     col(col_name)
@@ -1099,6 +1101,104 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_enter_staging_waits_for_pending_checkpoint() {
+    for block_last_checkpoint_write in [false, true] {
+        for partition_directive in [
+            StagingPartitionDirective::RejectAllWrites,
+            StagingPartitionDirective::UpdatePartitionExpr(default_partition_expr()),
+        ] {
+            let (blocker, mock_layer) = if block_last_checkpoint_write {
+                CheckpointTaskBlocker::block_last_checkpoint_write()
+            } else {
+                CheckpointTaskBlocker::block_cleanup()
+            };
+            let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+            let engine = env
+                .create_engine(MitoConfig {
+                    manifest_checkpoint_distance: 1,
+                    ..Default::default()
+                })
+                .await;
+            let region_id = RegionId::new(1, 1);
+            let request = CreateRequestBuilder::new().build();
+            let column_schemas = rows_schema(&request);
+            engine
+                .handle_request(region_id, RegionRequest::Create(request))
+                .await
+                .unwrap();
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: column_schemas,
+                    rows: build_rows(0, 1),
+                },
+            )
+            .await;
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Flush(RegionFlushRequest::default()),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+                .await
+                .expect("checkpoint task did not reach the configured block point");
+
+            let region = engine.get_region(region_id).unwrap();
+            let wait_started = region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .checkpointer()
+                .pending_checkpoint_wait_started();
+            // Register before starting the transition so the notification cannot be lost.
+            let wait_started = wait_started.notified();
+            let cloned_engine = engine.clone();
+            let enter_staging = tokio::spawn(async move {
+                cloned_engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::EnterStaging(EnterStagingRequest {
+                            partition_directive,
+                        }),
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), wait_started)
+                .await
+                .expect("EnterStaging did not start waiting for the checkpoint");
+            assert_eq!(
+                RegionRoleState::Leader(RegionLeaderState::EnteringStaging),
+                region.state()
+            );
+            assert!(
+                !enter_staging.is_finished(),
+                "EnterStaging returned before the checkpoint task finished"
+            );
+
+            blocker.release();
+            enter_staging.await.unwrap().unwrap();
+            assert_eq!(
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+                region.state()
+            );
+            assert!(
+                !region
+                    .manifest_ctx
+                    .manifest_manager
+                    .read()
+                    .await
+                    .checkpointer()
+                    .is_doing_checkpoint()
+            );
+        }
+    }
 }
 
 #[tokio::test]

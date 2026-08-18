@@ -325,9 +325,15 @@ impl EventListener for AlterFlushListener {
 #[derive(Default)]
 pub struct NotifyRegionChangeResultListener {
     notify: Notify,
+    entered: Notify,
 }
 
 impl NotifyRegionChangeResultListener {
+    /// Waits until a region change result reaches the listener.
+    pub async fn wait_notify_entered(&self) {
+        self.entered.notified().await;
+    }
+
     /// Continue to sending region change result.
     pub fn wake_notify(&self) {
         self.notify.notify_one();
@@ -341,6 +347,7 @@ impl EventListener for NotifyRegionChangeResultListener {
             "Wait on notify to start notify region change result for region {}",
             region_id
         );
+        self.entered.notify_one();
         self.notify.notified().await;
         info!(
             "Continue to sending region change result for region {}",

@@ -1330,11 +1330,8 @@ impl RegionServerInner {
         }
 
         if !errors.is_empty() {
-            return error::UnexpectedSnafu {
-                // Returns the first error.
-                violated: format!("Failed to open batch regions: {:?}", errors[0]),
-            }
-            .fail();
+            // Preserve the first region error so callers can honor its status code and retry hint.
+            return Err(errors.swap_remove(0)).context(HandleBatchOpenRequestSnafu);
         }
 
         Ok(open_regions)
@@ -1979,7 +1976,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{Rows, SemanticType};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -2514,7 +2511,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     struct CurrentEngineTest {
