@@ -74,6 +74,7 @@ on:
         default: perf-regression-8-cores
         options:
           - perf-regression-8-cores
+          - aliyun-ecs
   pull_request:
     types: [labeled]
 
@@ -81,14 +82,66 @@ permissions:
   contents: read
 
 jobs:
+  provision:
+    # Only runs when the aliyun-ecs path is selected: explicitly via the
+    # runner input, or for PR labels via the QUERY_REGRESSION_PR_RUNNER
+    # repository variable. Uses trusted scripts from the PR base (or the
+    # dispatched ref), never from candidate code.
+    if: >-
+      ${{ (github.event_name != 'pull_request' && inputs.runner == 'aliyun-ecs') ||
+           (github.event_name == 'pull_request' &&
+            !github.event.pull_request.draft &&
+            (github.event.label.name == 'query-regression' ||
+             github.event.label.name == 'heavy-regression') &&
+            (vars.QUERY_REGRESSION_PR_RUNNER || 'perf-regression-8-cores') == 'aliyun-ecs') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: query-regression-persistent-cache-v1
+      queue: max
+      cancel-in-progress: false
+    outputs:
+      label: ${{ steps.provision.outputs.label }}
+      instance_id: ${{ steps.provision.outputs.instance_id }}
+      runner_name: ${{ steps.provision.outputs.runner_name }}
+    steps:
+      - name: Checkout trusted provisioning scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Provision ECS runner
+        id: provision
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          ALIYUN_ECS_VSWITCH_ID: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          ALIYUN_ECS_SECURITY_GROUP_ID: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          ALIYUN_ECS_INSTANCE_TYPE: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          QUERY_REGRESSION_ECS_IMAGE_ID: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          QUERY_REGRESSION_CACHE_DISK_ID: ${{ vars.QUERY_REGRESSION_CACHE_DISK_ID }}
+        run: >-
+          uv run .github/scripts/aliyun-ecs-runner-provision.py
+
   query-regression:
+    needs: [provision]
     if: >-
       ${{ github.event_name != 'pull_request' ||
            (github.event_name == 'pull_request' &&
             !github.event.pull_request.draft &&
             (github.event.label.name == 'query-regression' ||
              github.event.label.name == 'heavy-regression')) }}
-    runs-on: ${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}
+    runs-on: >-
+      ${{ needs.provision.outputs.label ||
+          (github.event_name != 'pull_request' && inputs.runner ||
+           (vars.QUERY_REGRESSION_PR_RUNNER || 'perf-regression-8-cores')) }}
     timeout-minutes: 180
     concurrency:
       group: query-regression-persistent-cache-v1
@@ -115,6 +168,19 @@ jobs:
       EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
       EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
     steps:
+      - name: Report provisioned ECS runner
+        if: ${{ needs.provision.outputs.instance_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf -- '- ECS instance: `%s` (type `%s`, image `%s`, region `%s`)\n' \
+              "${{ needs.provision.outputs.instance_id }}" \
+              "${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}" \
+              "${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}" \
+              "${{ vars.ALIYUN_ECS_REGION_ID }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Checkout base source
         uses: actions/checkout@v4
         with:
@@ -574,6 +640,7 @@ jobs:
           uv run --no-project python tests/perf/test_query_regression_runner_otlp_trace_load.py
           uv run --no-project python tests/perf/test_query_regression_summary_otlp.py
           uv run --no-project python tests/perf/test_query_regression_case_selection.py
+          uv run --no-project python tests/perf/test_aliyun_ecs_runner_scripts.py
 
       - name: Build candidate greptime and query regression helpers
         working-directory: src
@@ -700,3 +767,37 @@ jobs:
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}
         run: exit 1
+
+  teardown:
+    # Releases the dynamically provisioned ECS runner. Runs even when the
+    # benchmark job fails or is cancelled; skipped on the ARC path because the
+    # provision outputs are empty.
+    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    needs: [provision, query-regression]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: query-regression-persistent-cache-v1
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - name: Checkout trusted teardown scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Teardown ECS runner
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          QUERY_REGRESSION_ECS_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+          QUERY_REGRESSION_ECS_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        run: >-
+          uv run .github/scripts/aliyun-ecs-runner-teardown.py

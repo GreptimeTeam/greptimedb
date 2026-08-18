@@ -1,10 +1,80 @@
 # Query regression self-hosted runners
 
-The `Query Regression` workflow uses the dedicated ARC runner scale set
-`perf-regression-8-cores`. ARC runner Pods run in the target Kubernetes cluster
-and connect outbound to GitHub. The live scale set is currently **paused**:
-`minRunners=0`, `maxRunners=0`, and no runner Pods. Do not resume it without
-explicit approval.
+The `Query Regression` workflow has two runner paths:
+
+- **ARC scale set `perf-regression-8-cores`** (this directory, the original
+  path). ARC runner Pods run in the target Kubernetes cluster and connect
+  outbound to GitHub. The live scale set is currently **paused**:
+  `minRunners=0`, `maxRunners=0`, and no runner Pods. Do not resume it without
+  explicit approval.
+- **Aliyun ECS ephemeral runners** (`aliyun-ecs`): a `provision` job on
+  `ubuntu-latest` creates one pay-as-you-go ECS instance per run, attaches the
+  retained ESSD build-cache disk, and the instance registers itself as an
+  ephemeral GitHub runner with a per-run label. A `teardown` job
+  (`if: always()`) deletes the instance; `query-regression-janitor.yml` sweeps
+  tagged leftovers older than 4 hours daily. Select the path per dispatch with
+  `runner=aliyun-ecs`, or for PR labels by setting the repository variable
+  `QUERY_REGRESSION_PR_RUNNER=aliyun-ecs` (unset or any other value keeps PRs
+  on the ARC scale set; that is also the rollback switch).
+
+## Aliyun ECS path
+
+Configuration lives in repository variables/secrets:
+
+| Kind | Name | Purpose |
+| --- | --- | --- |
+| secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/AttachDisk/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
+| secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path). |
+| vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone, which must match the cache disk's zone. |
+| vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family, e.g. `ecs.g8i.2xlarge`. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
+| vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
+| vars | `QUERY_REGRESSION_CACHE_DISK_ID` | Retained ESSD data disk (>=600Gi) holding the build caches. |
+
+The retained cache disk mirrors the ARC PVC subPath layout: top-level
+directories `cargo-registry-v1`, `cargo-git-v1`, `query-regression-target-v1`,
+`meta-v1`, and `sccache-v1` are bind-mounted by cloud-init to the same
+`/home/runner/...` paths the workflow already uses. The instance is created
+with `DeleteWithInstance=false` for the data disk, so deleting the instance
+detaches and retains it. To rebuild the cache from scratch, delete or reformat
+the disk; the next provision formats an unformatted disk automatically.
+
+Trust model on the ECS path: the instance receives only the one-hour runner
+registration token via user data and holds no cloud credentials; the Aliyun
+AK/SK exist only in the control-plane jobs. Instance tags
+(`managed-by=query-regression-ci`, `query-regression-run-id`) feed the janitor
+sweep.
+
+### Building and updating the ECS image
+
+The runner `Dockerfile` in the parent directory stays the single source of the
+tool contract. Build a new ECS image from it:
+
+```bash
+ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
+uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
+  --region-id <region> --vswitch-id <vsw-...> --security-group-id <sg-...> \
+  --base-image-id <ubuntu-24.04-image-id>
+```
+
+The script boots a temporary builder instance, `docker build`s the runner
+image, materializes `/opt/rustup`, `/opt/cargo`, `/usr/local/bin` tools, and
+`/home/runner` (actions-runner) onto the host, installs the ephemeral-runner
+systemd unit from `ecs-image/`, and snapshots a custom image. It prints the
+image id; set it as `QUERY_REGRESSION_ECS_IMAGE_ID`, and bump
+`RUNNER_IMAGE_EPOCH` in `query-regression.yml` at the same time so the target
+cache invalidates, mirroring the digest/epoch rule of the ARC path. Builder
+sentinel polling requires the Cloud Assistant agent, which Aliyun public
+Ubuntu images include.
+
+### ECS path rollback and cache recovery
+
+To roll back: unset `QUERY_REGRESSION_PR_RUNNER` (PRs return to
+`perf-regression-8-cores`) and dispatch with the ARC runner. The ARC scale set
+stays deployed-but-paused during the coexistence window.
+
+For disk loss or corruption: the cache is disposable. Create a fresh ESSD disk
+in the same zone, update `QUERY_REGRESSION_CACHE_DISK_ID`, and let the next run
+cold-fill it (expect the first build to take the full cold-build time).
 
 ## Prerequisites and trust admission
 
