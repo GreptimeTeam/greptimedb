@@ -295,34 +295,8 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
         "downgrade returned before checkpoint cleanup finished"
     );
 
-    // Cancel the first transition while it is waiting. The checkpoint handle
-    // must remain owned by the manager so an idempotent retry can join it.
-    downgrade.abort();
-    assert!(downgrade.await.unwrap_err().is_cancelled());
-    let retry_wait_started = region
-        .manifest_ctx
-        .manifest_manager
-        .read()
-        .await
-        .checkpointer()
-        .pending_checkpoint_wait_started();
-    let retry_wait_started = retry_wait_started.notified();
-    let cloned_engine = engine.clone();
-    let retry_downgrade = tokio::spawn(async move {
-        cloned_engine
-            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(5), retry_wait_started)
-        .await
-        .expect("idempotent downgrade retry did not start waiting for the checkpoint");
-    assert!(
-        !retry_downgrade.is_finished(),
-        "idempotent downgrade retry did not wait for checkpoint cleanup"
-    );
-
     blocker.release();
-    assert_success_response(&retry_downgrade.await.unwrap().unwrap(), 2);
+    assert_success_response(&downgrade.await.unwrap().unwrap(), 2);
 
     // Final flush publishes a normal delta, but Downgrading must not start a
     // checkpoint after the barrier.
@@ -388,6 +362,75 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
         .await
         .wait_for_pending_checkpoint()
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_idempotent_downgrading_waits_for_pending_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            manifest_checkpoint_distance: 1,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    // Arrange the state observed by a retried request after the first request
+    // entered Downgrading but its response was lost.
+    engine
+        .set_region_role(region_id, RegionRole::DowngradingLeader)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let wait_started = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+    let wait_started = wait_started.notified();
+    let cloned_engine = engine.clone();
+    let retry_downgrade = tokio::spawn(async move {
+        cloned_engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), wait_started)
+        .await
+        .expect("idempotent downgrade did not start waiting for the checkpoint");
+    assert!(
+        !retry_downgrade.is_finished(),
+        "idempotent downgrade did not wait for checkpoint cleanup"
+    );
+
+    blocker.release();
+    assert_success_response(&retry_downgrade.await.unwrap().unwrap(), 1);
 }
 
 #[tokio::test]

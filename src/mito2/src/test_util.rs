@@ -169,7 +169,7 @@ struct BlockingCheckpointDeleter {
 impl object_store::layers::mock::Delete for BlockingCheckpointDeleter {
     async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
         self.inner.delete(path, args).await?;
-        if is_normal_manifest_checkpoint_file(path) {
+        if is_manifest_checkpoint_file(path) {
             self.has_manifest_cleanup_target = true;
         }
         Ok(())
@@ -183,24 +183,14 @@ impl object_store::layers::mock::Delete for BlockingCheckpointDeleter {
     }
 }
 
-fn is_normal_manifest_checkpoint_file(path: &str) -> bool {
+fn is_manifest_checkpoint_file(path: &str) -> bool {
+    // The mock deleter receives paths relative to the listed manifest
+    // directory, so the normal/staging directory segments are unavailable.
     let path = Path::new(path);
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    if !is_delta_file(file_name) && !is_checkpoint_file(file_name) {
-        return false;
-    }
-
-    let Some(manifest_dir) = path.parent() else {
-        return false;
-    };
-    manifest_dir.file_name().and_then(|name| name.to_str()) == Some("manifest")
-        && manifest_dir
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            != Some("staging")
+    is_delta_file(file_name) || is_checkpoint_file(file_name)
 }
 
 struct BlockingCheckpointWriter {
