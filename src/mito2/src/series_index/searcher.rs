@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
 use async_stream::try_stream;
-use common_datasource::file_format::parquet::LazyParquetFileReader;
+use bytes::Bytes;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::range::TimestampRange;
 use datafusion_common::pruning::PruningStatistics;
@@ -26,28 +27,62 @@ use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt32Array, UInt64Array};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
-use futures::TryStreamExt;
 use object_store::ObjectStore;
-use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
-use parquet::file::metadata::RowGroupMetaData;
-use parquet::file::statistics::Statistics;
+use parquet::DecodeResult;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use table::predicate::Predicate;
 
 use crate::error::{
-    InvalidMetaSnafu, InvalidRecordBatchSnafu, ReadParquetSnafu, RecordBatchSnafu, Result,
-    UnexpectedSnafu,
+    InvalidMetaSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, ReadParquetSnafu, RecordBatchSnafu,
+    Result, UnexpectedSnafu,
 };
 use crate::series_index::{
     MAX_TS_COLUMN, METRIC_SERIES_ID_BATCH_SIZE, MIN_TS_COLUMN, MetricSeriesId,
     MetricSeriesIdStream, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN, series_index_schema,
 };
+use crate::sst::parquet::format::{column_null_counts, column_values_by_type};
+use crate::sst::parquet::helper::fetch_byte_ranges;
+use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::simple_tag_filters;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
+
+#[derive(Clone)]
+struct SeriesIndexRangeFetcher {
+    object_store: ObjectStore,
+}
+
+impl SeriesIndexRangeFetcher {
+    async fn fetch(&self, path: &str, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        fetch_byte_ranges(path, self.object_store.clone(), ranges)
+            .await
+            .context(OpenDalSnafu)
+    }
+}
+
+#[derive(Clone)]
+struct SeriesIndexMetadataProvider {
+    object_store: ObjectStore,
+}
+
+impl SeriesIndexMetadataProvider {
+    async fn load(&self, path: &str) -> Result<Arc<ParquetMetaData>> {
+        let mut metrics = MetadataCacheMetrics::default();
+        MetadataLoader::new(self.object_store.clone(), path, 0)
+            .load(&mut metrics)
+            .await
+            .map(Arc::new)
+    }
+}
 
 /// Searches a series-index file for metric series matching query predicates.
 pub struct SeriesIndexSearcher {
-    object_store: ObjectStore,
+    range_fetcher: SeriesIndexRangeFetcher,
+    metadata_provider: SeriesIndexMetadataProvider,
     filters: Vec<SimpleFilterEvaluator>,
     pruning_predicate: Predicate,
     empty_time_range: bool,
@@ -75,7 +110,10 @@ impl SeriesIndexSearcher {
         let (exprs, filters): (Vec<_>, Vec<_>) = filters.into_iter().unzip();
 
         Ok(Self {
-            object_store,
+            range_fetcher: SeriesIndexRangeFetcher {
+                object_store: object_store.clone(),
+            },
+            metadata_provider: SeriesIndexMetadataProvider { object_store },
             filters,
             pruning_predicate: Predicate::new(exprs),
             empty_time_range,
@@ -88,22 +126,25 @@ impl SeriesIndexSearcher {
             return Ok(Box::pin(futures::stream::empty()));
         }
 
-        let reader = LazyParquetFileReader::new(self.object_store.clone(), path.to_string(), None);
-        let builder = ParquetRecordBatchStreamBuilder::new(reader)
-            .await
-            .with_context(|_| ReadParquetSnafu {
-                path: path.to_string(),
-            })?;
-        validate_index_schema(builder.schema())?;
+        let parquet_metadata = self.metadata_provider.load(path).await?;
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(parquet_metadata, ArrowReaderOptions::new())
+                .with_context(|_| ReadParquetSnafu {
+                    path: path.to_string(),
+                })?;
+        validate_index_schema(arrow_metadata.schema())?;
 
         let row_groups = row_groups_to_read(
-            builder.metadata().row_groups(),
-            builder.schema().clone(),
+            arrow_metadata.metadata().row_groups(),
+            arrow_metadata.schema().clone(),
             &self.pruning_predicate,
         );
-        let projection =
-            projection_mask(builder.parquet_schema(), builder.schema(), &self.filters)?;
-        let mut input = builder
+        let projection = projection_mask(
+            arrow_metadata.parquet_schema(),
+            arrow_metadata.schema(),
+            &self.filters,
+        )?;
+        let mut decoder = ParquetPushDecoderBuilder::new_with_metadata(arrow_metadata)
             .with_row_groups(row_groups)
             .with_projection(projection)
             .build()
@@ -112,15 +153,27 @@ impl SeriesIndexSearcher {
             })?;
         let path = path.to_string();
         let filters = self.filters.clone();
+        let range_fetcher = self.range_fetcher.clone();
 
         Ok(Box::pin(try_stream! {
             let mut last_series = None;
             let mut output = Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE);
-            while let Some(batch) = input
-                .try_next()
-                .await
-                .with_context(|_| ReadParquetSnafu { path: path.clone() })?
-            {
+            loop {
+                let batch = match decoder
+                    .try_decode()
+                    .with_context(|_| ReadParquetSnafu { path: path.clone() })?
+                {
+                    DecodeResult::NeedsData(ranges) => {
+                        let data = range_fetcher.fetch(&path, &ranges).await?;
+                        decoder
+                            .push_ranges(ranges, data)
+                            .with_context(|_| ReadParquetSnafu { path: path.clone() })?;
+                        continue;
+                    }
+                    DecodeResult::Data(batch) => batch,
+                    DecodeResult::Finished => break,
+                };
+
                 let mut mask = BooleanBuffer::new_set(batch.num_rows());
                 for filter in &filters {
                     let column = column(&batch, filter.column_name())?;
@@ -301,17 +354,7 @@ impl PruningStatistics for SeriesIndexPruningStats<'_> {
 
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
         let column_index = self.schema.index_of(&column.name).ok()?;
-        let null_counts = self
-            .row_groups
-            .iter()
-            .map(|row_group| {
-                row_group
-                    .column(column_index)
-                    .statistics()?
-                    .null_count_opt()
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Arc::new(UInt64Array::from(null_counts)))
+        column_null_counts(self.row_groups, column_index)
     }
 
     fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
@@ -327,66 +370,7 @@ impl SeriesIndexPruningStats<'_> {
     fn column_values(&self, column: &Column, is_min: bool) -> Option<ArrayRef> {
         let column_index = self.schema.index_of(&column.name).ok()?;
         let data_type = self.schema.field(column_index).data_type();
-        let null_scalar: ScalarValue = data_type.try_into().ok()?;
-        let values = self
-            .row_groups
-            .iter()
-            .map(|row_group| {
-                let stats = row_group.column(column_index).statistics()?;
-                stats_scalar_value(stats, data_type, is_min)
-            })
-            .map(|value| value.unwrap_or_else(|| null_scalar.clone()))
-            .collect::<Vec<_>>();
-        ScalarValue::iter_to_array(values).ok()
-    }
-}
-
-fn stats_scalar_value(
-    stats: &Statistics,
-    data_type: &DataType,
-    is_min: bool,
-) -> Option<ScalarValue> {
-    macro_rules! value {
-        ($stats:expr) => {
-            if is_min {
-                *$stats.min_opt()?
-            } else {
-                *$stats.max_opt()?
-            }
-        };
-    }
-
-    match (stats, data_type) {
-        (Statistics::Boolean(stats), DataType::Boolean) => {
-            Some(ScalarValue::Boolean(Some(value!(stats))))
-        }
-        (Statistics::Int32(stats), DataType::Int32) => {
-            Some(ScalarValue::Int32(Some(value!(stats))))
-        }
-        (Statistics::Int32(stats), DataType::UInt32) => {
-            Some(ScalarValue::UInt32(Some(value!(stats) as u32)))
-        }
-        (Statistics::Int64(stats), DataType::Int64) => {
-            Some(ScalarValue::Int64(Some(value!(stats))))
-        }
-        (Statistics::Int64(stats), DataType::UInt64) => {
-            Some(ScalarValue::UInt64(Some(value!(stats) as u64)))
-        }
-        (Statistics::Float(stats), DataType::Float32) => {
-            Some(ScalarValue::Float32(Some(value!(stats))))
-        }
-        (Statistics::Double(stats), DataType::Float64) => {
-            Some(ScalarValue::Float64(Some(value!(stats))))
-        }
-        (Statistics::ByteArray(stats), DataType::Utf8) => {
-            let bytes = if is_min {
-                stats.min_bytes_opt()?
-            } else {
-                stats.max_bytes_opt()?
-            };
-            Some(ScalarValue::Utf8(String::from_utf8(bytes.to_vec()).ok()))
-        }
-        _ => None,
+        column_values_by_type(self.row_groups, data_type, column_index, is_min)
     }
 }
 
@@ -626,17 +610,13 @@ mod tests {
             None,
         )
         .unwrap();
-        let builder = ParquetRecordBatchStreamBuilder::new(LazyParquetFileReader::new(
-            object_store.clone(),
-            path.to_string(),
-            None,
-        ))
-        .await
-        .unwrap();
+        let parquet_metadata = searcher.metadata_provider.load(path).await.unwrap();
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(parquet_metadata, ArrowReaderOptions::new()).unwrap();
         assert_eq!(
             row_groups_to_read(
-                builder.metadata().row_groups(),
-                builder.schema().clone(),
+                arrow_metadata.metadata().row_groups(),
+                arrow_metadata.schema().clone(),
                 &searcher.pruning_predicate,
             ),
             vec![1]
