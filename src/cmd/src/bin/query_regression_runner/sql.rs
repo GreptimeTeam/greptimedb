@@ -145,13 +145,12 @@ pub(super) async fn http_post_prom_range_query(
 ) -> Value {
     let mut sample = post_form(
         client,
-        format!("http://127.0.0.1:{port}/v1/prometheus/api/v1/query_range"),
+        prom_range_query_url(port, db),
         &[
             ("query", query),
             ("start", start.unwrap_or_default()),
             ("end", end.unwrap_or_default()),
             ("step", step.unwrap_or_default()),
-            ("db", db),
         ],
     )
     .await;
@@ -160,6 +159,15 @@ pub(super) async fn http_post_prom_range_query(
         .expect("HTTP samples are objects")
         .insert("query".to_string(), Value::String(query.to_string()));
     sample
+}
+
+fn prom_range_query_url(port: u16, db: &str) -> String {
+    let mut url = reqwest::Url::parse(&format!(
+        "http://127.0.0.1:{port}/v1/prometheus/api/v1/query_range"
+    ))
+    .expect("fixed Prometheus range query URL must be valid");
+    url.query_pairs_mut().append_pair("db", db);
+    url.into()
 }
 
 async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value {
@@ -248,6 +256,17 @@ pub(super) fn sql_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prom_range_query_url_places_database_in_query_parameters() {
+        let url = reqwest::Url::parse(&prom_range_query_url(4000, "catalog-schema name"))
+            .expect("generated URL must be valid");
+        assert_eq!(url.path(), "/v1/prometheus/api/v1/query_range");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            vec![("db".into(), "catalog-schema name".into())]
+        );
+    }
 
     #[test]
     fn top_level_errors_do_not_inspect_rows() {
