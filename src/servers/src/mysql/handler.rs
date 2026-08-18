@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ::auth::{Identity, Password, UserProviderRef};
+use ::auth::{Identity, MysqlAuthMethod, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
@@ -347,15 +347,14 @@ impl MysqlInstanceShim {
     }
 
     fn auth_plugin(&self) -> &'static str {
-        if self
+        match self
             .user_provider
             .as_ref()
-            .map(|x| x.external())
-            .unwrap_or(false)
+            .map(|provider| provider.mysql_auth_method())
+            .unwrap_or(MysqlAuthMethod::NativePassword)
         {
-            MYSQL_CLEAR_PASSWORD
-        } else {
-            MYSQL_NATIVE_PASSWORD
+            MysqlAuthMethod::NativePassword => MYSQL_NATIVE_PASSWORD,
+            MysqlAuthMethod::ClearPassword => MYSQL_CLEAR_PASSWORD,
         }
     }
 }
