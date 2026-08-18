@@ -132,12 +132,17 @@ jobs:
 
   query-regression:
     needs: [provision]
+    # `!failure() && !cancelled()` both suppresses the implicit success() and
+    # lets the job run when provision was intentionally skipped on the ARC
+    # path; a failed or cancelled provision still blocks the run because no
+    # ECS runner would be waiting.
     if: >-
-      ${{ github.event_name != 'pull_request' ||
-           (github.event_name == 'pull_request' &&
-            !github.event.pull_request.draft &&
-            (github.event.label.name == 'query-regression' ||
-             github.event.label.name == 'heavy-regression')) }}
+      ${{ !failure() && !cancelled() &&
+           (github.event_name != 'pull_request' ||
+            (github.event_name == 'pull_request' &&
+             !github.event.pull_request.draft &&
+             (github.event.label.name == 'query-regression' ||
+              github.event.label.name == 'heavy-regression'))) }}
     runs-on: >-
       ${{ needs.provision.outputs.label ||
           (github.event_name != 'pull_request' && inputs.runner ||
