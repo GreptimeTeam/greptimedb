@@ -30,8 +30,9 @@ use subtle::ConstantTimeEq;
 
 use crate::common::{
     DEFAULT_PBKDF2_SHA256_SALT_LEN, Identity, MAX_PBKDF2_SHA256_ITERATIONS,
-    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, PG_SCRAM_SHA256_KEY_LEN, Password,
-    PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
+    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, Password, PgScramSha256Verifier,
+    auth_mysql_with_hash_stage_2, parse_mysql_native_password_verifier,
+    parse_pg_scram_sha256_password_verifier,
 };
 use crate::error::{
     IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedAuthMethodSnafu,
@@ -91,7 +92,15 @@ pub trait UserProvider: Send + Sync {
         .fail()
     }
 
-    async fn postgres_auth_info(&self, _id: Identity<'_>) -> Result<PgAuthInfo> {
+    fn mysql_auth_method(&self) -> MysqlAuthMethod {
+        if self.external() {
+            MysqlAuthMethod::ClearPassword
+        } else {
+            MysqlAuthMethod::NativePassword
+        }
+    }
+
+    async fn postgres_auth_info(&self, _id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         Ok(PgAuthInfo::Cleartext)
     }
 
@@ -99,6 +108,12 @@ pub trait UserProvider: Send + Sync {
     fn external(&self) -> bool {
         false
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MysqlAuthMethod {
+    NativePassword,
+    ClearPassword,
 }
 
 pub enum PgAuthInfo {
@@ -231,29 +246,13 @@ impl PasswordVerifier {
             });
         }
 
-        if let Some(verifier) = input.strip_prefix("mysql_native_password:") {
-            let hash_stage_2 = hex::decode(verifier).ok()?;
-            if hash_stage_2.len() != 20 {
-                return None;
-            }
-
+        if input.starts_with("mysql_native_password:") {
+            let hash_stage_2 = parse_mysql_native_password_verifier(input).ok()?;
             return Some(Self::MysqlNativePassword { hash_stage_2 });
         }
 
-        if let Some(verifier) = input.strip_prefix("pg_scram_sha256:") {
-            let mut parts = verifier.split(':');
-            let iterations = parts.next()?.parse::<u32>().ok()?;
-            let salt = hex::decode(parts.next()?).ok()?;
-            let stored_key = hex::decode(parts.next()?).ok()?;
-            let server_key = hex::decode(parts.next()?).ok()?;
-            if parts.next().is_some()
-                || stored_key.len() != PG_SCRAM_SHA256_KEY_LEN
-                || server_key.len() != PG_SCRAM_SHA256_KEY_LEN
-            {
-                return None;
-            }
-
-            return PgScramSha256Verifier::new(iterations, salt, stored_key, server_key)
+        if input.starts_with("pg_scram_sha256:") {
+            return parse_pg_scram_sha256_password_verifier(input)
                 .ok()
                 .map(Self::PgScramSha256);
         }

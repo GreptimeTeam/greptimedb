@@ -129,6 +129,46 @@ pub fn auth_mysql(
     auth_mysql_with_hash_stage_2(auth_data, salt, username, &hash_stage_2)
 }
 
+/// Authenticates a MySQL native password response against an encoded verifier.
+pub fn auth_mysql_with_verifier(
+    auth_data: HashedPassword,
+    salt: Salt,
+    username: &str,
+    verifier: &str,
+) -> Result<()> {
+    let hash_stage_2 = parse_mysql_native_password_verifier(verifier)?;
+    auth_mysql_with_hash_stage_2(auth_data, salt, username, &hash_stage_2)
+}
+
+pub fn validate_mysql_native_password_verifier(verifier: &str) -> Result<()> {
+    parse_mysql_native_password_verifier(verifier).map(|_| ())
+}
+
+pub(crate) fn parse_mysql_native_password_verifier(verifier: &str) -> Result<Vec<u8>> {
+    let Some(verifier) = verifier.strip_prefix("mysql_native_password:") else {
+        return InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Invalid mysql native password verifier format",
+        }
+        .fail();
+    };
+    let Ok(hash_stage_2) = hex::decode(verifier) else {
+        return InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Invalid mysql native password verifier encoding",
+        }
+        .fail();
+    };
+    ensure!(
+        hash_stage_2.len() == 20,
+        InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Illegal mysql native password verifier length",
+        }
+    );
+    Ok(hash_stage_2)
+}
+
 pub(crate) fn auth_mysql_with_hash_stage_2(
     auth_data: HashedPassword,
     salt: Salt,
@@ -363,6 +403,45 @@ pub fn format_pg_scram_sha256_password_verifier(
     ))
 }
 
+/// Parses and validates an encoded PostgreSQL SCRAM-SHA-256 verifier.
+pub fn parse_pg_scram_sha256_password_verifier(verifier: &str) -> Result<PgScramSha256Verifier> {
+    let Some(verifier) = verifier.strip_prefix("pg_scram_sha256:") else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier format",
+        }
+        .fail();
+    };
+    let mut parts = verifier.split(':');
+    let (Some(iterations), Some(salt), Some(stored_key), Some(server_key), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier format",
+        }
+        .fail();
+    };
+    let (Ok(iterations), Ok(salt), Ok(stored_key), Ok(server_key)) = (
+        iterations.parse::<u32>(),
+        hex::decode(salt),
+        hex::decode(stored_key),
+        hex::decode(server_key),
+    ) else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier encoding",
+        }
+        .fail();
+    };
+
+    PgScramSha256Verifier::new(iterations, salt, stored_key, server_key)
+}
+
 fn pg_scram_sha256_salted_password(
     password: &[u8],
     salt: &[u8],
@@ -437,6 +516,17 @@ fn double_sha1(data: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn mysql_native_password_auth_data(password: &[u8], salt: &[u8]) -> Vec<u8> {
+        let hash_stage_1 = sha1_one(password);
+        let hash_stage_2 = mysql_native_password_hash(password);
+        let scramble = sha1_two(salt, &hash_stage_2);
+        hash_stage_1
+            .iter()
+            .zip(scramble)
+            .map(|(lhs, rhs)| lhs ^ rhs)
+            .collect()
+    }
+
     #[test]
     fn test_sha() {
         let sha_1_answer: Vec<u8> = vec![
@@ -467,6 +557,24 @@ mod tests {
         assert_eq!(
             "mysql_native_password:6bb4837eb74329105ee4568dda7dc67ed2ca2ad9",
             verifier
+        );
+        assert_eq!(
+            mysql_native_password_hash(b"123456"),
+            parse_mysql_native_password_verifier(&verifier).unwrap()
+        );
+        assert!(parse_mysql_native_password_verifier("mysql_native_password:00").is_err());
+
+        let salt = b"01234567890123456789";
+        let auth_data = mysql_native_password_auth_data(b"123456", salt);
+        auth_mysql_with_verifier(&auth_data, salt, "greptime", &verifier).unwrap();
+        assert!(
+            auth_mysql_with_verifier(
+                &auth_data,
+                salt,
+                "greptime",
+                &format_mysql_native_password_verifier(b"wrong")
+            )
+            .is_err()
         );
     }
 
@@ -499,6 +607,10 @@ mod tests {
             "pg_scram_sha256:4096:73616c74:945e1c466fc9932efadc23781edc5d1e78d5e10f005933652af1a6105154f084:b9bf0e811b1fb6793671c0cc3adedf7c75cd72291191092ad65878c5a02aad2c",
             verifier
         );
+        let parsed = parse_pg_scram_sha256_password_verifier(&verifier).unwrap();
+        assert_eq!(4096, parsed.iterations());
+        assert_eq!(b"salt", parsed.salt());
+        assert!(parse_pg_scram_sha256_password_verifier("pg_scram_sha256:bad").is_err());
     }
 
     #[test]

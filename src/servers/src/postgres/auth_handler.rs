@@ -152,9 +152,13 @@ impl PgLoginVerifier {
             Some(name) => name,
             None => return Ok(PgAuthInfo::Cleartext),
         };
+        let catalog = match &login.catalog {
+            Some(name) => name,
+            None => return Ok(PgAuthInfo::Cleartext),
+        };
 
         match user_provider
-            .postgres_auth_info(Identity::UserId(user_name, None))
+            .postgres_auth_info(Identity::UserId(user_name, None), catalog)
             .await
         {
             Err(e) => {
