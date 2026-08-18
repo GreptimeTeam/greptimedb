@@ -98,6 +98,7 @@ pub trait InsertLimitInterceptor: Send + Sync {
     ) -> std::result::Result<(), BoxedError>;
 }
 
+/// Shared reference to an [InsertLimitInterceptor], registered via `Plugins`.
 pub type InsertLimitInterceptorRef = Arc<dyn InsertLimitInterceptor>;
 
 pub struct Inserter {
@@ -109,7 +110,7 @@ pub struct Inserter {
     /// When `false`, missing tables are never auto-created regardless of the
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
-    insert_limit_interceptor: Option<InsertLimitInterceptorRef>,
+    pub(crate) insert_limit_interceptor: Option<InsertLimitInterceptorRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -437,8 +438,18 @@ impl Inserter {
         if let Some(interceptor) = &self.insert_limit_interceptor {
             let rows = count_region_insert_rows(&requests.normal_requests)
                 + count_region_insert_rows(&requests.instant_requests);
+            // Charge the target table's database, not the session's: fully
+            // qualified inserts (e.g. `INSERT INTO other_db.t`) may target a
+            // different database than the session's current one. All tables in
+            // one batch resolve to the same database, so any entry works; fall
+            // back to the session context when there is no table info.
+            let (catalog, schema) = table_infos
+                .values()
+                .next()
+                .map(|info| (info.catalog_name.clone(), info.schema_name.clone()))
+                .unwrap_or_else(|| (ctx.current_catalog().to_string(), ctx.current_schema()));
             interceptor
-                .check_ingest(ctx.current_catalog(), &ctx.current_schema(), rows)
+                .check_ingest(&catalog, &schema, rows)
                 .await
                 .map_err(|source| crate::error::Error::External {
                     source,
@@ -1865,14 +1876,12 @@ mod tests {
         let interceptor = Arc::new(RecordingInterceptor::default());
         let inserter = new_inserter_with_interceptor(Some(interceptor.clone())).await;
         let table_id = 1;
-        let table_infos = HashMap::from_iter([(
-            table_id,
-            Arc::new(new_test_table_info(
-                table_id,
-                "test_table",
-                vec![0].into_iter(),
-            )),
-        )]);
+        // The target table lives in a different database than the session's;
+        // the limit must be attributed to the table's catalog/schema.
+        let mut table_info = new_test_table_info(table_id, "test_table", vec![0].into_iter());
+        table_info.catalog_name = "other_catalog".to_string();
+        table_info.schema_name = "other_schema".to_string();
+        let table_infos = HashMap::from_iter([(table_id, Arc::new(table_info))]);
         let requests = new_region_insert_requests(table_id, 0, 3, 2);
         let ctx = Arc::new(QueryContext::with(
             DEFAULT_CATALOG_NAME,
@@ -1886,11 +1895,7 @@ mod tests {
         let calls = interceptor.calls.lock().unwrap();
         assert_eq!(
             calls.as_slice(),
-            &[(
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                5
-            )]
+            &[("other_catalog".to_string(), "other_schema".to_string(), 5)]
         );
     }
 
