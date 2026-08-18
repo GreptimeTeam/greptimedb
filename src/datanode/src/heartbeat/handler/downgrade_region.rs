@@ -525,9 +525,7 @@ mod tests {
                     region_id,
                     RegionRequest::Alter(RegionAlterRequest {
                         kind: AlterKind::SetRegionOptions {
-                            options: vec![SetRegionOption::AutoFlushInterval(Some(
-                                Duration::from_secs(60),
-                            ))],
+                            options: vec![SetRegionOption::MaxRowGroupRowCount(Some(1024))],
                         },
                     }),
                 )
@@ -537,8 +535,8 @@ mod tests {
             .await
             .expect("region did not enter Altering");
 
-        let mut region_server = mock_region_server();
-        region_server.register_engine(Arc::new(engine.clone()));
+        let region_server = mock_region_server();
+        region_server.register_test_region(region_id, Arc::new(engine.clone()));
         let handler_context =
             HandlerContext::new_for_test(region_server, Arc::new(MemoryKvBackend::new()));
         let reply = DowngradeRegionsHandler
