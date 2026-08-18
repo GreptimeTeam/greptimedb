@@ -33,6 +33,7 @@ use common_catalog::consts::{
     TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
     trace_operations_table_name, trace_services_table_name,
 };
+use common_error::ext::BoxedError;
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
@@ -88,6 +89,23 @@ use crate::req_convert::insert::{
 };
 use crate::statement::StatementExecutor;
 
+/// Intercepts row inserts right before they are dispatched to datanodes,
+/// e.g. to enforce database-level ingest rate limits.
+/// Registered via `Plugins`; `None` means no interception (OSS default).
+#[async_trait::async_trait]
+pub trait InsertLimitInterceptor: Send + Sync {
+    /// Checks whether `rows` rows may be ingested into `catalog.schema`.
+    /// Returning `Err` rejects the whole request.
+    async fn check_ingest(
+        &self,
+        catalog: &str,
+        schema: &str,
+        rows: u64,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
+pub type InsertLimitInterceptorRef = Arc<dyn InsertLimitInterceptor>;
+
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
@@ -98,6 +116,7 @@ pub struct Inserter {
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
+    insert_limit_interceptor: Option<InsertLimitInterceptorRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -168,6 +187,7 @@ impl Inserter {
             table_flownode_set_cache,
             auto_create_table,
             pending_rows_batcher: None,
+            insert_limit_interceptor: None,
         }
     }
 
@@ -177,6 +197,16 @@ impl Inserter {
         batcher: Option<Arc<dyn PendingRowsBatcher>>,
     ) -> Self {
         self.pending_rows_batcher = batcher;
+        self
+    }
+
+    /// Sets the [InsertLimitInterceptor] invoked before insert requests are
+    /// dispatched to datanodes. `None` (the default) disables interception.
+    pub fn with_insert_limit_interceptor(
+        mut self,
+        interceptor: Option<InsertLimitInterceptorRef>,
+    ) -> Self {
+        self.insert_limit_interceptor = interceptor;
         self
     }
 
@@ -542,6 +572,15 @@ impl Inserter {
     }
 }
 
+/// Counts the total number of rows in a [RegionInsertRequests].
+fn count_region_insert_rows(requests: &RegionInsertRequests) -> u64 {
+    requests
+        .requests
+        .iter()
+        .map(|r| r.rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0) as u64)
+        .sum()
+}
+
 impl Inserter {
     async fn do_request(
         &self,
@@ -551,6 +590,18 @@ impl Inserter {
     ) -> Result<Output> {
         // Fill impure default values in the request
         let requests = fill_reqs_with_impure_default(table_infos, requests)?;
+
+        if let Some(interceptor) = &self.insert_limit_interceptor {
+            let rows = count_region_insert_rows(&requests.normal_requests)
+                + count_region_insert_rows(&requests.instant_requests);
+            interceptor
+                .check_ingest(ctx.current_catalog(), &ctx.current_schema(), rows)
+                .await
+                .map_err(|source| crate::error::Error::External {
+                    source,
+                    location: snafu::Location::default(),
+                })?;
+        }
 
         let write_cost = write_meter!(
             ctx.current_catalog(),
@@ -1701,12 +1752,14 @@ impl FlowMirrorTask {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
     use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::{BoxedError, ErrorExt, PlainError};
+    use common_error::status_code::StatusCode;
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::test_util::MockDatanodeManager;
@@ -1721,7 +1774,7 @@ mod tests {
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 
     use crate::insert::*;
-    use crate::test_util::{create_partition_rule_manager, prepare_mocked_backend};
+    use crate::test_util::{create_partition_rule_manager, new_test_table_info, prepare_mocked_backend};
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -1907,6 +1960,144 @@ mod tests {
 
         assert!(request_is_native_histogram(&request_schema));
         assert!(table_is_native_histogram(&table));
+    }
+
+    struct RejectAllInterceptor;
+
+    #[async_trait::async_trait]
+    impl InsertLimitInterceptor for RejectAllInterceptor {
+        async fn check_ingest(
+            &self,
+            _catalog: &str,
+            _schema: &str,
+            _rows: u64,
+        ) -> std::result::Result<(), BoxedError> {
+            Err(BoxedError::new(PlainError::new(
+                "rate limited for test".to_string(),
+                StatusCode::RateLimited,
+            )))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingInterceptor {
+        calls: Mutex<Vec<(String, String, u64)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl InsertLimitInterceptor for RecordingInterceptor {
+        async fn check_ingest(
+            &self,
+            catalog: &str,
+            schema: &str,
+            rows: u64,
+        ) -> std::result::Result<(), BoxedError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((catalog.to_string(), schema.to_string(), rows));
+            Ok(())
+        }
+    }
+
+    async fn new_inserter_with_interceptor(
+        interceptor: Option<InsertLimitInterceptorRef>,
+    ) -> Inserter {
+        let kv_backend = prepare_mocked_backend().await;
+        Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            create_partition_rule_manager(kv_backend.clone()).await,
+            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(100),
+                kv_backend.clone(),
+            )),
+            true,
+        )
+        .with_insert_limit_interceptor(interceptor)
+    }
+
+    fn new_region_insert_requests(
+        table_id: u32,
+        region_number: u32,
+        num_normal_rows: usize,
+        num_instant_rows: usize,
+    ) -> InstantAndNormalInsertRequests {
+        let build = |num_rows: usize| RegionInsertRequests {
+            requests: vec![RegionInsertRequest {
+                region_id: RegionId::new(table_id, region_number).as_u64(),
+                rows: Some(Rows {
+                    schema: vec![],
+                    rows: vec![api::v1::Row { values: vec![] }; num_rows],
+                }),
+                partition_expr_version: None,
+                skip_wal: false,
+            }],
+        };
+        InstantAndNormalInsertRequests {
+            normal_requests: build(num_normal_rows),
+            instant_requests: build(num_instant_rows),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_rejected_by_limit_interceptor() {
+        let inserter = new_inserter_with_interceptor(Some(Arc::new(RejectAllInterceptor))).await;
+        let table_id = 1;
+        let table_infos = HashMap::from_iter([(
+            table_id,
+            Arc::new(new_test_table_info(
+                table_id,
+                "test_table",
+                vec![0].into_iter(),
+            )),
+        )]);
+        let requests = new_region_insert_requests(table_id, 0, 3, 0);
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let err = inserter
+            .do_request(requests, &table_infos, &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn test_insert_limit_interceptor_receives_total_rows() {
+        let interceptor = Arc::new(RecordingInterceptor::default());
+        let inserter = new_inserter_with_interceptor(Some(interceptor.clone())).await;
+        let table_id = 1;
+        let table_infos = HashMap::from_iter([(
+            table_id,
+            Arc::new(new_test_table_info(
+                table_id,
+                "test_table",
+                vec![0].into_iter(),
+            )),
+        )]);
+        let requests = new_region_insert_requests(table_id, 0, 3, 2);
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        // The interceptor passes; the request then fails downstream because the
+        // mocked backend has no table route. Only the interception is asserted.
+        let _ = inserter.do_request(requests, &table_infos, &ctx).await;
+
+        let calls = interceptor.calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                5
+            )]
+        );
     }
 
     #[test]
