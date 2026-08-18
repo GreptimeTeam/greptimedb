@@ -119,4 +119,3 @@ Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err:
 DROP TABLE test_alter_preserve_no_append;
 
 Affected Rows: 0
-
