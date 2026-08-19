@@ -305,10 +305,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
                 SetRegionOption::PreserveRowSequence(new_preserve) => {
-                    // Toggling preserve_row_sequence only affects in-memory
-                    // RegionOptions and how future flushes/compactions mark SST
-                    // metadata; it does not require an empty memtable, so it
-                    // never blocks the fast path.
                     if new_preserve != current_options.preserve_row_sequence {
                         info!(
                             "Update region preserve_row_sequence: {}, previous: {:?} new: {:?}",
@@ -342,8 +338,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .build()
         })?;
         if all_options_altered {
-            // preserve_row_sequence toggles apply in memory and do not require
-            // an empty memtable.
             region.version_control.alter_options(candidate);
             Ok(None)
         } else {
