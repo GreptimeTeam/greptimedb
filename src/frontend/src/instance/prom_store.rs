@@ -31,7 +31,7 @@ use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
 use common_query::Output;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
@@ -53,16 +53,24 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
+use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
-    TableNotFoundSnafu,
+    AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
+    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
+
+struct RemoteQueryOutput {
+    table_name: String,
+    timestamp_column_name: String,
+    value_column_name: String,
+    output: Output,
+}
 
 fn auto_create_table_type_for_prom_remote_write(
     ctx: &QueryContextRef,
@@ -140,7 +148,12 @@ fn resolve_remote_query_target(
 }
 
 #[instrument(skip_all, fields(table_name))]
-async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
+async fn to_query_result(
+    table_name: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    output: Output,
+) -> ServerResult<QueryResult> {
     let OutputData::Stream(stream) = output.data else {
         unreachable!()
     };
@@ -148,8 +161,39 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
         .await
         .context(error::CollectRecordbatchSnafu)?;
     Ok(QueryResult {
-        timeseries: prom_store::recordbatches_to_timeseries(table_name, recordbatches)?,
+        timeseries: prom_store::recordbatches_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatches,
+        )?,
     })
+}
+
+fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+    let columns = table
+        .field_columns()
+        .map(|column| column.name)
+        .collect::<Vec<_>>();
+
+    match columns.as_slice() {
+        [] => ColumnNotFoundSnafu {
+            msg: format!("value field in table '{table_name}'"),
+        }
+        .fail(),
+
+        [only] => Ok(only.clone()),
+
+        columns if columns.iter().any(|name| name == greptime_value()) => {
+            Ok(greptime_value().to_string())
+        }
+
+        columns => AmbiguousValueColumnSnafu {
+            table_name: table_name.to_string(),
+            field_columns: columns.to_vec(),
+        }
+        .fail(),
+    }
 }
 
 impl Instance {
@@ -161,7 +205,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
-    ) -> Result<Output> {
+    ) -> Result<RemoteQueryOutput> {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name, Some(ctx))
@@ -171,6 +215,17 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
+        let timestamp_column_name = table
+            .schema()
+            .timestamp_column()
+            .with_context(|| ColumnNotFoundSnafu {
+                msg: format!("time index in table '{table_name}'"),
+            })?
+            .name
+            .clone();
+
+        let value_column_name = resolve_column_names(table_name, &table)?;
+
         let dataframe = self
             .query_engine
             .read_table(table)
@@ -178,8 +233,8 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let logical_plan =
-            prom_store::query_to_plan(dataframe, query).context(PromStoreRemoteQueryPlanSnafu)?;
+        let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
 
         debug!(
             "Prometheus remote read, table: {}, logical plan: {}",
@@ -187,10 +242,18 @@ impl Instance {
             logical_plan.display_indent(),
         );
 
-        self.query_engine
+        let output = self
+            .query_engine
             .execute(logical_plan, ctx.clone())
             .await
-            .context(ExecLogicalPlanSnafu)
+            .context(ExecLogicalPlanSnafu)?;
+
+        Ok(RemoteQueryOutput {
+            table_name: table_name.to_string(),
+            timestamp_column_name,
+            value_column_name,
+            output,
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -199,17 +262,17 @@ impl Instance {
         ctx: QueryContextRef,
         queries: &[Query],
         query_targets: &[PermissionTableTarget],
-    ) -> ServerResult<Vec<(String, Output)>> {
+    ) -> ServerResult<Vec<RemoteQueryOutput>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for (query, target) in queries.iter().zip(query_targets) {
-            let output = self
+            let result = self
                 .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
 
-            results.push((target.table.clone(), output));
+            results.push(result);
         }
         Ok(results)
     }
@@ -526,9 +589,23 @@ impl PromStoreProtocolHandler for Instance {
             ResponseType::Samples => {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
-                for (table_name, output) in results {
+                for result in results {
+                    let RemoteQueryOutput {
+                        table_name,
+                        timestamp_column_name,
+                        value_column_name,
+                        output,
+                    } = result;
                     let plan = output.meta.plan.clone();
-                    query_results.push(to_query_result(&table_name, output).await?);
+                    query_results.push(
+                        to_query_result(
+                            &table_name,
+                            &timestamp_column_name,
+                            &value_column_name,
+                            output,
+                        )
+                        .await?,
+                    );
                     if let Some(ref plan) = plan {
                         collect_plan_metrics(plan, &mut [&mut map]);
                     }
