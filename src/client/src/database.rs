@@ -1031,15 +1031,13 @@ impl Database {
                 Some((affected_rows_seen, app_metadata_bytes_ref, inline_metrics_bytes)),
                 Some(Ok(FlightMessage::AffectedRows { metrics, .. })),
             ) = (payload_timing.as_ref(), flight_message.as_ref())
+                && !affected_rows_seen.swap(true, Ordering::Relaxed)
             {
-                if !affected_rows_seen.swap(true, Ordering::Relaxed) {
-                    app_metadata_bytes_ref
-                        .store(app_metadata_bytes.unwrap_or(0), Ordering::Relaxed);
-                    inline_metrics_bytes.store(
-                        metrics.as_ref().map_or(0, |metrics| metrics.len()),
-                        Ordering::Relaxed,
-                    );
-                }
+                app_metadata_bytes_ref.store(app_metadata_bytes.unwrap_or(0), Ordering::Relaxed);
+                inline_metrics_bytes.store(
+                    metrics.as_ref().map_or(0, |metrics| metrics.len()),
+                    Ordering::Relaxed,
+                );
             }
             future::ready(flight_message)
         });
@@ -1349,6 +1347,66 @@ mod tests {
     #[test]
     fn test_parse_terminal_metrics_rejects_invalid_json() {
         assert!(parse_terminal_metrics("{not-json}").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flow_dml_timing_affected_rows_success_path() {
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            })] as Vec<Result<FlightMessage>>),
+            Some(FlowDmlFlightTiming::new(
+                "attempt-success".to_string(),
+                None,
+            )),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(output.output.data, OutputData::AffectedRows(3)));
+        assert!(output.metrics.is_ready());
+    }
+
+    #[tokio::test]
+    async fn test_flow_dml_timing_terminal_error_path() {
+        let error = IllegalFlightMessagesSnafu {
+            reason: "terminal test error",
+        }
+        .build();
+        let result = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Err(error),
+            ] as Vec<Result<FlightMessage>>),
+            Some(FlowDmlFlightTiming::new("attempt-error".to_string(), None)),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flow_dml_timing_schema_disarm_path() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![Ok(FlightMessage::Schema(
+                schema.arrow_schema().clone(),
+            ))] as Vec<Result<FlightMessage>>),
+            Some(FlowDmlFlightTiming::new("attempt-schema".to_string(), None)),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(output.output.data, OutputData::Stream(_)));
+        assert!(!output.metrics.is_ready());
     }
 
     #[tokio::test]

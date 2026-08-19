@@ -445,12 +445,12 @@ impl DatafusionQueryEngine {
                 break;
             };
             let batch = batch.context(CreateRecordBatchSnafu);
-            if let Some(timing) = dml_timing.as_mut() {
-                if batch.is_err() {
-                    timing.complete_stage("select_poll");
-                    timing.failed_stage = Some("select_poll");
-                    timing.finish("error");
-                }
+            if let Some(timing) = dml_timing.as_mut()
+                && batch.is_err()
+            {
+                timing.complete_stage("select_poll");
+                timing.failed_stage = Some("select_poll");
+                timing.finish("error");
             }
             let batch = batch?;
             if let Some(timing) = dml_timing.as_mut() {
@@ -1632,8 +1632,6 @@ mod tests {
         assert!(right_last_filter_len.load(Ordering::Relaxed) > 0);
     }
 
-    // --- DmlStageTiming accumulator accounting ---
-
     #[test]
     fn test_dml_stage_timing_accumulates_and_finishes() {
         let mut timing = DmlStageTiming::new(
@@ -1642,7 +1640,6 @@ mod tests {
             "greptime.public.out".to_string(),
         );
 
-        // two batches, then EOF
         timing.record_select_poll(Duration::from_millis(10));
         timing.record_batch(5);
         timing.record_conversion(Duration::from_millis(4));
@@ -1685,14 +1682,16 @@ mod tests {
     #[test]
     fn test_dml_stage_timing_empty_stream_reports_no_first_batch() {
         let mut timing = DmlStageTiming::new("attempt-3".to_string(), None, "t".to_string());
-        // immediate EOF
         timing.record_select_poll(Duration::from_millis(1));
+        timing.record_source_eof();
         timing.finish("ok");
 
         assert_eq!(timing.batch_count, 0);
         assert_eq!(timing.output_rows, 0);
         assert_eq!(timing.first_batch, None);
         assert_eq!(timing.select_poll_total, Duration::from_millis(1));
+        assert_eq!(timing.source_eof, Some(Duration::from_millis(1)));
+        assert_eq!(timing.last_completed_stage, "source_eof");
     }
 
     #[test]

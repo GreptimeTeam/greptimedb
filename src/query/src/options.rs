@@ -688,6 +688,55 @@ mod flow_extension_tests {
         );
     }
 
+    // --- diagnostic flow ID helper tests ---
+
+    #[test]
+    fn test_parse_diagnostic_flow_id_trims_whitespace() {
+        let exts = HashMap::from([(FLOW_ATTEMPT_ID.to_string(), "  attempt-1\t".to_string())]);
+
+        assert_eq!(
+            parse_diagnostic_flow_attempt_id(&exts),
+            Some("attempt-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_diagnostic_flow_id_empty_input() {
+        assert_eq!(parse_diagnostic_flow_attempt_id(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn test_parse_diagnostic_flow_id_enforces_64_byte_limit() {
+        let exts = HashMap::from([(FLOW_ATTEMPT_ID.to_string(), "a".repeat(64))]);
+        assert_eq!(
+            parse_diagnostic_flow_attempt_id(&exts),
+            Some("a".repeat(64))
+        );
+
+        let exts = HashMap::from([(FLOW_ATTEMPT_ID.to_string(), "a".repeat(65))]);
+        assert_eq!(parse_diagnostic_flow_attempt_id(&exts), None);
+    }
+
+    #[test]
+    fn test_parse_diagnostic_flow_id_rejects_non_ascii() {
+        let exts = HashMap::from([(FLOW_ID.to_string(), "flow-你好".to_string())]);
+
+        assert_eq!(parse_diagnostic_flow_id(&exts), None);
+    }
+
+    #[test]
+    fn test_diagnostic_flow_keys_do_not_activate_flow_correctness_parsing() {
+        let exts = HashMap::from([
+            (FLOW_ATTEMPT_ID.to_string(), "attempt-1".to_string()),
+            (FLOW_ID.to_string(), "flow-1".to_string()),
+        ]);
+
+        assert_eq!(
+            FlowQueryExtensions::parse_flow_extensions(&exts).unwrap(),
+            None
+        );
+    }
+
     // --- scheduled time helper tests ---
 
     #[test]

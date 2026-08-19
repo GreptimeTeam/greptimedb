@@ -38,7 +38,7 @@ use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
 use common_recordbatch::DfRecordBatch;
 use common_telemetry::debug;
-use common_telemetry::tracing::info_span;
+use common_telemetry::tracing::{Level, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datatypes::arrow::datatypes::SchemaRef;
 use futures::{Stream, future, ready};
@@ -603,9 +603,15 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let flow_attempt_id = parse_diagnostic_flow_attempt_id(&query_ctx.extensions());
-            let flow_id = parse_diagnostic_flow_id(&query_ctx.extensions());
-            let encode_started = Instant::now();
+            let diagnostic_enabled =
+                common_telemetry::tracing::enabled!(target: module_path!(), Level::DEBUG);
+            let flow_attempt_id = diagnostic_enabled
+                .then(|| parse_diagnostic_flow_attempt_id(&query_ctx.extensions()))
+                .flatten();
+            let flow_id = flow_attempt_id
+                .as_ref()
+                .and_then(|_| parse_diagnostic_flow_id(&query_ctx.extensions()));
+            let encode_started = flow_attempt_id.as_ref().map(|_| Instant::now());
             let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
                 output.meta.plan,
                 should_emit_terminal_metrics,
@@ -613,7 +619,9 @@ fn to_flight_data_stream(
                 Some(metrics) => match serde_json::to_string(&metrics) {
                     Ok(metrics) => Some(metrics),
                     Err(e) => {
-                        if let Some(attempt_id) = flow_attempt_id.as_ref() {
+                        if let (Some(attempt_id), Some(encode_started)) =
+                            (flow_attempt_id.as_ref(), encode_started.as_ref())
+                        {
                             debug!(
                                 attempt_id = attempt_id.as_str(),
                                 flow_id = flow_id.as_deref().unwrap_or("unknown"),
@@ -639,7 +647,9 @@ fn to_flight_data_stream(
                 metrics: terminal_metrics,
             });
             let affected_rows_app_metadata_bytes = affected_rows.first().app_metadata.len();
-            if let Some(attempt_id) = flow_attempt_id {
+            if let (Some(attempt_id), Some(encode_started)) =
+                (flow_attempt_id.as_ref(), encode_started.as_ref())
+            {
                 debug!(
                     attempt_id = attempt_id.as_str(),
                     flow_id = flow_id.as_deref().unwrap_or("unknown"),
