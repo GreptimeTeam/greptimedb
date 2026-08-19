@@ -1029,13 +1029,22 @@ mod tests {
     #[test]
     fn test_conversion_skips_descriptor_for_legacy_mode() {
         set_default_prefix(None).unwrap();
-        let request = gauge_request(vec![keyvalue("service.name", "api")], "my_gauge");
+        let request = gauge_request(
+            vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
+            "my_gauge",
+        );
         let mut ctx = OtlpMetricCtx {
             is_legacy: true,
             ..Default::default()
         };
         let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
         assert!(conversion.resource_info.is_none());
+
+        // legacy tables predate job/instance and the promote filter; adding
+        // either would alter the schema of tables already in use
+        let cols = column_names(&conversion.requests, "my_gauge");
+        assert!(!cols.contains(&"job".to_string()));
+        assert!(cols.contains(&"host_id".to_string()));
     }
 
     #[test]

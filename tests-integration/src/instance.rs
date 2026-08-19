@@ -692,10 +692,9 @@ mod tests {
         );
     }
 
-    /// The OTLP resource descriptor is derived enrichment written after the
-    /// metric data is committed. A permission policy denying its table must
-    /// not fail the request — that would make the client retry data the
-    /// server already accepted — it degrades to a partial-success warning.
+    /// Denying the descriptor's table must not fail the request: the metric
+    /// data is already committed, so the client would retry what the server
+    /// accepted.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_otlp_descriptor_permission_denial_degrades() {
         use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
