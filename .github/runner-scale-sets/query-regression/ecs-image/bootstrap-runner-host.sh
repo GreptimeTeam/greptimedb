@@ -25,6 +25,10 @@
 # runner home, and the rustup/cargo toolchain roots, symlinked back to the
 # hard-coded contract paths (/home/runner, /opt/rustup, /opt/cargo).
 #
+# The script is idempotent: re-running refreshes the toolchain in place, and
+# the runner registration (.runner/.credentials) and _work survive. A live
+# runner service is stopped first and restarted at the end.
+#
 # Usage:
 #   sudo bash bootstrap-runner-host.sh --repo-dir /path/to/greptimedb
 #   sudo RUNNER_TOKEN=<token> bash bootstrap-runner-host.sh --repo-dir . \
@@ -79,6 +83,16 @@ fi
 
 step() { printf '\n==> %s\n' "$*"; }
 
+# A re-run refreshes files under the (possibly live) runner service, so stop
+# it first and restart it at the end (unless --register re-creates it).
+RUNNER_SERVICE="$(systemctl list-units --type=service --all --no-legend 'actions.runner.*' 2>/dev/null | awk '{print $1}' | head -n 1 || true)"
+RUNNER_WAS_ACTIVE="false"
+if [[ -n "${RUNNER_SERVICE}" ]] && systemctl is-active --quiet "${RUNNER_SERVICE}"; then
+  step "Stop running runner service ${RUNNER_SERVICE}"
+  systemctl stop "${RUNNER_SERVICE}"
+  RUNNER_WAS_ACTIVE="true"
+fi
+
 step "Install docker-ce from Docker's official repository"
 for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
   apt-get remove -y "${pkg}" 2>/dev/null || true
@@ -116,12 +130,15 @@ step "Build the runner image"
 docker build --platform linux/amd64 -f "${DOCKERFILE}" -t "${IMAGE_TAG}" "${REPO_DIR}"
 
 step "Materialize the toolchain onto the host"
-mkdir -p "${DATA_ROOT}/opt" /opt /home
+mkdir -p "${DATA_ROOT}/opt" "${DATA_ROOT}/runner" /opt /home
 container="$(docker create "${IMAGE_TAG}")"
 trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
-docker cp "${container}:/home/runner" "${DATA_ROOT}/runner"
-docker cp "${container}:/opt/rustup" "${DATA_ROOT}/opt/rustup"
-docker cp "${container}:/opt/cargo" "${DATA_ROOT}/opt/cargo"
+# The `/.` suffix copies directory *contents*, so re-running over an existing
+# materialization refreshes it in place instead of nesting runner/runner.
+# Files absent from the image (runner registration, _work) are preserved.
+docker cp "${container}:/home/runner/." "${DATA_ROOT}/runner"
+docker cp "${container}:/opt/rustup/." "${DATA_ROOT}/opt/rustup"
+docker cp "${container}:/opt/cargo/." "${DATA_ROOT}/opt/cargo"
 for tool in uv uvx otelgen sccache; do
   docker cp "${container}:/usr/local/bin/${tool}" "/usr/local/bin/${tool}"
 done
@@ -146,6 +163,9 @@ chown "${RUNNER_UID}:${RUNNER_GID}" "${DATA_ROOT}/runner/.env"
 
 if [[ "${REGISTER}" == "true" ]]; then
   step "Register runner ${RUNNER_NAME} (labels: ${RUNNER_LABELS})"
+  if [[ -n "${RUNNER_SERVICE}" ]]; then
+    (cd /home/runner && ./svc.sh uninstall) || true
+  fi
   runuser -u runner -- bash -c "cd /home/runner && HOME=/home/runner ./config.sh \
     --url '${REPO_URL}' --token '${RUNNER_TOKEN}' --name '${RUNNER_NAME}' \
     --labels '${RUNNER_LABELS}' --unattended --replace --disableupdate"
@@ -157,6 +177,11 @@ if [[ "${REGISTER}" == "true" ]]; then
   ./svc.sh status
 else
   step "Skipping registration (pass --register --repo-url ... with RUNNER_TOKEN to enable)"
+  if [[ "${RUNNER_WAS_ACTIVE}" == "true" ]]; then
+    step "Restart runner service ${RUNNER_SERVICE}"
+    systemctl start "${RUNNER_SERVICE}"
+    systemctl --no-pager status "${RUNNER_SERVICE}" || true
+  fi
 fi
 
 step "Done"
