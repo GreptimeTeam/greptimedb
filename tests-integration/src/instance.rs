@@ -691,4 +691,118 @@ mod tests {
             "denied source leaked into entities:\n{pretty_print}"
         );
     }
+
+    /// The OTLP resource descriptor is derived enrichment written after the
+    /// metric data is committed. A permission policy denying its table must
+    /// not fail the request — that would make the client retry data the
+    /// server already accepted — it degrades to a partial-success warning.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_descriptor_permission_denial_degrades() {
+        use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+        use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+            Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+        };
+        use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+        use servers::query_handler::OpenTelemetryProtocolHandler;
+
+        common_telemetry::init_default_ut_logging();
+
+        /// Denies writes to the descriptor table only.
+        struct DenyResourceInfo;
+
+        impl auth::PermissionChecker for DenyResourceInfo {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if let auth::PermissionTableTargets::Resolved(targets) = targets
+                    && targets
+                        .iter()
+                        .any(|target| target.table == "otel_resource_info")
+                {
+                    return Ok(auth::PermissionResp::Reject);
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(Arc::new(DenyResourceInfo));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_descriptor_denied")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance().clone();
+
+        let attr = |key: &str, value: &str| KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.to_string())),
+            }),
+        };
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![attr("service.name", "api"), attr("host.id", "h-1")],
+                    ..Default::default()
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: "denied_descriptor_gauge".to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let outcome =
+            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
+                .await
+                .unwrap();
+        let warning = outcome.warning.expect("denial must surface as a warning");
+        assert!(
+            warning.contains("otel_resource_info"),
+            "unexpected warning: {warning}"
+        );
+
+        // the metric data is committed, the descriptor table was never created
+        let sql = "select table_name from information_schema.tables \
+                   where table_schema = 'public' order by table_name";
+        let output = query(&instance, sql).await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        assert!(
+            pretty_print.contains("denied_descriptor_gauge"),
+            "metric data was not committed:\n{pretty_print}"
+        );
+        assert!(
+            !pretty_print.contains("otel_resource_info"),
+            "denied descriptor table was created:\n{pretty_print}"
+        );
+    }
 }
