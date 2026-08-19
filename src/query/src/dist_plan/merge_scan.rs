@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,6 +89,22 @@ fn remote_schema_mismatch(message: impl Into<String>) -> DataFusionError {
 
 fn record_merge_scan_schema_error() {
     MERGE_SCAN_ERRORS_TOTAL.inc();
+
+    #[cfg(test)]
+    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    // The Prometheus counter is process-global and tests run concurrently. Keep
+    // a thread-local companion at the production increment site for stable
+    // execution-path assertions.
+    static TEST_MERGE_SCAN_SCHEMA_ERRORS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn merge_scan_schema_error_count_for_test() -> u64 {
+    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
 }
 
 /// Returns true when the field is a JSON column, identified either by its
@@ -1203,11 +1221,14 @@ impl MergeScanMetric {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap as StdHashMap};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     use arrow_schema::{DataType as TestArrowDataType, Field};
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
+    use common_recordbatch::{DfRecordBatch, RecordBatch, RecordBatchStream};
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
@@ -1217,6 +1238,11 @@ mod tests {
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
+    use datatypes::arrow::array::TimestampMillisecondArray;
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Int64Vector, StringVector};
+    use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
@@ -1228,11 +1254,51 @@ mod tests {
     use crate::dist_plan::{DynFilterRegistryManager, Subscriber};
     use crate::region_query::RegionQueryHandler;
 
+    fn int64_schema(columns: &[&str]) -> Arc<Schema> {
+        Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|name| ColumnSchema::new(*name, ConcreteDataType::int64_datatype(), false))
+                .collect(),
+        ))
+    }
+
+    fn record_batch(schema: Arc<Schema>, columns: Vec<VectorRef>) -> RecordBatch {
+        RecordBatch::new(schema, columns).expect("test record batch must match its schema")
+    }
+
     fn expected_int64_schema() -> ArrowSchema {
-        ArrowSchema::new(vec![
-            Field::new("a", TestArrowDataType::Int64, false),
-            Field::new("b", TestArrowDataType::Int64, false),
-        ])
+        int64_schema(&["a", "b"]).arrow_schema().as_ref().clone()
+    }
+
+    fn merge_scan_exec_with_handler(
+        regions: Vec<RegionId>,
+        expected_schema: ArrowSchema,
+        handler: Arc<TestRegionQueryHandler>,
+    ) -> MergeScanExec {
+        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
+        MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &expected_schema,
+            handler,
+            QueryContext::arc(),
+            1,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    async fn collect_merge_scan(
+        exec: MergeScanExec,
+    ) -> datafusion_common::Result<Vec<DfRecordBatch>> {
+        exec.execute(0, Arc::new(TaskContext::default()))?
+            .try_collect()
+            .await
     }
 
     fn json_field_metadata(wire_form: bool, settings: &str) -> StdHashMap<String, String> {
@@ -1332,6 +1398,380 @@ mod tests {
         assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
     }
 
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_reordered_advertised_columns_before_repair() {
+        let region_id = RegionId::new(1024, 1);
+        let schema = int64_schema(&["b", "a"]);
+        let batch = record_batch(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([2])) as _,
+                Arc::new(Int64Vector::from_slice([1])) as _,
+            ],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            schema,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_missing_and_extra_advertised_columns() {
+        for columns in [["a"].as_slice(), ["a", "b", "extra"].as_slice()] {
+            let region_id = RegionId::new(1024, columns.len() as u32);
+            let schema = int64_schema(columns);
+            let vectors = columns
+                .iter()
+                .map(|_| Arc::new(Int64Vector::from_slice([1])) as VectorRef)
+                .collect();
+            let batch = record_batch(schema.clone(), vectors);
+            let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                schema,
+                vec![batch],
+            )]));
+            let before = merge_scan_schema_error_count_for_test();
+            assert!(
+                collect_merge_scan(merge_scan_exec_with_handler(
+                    vec![region_id],
+                    expected_int64_schema(),
+                    handler,
+                ))
+                .await
+                .is_err()
+            );
+            assert_eq!(merge_scan_schema_error_count_for_test(), before + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_advertised_schema_and_records_metric() {
+        let region_id = RegionId::new(1024, 10);
+        let advertised = int64_schema(&["a", "b", "extra"]);
+        let batch = record_batch(
+            advertised.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([1])) as _,
+                Arc::new(Int64Vector::from_slice([2])) as _,
+                Arc::new(Int64Vector::from_slice([3])) as _,
+            ],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        let before = merge_scan_schema_error_count_for_test();
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(merge_scan_schema_error_count_for_test(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_advertised_schema_inner_batch_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let advertised = int64_schema(&["a", "b"]);
+        let inner = record_batch(
+            int64_schema(&["b", "a"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([2])) as _,
+                Arc::new(Int64Vector::from_slice([1])) as _,
+            ],
+        )
+        .into_df_record_batch();
+        let batch = RecordBatch::from_df_record_batch(advertised.clone(), inner);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        let before = merge_scan_schema_error_count_for_test();
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(merge_scan_schema_error_count_for_test(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_non_timezone_type_mismatch() {
+        let region_id = RegionId::new(1024, 11);
+        let expected = ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Int64, false)]);
+        let advertised = Arc::new(
+            Schema::try_from(ArrowSchema::new(vec![Field::new(
+                "value",
+                TestArrowDataType::Utf8,
+                false,
+            )]))
+            .unwrap(),
+        );
+        let batch = record_batch(
+            advertised.clone(),
+            vec![Arc::new(StringVector::from_slice(&["wrong"])) as _],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected,
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_nullability_mismatch() {
+        let region_id = RegionId::new(1024, 12);
+        let expected = ArrowSchema::new(vec![Field::new("value", TestArrowDataType::Int64, false)]);
+        let advertised = Arc::new(
+            Schema::try_from(ArrowSchema::new(vec![Field::new(
+                "value",
+                TestArrowDataType::Int64,
+                true,
+            )]))
+            .unwrap(),
+        );
+        let batch = record_batch(
+            advertised.clone(),
+            vec![Arc::new(Int64Vector::from_slice([1])) as _],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected,
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_accepts_timezone_difference_and_repairs_output_schema() {
+        let region_id = RegionId::new(1024, 13);
+        let expected = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(
+                arrow_schema::TimeUnit::Millisecond,
+                Some("Asia/Shanghai".into()),
+            ),
+            false,
+        )]));
+        let advertised = Arc::new(
+            Schema::try_from(Arc::new(ArrowSchema::new(vec![Field::new(
+                "ts",
+                TestArrowDataType::Timestamp(
+                    arrow_schema::TimeUnit::Millisecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            )])))
+            .unwrap(),
+        );
+        let inner_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            TestArrowDataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let inner = DfRecordBatch::try_new(
+            inner_schema,
+            vec![Arc::new(TimestampMillisecondArray::from_iter_values([1])) as _],
+        )
+        .unwrap();
+        let batch = RecordBatch::from_df_record_batch(advertised.clone(), inner);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        let output = collect_merge_scan(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected.as_ref().clone(),
+            handler,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].schema_ref().as_ref(), expected.as_ref());
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_rejects_hidden_extra_inner_column() {
+        let region_id = RegionId::new(1024, 1);
+        let advertised = int64_schema(&["a", "b"]);
+        let inner = record_batch(
+            int64_schema(&["a", "b", "extra"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([1])) as _,
+                Arc::new(Int64Vector::from_slice([2])) as _,
+                Arc::new(Int64Vector::from_slice([3])) as _,
+            ],
+        )
+        .into_df_record_batch();
+        let batch = RecordBatch::from_df_record_batch(advertised.clone(), inner);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_accepts_structurally_equal_distinct_schema_arcs() {
+        let region_id = RegionId::new(1024, 1);
+        let advertised = int64_schema(&["a", "b"]);
+        let distinct = Arc::new(
+            Schema::try_from(Arc::new(advertised.arrow_schema().as_ref().clone())).unwrap(),
+        );
+        assert_eq!(
+            advertised.arrow_schema().as_ref(),
+            distinct.arrow_schema().as_ref()
+        );
+        assert!(!Arc::ptr_eq(&advertised, &distinct));
+        let batch = record_batch(
+            distinct,
+            vec![
+                Arc::new(Int64Vector::from_slice([1])) as _,
+                Arc::new(Int64Vector::from_slice([2])) as _,
+            ],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            advertised,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_ignores_skipping_and_inverted_index_metadata() {
+        let region_id = RegionId::new(1024, 1);
+        let fields = vec![
+            Field::new("a", TestArrowDataType::Int64, false).with_metadata(StdHashMap::from([
+                (
+                    datatypes::schema::SKIPPING_INDEX_KEY.to_string(),
+                    "bloom".to_string(),
+                ),
+                (
+                    datatypes::schema::INVERTED_INDEX_KEY.to_string(),
+                    "true".to_string(),
+                ),
+            ])),
+            Field::new("b", TestArrowDataType::Int64, false),
+        ];
+        let schema = Arc::new(Schema::try_from(Arc::new(ArrowSchema::new(fields))).unwrap());
+        let batch = record_batch(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([1])) as _,
+                Arc::new(Int64Vector::from_slice([2])) as _,
+            ],
+        );
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            schema,
+            vec![batch],
+        )]));
+        assert!(
+            collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected_int64_schema(),
+                handler,
+            ))
+            .await
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn merge_scan_schema_validation_rejects_nullability_and_type_differences_but_accepts_timezone_only_difference()
+     {
+        let expected = ArrowSchema::new(vec![
+            Field::new("value", TestArrowDataType::Int64, false),
+            Field::new(
+                "ts",
+                TestArrowDataType::Timestamp(
+                    arrow_schema::TimeUnit::Millisecond,
+                    Some("UTC".into()),
+                ),
+                false,
+            ),
+        ]);
+        let nullable = ArrowSchema::new(vec![
+            Field::new("value", TestArrowDataType::Int64, true),
+            expected.field(1).as_ref().clone(),
+        ]);
+        let wrong_type = ArrowSchema::new(vec![
+            Field::new("value", TestArrowDataType::Utf8, false),
+            expected.field(1).as_ref().clone(),
+        ]);
+        assert!(validate_remote_schema(&expected, &nullable, "test").is_err());
+        assert!(validate_remote_schema(&expected, &wrong_type, "test").is_err());
+
+        let timezone = ArrowSchema::new(vec![
+            expected.field(0).as_ref().clone(),
+            Field::new(
+                "ts",
+                TestArrowDataType::Timestamp(
+                    arrow_schema::TimeUnit::Millisecond,
+                    Some("Asia/Shanghai".into()),
+                ),
+                false,
+            ),
+        ]);
+        assert!(validate_remote_schema(&expected, &timezone, "test").is_ok());
+    }
+
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
     }
@@ -1361,7 +1801,7 @@ mod tests {
             regions,
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             target_partition,
             AliasMapping::new(),
@@ -1504,16 +1944,87 @@ mod tests {
         assert_eq!(registry_manager.registry_count(), 0);
     }
 
-    struct TestRegionQueryHandler;
+    #[derive(Clone)]
+    struct TestRegionResponse {
+        advertised_schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+    }
+
+    #[derive(Default)]
+    struct TestRegionQueryHandler {
+        responses: StdHashMap<RegionId, TestRegionResponse>,
+    }
+
+    impl TestRegionQueryHandler {
+        fn with_responses(
+            responses: impl IntoIterator<Item = (RegionId, Arc<Schema>, Vec<RecordBatch>)>,
+        ) -> Self {
+            Self {
+                responses: responses
+                    .into_iter()
+                    .map(|(region_id, advertised_schema, batches)| {
+                        (
+                            region_id,
+                            TestRegionResponse {
+                                advertised_schema,
+                                batches,
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    struct TestRecordBatchStream {
+        schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+        index: usize,
+    }
+
+    impl Stream for TestRecordBatchStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(batch) = self.batches.get(self.index).cloned() {
+                self.index += 1;
+                Poll::Ready(Some(Ok(batch)))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    impl RecordBatchStream for TestRecordBatchStream {
+        fn schema(&self) -> Arc<Schema> {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
+        }
+    }
 
     #[async_trait]
     impl RegionQueryHandler for TestRegionQueryHandler {
         async fn do_get(
             &self,
             _read_preference: ReadPreference,
-            _request: common_query::request::QueryRequest,
+            request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
-            unimplemented!("test only")
+            let response = self
+                .responses
+                .get(&request.region_id)
+                .expect("test handler needs a response for every requested region");
+            Ok(Box::pin(TestRecordBatchStream {
+                schema: response.advertised_schema.clone(),
+                batches: response.batches.clone(),
+                index: 0,
+            }))
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -1560,7 +2071,7 @@ mod tests {
 
         let session_state = SessionStateBuilder::new().build();
 
-        let handler = Arc::new(TestRegionQueryHandler);
+        let handler = Arc::new(TestRegionQueryHandler::default());
         let target_partition = 2;
 
         let exec = MergeScanExec::new(
@@ -1616,7 +2127,7 @@ mod tests {
         let regions = vec![RegionId::new(1024, 1)];
         let query_ctx = QueryContext::arc();
         let session_state = SessionStateBuilder::new().build();
-        let handler = Arc::new(TestRegionQueryHandler);
+        let handler = Arc::new(TestRegionQueryHandler::default());
         let exec = MergeScanExec::new(
             &session_state,
             table,
@@ -1729,7 +2240,7 @@ mod tests {
             vec![region_id],
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
             AliasMapping::new(),
@@ -1798,7 +2309,7 @@ mod tests {
             vec![logical_region_id],
             plan,
             &schema,
-            Arc::new(TestRegionQueryHandler),
+            Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
             AliasMapping::new(),
