@@ -34,7 +34,6 @@ use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
-use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
@@ -93,11 +92,6 @@ pub fn is_database_selection_label(label: &str) -> bool {
 /// Check if given label is a physical table selection label
 pub fn is_physical_table_selection_label(label: &str) -> bool {
     label == PHYSICAL_TABLE_LABEL || label == PHYSICAL_TABLE_LABEL_ALT
-}
-
-/// Metrics for push gateway protocol
-pub struct Metrics {
-    pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
 }
 
 /// Get table name from remote query
