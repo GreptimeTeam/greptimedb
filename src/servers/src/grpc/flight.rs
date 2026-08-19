@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
@@ -44,7 +45,9 @@ use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
 use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
-use query::options::FlowQueryExtensions;
+use query::options::{
+    FlowQueryExtensions, parse_diagnostic_flow_attempt_id, parse_diagnostic_flow_id,
+};
 use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, ResultExt, ensure};
 use table::table_name::TableName;
@@ -600,6 +603,9 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
+            let flow_attempt_id = parse_diagnostic_flow_attempt_id(&query_ctx.extensions());
+            let flow_id = parse_diagnostic_flow_id(&query_ctx.extensions());
+            let encode_started = Instant::now();
             let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
                 output.meta.plan,
                 should_emit_terminal_metrics,
@@ -607,6 +613,16 @@ fn to_flight_data_stream(
                 Some(metrics) => match serde_json::to_string(&metrics) {
                     Ok(metrics) => Some(metrics),
                     Err(e) => {
+                        if let Some(attempt_id) = flow_attempt_id.as_ref() {
+                            debug!(
+                                attempt_id = attempt_id.as_str(),
+                                flow_id = flow_id.as_deref().unwrap_or("unknown"),
+                                elapsed_ms = encode_started.elapsed().as_millis() as u64,
+                                last_completed_stage = "dml_affected_rows",
+                                outcome = "error",
+                                "Flow DML Flight server summary",
+                            );
+                        }
                         let stream = tokio_stream::once(Err(Status::internal(format!(
                             "Failed to serialize terminal metrics: {e}"
                         ))));
@@ -615,10 +631,28 @@ fn to_flight_data_stream(
                 },
                 None => None,
             };
+            let inline_terminal_metrics_present = terminal_metrics.is_some();
+            let inline_terminal_metrics_json_bytes =
+                terminal_metrics.as_ref().map_or(0, |metrics| metrics.len());
             let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
                 rows,
                 metrics: terminal_metrics,
             });
+            let affected_rows_app_metadata_bytes = affected_rows.first().app_metadata.len();
+            if let Some(attempt_id) = flow_attempt_id {
+                debug!(
+                    attempt_id = attempt_id.as_str(),
+                    flow_id = flow_id.as_deref().unwrap_or("unknown"),
+                    affected_rows = rows,
+                    inline_terminal_metrics_present,
+                    inline_terminal_metrics_json_bytes,
+                    affected_rows_app_metadata_bytes,
+                    elapsed_ms = encode_started.elapsed().as_millis() as u64,
+                    last_completed_stage = "flight_affected_rows_encoded",
+                    outcome = "ok",
+                    "Flow DML Flight server summary",
+                );
+            }
             let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
             Box::pin(stream) as _
         }

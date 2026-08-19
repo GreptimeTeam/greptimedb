@@ -32,6 +32,18 @@ pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
 /// execution read this extension so `now()` is stable for the whole attempt.
 pub const FLOW_SCHEDULED_TIME_MILLIS: &str = "flow.scheduled_time_millis";
+/// Diagnostic-only flow attempt ID extension propagated by flownode for one
+/// batching `INSERT INTO ... SELECT` attempt. It correlates timing logs across
+/// flownode -> frontend query context -> DataFusion DML -> operator insert.
+/// It never participates in correctness parsing and invalid values never
+/// reject a request.
+pub const FLOW_ATTEMPT_ID: &str = "flow.attempt_id";
+/// Diagnostic-only flow ID extension propagated by flownode alongside
+/// [`FLOW_ATTEMPT_ID`].
+pub const FLOW_ID: &str = "flow.id";
+/// Maximum accepted length (in chars) of a diagnostic flow ID/attempt ID.
+/// Longer or non-ASCII values are treated as absent.
+pub const MAX_DIAGNOSTIC_FLOW_ID_LEN: usize = 64;
 /// Enable by default, set to false to explicitly disable.
 pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
@@ -334,6 +346,37 @@ pub fn parse_scheduled_time_datetime(
 pub fn scheduled_time_from_ctx(query_ctx: &QueryContextRef) -> Option<DateTime<Utc>> {
     let extensions = query_ctx.extensions();
     parse_scheduled_time_datetime(&extensions).ok().flatten()
+}
+
+/// Parses the diagnostic-only `flow.attempt_id` extension.
+///
+/// Returns `Some` only when the value is present, non-empty, ASCII-only and no
+/// longer than [`MAX_DIAGNOSTIC_FLOW_ID_LEN`]. Missing, malformed or
+/// out-of-bound values return `None` and never reject the request. This is a
+/// diagnostics-only key: it is intentionally excluded from
+/// [`FlowQueryExtensions::parse_flow_extensions`] correctness parsing, so a
+/// request carrying only `flow.attempt_id`/`flow.id` still parses as a
+/// non-flow query.
+pub fn parse_diagnostic_flow_attempt_id(extensions: &HashMap<String, String>) -> Option<String> {
+    parse_diagnostic_flow_id_value(extensions, FLOW_ATTEMPT_ID)
+}
+
+/// Parses the diagnostic-only `flow.id` extension with the same bounded-ASCII
+/// rules as [`parse_diagnostic_flow_attempt_id`].
+pub fn parse_diagnostic_flow_id(extensions: &HashMap<String, String>) -> Option<String> {
+    parse_diagnostic_flow_id_value(extensions, FLOW_ID)
+}
+
+fn parse_diagnostic_flow_id_value(
+    extensions: &HashMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    let value = extensions.get(key)?;
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_DIAGNOSTIC_FLOW_ID_LEN || !value.is_ascii() {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 /// Carries the scheduled logical "now" through [`ConfigOptions::extensions`] so

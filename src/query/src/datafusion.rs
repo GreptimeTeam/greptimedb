@@ -21,6 +21,7 @@ mod planner;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_base::Plugins;
@@ -50,6 +51,7 @@ use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
 use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
+use tokio::time::Instant;
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -67,7 +69,9 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
-use crate::options::ScheduledTimeExtension;
+use crate::options::{
+    ScheduledTimeExtension, parse_diagnostic_flow_attempt_id, parse_diagnostic_flow_id,
+};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -138,6 +142,165 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     counters
 }
 
+/// Terminal timing accumulator for one flow `INSERT INTO ... SELECT` DML
+/// statement executed by [`DatafusionQueryEngine`].
+///
+/// Only instantiated when a valid `flow.attempt_id` extension is present;
+/// otherwise the ordinary DML path is untouched. Every field defaults to zero
+/// and exactly one terminal summary is emitted (via [`Self::finish`] on
+/// success or [`Drop`] on cancellation), so returned stream, conversion and
+/// insert failures are reported exactly once.
+struct DmlStageTiming {
+    attempt_id: String,
+    flow_id: Option<String>,
+    table: String,
+    started: Instant,
+    last_completed_stage: &'static str,
+    active_stage: Option<&'static str>,
+    select_poll_total: Duration,
+    select_poll_max: Duration,
+    /// Duration of the `stream.next()` poll that produced the first batch.
+    first_batch: Option<Duration>,
+    /// Duration of the final `stream.next()` poll that observed source EOF.
+    source_eof: Option<Duration>,
+    last_poll: Duration,
+    batch_convert_total: Duration,
+    sink_insert_total: Duration,
+    sink_insert_max: Duration,
+    batch_count: usize,
+    output_rows: usize,
+    max_batch_rows: usize,
+    affected_rows: usize,
+    /// Stage that failed, when the terminal summary reports an error outcome.
+    failed_stage: Option<&'static str>,
+    finished: bool,
+}
+
+impl DmlStageTiming {
+    fn new(attempt_id: String, flow_id: Option<String>, table: String) -> Self {
+        Self {
+            attempt_id,
+            flow_id,
+            table,
+            started: Instant::now(),
+            last_completed_stage: "dml_started",
+            active_stage: None,
+            select_poll_total: Duration::ZERO,
+            select_poll_max: Duration::ZERO,
+            first_batch: None,
+            source_eof: None,
+            last_poll: Duration::ZERO,
+            batch_convert_total: Duration::ZERO,
+            sink_insert_total: Duration::ZERO,
+            sink_insert_max: Duration::ZERO,
+            batch_count: 0,
+            output_rows: 0,
+            max_batch_rows: 0,
+            affected_rows: 0,
+            failed_stage: None,
+            finished: false,
+        }
+    }
+
+    fn set_active_stage(&mut self, stage: &'static str) {
+        self.active_stage = Some(stage);
+    }
+
+    fn complete_stage(&mut self, stage: &'static str) {
+        self.last_completed_stage = stage;
+        self.active_stage = None;
+    }
+
+    /// Records one `stream.next()` await, including the final `None` (EOF)
+    /// poll.
+    fn record_select_poll(&mut self, elapsed: Duration) {
+        self.select_poll_total += elapsed;
+        self.select_poll_max = self.select_poll_max.max(elapsed);
+        self.last_poll = elapsed;
+    }
+
+    /// Records the final source EOF poll.
+    fn record_source_eof(&mut self) {
+        self.source_eof = Some(self.last_poll);
+        self.complete_stage("source_eof");
+    }
+
+    /// Records one successfully decoded batch.
+    fn record_batch(&mut self, rows: usize) {
+        if self.first_batch.is_none() {
+            self.first_batch = Some(self.last_poll);
+            self.complete_stage("source_first_batch");
+        }
+        self.batch_count += 1;
+        self.output_rows += rows;
+        self.max_batch_rows = self.max_batch_rows.max(rows);
+    }
+
+    /// Records the column-vector conversion time of one batch.
+    fn record_conversion(&mut self, elapsed: Duration) {
+        self.batch_convert_total += elapsed;
+        self.complete_stage("batch_convert");
+    }
+
+    /// Records the exact await time of one `self.insert` call.
+    fn record_sink_insert(&mut self, elapsed: Duration) {
+        self.sink_insert_total += elapsed;
+        self.sink_insert_max = self.sink_insert_max.max(elapsed);
+        self.complete_stage("sink_insert");
+    }
+
+    fn record_affected_rows(&mut self, rows: usize) {
+        self.affected_rows += rows;
+        self.complete_stage("dml_affected_rows");
+    }
+
+    /// Marks the attempt finished and emits the single terminal summary.
+    /// Idempotent; the [`Drop`] path then stays silent.
+    fn finish(&mut self, outcome: &str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.emit(outcome);
+    }
+
+    fn emit(&self, outcome: &str) {
+        let flow_id = self.flow_id.as_deref().unwrap_or("unknown");
+        common_telemetry::debug!(
+            attempt_id = self.attempt_id.as_str(),
+            flow_id = flow_id,
+            table = self.table.as_str(),
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            last_completed_stage = self.last_completed_stage,
+            active_stage = ?self.active_stage,
+            select_poll_total_ms = self.select_poll_total.as_millis() as u64,
+            select_poll_max_ms = self.select_poll_max.as_millis() as u64,
+            source_first_batch_ms = self.first_batch.map(|d| d.as_millis() as u64),
+            source_eof_ms = self.source_eof.map(|d| d.as_millis() as u64),
+            batch_convert_total_ms = self.batch_convert_total.as_millis() as u64,
+            sink_insert_total_ms = self.sink_insert_total.as_millis() as u64,
+            sink_insert_max_ms = self.sink_insert_max.as_millis() as u64,
+            batch_count = self.batch_count,
+            output_rows = self.output_rows,
+            max_batch_rows = self.max_batch_rows,
+            affected_rows = self.affected_rows,
+            failed_stage = ?self.failed_stage,
+            outcome = outcome,
+            "Flow DML stage timing",
+        );
+    }
+}
+
+impl Drop for DmlStageTiming {
+    fn drop(&mut self) {
+        // An unfinished future was cancelled or dropped. Returned errors call
+        // `finish("error")` at their failure site instead.
+        if !self.finished {
+            self.emit("dropped");
+        }
+    }
+}
+
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
     plugins: Plugins,
@@ -200,11 +363,63 @@ impl DatafusionQueryEngine {
         let default_catalog = &query_ctx.current_catalog().to_owned();
         let default_schema = &query_ctx.current_schema();
         let table_name = dml.table_name.resolve(default_catalog, default_schema);
-        let table = self.find_table(&table_name, &query_ctx).await?;
 
-        let Output { data, meta } = self
+        // Diagnostic-only flow attempt correlation. Missing/invalid IDs and
+        // disabled DEBUG logging leave the ordinary DML path untouched.
+        let mut dml_timing = if tracing::enabled!(target: module_path!(), tracing::Level::DEBUG) {
+            parse_diagnostic_flow_attempt_id(&query_ctx.extensions()).map(|attempt_id| {
+                DmlStageTiming::new(
+                    attempt_id,
+                    parse_diagnostic_flow_id(&query_ctx.extensions()),
+                    table_name.to_string(),
+                )
+            })
+        } else {
+            None
+        };
+
+        if let Some(timing) = dml_timing.as_mut() {
+            timing.set_active_stage("table_lookup");
+        }
+        let table = match self.find_table(&table_name, &query_ctx).await {
+            Ok(table) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.complete_stage("table_lookup");
+                }
+                table
+            }
+            Err(e) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.complete_stage("table_lookup");
+                    timing.failed_stage = Some("table_lookup");
+                    timing.finish("error");
+                }
+                return Err(e);
+            }
+        };
+
+        if let Some(timing) = dml_timing.as_mut() {
+            timing.set_active_stage("source_plan");
+        }
+        let Output { data, meta } = match self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
-            .await?;
+            .await
+        {
+            Ok(output) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.complete_stage("source_plan");
+                }
+                output
+            }
+            Err(e) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.complete_stage("source_plan");
+                    timing.failed_stage = Some("source_plan");
+                    timing.finish("error");
+                }
+                return Err(e);
+            }
+        };
         let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
@@ -214,30 +429,100 @@ impl DatafusionQueryEngine {
         let mut affected_rows = 0;
         let mut insert_cost = 0;
 
-        while let Some(batch) = stream.next().await {
-            let batch = batch.context(CreateRecordBatchSnafu)?;
+        loop {
+            let poll_started = dml_timing.as_mut().map(|timing| {
+                timing.set_active_stage("select_poll");
+                Instant::now()
+            });
+            let polled = stream.next().await;
+            if let (Some(timing), Some(poll_started)) = (dml_timing.as_mut(), poll_started) {
+                timing.record_select_poll(poll_started.elapsed());
+            }
+            let Some(batch) = polled else {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.record_source_eof();
+                }
+                break;
+            };
+            let batch = batch.context(CreateRecordBatchSnafu);
+            if let Some(timing) = dml_timing.as_mut() {
+                if batch.is_err() {
+                    timing.complete_stage("select_poll");
+                    timing.failed_stage = Some("select_poll");
+                    timing.finish("error");
+                }
+            }
+            let batch = batch?;
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.record_batch(batch.num_rows());
+            }
+
+            let converted_started = dml_timing.as_ref().map(|_| Instant::now());
             let column_vectors = batch
                 .column_vectors(&table_name.to_string(), table.schema())
                 .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?;
+                .context(QueryExecutionSnafu);
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.record_conversion(converted_started.unwrap().elapsed());
+                if column_vectors.is_err() {
+                    timing.failed_stage = Some("batch_convert");
+                    timing.finish("error");
+                }
+            }
+            let column_vectors = column_vectors?;
 
             match dml.op {
                 WriteOp::Insert(_) => {
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.set_active_stage("sink_insert");
+                    }
+                    let insert_started = dml_timing.as_ref().map(|_| Instant::now());
                     // We ignore the insert op.
                     let output = self
                         .insert(&table_name, column_vectors, query_ctx.clone())
-                        .await?;
+                        .await;
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.record_sink_insert(insert_started.unwrap().elapsed());
+                        if output.is_err() {
+                            timing.failed_stage = Some("sink_insert");
+                            timing.finish("error");
+                        }
+                    }
+                    let output = output?;
                     let (rows, cost) = output.extract_rows_and_cost();
                     affected_rows += rows;
                     insert_cost += cost;
                 }
                 WriteOp::Delete => {
-                    affected_rows += self
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.set_active_stage("sink_delete");
+                    }
+                    let deleted = self
                         .delete(&table_name, &table, column_vectors, query_ctx.clone())
-                        .await?;
+                        .await;
+                    match deleted {
+                        Ok(rows) => {
+                            if let Some(timing) = dml_timing.as_mut() {
+                                timing.complete_stage("sink_delete");
+                            }
+                            affected_rows += rows;
+                        }
+                        Err(e) => {
+                            if let Some(timing) = dml_timing.as_mut() {
+                                timing.complete_stage("sink_delete");
+                                timing.failed_stage = Some("sink_delete");
+                                timing.finish("error");
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
             }
+        }
+        if let Some(timing) = dml_timing.as_mut() {
+            timing.record_affected_rows(affected_rows);
+            timing.finish("ok");
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
@@ -733,6 +1018,7 @@ mod tests {
     use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use api::v1::SemanticType;
     use arrow::array::{ArrayRef, UInt64Array};
@@ -1344,5 +1630,85 @@ mod tests {
         assert_eq!(0, left_last_filter_len.load(Ordering::Relaxed));
         assert!(right_update_calls.load(Ordering::Relaxed) > 0);
         assert!(right_last_filter_len.load(Ordering::Relaxed) > 0);
+    }
+
+    // --- DmlStageTiming accumulator accounting ---
+
+    #[test]
+    fn test_dml_stage_timing_accumulates_and_finishes() {
+        let mut timing = DmlStageTiming::new(
+            "42-1700000000000-0123456789abcdef".to_string(),
+            Some("7".to_string()),
+            "greptime.public.out".to_string(),
+        );
+
+        // two batches, then EOF
+        timing.record_select_poll(Duration::from_millis(10));
+        timing.record_batch(5);
+        timing.record_conversion(Duration::from_millis(4));
+        timing.record_sink_insert(Duration::from_millis(40));
+
+        timing.record_select_poll(Duration::from_millis(20));
+        timing.record_batch(3);
+        timing.record_conversion(Duration::from_millis(6));
+        timing.record_sink_insert(Duration::from_millis(60));
+
+        // EOF poll is included in select_poll totals
+        timing.record_select_poll(Duration::from_millis(30));
+        timing.record_source_eof();
+
+        timing.record_affected_rows(8);
+        timing.finish("ok");
+
+        assert_eq!(timing.select_poll_total, Duration::from_millis(60));
+        assert_eq!(timing.select_poll_max, Duration::from_millis(30));
+        assert_eq!(timing.first_batch, Some(Duration::from_millis(10)));
+        assert_eq!(timing.source_eof, Some(Duration::from_millis(30)));
+        assert_eq!(timing.batch_convert_total, Duration::from_millis(10));
+        assert_eq!(timing.sink_insert_total, Duration::from_millis(100));
+        assert_eq!(timing.sink_insert_max, Duration::from_millis(60));
+        assert_eq!(timing.batch_count, 2);
+        assert_eq!(timing.output_rows, 8);
+        assert_eq!(timing.max_batch_rows, 5);
+        assert_eq!(timing.affected_rows, 8);
+        assert!(timing.finished);
+    }
+
+    #[test]
+    fn test_dml_stage_timing_finish_is_idempotent() {
+        let mut timing = DmlStageTiming::new("attempt-2".to_string(), None, "t".to_string());
+        timing.finish("ok");
+        timing.finish("ok");
+        assert!(timing.finished);
+    }
+
+    #[test]
+    fn test_dml_stage_timing_empty_stream_reports_no_first_batch() {
+        let mut timing = DmlStageTiming::new("attempt-3".to_string(), None, "t".to_string());
+        // immediate EOF
+        timing.record_select_poll(Duration::from_millis(1));
+        timing.finish("ok");
+
+        assert_eq!(timing.batch_count, 0);
+        assert_eq!(timing.output_rows, 0);
+        assert_eq!(timing.first_batch, None);
+        assert_eq!(timing.select_poll_total, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn test_dml_stage_timing_drop_reports_dropped_with_active_stage() {
+        // An unfinished accumulator represents cancellation/drop, not a
+        // returned error. Keep the active await stage for its Drop summary.
+        let mut timing = DmlStageTiming::new("attempt-4".to_string(), None, "t".to_string());
+        timing.record_select_poll(Duration::from_millis(5));
+        timing.record_batch(1);
+        timing.set_active_stage("sink_insert");
+        assert_eq!(timing.active_stage, Some("sink_insert"));
+        assert_eq!(timing.last_completed_stage, "source_first_batch");
+        drop(timing);
+
+        let mut timing = DmlStageTiming::new("attempt-5".to_string(), None, "t".to_string());
+        timing.finish("ok");
+        drop(timing);
     }
 }

@@ -14,9 +14,10 @@
 
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -43,13 +44,15 @@ use common_query::Output;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatchStreamWrapper};
-use common_telemetry::tracing::Span;
+use common_telemetry::tracing::{Level, Span};
 use common_telemetry::tracing_context::W3cTrace;
-use common_telemetry::{error, warn};
+use common_telemetry::{debug, error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
+use query::options::{parse_diagnostic_flow_attempt_id, parse_diagnostic_flow_id};
 use snafu::ResultExt;
+use tokio::time::Instant;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -256,41 +259,198 @@ fn attach_terminal_metrics(output: Output, terminal_metrics: &OutputMetrics) -> 
     Output::new(data, meta)
 }
 
+/// Terminal diagnostic accumulator for a Flow DML Flight response.
+///
+/// It remains inactive for the streamed query path: a Schema first message
+/// disarms it before that stream is returned to its caller.
+struct FlowDmlFlightTiming {
+    attempt_id: String,
+    flow_id: Option<String>,
+    started: Instant,
+    rpc_response_wait: Option<Duration>,
+    affected_rows_wait: Option<Duration>,
+    terminal_wait: Option<Duration>,
+    affected_rows_app_metadata_bytes: Arc<AtomicUsize>,
+    inline_metrics_bytes: Arc<AtomicUsize>,
+    last_completed_stage: &'static str,
+    active_stage: Option<&'static str>,
+    finished: bool,
+}
+
+impl FlowDmlFlightTiming {
+    fn new(attempt_id: String, flow_id: Option<String>) -> Self {
+        Self {
+            attempt_id,
+            flow_id,
+            started: Instant::now(),
+            rpc_response_wait: None,
+            affected_rows_wait: None,
+            terminal_wait: None,
+            affected_rows_app_metadata_bytes: Arc::new(AtomicUsize::new(0)),
+            inline_metrics_bytes: Arc::new(AtomicUsize::new(0)),
+            last_completed_stage: "request_sent",
+            active_stage: None,
+            finished: false,
+        }
+    }
+
+    fn set_active_stage(&mut self, stage: &'static str) {
+        self.active_stage = Some(stage);
+    }
+
+    fn complete_stage(&mut self, stage: &'static str) {
+        self.last_completed_stage = stage;
+        self.active_stage = None;
+    }
+
+    fn record_rpc_response(&mut self, elapsed: Duration) {
+        self.rpc_response_wait = Some(elapsed);
+        self.complete_stage("flight_rpc_response");
+    }
+
+    fn record_affected_rows(&mut self, elapsed: Duration) {
+        self.affected_rows_wait = Some(elapsed);
+        self.complete_stage("affected_rows");
+    }
+
+    fn record_terminal(&mut self, elapsed: Duration) {
+        self.terminal_wait = Some(elapsed);
+        self.complete_stage("terminal_eof");
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        debug!(
+            attempt_id = self.attempt_id.as_str(),
+            flow_id = self.flow_id.as_deref().unwrap_or("unknown"),
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            flight_rpc_response_wait_ms = self.rpc_response_wait.map(|d| d.as_millis() as u64),
+            affected_rows_wait_ms = self.affected_rows_wait.map(|d| d.as_millis() as u64),
+            terminal_eof_wait_ms = self.terminal_wait.map(|d| d.as_millis() as u64),
+            affected_rows_app_metadata_bytes = self
+                .affected_rows_app_metadata_bytes
+                .load(Ordering::Relaxed),
+            inline_metrics_bytes = self.inline_metrics_bytes.load(Ordering::Relaxed),
+            last_completed_stage = self.last_completed_stage,
+            active_stage = ?self.active_stage,
+            outcome = outcome,
+            "Flow DML Flight client summary",
+        );
+    }
+
+    fn disarm(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for FlowDmlFlightTiming {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish("dropped");
+        }
+    }
+}
+
 async fn output_from_flight_message_stream<S>(
     mut flight_message_stream: S,
+    mut dml_timing: Option<FlowDmlFlightTiming>,
 ) -> Result<OutputWithMetrics>
 where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
+    let affected_rows_started = dml_timing.as_mut().map(|timing| {
+        timing.set_active_stage("affected_rows");
+        Instant::now()
+    });
     let Some(first_flight_message) = flight_message_stream.next().await else {
+        if let Some(timing) = dml_timing.as_mut() {
+            timing.record_affected_rows(affected_rows_started.unwrap().elapsed());
+            timing.finish("error");
+        }
         return IllegalFlightMessagesSnafu {
             reason: "Expect the response not to be empty",
         }
         .fail();
     };
 
-    let first_flight_message = first_flight_message?;
+    let first_flight_message = match first_flight_message {
+        Ok(message) => message,
+        Err(e) => {
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.record_affected_rows(affected_rows_started.unwrap().elapsed());
+                timing.finish("error");
+            }
+            return Err(e);
+        }
+    };
+
+    if let Some(timing) = dml_timing.as_mut() {
+        timing.record_affected_rows(affected_rows_started.unwrap().elapsed());
+    }
 
     match first_flight_message {
         FlightMessage::AffectedRows { rows, metrics } => {
             let terminal_metrics = OutputMetrics::new();
             if let Some(metrics) = metrics {
-                terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
+                let metrics = match parse_terminal_metrics(&metrics) {
+                    Ok(metrics) => metrics,
+                    Err(e) => {
+                        if let Some(timing) = dml_timing.as_mut() {
+                            timing.finish("error");
+                        }
+                        return Err(e);
+                    }
+                };
+                terminal_metrics.update(Some(metrics));
             }
-            let next_message = flight_message_stream.next().await.transpose()?;
+            let terminal_started = dml_timing.as_mut().map(|timing| {
+                timing.set_active_stage("terminal_eof");
+                Instant::now()
+            });
+            let next_message = match flight_message_stream.next().await.transpose() {
+                Ok(message) => message,
+                Err(e) => {
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.record_terminal(terminal_started.unwrap().elapsed());
+                        timing.finish("error");
+                    }
+                    return Err(e);
+                }
+            };
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.record_terminal(terminal_started.unwrap().elapsed());
+            }
             match next_message {
                 None => terminal_metrics.mark_ready(),
                 Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
-                    terminal_metrics.update(Some(parse_terminal_metrics(&s)?));
+                    let metrics = match parse_terminal_metrics(&s) {
+                        Ok(metrics) => metrics,
+                        Err(e) => {
+                            if let Some(timing) = dml_timing.as_mut() {
+                                timing.finish("error");
+                            }
+                            return Err(e);
+                        }
+                    };
+                    terminal_metrics.update(Some(metrics));
                     terminal_metrics.mark_ready();
                 }
                 Some(FlightMessage::Metrics(_)) => {
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.finish("error");
+                    }
                     return IllegalFlightMessagesSnafu {
                         reason: "'AffectedRows' Flight metadata already carries Metrics and cannot be followed by another Metrics message",
                     }
                     .fail();
                 }
                 Some(other) => {
+                    if let Some(timing) = dml_timing.as_mut() {
+                        timing.finish("error");
+                    }
                     return IllegalFlightMessagesSnafu {
                         reason: format!(
                             "'AffectedRows' Flight message can only be followed by a Metrics message, got {other:?}"
@@ -299,16 +459,27 @@ where
                     .fail();
                 }
             }
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.finish("ok");
+            }
             Ok(OutputWithMetrics {
                 output: Output::new_with_affected_rows(rows),
                 metrics: terminal_metrics,
             })
         }
-        FlightMessage::RecordBatch(_) | FlightMessage::Metrics(_) => IllegalFlightMessagesSnafu {
-            reason: "The first flight message cannot be a RecordBatch or Metrics message",
+        FlightMessage::RecordBatch(_) | FlightMessage::Metrics(_) => {
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.finish("error");
+            }
+            IllegalFlightMessagesSnafu {
+                reason: "The first flight message cannot be a RecordBatch or Metrics message",
+            }
+            .fail()
         }
-        .fail(),
         FlightMessage::Schema(schema) => {
+            if let Some(timing) = dml_timing.as_mut() {
+                timing.disarm();
+            }
             let metrics = Arc::new(ArcSwapOption::from(None));
             let metrics_ref = metrics.clone();
             let schema = Arc::new(
@@ -784,9 +955,37 @@ impl Database {
         Self::put_flow_extensions(metadata, flow_extensions)?;
         Self::put_snapshot_seqs(metadata, snapshot_seqs)?;
 
-        let mut client = self.client.make_flight_client(false, false)?;
+        let mut dml_timing = if common_telemetry::tracing::enabled!(target: module_path!(), Level::DEBUG)
+        {
+            let flow_extensions = flow_extensions
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect::<std::collections::HashMap<_, _>>();
+            parse_diagnostic_flow_attempt_id(&flow_extensions).map(|attempt_id| {
+                FlowDmlFlightTiming::new(attempt_id, parse_diagnostic_flow_id(&flow_extensions))
+            })
+        } else {
+            None
+        };
+        let mut client = match self.client.make_flight_client(false, false) {
+            Ok(client) => client,
+            Err(e) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.finish("error");
+                }
+                return Err(e);
+            }
+        };
 
-        let response = client.mut_inner().do_get(request).await.or_else(|e| {
+        let rpc_started = dml_timing.as_mut().map(|timing| {
+            timing.set_active_stage("flight_rpc_response");
+            Instant::now()
+        });
+        let response = client.mut_inner().do_get(request).await;
+        if let Some(timing) = dml_timing.as_mut() {
+            timing.record_rpc_response(rpc_started.unwrap().elapsed());
+        }
+        let response = response.or_else(|e| {
             let tonic_code = e.code();
             let e: Error = e.into();
             error!(
@@ -799,16 +998,53 @@ impl Database {
                 addr: client.addr().to_string(),
                 tonic_code,
             })
-        })?;
+        });
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                if let Some(timing) = dml_timing.as_mut() {
+                    timing.finish("error");
+                }
+                return Err(e);
+            }
+        };
 
         let flight_data_stream = response.into_inner();
         let mut decoder = FlightDecoder::default();
-
-        let flight_message_stream = flight_data_stream.filter_map(move |flight_data| {
-            future::ready(decode_flight_data(&mut decoder, flight_data))
+        let payload_timing = dml_timing.as_ref().map(|timing| {
+            (
+                Arc::new(AtomicBool::new(false)),
+                timing.affected_rows_app_metadata_bytes.clone(),
+                timing.inline_metrics_bytes.clone(),
+            )
         });
 
-        output_from_flight_message_stream(flight_message_stream).await
+        let flight_message_stream = flight_data_stream.filter_map(move |flight_data| {
+            let app_metadata_bytes = payload_timing.as_ref().and_then(|_| {
+                flight_data
+                    .as_ref()
+                    .ok()
+                    .map(|flight_data| flight_data.app_metadata.len())
+            });
+            let flight_message = decode_flight_data(&mut decoder, flight_data);
+            if let (
+                Some((affected_rows_seen, app_metadata_bytes_ref, inline_metrics_bytes)),
+                Some(Ok(FlightMessage::AffectedRows { metrics, .. })),
+            ) = (payload_timing.as_ref(), flight_message.as_ref())
+            {
+                if !affected_rows_seen.swap(true, Ordering::Relaxed) {
+                    app_metadata_bytes_ref
+                        .store(app_metadata_bytes.unwrap_or(0), Ordering::Relaxed);
+                    inline_metrics_bytes.store(
+                        metrics.as_ref().map_or(0, |metrics| metrics.len()),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            future::ready(flight_message)
+        });
+
+        output_from_flight_message_stream(flight_message_stream, dml_timing).await
     }
 
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
@@ -1117,13 +1353,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_are_parsed() {
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![Ok(
-            FlightMessage::AffectedRows {
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
                 rows: 3,
                 metrics: Some(terminal_metrics_json()),
-            },
-        )]
-            as Vec<Result<FlightMessage>>))
+            })] as Vec<Result<FlightMessage>>),
+            None,
+        )
         .await
         .unwrap();
 
@@ -1138,14 +1374,16 @@ mod tests {
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_rejects_trailing_metrics() {
         let metrics_json = terminal_metrics_json();
-        let err = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::AffectedRows {
-                rows: 3,
-                metrics: Some(metrics_json.clone()),
-            }),
-            Ok(FlightMessage::Metrics(metrics_json)),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let err = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: Some(metrics_json.clone()),
+                }),
+                Ok(FlightMessage::Metrics(metrics_json)),
+            ] as Vec<Result<FlightMessage>>),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -1167,12 +1405,14 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
-            Ok(FlightMessage::Metrics("{not-json}".to_string())),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
+            ] as Vec<Result<FlightMessage>>),
+            None,
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();
@@ -1211,18 +1451,20 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([2])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(
-                first_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
-            Ok(FlightMessage::RecordBatch(
-                second_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(
+                    first_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
+                Ok(FlightMessage::RecordBatch(
+                    second_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
+            ] as Vec<Result<FlightMessage>>),
+            None,
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();
