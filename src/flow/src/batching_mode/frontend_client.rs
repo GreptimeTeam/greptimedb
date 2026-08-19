@@ -15,6 +15,7 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
@@ -27,6 +28,7 @@ use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::{Output, OutputData};
 use common_telemetry::warn;
 use futures::stream::{FuturesUnordered, StreamExt};
+use http::uri::Authority;
 use meta_client::client::MetaClient;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::metrics::terminal_recordbatch_metrics_from_plan;
@@ -135,6 +137,8 @@ impl FrontendClient {
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
+        let mut batch_opts = batch_opts;
+        normalize_frontend_endpoints(&mut batch_opts)?;
         common_telemetry::info!("Frontend client build without auth");
         Ok(Self::Distributed {
             meta_client,
@@ -192,6 +196,66 @@ impl DatabaseWithPeer {
             })?;
         Ok(())
     }
+}
+
+fn candidate_frontends(
+    configured_frontends: Option<Vec<Peer>>,
+    discovered_frontends: Vec<Peer>,
+) -> Vec<Peer> {
+    configured_frontends
+        .filter(|frontends| !frontends.is_empty())
+        .unwrap_or(discovered_frontends)
+}
+
+fn normalize_frontend_endpoints(batch_opts: &mut BatchingModeOptions) -> Result<(), Error> {
+    if let Some(endpoints) = batch_opts.experimental_frontend_endpoints.as_mut() {
+        if endpoints.is_empty() {
+            return Ok(());
+        }
+        for endpoint in endpoints {
+            *endpoint = normalize_frontend_endpoint(endpoint)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_frontend_endpoint(endpoint: &str) -> Result<String, Error> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return UnexpectedSnafu {
+            reason: "experimental_frontend_endpoints contains a blank address",
+        }
+        .fail();
+    }
+    if endpoint.contains("@")
+        || endpoint.contains("/")
+        || endpoint.contains("?")
+        || endpoint.contains("#")
+        || endpoint.contains("://")
+    {
+        return UnexpectedSnafu {
+            reason: format!("Invalid experimental_frontend_endpoints authority `{endpoint}`"),
+        }
+        .fail();
+    }
+
+    let authority = Authority::from_str(endpoint).map_err(|err| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Invalid experimental_frontend_endpoints authority `{endpoint}`: {err}"
+            ),
+        }
+        .build()
+    })?;
+    if authority.host().is_empty() || authority.port_u16().is_none() {
+        return UnexpectedSnafu {
+            reason: format!(
+                "Invalid experimental_frontend_endpoints authority `{endpoint}`: expected host:port"
+            ),
+        }
+        .fail();
+    }
+    Ok(endpoint.to_string())
 }
 
 impl FrontendClient {
@@ -266,11 +330,51 @@ impl FrontendClient {
         Ok(failures)
     }
 
+    /// Return the configured DML frontends, if the option is enabled.
+    ///
+    /// `Some([])` is intentionally treated as unset, preserving the default
+    /// metasrv discovery behavior. Configured values are normalized before
+    /// they are passed to the existing channel manager.
+    pub(crate) fn configured_dml_frontends(&self) -> Result<Option<Vec<Peer>>, Error> {
+        let Self::Distributed { batch_opts, .. } = self else {
+            return Ok(None);
+        };
+        let Some(addrs) = batch_opts.experimental_frontend_endpoints.as_ref() else {
+            return Ok(None);
+        };
+        if addrs.is_empty() {
+            return Ok(None);
+        }
+
+        let peers = addrs
+            .iter()
+            .enumerate()
+            .map(|(id, addr)| {
+                Ok(Peer {
+                    id: id as u64,
+                    addr: addr.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Some(peers))
+    }
+
     /// Get a frontend discovered by metasrv and verified with a query probe.
     async fn get_random_active_frontend(
         &self,
         catalog: &str,
         schema: &str,
+    ) -> Result<DatabaseWithPeer, Error> {
+        self.get_random_frontend(catalog, schema, None).await
+    }
+
+    /// Get a verified frontend from the supplied list. A supplied list is
+    /// authoritative and never falls back to metasrv discovery.
+    async fn get_random_frontend(
+        &self,
+        catalog: &str,
+        schema: &str,
+        configured_frontends: Option<Vec<Peer>>,
     ) -> Result<DatabaseWithPeer, Error> {
         let Self::Distributed {
             meta_client: _,
@@ -288,7 +392,13 @@ impl FrontendClient {
         let mut interval = tokio::time::interval(batch_opts.grpc_conn_timeout);
         interval.tick().await;
         for retry in 0..batch_opts.experimental_grpc_max_retries {
-            let mut frontends = self.scan_for_frontend().await?;
+            let discovered_frontends = if configured_frontends.is_none() {
+                self.scan_for_frontend().await?
+            } else {
+                Vec::new()
+            };
+            let mut frontends =
+                candidate_frontends(configured_frontends.clone(), discovered_frontends);
             // shuffle the frontends to avoid always pick the same one
             frontends.shuffle(&mut rng());
 
@@ -408,7 +518,9 @@ impl FrontendClient {
                     (QUERY_PARALLELISM_HINT, query_parallelism.as_str()),
                     (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
                 ];
-                let db = self.get_random_active_frontend(catalog, schema).await?;
+                let db = self
+                    .get_random_frontend(catalog, schema, self.configured_dml_frontends()?)
+                    .await?;
                 *peer_desc = Some(PeerDesc::Dist {
                     peer: db.peer.clone(),
                 });
@@ -625,6 +737,7 @@ mod tests {
 
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, Ticket};
+    use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
@@ -698,6 +811,9 @@ mod tests {
 
     #[derive(Debug)]
     struct RejectUnauthenticatedFlight;
+
+    #[derive(Debug)]
+    struct AffectedRowsFlight;
 
     #[derive(Debug)]
     struct SlowFlight;
@@ -787,6 +903,23 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl FlightCraft for AffectedRowsFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            let mut encoder = FlightEncoder::default();
+            let data = encoder.encode(FlightMessage::AffectedRows {
+                rows: 1,
+                metrics: None,
+            });
+            Ok(TonicResponse::new(Box::pin(futures::stream::iter(
+                data.into_iter().map(Ok),
+            ))))
+        }
+    }
+
+    #[async_trait::async_trait]
     impl FlightCraft for SlowFlight {
         async fn do_get(
             &self,
@@ -822,6 +955,186 @@ mod tests {
         });
 
         (addr, server)
+    }
+
+    #[test]
+    fn test_candidate_frontends_source_is_authoritative() {
+        let configured = vec![Peer {
+            id: 1,
+            addr: "configured:4001".to_string(),
+        }];
+        let discovered = vec![Peer {
+            id: 2,
+            addr: "unrelated:4002".to_string(),
+        }];
+        assert_eq!(
+            configured,
+            candidate_frontends(Some(configured.clone()), discovered)
+        );
+        assert_eq!(
+            vec![Peer {
+                id: 2,
+                addr: "unrelated:4002".to_string(),
+            }],
+            candidate_frontends(
+                None,
+                vec![Peer {
+                    id: 2,
+                    addr: "unrelated:4002".to_string(),
+                }]
+            )
+        );
+        assert_eq!(
+            vec![Peer {
+                id: 2,
+                addr: "unrelated:4002".to_string(),
+            }],
+            candidate_frontends(
+                Some(vec![]),
+                vec![Peer {
+                    id: 2,
+                    addr: "unrelated:4002".to_string(),
+                }]
+            )
+        );
+    }
+
+    #[test]
+    fn test_frontend_endpoint_normalization_and_validation() {
+        assert_eq!(
+            "example.com:4001",
+            normalize_frontend_endpoint("  example.com:4001 ").unwrap()
+        );
+        assert_eq!(
+            "[::1]:4001",
+            normalize_frontend_endpoint(" [::1]:4001 ").unwrap()
+        );
+        for invalid in [
+            "",
+            " ",
+            "http://example.com:4001",
+            "https://example.com:4001",
+            "user@example.com:4001",
+            "example.com:4001/path",
+            "example.com:4001?query",
+            "example.com:4001#fragment",
+            "example.com",
+            "example.com:not-a-port",
+            "[::1]",
+            "::1:4001",
+        ] {
+            assert!(
+                normalize_frontend_endpoint(invalid).is_err(),
+                "expected invalid endpoint: {invalid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configured_dml_query_uses_only_configured_frontend() {
+        let (configured_addr, server) = start_flight_server(AffectedRowsFlight).await;
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions {
+                experimental_grpc_max_retries: 1,
+                experimental_frontend_endpoints: Some(vec![configured_addr.clone()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut peer_desc = None;
+        let result = client
+            .query_with_terminal_metrics(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                QueryRequest {
+                    query: Some(Query::Sql("SELECT 1".to_string())),
+                },
+                &[],
+                &HashMap::new(),
+                &mut peer_desc,
+            )
+            .await
+            .expect("configured frontend should handle the query");
+        server.abort();
+
+        assert!(matches!(
+            peer_desc,
+            Some(PeerDesc::Dist { peer }) if peer.addr == configured_addr
+        ));
+        assert!(matches!(result.output.data, OutputData::AffectedRows(1)));
+    }
+
+    #[test]
+    fn test_configured_dml_frontends_selection() {
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions {
+                experimental_frontend_endpoints: Some(vec![" dml-only:4001 ".to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let frontends = client.configured_dml_frontends().unwrap().unwrap();
+        assert_eq!(
+            vec![Peer {
+                id: 0,
+                addr: "dml-only:4001".to_string(),
+            }],
+            frontends
+        );
+    }
+
+    #[test]
+    fn test_empty_dml_frontend_list_is_disabled() {
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions {
+                experimental_frontend_endpoints: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(client.configured_dml_frontends().unwrap().is_none());
+        assert!(
+            FrontendClient::from_meta_client(
+                Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+                QueryOptions::default(),
+                BatchingModeOptions::default(),
+            )
+            .unwrap()
+            .configured_dml_frontends()
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_dml_frontend_endpoint_rejected_at_construction() {
+        for endpoint in [
+            "  ",
+            "http://example.com:4001",
+            "example.com:4001/path",
+            "example.com:invalid",
+            "example.com",
+        ] {
+            let err = FrontendClient::from_meta_client(
+                Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+                QueryOptions::default(),
+                BatchingModeOptions {
+                    experimental_frontend_endpoints: Some(vec![endpoint.to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("experimental_frontend_endpoints"),
+                "unexpected error for {endpoint}: {err}"
+            );
+        }
     }
 
     #[tokio::test]

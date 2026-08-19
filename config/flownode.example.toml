@@ -32,6 +32,11 @@ node_id = 14
 #+experimental_enable_incremental_read=false
 ## Read preference of the Frontend client.
 #+read_preference="Leader"
+## Optional distributed Flownode batching-DML-only frontend authorities.
+## When set, batching INSERT INTO SELECT queries use only these host:port
+## authorities and do not fall back to metasrv-discovered frontends. An empty
+## list disables it. Standalone and streaming Flow are unaffected.
+#+experimental_frontend_endpoints=["127.0.0.1:4001"]
 [flow.batching_mode.frontend_tls]
 ## Whether to enable TLS for client.
 #+enabled=false

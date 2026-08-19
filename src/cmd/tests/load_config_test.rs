@@ -324,6 +324,89 @@ fn test_load_flownode_example_config() {
 }
 
 #[test]
+fn test_load_flownode_experimental_frontend_endpoints() {
+    let toml = r#"
+        [flow.batching_mode]
+        query_timeout = "600s"
+        slow_query_threshold = "60s"
+        experimental_min_refresh_duration = "5s"
+        grpc_conn_timeout = "5s"
+        experimental_grpc_max_retries = 3
+        experimental_frontend_scan_timeout = "30s"
+        experimental_max_filter_num_per_query = 20
+        experimental_time_window_merge_threshold = 3
+        experimental_enable_incremental_read = false
+        read_preference = "Leader"
+        experimental_frontend_endpoints = ["frontend-dml-a:4001", "frontend-dml-b:4001"]
+    "#;
+    let options: GreptimeOptions<FlownodeOptions> = toml::from_str(toml).unwrap();
+    assert_eq!(
+        Some(vec![
+            "frontend-dml-a:4001".to_string(),
+            "frontend-dml-b:4001".to_string(),
+        ]),
+        options
+            .component
+            .flow
+            .batching_mode
+            .experimental_frontend_endpoints
+    );
+
+    let empty: GreptimeOptions<FlownodeOptions> = toml::from_str(
+        r#"
+        [flow.batching_mode]
+        query_timeout = "600s"
+        slow_query_threshold = "60s"
+        experimental_min_refresh_duration = "5s"
+        grpc_conn_timeout = "5s"
+        experimental_grpc_max_retries = 3
+        experimental_frontend_scan_timeout = "30s"
+        experimental_max_filter_num_per_query = 20
+        experimental_time_window_merge_threshold = 3
+        experimental_enable_incremental_read = false
+        read_preference = "Leader"
+        experimental_frontend_endpoints = []
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        Some(vec![]),
+        empty
+            .component
+            .flow
+            .batching_mode
+            .experimental_frontend_endpoints
+    );
+}
+
+#[test]
+fn test_load_flownode_experimental_frontend_endpoints_from_env() {
+    let env_prefix = "FLOW_FRONTEND_ENDPOINTS_UT";
+    let env_key = [
+        env_prefix,
+        "FLOW",
+        "BATCHING_MODE",
+        "EXPERIMENTAL_FRONTEND_ENDPOINTS",
+    ]
+    .join(ENV_VAR_SEP);
+    temp_env::with_var(env_key, Some("frontend-a:4001,frontend-b:4002"), || {
+        let options =
+            GreptimeOptions::<FlownodeOptions>::load_layered_options(None, env_prefix).unwrap();
+        assert_eq!(
+            Some(vec![
+                "frontend-a:4001".to_string(),
+                "frontend-b:4002".to_string(),
+            ]),
+            options
+                .component
+                .flow
+                .batching_mode
+                .experimental_frontend_endpoints
+        );
+    });
+}
+
+#[test]
 fn test_load_standalone_example_config() {
     let example_config = common_test_util::find_workspace_path("config/standalone.example.toml");
     let options =

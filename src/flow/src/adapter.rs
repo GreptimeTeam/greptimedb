@@ -154,6 +154,10 @@ impl Default for FlownodeOptions {
 }
 
 impl Configurable for FlownodeOptions {
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(["flow.batching_mode.experimental_frontend_endpoints"].as_slice())
+    }
+
     fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
         if self.flow.num_workers == 0 {
             self.flow.num_workers = (get_total_cpu_cores() / 2).max(1);
