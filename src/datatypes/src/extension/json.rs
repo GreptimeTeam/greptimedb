@@ -450,7 +450,7 @@ mod tests {
             Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default())));
         let missing = Field::new("data", DataType::Struct(Fields::empty()), true)
             .with_extension_type(metadata.clone());
-        assert!(json2_remainder_field(&missing).is_err());
+        assert!(json2_remainder_field(&missing).is_ok_and(|x| x.is_none()));
 
         let invalid = Field::new(
             "data",
