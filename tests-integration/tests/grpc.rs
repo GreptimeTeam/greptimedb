@@ -874,7 +874,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "1".to_string())),
+                value: Some((5.0, "1.0".to_string())),
                 ..Default::default()
             },
             PromSeriesVector {
@@ -884,7 +884,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "2".to_string())),
+                value: Some((5.0, "2.0".to_string())),
                 ..Default::default()
             },
         ]
@@ -936,7 +936,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                values: vec![(5.0, "1.0".to_string()), (10.0, "1.0".to_string())],
                 ..Default::default()
             },
             PromSeriesMatrix {
@@ -946,7 +946,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                values: vec![(5.0, "2.0".to_string()), (10.0, "2.0".to_string())],
                 ..Default::default()
             },
         ]

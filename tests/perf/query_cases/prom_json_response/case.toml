@@ -2,8 +2,8 @@
 #
 # Exercises the serial per-request
 # `PrometheusJsonResponse::record_batches_to_data`
-# (src/servers/src/http/result/prometheus_resp.rs) path and its per-series
-# IndexMap entry reuse.
+# (src/servers/src/http/result/prometheus_resp.rs) path, ryu float formatting,
+# and its per-series IndexMap entry reuse.
 #
 # 256 series x 481 evaluation timestamps (2h at 15s) = ~123k output samples
 # per request. The primary `prom_http` query builds the Prometheus JSON
