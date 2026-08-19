@@ -12,22 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OTel-native resource descriptor synthesized from OTLP metrics requests.
+//! Resource descriptor synthesized from OTLP metrics requests, so the entity
+//! graph reads one table instead of scanning every logical metric table for
+//! attributes the promote filter may have dropped.
 //!
-//! Ordinary OTLP metrics scatter (filtered) resource attributes as tags over
-//! every emitted metric table, which is useless for entity extraction: the
-//! entity graph would have to scan every logical table and would still miss
-//! attributes dropped by the promote filter. Instead, each request projects
-//! its distinct resources into one info-metric-shaped table,
-//! [`OTEL_RESOURCE_INFO_TABLE_NAME`], which the entity-graph conventions
-//! whitelist by name.
-//!
-//! Columns are a fixed allowlist keyed by the raw OTel attribute names —
-//! deliberately independent of both the per-request label translation
-//! strategy (the conventions match fixed column names) and the resource-attr
-//! promote/ignore headers (this is entity metadata, not label promotion).
-//! `job`/`instance` are derived compatibility columns aligning the service
-//! identity with Prometheus-sourced `target_info`.
+//! Columns are a fixed allowlist under the raw OTel attribute names: the
+//! conventions whitelist matches fixed names, so they must not follow the
+//! per-request label translation strategy or the promote/ignore headers.
 
 use std::collections::BTreeMap;
 
@@ -42,66 +33,73 @@ use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
 use crate::row_writer::{self, MultiTableData};
 
-/// Table name of the synthesized resource descriptor; reserved in the sense
-/// that an incoming metric with the same name suppresses synthesis for its
-/// request.
 pub const OTEL_RESOURCE_INFO_TABLE_NAME: &str = "otel_resource_info";
 
-/// Resource attributes projected verbatim under their raw OTel keys.
-/// `service.instance.id` is not listed: it lands unchanged in `instance`.
-const RESOURCE_INFO_ATTRS: [&str; 9] = [
-    KEY_SERVICE_NAME,
-    KEY_SERVICE_NAMESPACE,
-    "host.id",
-    "host.name",
-    "container.id",
-    "container.name",
-    "k8s.pod.uid",
-    "k8s.pod.name",
-    "k8s.namespace.name",
-];
+/// Attributes projected under their raw OTel keys. `service.instance.id` is
+/// absent on purpose: it lands in `instance`.
+///
+/// Matched instead of scanned: this runs for every attribute of every
+/// resource, and the compiler turns it into a length-and-prefix dispatch.
+fn is_projected_attr(key: &str) -> bool {
+    matches!(
+        key,
+        KEY_SERVICE_NAME
+            | KEY_SERVICE_NAMESPACE
+            | "host.id"
+            | "host.name"
+            | "container.id"
+            | "container.name"
+            | "k8s.pod.uid"
+            | "k8s.pod.name"
+            | "k8s.namespace.name"
+    )
+}
 
-/// Request-local resource snapshots: one row per distinct projected attribute
-/// set, stamped with the newest data-point timestamp that observed it.
-/// Cross-request dedup is left to the storage engine's last-row merge.
+/// Upper bound of [`is_projected_attr`] plus the derived `job`/`instance`,
+/// used to size the per-row buffers.
+const MAX_PROJECTED_TAGS: usize = 11;
+
+/// One row per distinct projected attribute set in a request, stamped with
+/// the newest data-point time that observed it. Dedup is request-local; the
+/// storage engine merges repeats across requests.
 #[derive(Debug, Default)]
 pub struct ResourceInfoData {
     rows: BTreeMap<Vec<(String, String)>, i64>,
 }
 
 impl ResourceInfoData {
-    /// Projects one resource's raw (unfiltered) attributes; resources whose
-    /// projection is empty contribute nothing.
+    /// Takes the raw attributes, before the promote filter runs on them.
     pub fn observe(&mut self, raw_attrs: &[KeyValue], max_ts_nanos: i64) {
-        let mut tags = BTreeMap::new();
+        let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let (job, instance) = service_identity(raw_attrs);
         if let Some(job) = job {
-            tags.insert(JOB_KEY.to_string(), job);
+            tags.push((JOB_KEY.to_string(), job));
         }
         if let Some(instance) = instance {
-            tags.insert(INSTANCE_KEY.to_string(), instance);
+            tags.push((INSTANCE_KEY.to_string(), instance));
         }
         for kv in raw_attrs {
-            if RESOURCE_INFO_ATTRS.contains(&kv.key.as_str())
+            if is_projected_attr(&kv.key)
                 && let Some(value) = scalar_value_string(kv.value.as_ref())
             {
-                tags.insert(kv.key.clone(), value);
+                tags.push((kv.key.clone(), value));
             }
         }
         if tags.is_empty() {
             return;
         }
+        // Sorted so equal attribute sets share a key, and so the emitted
+        // columns keep a stable order.
+        tags.sort_unstable();
 
-        let entry = self
-            .rows
-            .entry(tags.into_iter().collect())
-            .or_insert(i64::MIN);
-        *entry = (*entry).max(max_ts_nanos);
+        self.rows
+            .entry(tags)
+            .and_modify(|ts| *ts = (*ts).max(max_ts_nanos))
+            .or_insert(max_ts_nanos);
     }
 
-    /// Builds the descriptor insert: all projected attributes as tags plus
-    /// `greptime_value = 1.0`, timestamps in milliseconds. `None` when no
-    /// resource was observed.
+    /// Every projected attribute becomes a tag, so auto-create puts it in the
+    /// primary key where the conventions expect it.
     pub fn into_row_insert_requests(self) -> Result<Option<RowInsertRequests>> {
         if self.rows.is_empty() {
             return Ok(None);
@@ -110,7 +108,7 @@ impl ResourceInfoData {
         let mut writer = MultiTableData::default();
         let table = writer.get_or_default_table_data(
             OTEL_RESOURCE_INFO_TABLE_NAME,
-            RESOURCE_INFO_ATTRS.len() + 4,
+            MAX_PROJECTED_TAGS + 2,
             self.rows.len(),
         );
         for (tags, ts_nanos) in self.rows {
@@ -132,8 +130,8 @@ impl ResourceInfoData {
     }
 }
 
-/// The newest data-point timestamp under a resource, the descriptor row's
-/// observation time. `None` when the resource carries no data points at all.
+/// The descriptor row's observation time, so it shares a window with the
+/// metric rows it describes. `None` when the resource has no data points.
 pub(crate) fn max_data_point_time_nanos(resource: &ResourceMetrics) -> Option<i64> {
     let mut max_ts: Option<u64> = None;
     let mut fold = |ts: u64| max_ts = Some(max_ts.map_or(ts, |cur| cur.max(ts)));
@@ -191,7 +189,6 @@ mod tests {
             kv("os.type", "linux"),
         ];
         data.observe(&attrs, 100);
-        // the same resource seen again keeps one row with the newest timestamp
         data.observe(&attrs, 50);
         assert_eq!(data.rows.len(), 1);
         let (tags, ts) = data.rows.iter().next().unwrap();
@@ -199,7 +196,6 @@ mod tests {
         assert!(tags.contains(&("job".to_string(), "shop/api".to_string())));
         assert!(tags.contains(&("instance".to_string(), "inst-1".to_string())));
         assert!(tags.contains(&("service.name".to_string(), "api".to_string())));
-        // not allowlisted / folded into instance
         assert!(
             tags.iter()
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
@@ -207,14 +203,11 @@ mod tests {
 
         data.observe(&[kv("host.id", "h-2")], 10);
         assert_eq!(data.rows.len(), 2);
-    }
 
-    #[test]
-    fn observe_skips_resources_with_empty_projection() {
-        let mut data = ResourceInfoData::default();
-        data.observe(&[kv("os.type", "linux")], 100);
-        assert!(data.rows.is_empty());
-        assert!(data.into_row_insert_requests().unwrap().is_none());
+        // nothing allowlisted: no row at all, rather than an empty one
+        let mut empty = ResourceInfoData::default();
+        empty.observe(&[kv("os.type", "linux")], 100);
+        assert!(empty.into_row_insert_requests().unwrap().is_none());
     }
 
     #[test]

@@ -32,9 +32,8 @@ virtual_dst_candidates:
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
 # Implicit declarations for greptime_trace_v1 tables; the pod UID bridges
-# trace-side pods onto the kube-state-metrics entities below. Host and
-# container identities are the stable ids only — host.name and container.name
-# vary by SDK and resource detector, so they stay descriptive.
+# trace-side pods onto the kube-state-metrics entities below. host.name and
+# container.name vary by SDK and resource detector, so identity is the id.
 otlp_trace_entities:
   - entity: service
     id: [service_name]
@@ -128,12 +127,10 @@ prometheus_info_metrics:
 
 # Implicit declarations for the OTLP resource descriptor synthesized at
 # metrics ingestion, gated on source=opentelemetry and metric.type=info.
-# Columns are the raw OTel attribute keys; job/instance are the derived
-# Prometheus-compatible service identity, so services line up with
-# target_info-sourced entities. Every descriptive column is explicit: the
-# descriptor's attribute set is a known allowlist, and identifying attributes
-# of other entities must not leak into service.instance the way target_info's
-# descriptive_rest would.
+# job/instance are the derived Prometheus-compatible identity, so services
+# line up with target_info. Unlike target_info the attribute set is known, so
+# descriptive columns are listed instead of swept up by descriptive_rest,
+# which would misfile other entities' ids under service.instance.
 otel_info_metrics:
   otel_resource_info:
     - entity: service

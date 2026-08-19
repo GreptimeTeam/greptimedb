@@ -84,6 +84,10 @@ fn trace_permission_targets(
     PermissionTableTargets::resolved(targets)
 }
 
+/// Whether the table under the descriptor's name is the one ingestion
+/// created, so a user's same-named table never receives descriptor rows.
+/// Not atomic: the insert path resolves the name again, so a concurrent DROP
+/// plus CREATE can still slip a foreign table into that window.
 fn is_owned_resource_info_table(table: &table::metadata::TableInfo) -> bool {
     let options = &table.meta.options.extra_options;
     table.meta.engine == MITO_ENGINE
@@ -178,11 +182,9 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .context(error::ExecuteGrpcQuerySnafu)?
         };
 
-        // The descriptor is derived enrichment written after the main data is
-        // committed: neither a permission denial on its table nor a write
-        // failure (e.g. a conflicting pre-existing table, or auto-create
-        // disabled) must fail the request and trigger client retries of
-        // already-accepted data; both degrade to a partial-success warning.
+        // Derived enrichment, written after the metric data is committed:
+        // failing here would make the client retry data the server already
+        // accepted, so every failure degrades to a warning instead.
         let mut warning = None;
         if let Some(resource_info) = resource_info {
             let existing = self

@@ -1003,7 +1003,6 @@ mod tests {
                 "service.instance"
             ]
         );
-        // host identity is host.id only; host.name stays descriptive
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
         assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
         assert_eq!(declarations[3].id_columns, vec!["job"]);
@@ -1011,20 +1010,18 @@ mod tests {
             declarations[3].descriptive_columns,
             vec!["service.name", "service.namespace"]
         );
-        // no descriptive_rest: other entities' identifying attributes must
-        // not leak into service.instance
+        // no descriptive_rest: other entities' ids must not be filed under
+        // service.instance
         assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
         assert!(declarations[4].descriptive_columns.is_empty());
-    }
 
-    #[test]
-    fn otel_resource_info_missing_id_columns_drop_entities() {
-        let info = prom_table_info(
+        // an id column the table lacks drops that entity, not the table
+        let partial = prom_table_info(
             "otel_resource_info",
             &["job", "service.name", "host.id"],
             OTEL_STAMPS,
         );
-        let types: Vec<String> = sorted_declarations(&info)
+        let types: Vec<String> = sorted_declarations(&partial)
             .into_iter()
             .map(|d| d.entity_type)
             .collect();

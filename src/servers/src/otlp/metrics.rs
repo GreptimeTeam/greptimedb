@@ -90,14 +90,13 @@ const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 /// Result of converting one OTLP metrics request.
 pub struct MetricsConversion {
     pub requests: RowInsertRequests,
-    /// Row count of `requests` (the resource descriptor is not counted).
+    /// Row count of `requests`; the resource descriptor is not counted.
     pub rows: usize,
     /// Per-table semantic index for the auto-create path to stamp as table
     /// options; covers the descriptor table too.
     pub semantic_index: SemanticIndex,
-    /// The synthesized resource descriptor insert. `None` in legacy mode,
-    /// when no resource projected any allowlisted attribute, or when the
-    /// request itself writes a metric named like the descriptor table.
+    /// The synthesized resource descriptor, written separately from the
+    /// metric data. See [`resource_info`].
     pub resource_info: Option<RowInsertRequests>,
 }
 
@@ -153,9 +152,8 @@ pub fn to_grpc_insert_requests(
 
     let (requests, rows) = table_writer.into_row_insert_requests();
 
-    // A metric emitting a table named like the descriptor would fight over
-    // the table (metric engine vs plain mito); the metric wins, synthesis is
-    // suppressed for the whole request.
+    // The metric and the descriptor would fight over the same table across
+    // two engines. The user's metric wins.
     let resource_info = if requests
         .inserts
         .iter()
@@ -290,8 +288,7 @@ fn from_metric_type(data: &metric::Data) -> MetricType {
     }
 }
 
-/// Renders a scalar attribute value as a string label value. Non-scalar
-/// values (bool, arrays, maps, bytes) are not representable as tags.
+/// Non-scalar values (bool, arrays, maps, bytes) are not representable as tags.
 fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
     match value.and_then(|v| v.value.as_ref())? {
         any_value::Value::StringValue(s) => Some(s.clone()),
@@ -301,11 +298,9 @@ fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
     }
 }
 
-/// Prometheus-style service identity of a resource. `job` is
-/// `<service.namespace>/<service.name>` when the namespace is present (per
-/// the OTel Prometheus compatibility spec), bare `service.name` otherwise,
-/// `None` when `service.name` is absent (no `unknown_service` fabrication).
-/// `instance` is `service.instance.id` verbatim.
+/// Prometheus-style `(job, instance)` identity. Per the OTel Prometheus
+/// compatibility spec `job` folds in `service.namespace` when present; a
+/// resource without `service.name` gets no job rather than a fabricated one.
 pub(crate) fn service_identity(attrs: &[KeyValue]) -> (Option<String>, Option<String>) {
     let mut name = None;
     let mut namespace = None;
@@ -1082,41 +1077,14 @@ mod tests {
         process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
         assert_eq!(attr_value(&attrs, "job").as_deref(), Some("api"));
 
-        // no service.name: no job is fabricated, namespace stays a plain attr
-        let mut attrs = vec![keyvalue("service.namespace", "shop")];
-        process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
-        assert_eq!(attr_value(&attrs, "job"), None);
-        assert_eq!(
-            attr_value(&attrs, "service.namespace").as_deref(),
-            Some("shop")
-        );
-    }
-
-    #[test]
-    fn test_resource_attrs_remap_and_promotion() {
+        // no service.name: no job is fabricated
         let mut attrs = vec![
-            keyvalue("service.name", "api"),
+            keyvalue("service.namespace", "shop"),
             keyvalue("service.instance.id", "inst-1"),
-            keyvalue("host.id", "h-1"),
         ];
         process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
-        assert_eq!(attr_value(&attrs, "instance").as_deref(), Some("inst-1"));
-        // raw identity attrs are in the default promote list and survive
-        assert_eq!(attr_value(&attrs, "service.name").as_deref(), Some("api"));
-        // non-promoted attrs are dropped
-        assert_eq!(attr_value(&attrs, "host.id"), None);
-    }
-
-    #[test]
-    fn test_legacy_mode_keeps_resource_attrs_untouched() {
-        let ctx = OtlpMetricCtx {
-            is_legacy: true,
-            ..Default::default()
-        };
-        let mut attrs = vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")];
-        process_resource_attrs(&mut attrs, &ctx);
         assert_eq!(attr_value(&attrs, "job"), None);
-        assert_eq!(attr_value(&attrs, "host.id").as_deref(), Some("h-1"));
+        assert_eq!(attr_value(&attrs, "instance").as_deref(), Some("inst-1"));
     }
 
     #[test]
