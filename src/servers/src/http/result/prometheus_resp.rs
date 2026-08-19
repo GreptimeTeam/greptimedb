@@ -38,6 +38,7 @@ use datatypes::prelude::ConcreteDataType;
 use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
+use ryu::Buffer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -72,9 +73,15 @@ fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNative
 
 /// Formats a sample value for the Prometheus HTTP API.
 ///
-/// Keep Rust's `f64::to_string()` output for wire compatibility.
+/// Finite sample strings use ryu's shortest-roundtrip representation and may
+/// differ textually from previous Rust/Prometheus wire formatting; values parse
+/// identically. Non-finite values retain Rust's `f64::to_string()` output.
 fn format_prometheus_sample_value(value: f64) -> String {
-    value.to_string()
+    if value.is_finite() {
+        Buffer::new().format_finite(value).to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -316,12 +323,11 @@ impl PrometheusJsonResponse {
 
         // Query output is clustered by series (the range plan sorts by series
         // key + timestamp), so consecutive rows usually belong to the same
-        // series. Remember the previous row's tags and the index of its entry
-        // in `buffer`, and reuse the entry directly when the tags are
-        // unchanged. This avoids building and hashing the label vector on
-        // every row; the worst case adds one `Vec` comparison per series
-        // transition before falling back to the map lookup.
-        let mut last_tags: Option<Vec<(&str, &str)>> = None;
+        // series. Remember the index of the previous row's entry in `buffer`,
+        // and reuse it directly when its tags are unchanged. This avoids
+        // building and hashing the label vector on every row; the worst case
+        // adds one `Vec` comparison per series transition before falling back
+        // to the map lookup.
         let mut last_entry_index = None;
 
         let schema = batches.schema();
@@ -397,22 +403,21 @@ impl PrometheusJsonResponse {
                     }
                 }
 
-                let samples = if last_tags.as_ref().is_some_and(|prev| prev == &tags) {
-                    // Same series as the previous row: reuse its entry without
-                    // re-hashing the label vector. Entries are never removed
-                    // from `buffer`, so the captured index stays valid.
-                    let index = last_entry_index
-                        .expect("last entry index is always set together with last tags");
-                    &mut buffer
+                let reuse = last_entry_index.filter(|index| {
+                    buffer
+                        .get_index(*index)
+                        .is_some_and(|(key, _)| key == &tags)
+                });
+                let samples = if let Some(index) = reuse {
+                    buffer
                         .get_index_mut(index)
-                        .expect("reused series entry must exist")
-                        .1
+                        .map(|(_, samples)| samples)
+                        .with_context(|| UnexpectedResultSnafu {
+                            reason: "reused series entry must exist",
+                        })?
                 } else {
-                    // Tags changed: fall back to the map lookup.
-                    let entry = buffer.entry(tags.clone());
-                    let index = entry.index();
-                    last_entry_index = Some(index);
-                    last_tags = Some(tags);
+                    let entry = buffer.entry(tags);
+                    last_entry_index = Some(entry.index());
                     entry.or_default()
                 };
                 if let Some((timestamp_millis, histogram)) = histogram {
@@ -600,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn format_prometheus_sample_value_matches_f64_to_string() {
+    fn format_prometheus_sample_value_uses_ryu_for_finite_values() {
         let values = [
             1.5,
             0.1,
@@ -614,19 +619,50 @@ mod tests {
             1e30,
             f64::MAX,
             f64::MIN_POSITIVE,
-            f64::NAN,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            // These ordinary decimal values differ between ryu and Rust's
-            // `f64::to_string()` shortest representations.
-            f64::from_bits(0x42374876e8000400),
-            f64::from_bits(0x3ff0000800000000),
-            f64::from_bits(0x430a8e5672bc7312),
         ];
 
         for value in values {
-            assert_eq!(format_prometheus_sample_value(value), value.to_string());
+            let output = format_prometheus_sample_value(value);
+            assert_eq!(output.parse::<f64>().unwrap().to_bits(), value.to_bits());
         }
+
+        // Representative integral values use ryu's explicit .0 form.
+        assert_eq!(format_prometheus_sample_value(1.0), "1.0");
+        assert_eq!(format_prometheus_sample_value(-0.0), "-0.0");
+        assert_eq!(format_prometheus_sample_value(100.0), "100.0");
+        assert_eq!(format_prometheus_sample_value(1e-6), "1e-6");
+        assert_eq!(format_prometheus_sample_value(1e-7), "1e-7");
+        assert_eq!(format_prometheus_sample_value(1e21), "1e21");
+
+        // These known shortest-roundtrip tie cases have different text but
+        // remain numerically equivalent to Rust's representation.
+        for value in [
+            f64::from_bits(0x42374876e8000400),
+            f64::from_bits(0x3ff0000800000000),
+            f64::from_bits(0x430a8e5672bc7312),
+        ] {
+            let ryu_output = format_prometheus_sample_value(value);
+            let std_output = value.to_string();
+            assert_ne!(ryu_output, std_output);
+            assert_eq!(ryu_output.parse::<f64>().unwrap(), value);
+            assert_eq!(std_output.parse::<f64>().unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn format_prometheus_sample_value_preserves_nonfinite_values() {
+        assert_eq!(format_prometheus_sample_value(f64::NAN), "NaN");
+        assert_eq!(format_prometheus_sample_value(f64::INFINITY), "inf");
+        assert_eq!(format_prometheus_sample_value(f64::NEG_INFINITY), "-inf");
+
+        // Parsing a NaN does not preserve its payload bits, so NaN is checked
+        // by its required semantic spelling rather than by to_bits().
+        assert!(
+            format_prometheus_sample_value(f64::NAN)
+                .parse::<f64>()
+                .unwrap()
+                .is_nan()
+        );
     }
 
     #[test]
@@ -669,12 +705,12 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert_eq!(
             series[0].values,
-            vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
+            vec![(1.0, "1.0".to_string()), (2.0, "NaN".to_string())]
         );
     }
 
     #[test]
-    fn record_batches_to_data_formats_values_with_f64_to_string() {
+    fn record_batches_to_data_formats_values_with_ryu() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -715,10 +751,20 @@ mod tests {
 
         assert_eq!(series.len(), 1);
         let input_values = [0.0, -0.0, 1.25, 1e30, 1e-7, f64::MAX];
+        // Keep this expected-value generation independent from the production
+        // formatter while still asserting the Arrow/batch-to-Prometheus path.
         let expected = input_values
             .into_iter()
             .enumerate()
-            .map(|(index, value)| ((index + 1) as f64, value.to_string()))
+            .map(|(index, value)| {
+                let expected_value = if value.is_finite() {
+                    let mut buffer = Buffer::new();
+                    buffer.format_finite(value).to_string()
+                } else {
+                    value.to_string()
+                };
+                ((index + 1) as f64, expected_value)
+            })
             .collect::<Vec<_>>();
         assert_eq!(series[0].values, expected);
     }
@@ -838,9 +884,9 @@ mod tests {
             vec!["a", "b", "c"]
         );
         // Vector results keep the last sample of each series.
-        assert_eq!(series[0].value, Some((4.0, "4".to_string())));
-        assert_eq!(series[1].value, Some((5.0, "5".to_string())));
-        assert_eq!(series[2].value, Some((6.0, "6".to_string())));
+        assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
+        assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
+        assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
     }
 
     #[test]
@@ -948,7 +994,7 @@ mod tests {
         assert_eq!(series[0].metric["__name__"], "label_replace_repro");
         assert_eq!(series[0].metric["host"], "server-01");
         assert_eq!(series[0].metric["host_copy"], "server-01");
-        assert_eq!(series[0].value, Some((1.0, "1".to_string())));
+        assert_eq!(series[0].value, Some((1.0, "1.0".to_string())));
     }
 
     #[test]
