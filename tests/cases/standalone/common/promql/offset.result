@@ -66,8 +66,10 @@ tql eval (1500, 1500, '1s') calculate_rate_offset_total offset -10m;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') calculate_rate_offset_total offset 10m;
 
-++
-++
++----+-----+---+
+| ts | val | x |
++----+-----+---+
++----+-----+---+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') calculate_rate_offset_total offset -10m;
@@ -92,14 +94,18 @@ tql eval (3000, 3000, '1s') calculate_rate_offset_total offset 10m;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') calculate_rate_offset_total offset -10m;
 
-++
-++
++----+-----+---+
+| ts | val | x |
++----+-----+---+
++----+-----+---+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') rate(calculate_rate_window_total[10m]);
 
-++
-++
++------+------------------------------------------------+
+| time | prom_rate(time_range,value,time,Int64(600000)) |
++------+------------------------------------------------+
++------+------------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') rate(calculate_rate_offset_total[10m] offset 5m);

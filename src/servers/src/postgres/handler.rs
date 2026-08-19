@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -303,6 +304,26 @@ impl DefaultQueryParser {
 pub struct PgSqlPlan {
     pub(crate) plan: SqlPlan,
     pub(crate) copy_to_stdout_format: Option<String>,
+    pub(crate) planning_context: PlanningContext,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlanningContext {
+    pub(crate) catalog: String,
+    pub(crate) schema: String,
+}
+
+impl PlanningContext {
+    fn from_query_ctx(query_ctx: &QueryContextRef) -> Self {
+        Self {
+            catalog: query_ctx.current_catalog().to_string(),
+            schema: query_ctx.current_schema(),
+        }
+    }
+
+    fn matches(&self, query_ctx: &QueryContextRef) -> bool {
+        self.catalog == query_ctx.current_catalog() && self.schema == query_ctx.current_schema()
+    }
 }
 
 #[async_trait]
@@ -323,6 +344,7 @@ impl QueryParser for DefaultQueryParser {
             return Ok(PgSqlPlan {
                 plan: SqlPlan::Empty,
                 copy_to_stdout_format: None,
+                planning_context: PlanningContext::from_query_ctx(&query_ctx),
             });
         }
 
@@ -330,6 +352,7 @@ impl QueryParser for DefaultQueryParser {
             return Ok(PgSqlPlan {
                 plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
+                planning_context: PlanningContext::from_query_ctx(&query_ctx),
             });
         }
 
@@ -357,23 +380,8 @@ impl QueryParser for DefaultQueryParser {
         } else {
             let stmt = stmts.remove(0);
 
-            if let Some(logical_plan) = self
-                .query_handler
-                .do_describe(stmt.clone(), query_ctx)
+            self.plan_statement(stmt, sql, copy_to_stdout_format, query_ctx)
                 .await
-                .map_err(convert_err)?
-                .map(|DescribeResult { logical_plan }| logical_plan)
-            {
-                Ok(PgSqlPlan {
-                    plan: SqlPlan::Plan(logical_plan, stmt),
-                    copy_to_stdout_format,
-                })
-            } else {
-                Ok(PgSqlPlan {
-                    plan: SqlPlan::Statement(stmt, sql),
-                    copy_to_stdout_format,
-                })
-            }
         }
     }
 
@@ -395,6 +403,35 @@ impl QueryParser for DefaultQueryParser {
         Err(PgWireError::ApiError(
             "get_result_schema is not expected to be called".into(),
         ))
+    }
+}
+
+impl DefaultQueryParser {
+    async fn plan_statement(
+        &self,
+        stmt: Statement,
+        sql: String,
+        copy_to_stdout_format: Option<String>,
+        query_ctx: QueryContextRef,
+    ) -> PgWireResult<PgSqlPlan> {
+        let planning_context = PlanningContext::from_query_ctx(&query_ctx);
+        let plan = if let Some(logical_plan) = self
+            .query_handler
+            .do_describe(stmt.clone(), query_ctx)
+            .await
+            .map_err(convert_err)?
+            .map(|DescribeResult { logical_plan }| logical_plan)
+        {
+            SqlPlan::Plan(logical_plan, stmt)
+        } else {
+            SqlPlan::Statement(stmt, sql)
+        };
+
+        Ok(PgSqlPlan {
+            plan,
+            copy_to_stdout_format,
+            planning_context,
+        })
     }
 }
 
@@ -424,7 +461,46 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
             .start_timer();
 
-        let pg_sql_plan = &portal.statement.statement;
+        // The statement store is immutable after parse: pgwire hands `do_query` a
+        // `&Portal` whose statement is an `Arc<StoredStatement>`, so there is no
+        // way to write a refreshed plan back. Once the session's catalog/schema
+        // (the planning context below) diverges from the one captured at parse
+        // time, every subsequent Execute of this prepared statement re-plans from
+        // scratch until the context matches again or the statement is re-parsed.
+        // This only applies to statements that produced a logical plan, and the
+        // cost is one describe + logical-plan step per Execute (no parameter
+        // binding or execution). search_path / USE changes are rare enough that
+        // we accept this instead of adding mutable state to the stored statement.
+        let refreshed_plan = if let PgSqlPlan {
+            plan: SqlPlan::Plan(_, stmt),
+            copy_to_stdout_format,
+            planning_context,
+        } = &portal.statement.statement
+            && !planning_context.matches(&query_ctx)
+        {
+            Some(
+                self.query_parser
+                    .plan_statement(
+                        stmt.clone(),
+                        stmt.to_string(),
+                        copy_to_stdout_format.clone(),
+                        query_ctx.clone(),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(refreshed_plan) = &refreshed_plan {
+            validate_cached_plan_contract(
+                &portal.statement.statement.plan,
+                &refreshed_plan.plan,
+                &self.session,
+            )?;
+        }
+        let pg_sql_plan = refreshed_plan
+            .as_ref()
+            .unwrap_or(&portal.statement.statement);
         let sql_plan = &pg_sql_plan.plan;
 
         let output = match sql_plan {
@@ -443,7 +519,13 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 }
             }
             SqlPlan::Plan(plan, stmt) => {
-                let values = parameters_to_scalar_values(plan, portal)?;
+                let original_plan =
+                    if let SqlPlan::Plan(original_plan, _) = &portal.statement.statement.plan {
+                        original_plan
+                    } else {
+                        plan
+                    };
+                let values = parameters_to_scalar_values(original_plan, portal)?;
                 let plan = plan
                     .clone()
                     .replace_params_with_values(&ParamValues::List(
@@ -546,6 +628,71 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
         Ok(DescribePortalResponse::new(fields))
     }
+}
+
+fn validate_cached_plan_contract(
+    original_sql_plan: &SqlPlan,
+    refreshed_sql_plan: &SqlPlan,
+    session: &Arc<Session>,
+) -> PgWireResult<()> {
+    let (SqlPlan::Plan(original_plan, _), SqlPlan::Plan(refreshed_plan, _)) =
+        (original_sql_plan, refreshed_sql_plan)
+    else {
+        // The refreshed plan is not a describable logical plan (e.g. it became
+        // a statement or empty plan after re-planning), so its parameter types
+        // and result schema cannot be compared with the cached one.
+        return Err(cached_plan_error("cached plan is no longer valid"));
+    };
+
+    let original_parameter_types = DfLogicalPlanner::get_inferred_parameter_types(original_plan)
+        .context(InferParameterTypesSnafu)
+        .map_err(convert_err)?
+        .into_iter()
+        .map(|(name, data_type)| {
+            (
+                name,
+                data_type.map(|data_type| ConcreteDataType::from_arrow_type(&data_type)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let refreshed_parameter_types = DfLogicalPlanner::get_inferred_parameter_types(refreshed_plan)
+        .context(InferParameterTypesSnafu)
+        .map_err(convert_err)?
+        .into_iter()
+        .map(|(name, data_type)| {
+            (
+                name,
+                data_type.map(|data_type| ConcreteDataType::from_arrow_type(&data_type)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    if original_parameter_types != refreshed_parameter_types {
+        return Err(cached_plan_error(
+            "cached plan must not change parameter type",
+        ));
+    }
+
+    // Check the complete result contract without indexing the portal's per-column formats.
+    // A refreshed plan may have a different arity, while `Format::Individual` is sized for
+    // the original RowDescription.
+    let original_fields = describe_fields(original_sql_plan, &Format::UnifiedText, session)?;
+    let refreshed_fields = describe_fields(refreshed_sql_plan, &Format::UnifiedText, session)?;
+    if !result_contract_matches(&original_fields, &refreshed_fields) {
+        return Err(cached_plan_error("cached plan must not change result type"));
+    }
+
+    Ok(())
+}
+
+fn result_contract_matches(original_fields: &[FieldInfo], refreshed_fields: &[FieldInfo]) -> bool {
+    original_fields == refreshed_fields
+}
+
+fn cached_plan_error(message: &str) -> PgWireError {
+    PgWireError::UserError(Box::new(
+        PgErrorCode::Ec0A000.to_err_info(message.to_string()),
+    ))
 }
 
 fn describe_fields(
@@ -778,5 +925,38 @@ mod tests {
             "COPY (SELECT 1) TO STDOUT WITH (DELIMITER ',', HEADER, FORMAT binary)",
         );
         assert_eq!(check_copy_to_stdout(&statement), Some("binary".to_string()));
+    }
+
+    #[test]
+    fn test_result_contract_rejects_arity_change_with_individual_format() {
+        let original_format = Format::Individual(vec![0]);
+        let original_fields = vec![FieldInfo::new(
+            "first".to_string(),
+            None,
+            None,
+            Type::INT8,
+            original_format.format_for(0),
+        )];
+        let refreshed_fields = vec![
+            FieldInfo::new(
+                "first".to_string(),
+                None,
+                None,
+                Type::INT8,
+                Format::UnifiedText.format_for(0),
+            ),
+            FieldInfo::new(
+                "second".to_string(),
+                None,
+                None,
+                Type::INT8,
+                Format::UnifiedText.format_for(1),
+            ),
+        ];
+
+        assert!(!result_contract_matches(
+            &original_fields,
+            &refreshed_fields
+        ));
     }
 }

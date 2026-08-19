@@ -20,7 +20,6 @@
 //! When MAD = 0 (majority-constant window), returns 0.0 if value equals
 //! median, or +inf otherwise.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
@@ -28,7 +27,6 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{DataFusionError, Result, ScalarValue};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
@@ -51,16 +49,12 @@ pub struct AnomalyScoreMad {
 impl AnomalyScoreMad {
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(1, Volatility::Immutable),
         }
     }
 }
 
 impl WindowUDFImpl for AnomalyScoreMad {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "anomaly_score_mad"
     }

@@ -488,10 +488,10 @@ mod tests {
         use datafusion_common::arrow::datatypes::TimeUnit as ArrowTimeUnit;
 
         let mut converter = TypeConverter::new(Arc::new(DFSchema::empty()), QueryContext::arc());
-        let expr = Expr::Cast(Cast {
-            expr: Box::new("2009-02-13 23:31:30".lit()),
-            data_type: DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-        });
+        let expr = Expr::Cast(Cast::new(
+            Box::new("2009-02-13 23:31:30".lit()),
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        ));
 
         assert_eq!(converter.f_up(expr.clone()).unwrap().data, expr);
     }

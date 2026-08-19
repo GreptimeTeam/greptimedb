@@ -36,7 +36,37 @@ SELECT * FROM information_schema.ssts_manifest order by file_path;
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+/index/<UUID>\.puffin) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
-SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
+-- SQLNESS REPLACE (\{"(bloom|fulltext|inverted)":.*\}) <META_JSON>
+SELECT *,
+  CASE index_type
+    WHEN 'bloom_filter' THEN concat(
+      'bloom_rows_per_segment=', CAST(json_get_int(parse_json(meta_json), 'bloom.rows_per_segment') AS STRING),
+      ',bloom_segment_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.segment_count') AS STRING),
+      ',bloom_row_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.row_count') AS STRING),
+      ',bloom_filter_size=', CAST(json_get_int(parse_json(meta_json), 'bloom.bloom_filter_size') AS STRING))
+    WHEN 'fulltext_bloom' THEN concat(
+      'bloom_rows_per_segment=', CAST(json_get_int(parse_json(meta_json), 'bloom.rows_per_segment') AS STRING),
+      ',bloom_segment_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.segment_count') AS STRING),
+      ',bloom_row_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.row_count') AS STRING),
+      ',bloom_filter_size=', CAST(json_get_int(parse_json(meta_json), 'bloom.bloom_filter_size') AS STRING),
+      ',fulltext_analyzer=', json_get_string(parse_json(meta_json), 'fulltext.analyzer'),
+      ',fulltext_case_sensitive=', CAST(json_get_bool(parse_json(meta_json), 'fulltext.case_sensitive') AS STRING))
+    WHEN 'inverted' THEN concat(
+      'inverted_bitmap_type=', json_get_string(parse_json(meta_json), 'inverted.bitmap_type'),
+      ',inverted_base_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.base_offset') AS STRING),
+      ',inverted_index_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.inverted_index_size') AS STRING),
+      ',inverted_relative_fst_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.relative_fst_offset') AS STRING),
+      ',inverted_fst_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.fst_size') AS STRING),
+      ',inverted_relative_null_bitmap_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.relative_null_bitmap_offset') AS STRING),
+      ',inverted_null_bitmap_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.null_bitmap_size') AS STRING),
+      ',inverted_segment_row_count=', CAST(json_get_int(parse_json(meta_json), 'inverted.segment_row_count') AS STRING),
+      ',inverted_total_row_count=', CAST(json_get_int(parse_json(meta_json), 'inverted.total_row_count') AS STRING))
+  END AS index_meta_summary
+FROM information_schema.ssts_index_meta
+ORDER BY index_type, target_type, target_key,
+  json_get_int(parse_json(meta_json), 'bloom.row_count'),
+  json_get_int(parse_json(meta_json), 'inverted.total_row_count'),
+  region_number, region_sequence, file_id;
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
@@ -64,7 +94,37 @@ SELECT * FROM information_schema.ssts_manifest order by region_id, sequence;
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+/index/<UUID>\.puffin) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
-SELECT * FROM information_schema.ssts_index_meta ORDER BY meta_json;
+-- SQLNESS REPLACE (\{"(bloom|fulltext|inverted)":.*\}) <META_JSON>
+SELECT *,
+  CASE index_type
+    WHEN 'bloom_filter' THEN concat(
+      'bloom_rows_per_segment=', CAST(json_get_int(parse_json(meta_json), 'bloom.rows_per_segment') AS STRING),
+      ',bloom_segment_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.segment_count') AS STRING),
+      ',bloom_row_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.row_count') AS STRING),
+      ',bloom_filter_size=', CAST(json_get_int(parse_json(meta_json), 'bloom.bloom_filter_size') AS STRING))
+    WHEN 'fulltext_bloom' THEN concat(
+      'bloom_rows_per_segment=', CAST(json_get_int(parse_json(meta_json), 'bloom.rows_per_segment') AS STRING),
+      ',bloom_segment_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.segment_count') AS STRING),
+      ',bloom_row_count=', CAST(json_get_int(parse_json(meta_json), 'bloom.row_count') AS STRING),
+      ',bloom_filter_size=', CAST(json_get_int(parse_json(meta_json), 'bloom.bloom_filter_size') AS STRING),
+      ',fulltext_analyzer=', json_get_string(parse_json(meta_json), 'fulltext.analyzer'),
+      ',fulltext_case_sensitive=', CAST(json_get_bool(parse_json(meta_json), 'fulltext.case_sensitive') AS STRING))
+    WHEN 'inverted' THEN concat(
+      'inverted_bitmap_type=', json_get_string(parse_json(meta_json), 'inverted.bitmap_type'),
+      ',inverted_base_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.base_offset') AS STRING),
+      ',inverted_index_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.inverted_index_size') AS STRING),
+      ',inverted_relative_fst_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.relative_fst_offset') AS STRING),
+      ',inverted_fst_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.fst_size') AS STRING),
+      ',inverted_relative_null_bitmap_offset=', CAST(json_get_int(parse_json(meta_json), 'inverted.relative_null_bitmap_offset') AS STRING),
+      ',inverted_null_bitmap_size=', CAST(json_get_int(parse_json(meta_json), 'inverted.null_bitmap_size') AS STRING),
+      ',inverted_segment_row_count=', CAST(json_get_int(parse_json(meta_json), 'inverted.segment_row_count') AS STRING),
+      ',inverted_total_row_count=', CAST(json_get_int(parse_json(meta_json), 'inverted.total_row_count') AS STRING))
+  END AS index_meta_summary
+FROM information_schema.ssts_index_meta
+ORDER BY index_type, target_type, target_key,
+  json_get_int(parse_json(meta_json), 'bloom.row_count'),
+  json_get_int(parse_json(meta_json), 'inverted.total_row_count'),
+  region_number, region_sequence, file_id;
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>

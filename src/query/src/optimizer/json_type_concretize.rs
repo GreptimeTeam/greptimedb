@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
 
 use arrow_schema::DataType;
@@ -50,11 +51,7 @@ impl OptimizerRule for JsonTypeConcretizeRule {
 
         plan.transform_down(|plan| match &plan {
             LogicalPlan::TableScan(table_scan) => {
-                let Some(source) = table_scan
-                    .source
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                else {
+                let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
                     return Ok(Transformed::no(plan));
                 };
 
@@ -95,12 +92,12 @@ fn apply_json_type_hint(
         return false;
     }
 
-    if let Some(adapter) = provider.as_any().downcast_ref::<DummyTableProvider>() {
+    if let Some(adapter) = (provider as &dyn Any).downcast_ref::<DummyTableProvider>() {
         adapter.with_json_type_hint(json_types);
         return true;
     }
 
-    if let Some(adapter) = provider.as_any().downcast_ref::<DfTableProviderAdapter>() {
+    if let Some(adapter) = (provider as &dyn Any).downcast_ref::<DfTableProviderAdapter>() {
         adapter.with_json_type_hint(json_types);
         return true;
     }

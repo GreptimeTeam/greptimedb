@@ -1547,7 +1547,7 @@ impl PruningStatistics for BatchPruningStats<'_> {
         None
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 

@@ -56,11 +56,9 @@ impl LogQueryPlanner {
             .await
             .context(CatalogSnafu)?;
         let schema = table_source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -882,8 +881,7 @@ impl MergeScanExec {
         let hash_expr_col_names: HashSet<_> = hash_exprs
             .iter()
             .filter_map(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .map(|col_expr| col_expr.name())
             })
             .collect();
@@ -905,8 +903,7 @@ impl MergeScanExec {
         let overlaps: Vec<_> = hash_exprs
             .iter()
             .filter(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
             })
             .cloned()
@@ -1147,10 +1144,6 @@ impl Drop for PartitionMetrics {
 }
 
 impl ExecutionPlan for MergeScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -1244,14 +1237,14 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(&self.arrow_schema));
+            return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 
         let mut statistics = Statistics::new_unknown(&self.arrow_schema);
         statistics.num_rows = self.estimated_num_rows();
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {
