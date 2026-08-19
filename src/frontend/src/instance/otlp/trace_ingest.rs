@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -107,9 +106,10 @@ struct TraceFailureMessages {
 
 #[derive(Debug)]
 struct TraceFailureEntry {
-    /// Fingerprint of the untruncated `(label, key)`. Storing the key itself
-    /// would let one entry grow with a user-controlled column name.
-    identity: u64,
+    label: &'static str,
+    /// Untruncated: two causes can agree on a truncated prefix and differ
+    /// exactly where the actionable detail is.
+    key: String,
     message: String,
     occurrences: usize,
 }
@@ -1718,21 +1718,16 @@ impl Instance {
     /// Records one failure, merging repeats of `(label, key)` into a count.
     fn push_trace_failure_message(
         messages: &mut TraceFailureMessages,
-        label: &str,
+        label: &'static str,
         key: &str,
         message: String,
     ) {
         OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).inc();
 
-        let mut hasher = DefaultHasher::new();
-        label.hash(&mut hasher);
-        key.hash(&mut hasher);
-        let identity = hasher.finish();
-
         if let Some(entry) = messages
             .entries
             .iter_mut()
-            .find(|entry| entry.identity == identity)
+            .find(|entry| entry.label == label && entry.key == key)
         {
             entry.occurrences += 1;
             return;
@@ -1744,7 +1739,8 @@ impl Instance {
         }
 
         messages.entries.push(TraceFailureEntry {
-            identity,
+            label,
+            key: key.to_string(),
             message,
             occurrences: 1,
         });
