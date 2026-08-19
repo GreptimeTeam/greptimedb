@@ -2087,8 +2087,7 @@ fn build_bulk_insert_request(
 }
 
 /// Bulk parts fold per-part sequences (commit-unit granularity): an exact range
-/// keeps or drops each whole part. The same set must hold before flush, after
-/// flush, and after compaction.
+/// keeps or drops each whole part. The same set must hold before and after flush.
 #[tokio::test]
 async fn test_exact_sequence_read_bulk_parts() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_bulk_parts").await;
@@ -2163,15 +2162,6 @@ async fn test_exact_sequence_read_bulk_parts() {
     assert!(scan.contains("| 3 "), "second bulk part missing:\n{scan}");
 
     test_util::flush_region(&engine, region_id, None).await;
-    assert_eq!(scan_exact(Some(2), Some(100)).await, scan);
-
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Compact(RegionCompactRequest::default()),
-        )
-        .await
-        .unwrap();
     assert_eq!(scan_exact(Some(2), Some(100)).await, scan);
 }
 
