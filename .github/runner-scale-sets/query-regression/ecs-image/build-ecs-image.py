@@ -58,14 +58,16 @@ BUILD_TIMEOUT_SECONDS = 60 * 60
 # Same apt package contract as the runner Dockerfile; the base
 # actions-runner image is Ubuntu 24.04, so an Ubuntu 24.04 host resolves the
 # same tool versions (protoc 3.21.12, mold 2.30.0, Python 3.12.3).
+# Docker itself comes from Docker's official repository (docker-ce), not the
+# distribution-packaged docker.io.
 APT_PACKAGES = [
     "build-essential",
     "ca-certificates",
     "clang",
     "cmake",
     "curl",
-    "docker.io",
     "git",
+    "gpg",
     "gzip",
     "jq",
     "libprotobuf-dev",
@@ -84,6 +86,8 @@ APT_PACKAGES = [
     "zstd",
 ]
 
+DOCKER_CE_PACKAGES = "docker-ce docker-ce-cli containerd.io docker-buildx-plugin"
+
 
 def render_user_data(dockerfile: str, start_runner: str, unit: str) -> str:
     dockerfile_b64 = base64.b64encode(dockerfile.encode()).decode()
@@ -95,6 +99,16 @@ set -euo pipefail
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {packages}
+
+# Docker from the official repository, not the distribution-packaged docker.io.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${{VERSION_CODENAME}} stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {DOCKER_CE_PACKAGES}
 
 base64 -d > /tmp/Dockerfile <<'EOF'
 {dockerfile_b64}
