@@ -563,7 +563,7 @@ impl ExecutionPlan for HistogramFoldExec {
                 )),
                 options: Some(SortOptions {
                     descending: false,  // numeric bounds ascending
-                    nulls_first: false, // unparseable bounds last
+                    nulls_first: false, // unparsable bounds last
                 }),
             });
         }
@@ -1878,7 +1878,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn ignore_unparseable_bucket_bounds() {
+    async fn ignore_unparsable_bucket_bounds() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("le", DataType::Utf8, true),

@@ -10675,7 +10675,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn nested_histogram_helpers_ignore_unparseable_bucket_labels() {
+    async fn nested_histogram_helpers_ignore_unparsable_bucket_labels() {
         let state = build_query_engine_state();
         for native_le in [None, Some("native")] {
             for query in [
