@@ -13,14 +13,14 @@
 # limitations under the License.
 
 [Unit]
-Description=Query regression ephemeral GitHub Actions runner
+Description=Ephemeral GitHub Actions runner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/query-regression-runner.env
-ExecStart=/opt/query-regression/start-runner.sh
+EnvironmentFile=/etc/ephemeral-github-runner.env
+ExecStart=/opt/ephemeral-github-runner/start-runner.sh
 Restart=no
 
 [Install]

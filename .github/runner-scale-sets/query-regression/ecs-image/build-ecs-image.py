@@ -131,16 +131,16 @@ groupadd --gid 1001 runner 2>/dev/null || true
 useradd --uid 1001 --gid 1001 --home-dir /home/runner --shell /bin/bash runner 2>/dev/null || true
 chown -R 1001:1001 /home/runner
 
-mkdir -p /opt/query-regression
-base64 -d > /opt/query-regression/start-runner.sh <<'EOF'
+mkdir -p /opt/ephemeral-github-runner
+base64 -d > /opt/ephemeral-github-runner/start-runner.sh <<'EOF'
 {start_runner_b64}
 EOF
-chmod 0755 /opt/query-regression/start-runner.sh
-base64 -d > /etc/systemd/system/query-regression-runner.service <<'EOF'
+chmod 0755 /opt/ephemeral-github-runner/start-runner.sh
+base64 -d > /etc/systemd/system/ephemeral-github-runner.service <<'EOF'
 {unit_b64}
 EOF
 systemctl daemon-reload
-systemctl enable query-regression-runner.service
+systemctl enable ephemeral-github-runner.service
 
 # Keep the image free of the build-time docker state.
 docker rm -f "${{container}}" >/dev/null
@@ -245,7 +245,7 @@ def main() -> int:
         render_user_data(
             (ASSETS_DIR.parent / "Dockerfile").read_text(),
             (ASSETS_DIR / "start-runner.sh").read_text(),
-            (ASSETS_DIR / "query-regression-runner.service").read_text(),
+            (ASSETS_DIR / "ephemeral-github-runner.service").read_text(),
         ).encode()
     ).decode()
 

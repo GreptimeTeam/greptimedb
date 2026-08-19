@@ -74,7 +74,7 @@ class ProvisionUserDataTest(unittest.TestCase):
         self.assertIn("RUNNER_LABELS=query-regression-ecs-12345", script)
         self.assertIn("RUNNER_TOKEN=TOKEN", script)
         self.assertIn("REPO_URL=https://github.com/GreptimeTeam/greptimedb", script)
-        self.assertIn("systemctl start query-regression-runner.service", script)
+        self.assertIn("systemctl start ephemeral-github-runner.service", script)
 
     def test_encode_user_data_round_trips(self) -> None:
         script = self.render()

@@ -154,13 +154,13 @@ bind_mount() {{
 {bind_mounts}
 chown -R {runner_uid}:{runner_gid} /home/runner
 
-cat > /etc/query-regression-runner.env <<'ENVEOF'
+cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
 RUNNER_LABELS={runner_label}
 RUNNER_TOKEN={runner_token}
 REPO_URL=https://github.com/{repo}
 ENVEOF
-systemctl start query-regression-runner.service
+systemctl start ephemeral-github-runner.service
 """
 
 

@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configure and start the ephemeral GitHub Actions runner on a query-regression
-# ECS instance. Baked into the custom image at /opt/query-regression/ by
+# Configure and start the ephemeral GitHub Actions runner on an ECS instance.
+# Baked into the custom image at /opt/ephemeral-github-runner/ by
 # build-ecs-image.py; the per-run environment is written by cloud-init to
-# /etc/query-regression-runner.env.
+# /etc/ephemeral-github-runner.env.
 set -euo pipefail
 
 # shellcheck disable=SC1091
-source /etc/query-regression-runner.env
+source /etc/ephemeral-github-runner.env
 
 export HOME=/home/runner
 cd /home/runner
