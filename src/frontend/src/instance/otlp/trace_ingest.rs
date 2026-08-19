@@ -25,7 +25,7 @@ use client::Output;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use datatypes::prelude::ConcreteDataType;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
@@ -50,10 +50,14 @@ use crate::instance::otlp::trace_types::{
     PendingTraceColumnRewrite, PreparedTraceColumnRewrites, TraceColumnRewriteError,
     choose_trace_reconcile_decision, enrich_trace_reconcile_error,
     is_trace_reconcile_candidate_type, prepare_trace_column_rewrites, push_observed_trace_type,
+    truncate_for_diagnostics,
 };
 use crate::metrics::{OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
 
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
+
+/// Maximum characters of a failure cause echoed to the client and the log.
+const TRACE_FAILURE_CAUSE_LIMIT: usize = 256;
 
 /// Determines how trace ingestion responds to a failure before a write is dispatched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +90,34 @@ struct TraceChunkIngestContext<'a> {
 struct TraceIngestState {
     aux_data: TraceAuxData,
     outcome: TraceIngestOutcome,
-    failure_messages: Vec<String>,
+    failure_messages: TraceFailureMessages,
+}
+
+/// Bounded, deduplicated failure details for one trace request.
+///
+/// Occurrences past [`TRACE_FAILURE_MESSAGE_LIMIT`] distinct failures are
+/// counted but their keys are dropped: retaining them would let this state grow
+/// with the number of distinct bad values in a request.
+#[derive(Debug, Default)]
+struct TraceFailureMessages {
+    entries: Vec<TraceFailureEntry>,
+    suppressed_occurrences: usize,
+}
+
+#[derive(Debug)]
+struct TraceFailureEntry {
+    label: &'static str,
+    /// Untruncated: two causes can agree on a truncated prefix and differ
+    /// exactly where the actionable detail is.
+    key: String,
+    message: String,
+    occurrences: usize,
+}
+
+impl TraceFailureMessages {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// How a v1 chunk should be reconciled when it is written.
@@ -863,7 +894,7 @@ impl Instance {
         let mut ingest_state = TraceIngestState {
             aux_data: TraceAuxData::default(),
             outcome: TraceIngestOutcome::default(),
-            failure_messages: Vec::new(),
+            failure_messages: TraceFailureMessages::default(),
         };
 
         let main_result: ServerResult<()> = async {
@@ -954,6 +985,7 @@ impl Instance {
                             Self::push_trace_failure_message(
                                 &mut ingest_state.failure_messages,
                                 "aux_table_update_failed",
+                                err.status_code().as_ref(),
                                 format!(
                                     "Auxiliary trace tables were not fully updated ({})",
                                     err.status_code().as_ref()
@@ -968,6 +1000,7 @@ impl Instance {
                 Err(err) => Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     "aux_table_update_failed",
+                    err.status_code().as_ref(),
                     format!(
                         "Auxiliary trace tables were not fully updated ({})",
                         err.status_code().as_ref()
@@ -984,6 +1017,35 @@ impl Instance {
             ingest_state.outcome.rejected_spans,
             ingest_state.failure_messages,
         );
+
+        if let Some(error_message) = &ingest_state.outcome.error_message {
+            let accepted_spans = ingest_state.outcome.accepted_spans;
+            let rejected_spans = ingest_state.outcome.rejected_spans;
+            // A partial success repeats every export interval while the sender
+            // keeps emitting the bad value, so only a fully rejected request is
+            // worth a warning. Either way the detail reaches the sender: as an
+            // OTLP partial success, or as the status message of a 400.
+            //
+            // The detail embeds attribute keys verbatim, so it goes out as a
+            // Debug field; interpolating it would let a newline in an attribute
+            // key forge log lines.
+            if accepted_spans == 0 && rejected_spans > 0 {
+                warn!(
+                    table_name = ingest_ctx.table_name,
+                    rejected_spans,
+                    error_message = ?error_message,
+                    "OTLP trace ingest rejected every span"
+                );
+            } else {
+                debug!(
+                    table_name = ingest_ctx.table_name,
+                    accepted_spans,
+                    rejected_spans,
+                    error_message = ?error_message,
+                    "OTLP trace ingest reported failures"
+                );
+            }
+        }
 
         Ok(ingest_state.outcome)
     }
@@ -1019,6 +1081,7 @@ impl Instance {
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     ChunkFailureReaction::Propagate.as_metric_label(),
+                    err.status_code().as_ref(),
                     format!(
                         "Propagating chunk write failure ({})",
                         err.status_code().as_ref()
@@ -1069,13 +1132,18 @@ impl Instance {
             // recover valid data.
             let span_count = chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>();
             ingest_state.outcome.rejected_spans += span_count;
+            let (cause, shown_cause) = Self::trace_failure_cause(&err);
             Self::push_trace_failure_message(
                 &mut ingest_state.failure_messages,
                 ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                // Merging discards of different sizes would make the reported
+                // count times its occurrences wrong.
+                &format!("{span_count}:{cause}"),
                 format!(
-                    "Discarded {} spans after pre-write request failure ({})",
+                    "Discarded {} spans after pre-write request failure ({}): {}",
                     span_count,
-                    err.status_code().as_ref()
+                    err.status_code().as_ref(),
+                    shown_cause
                 ),
             );
             return Ok(());
@@ -1110,6 +1178,7 @@ impl Instance {
             Self::push_trace_failure_message(
                 &mut ingest_state.failure_messages,
                 ChunkFailureReaction::RetryPerSpan.as_metric_label(),
+                "incompatible_binary_and_json",
                 "Chunk fallback triggered by incompatible binary and JSON values".to_string(),
             );
             return self
@@ -1136,6 +1205,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::RetryPerSpan.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
                     );
                     return self
@@ -1144,13 +1214,19 @@ impl Instance {
                 }
                 ChunkFailureReaction::DiscardChunk => {
                     ingest_state.outcome.rejected_spans += span_count;
+                    let (cause, shown_cause) = Self::trace_failure_cause(&err);
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                        // Chunks discarded for one cause differ in size; merging
+                        // them would make the reported count times its
+                        // occurrences wrong.
+                        &format!("{span_count}:{cause}"),
                         format!(
-                            "Discarded {} spans after pre-write chunk failure ({})",
+                            "Discarded {} spans after pre-write chunk failure ({}): {}",
                             span_count,
-                            err.status_code().as_ref()
+                            err.status_code().as_ref(),
+                            shown_cause
                         ),
                     );
                     return Ok(());
@@ -1159,6 +1235,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating pre-write chunk failure ({})",
                             err.status_code().as_ref()
@@ -1182,6 +1259,7 @@ impl Instance {
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     ChunkFailureReaction::Propagate.as_metric_label(),
+                    err.status_code().as_ref(),
                     format!(
                         "Propagating chunk write failure ({})",
                         err.status_code().as_ref()
@@ -1221,6 +1299,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating pre-write span failure for {}:{} ({})",
                             span.trace_id,
@@ -1232,14 +1311,19 @@ impl Instance {
                 }
 
                 ingest_state.outcome.rejected_spans += 1;
+                // Dedup on the cause, not the span id: one bad column rejects
+                // every span and would otherwise fill the entry list.
+                let (cause, shown_cause) = Self::trace_failure_cause(&err);
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     "span_rejected",
+                    &cause,
                     format!(
-                        "Rejected span {}:{} ({})",
+                        "Rejected span {}:{} ({}): {}",
                         span.trace_id,
                         span.span_id,
-                        err.status_code().as_ref()
+                        err.status_code().as_ref(),
+                        shown_cause
                     ),
                 );
                 continue;
@@ -1256,6 +1340,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating span write failure for {}:{} ({})",
                             span.trace_id,
@@ -1619,24 +1704,52 @@ impl Instance {
         outcome.write_cost += cost;
     }
 
-    fn push_trace_failure_message(messages: &mut Vec<String>, label: &str, message: String) {
+    /// Returns the full cause of a pre-write failure and its display form.
+    ///
+    /// `output_msg` masks internal errors and unwraps the root cause. Dedup must
+    /// key on the full text: two causes can agree on a truncated prefix and
+    /// differ exactly where the actionable detail is.
+    fn trace_failure_cause(err: &error::Error) -> (String, String) {
+        let cause = err.output_msg();
+        let display = truncate_for_diagnostics(&cause, TRACE_FAILURE_CAUSE_LIMIT);
+        (cause, display)
+    }
+
+    /// Records one failure, merging repeats of `(label, key)` into a count.
+    fn push_trace_failure_message(
+        messages: &mut TraceFailureMessages,
+        label: &'static str,
+        key: &str,
+        message: String,
+    ) {
         OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).inc();
 
-        if messages.len() < TRACE_FAILURE_MESSAGE_LIMIT {
-            messages.push(message);
-        } else if messages.len() == TRACE_FAILURE_MESSAGE_LIMIT {
-            tracing::debug!(
-                label,
-                limit = TRACE_FAILURE_MESSAGE_LIMIT,
-                "Trace ingest failure message limit reached; suppressing additional failure details"
-            );
+        if let Some(entry) = messages
+            .entries
+            .iter_mut()
+            .find(|entry| entry.label == label && entry.key == key)
+        {
+            entry.occurrences += 1;
+            return;
         }
+
+        if messages.entries.len() >= TRACE_FAILURE_MESSAGE_LIMIT {
+            messages.suppressed_occurrences += 1;
+            return;
+        }
+
+        messages.entries.push(TraceFailureEntry {
+            label,
+            key: key.to_string(),
+            message,
+            occurrences: 1,
+        });
     }
 
     fn finish_trace_failure_message(
         accepted_spans: usize,
         rejected_spans: usize,
-        messages: Vec<String>,
+        messages: TraceFailureMessages,
     ) -> Option<String> {
         if rejected_spans == 0 && messages.is_empty() {
             return None;
@@ -1648,8 +1761,27 @@ impl Instance {
         );
 
         if !messages.is_empty() {
+            let details = messages
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    if entry.occurrences > 1 {
+                        format!("{} (x{})", entry.message, entry.occurrences)
+                    } else {
+                        entry.message
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             summary.push_str(": ");
-            summary.push_str(&messages.join("; "));
+            summary.push_str(&details);
+        }
+
+        if messages.suppressed_occurrences > 0 {
+            summary.push_str(&format!(
+                "; {} additional failures suppressed",
+                messages.suppressed_occurrences
+            ));
         }
 
         Some(summary)

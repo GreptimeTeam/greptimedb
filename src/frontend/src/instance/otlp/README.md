@@ -158,6 +158,18 @@ Accounting follows the main-table write:
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.
 
+A rejection detail carries the failing cause, not just a status code, so an
+unusable attribute value names its column, source value, and target type. Repeats
+of the same `(site, cause)` collapse into one entry with an occurrence count, and
+only a fixed number of distinct entries is retained; failures past that limit are
+counted but their causes are dropped, which keeps the state bounded regardless of
+how many distinct bad values a request carries.
+
+A request that rejects every span is logged at warn level. A partial success is
+logged at debug level only: it repeats every export interval while the sender
+keeps emitting the value, and its detail already reaches the sender through the
+OTLP partial-success message.
+
 Finally, the HTTP handler returns:
 
 - full success when there are no rejected spans or failure details;
