@@ -1623,7 +1623,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.0.7",
  "rustix-linux-procfs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "winx",
 ]
 
@@ -1710,6 +1710,14 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "catio"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/catio.git?rev=efdc0a4#efdc0a48e1b5df2bc06af7283c09265036bd3eac"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
@@ -2820,6 +2828,7 @@ name = "common-runtime"
 version = "1.3.0"
 dependencies = [
  "async-trait",
+ "catio",
  "clap",
  "common-error",
  "common-macro",
@@ -9124,7 +9133,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13813,7 +13822,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
