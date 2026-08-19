@@ -100,7 +100,7 @@ use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
-use common_telemetry::{info, tracing, warn};
+use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use futures::future::{join_all, try_join_all};
@@ -1061,15 +1061,15 @@ impl EngineInner {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
         }
 
-        // Shared capability check used identically by the engine (fence
-        // relaxation) and the reader (row-level filtering) — see
-        // `read::scan_region::exact_sequence_range`. Only Flow's explicit
-        // `sequence_range` mode requests exactness; historical `memtable_only`
-        // scans never set `exact_sequence_range` and therefore keep every fence
-        // below regardless of region options.
-        let exact_sequence_range_files = exact_sequence_range_files(&request, &version);
-        let exact_sequence_range =
-            exact_sequence_range(&request, &version, &exact_sequence_range_files)?;
+        // Only exact requests need the capability check and its selected file
+        // list. Other requests keep the regular scan pruning path unchanged.
+        let selected_files = (request.exact_sequence_range && !request.skip_sst_files)
+            .then(|| exact_sequence_range_files(&request, &version));
+        let exact_sequence_range = exact_sequence_range(
+            &request,
+            &version,
+            selected_files.as_deref().unwrap_or_default(),
+        )?;
 
         // An extension range provider may contribute ranges on a follower
         // region, and extension streams are returned without a row-level
@@ -1089,6 +1089,13 @@ impl EngineInner {
             exact_sequence_range
         };
 
+        debug!(
+            "Scan region {} exact sequence range: requested={}, available={}, selected_files={}",
+            region_id,
+            request.exact_sequence_range,
+            exact_sequence_range.is_some(),
+            selected_files.as_ref().map_or(0, Vec::len),
+        );
         validate_sequence_fences(
             &request,
             &version,
@@ -1114,6 +1121,11 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
+        let scan_region = if let Some(files) = selected_files {
+            scan_region.with_selected_files(files)
+        } else {
+            scan_region
+        };
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
