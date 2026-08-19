@@ -675,6 +675,7 @@
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
 | `flow.batching_mode.experimental_enable_incremental_read` | Bool | `false` | Whether to enable experimental flow incremental source reads.<br/>When disabled, batching flows always execute full-snapshot queries.<br/>Can be overridden per flow with WITH (experimental_enable_incremental_read = 'true'). |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
+| `flow.batching_mode.experimental_frontend_endpoints` | Array | -- | Optional distributed Flownode batching-DML-only frontend authorities.<br/>When set, batching INSERT INTO SELECT queries use only these host:port<br/>authorities and do not fall back to metasrv-discovered frontends. An empty<br/>list disables it. Standalone and streaming Flow are unaffected. |
 | `flow.batching_mode.frontend_tls` | -- | -- | -- |
 | `flow.batching_mode.frontend_tls.enabled` | Bool | `false` | Whether to enable TLS for client. |
 | `flow.batching_mode.frontend_tls.server_ca_cert_path` | String | Unset | Server Certificate file path. |
