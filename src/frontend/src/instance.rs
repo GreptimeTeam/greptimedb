@@ -561,27 +561,39 @@ fn cache_legacy_mode(
 
 /// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
 /// For MySQL, it applies only to read-only statements.
+/// Computes the effective query timeout for the current channel.
+///
+/// For HTTP SQL requests the tighter of the session-level statement timeout
+/// and the endpoint-level request timeout applies, so that a query can time
+/// out gracefully (and record diagnostics) before the HTTP layer aborts the
+/// request. Zero timeouts are treated as unset.
+fn effective_query_timeout(query_ctx: &QueryContextRef) -> Option<Duration> {
+    let request_timeout = match query_ctx.channel() {
+        Channel::HttpSql => query_ctx.request_timeout(),
+        _ => None,
+    };
+    [query_ctx.query_timeout(), request_timeout]
+        .into_iter()
+        .flatten()
+        .filter(|timeout| !timeout.is_zero())
+        .min()
+}
+
 fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Duration> {
-    let query_timeout = query_ctx.query_timeout()?;
-    if query_timeout.is_zero() {
-        return None;
-    }
+    let timeout = effective_query_timeout(query_ctx)?;
     match query_ctx.channel() {
-        Channel::Mysql | Channel::HttpSql if stmt.is_readonly() => Some(query_timeout),
-        Channel::Postgres => Some(query_timeout),
+        Channel::Mysql | Channel::HttpSql if stmt.is_readonly() => Some(timeout),
+        Channel::Postgres => Some(timeout),
         _ => None,
     }
 }
 
 /// Derives timeout for plan execution.
 fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> Option<Duration> {
-    let query_timeout = query_ctx.query_timeout()?;
-    if query_timeout.is_zero() {
-        return None;
-    }
+    let timeout = effective_query_timeout(query_ctx)?;
     match query_ctx.channel() {
-        Channel::Mysql | Channel::HttpSql if is_readonly_plan(plan) => Some(query_timeout),
-        Channel::Postgres => Some(query_timeout),
+        Channel::Mysql | Channel::HttpSql if is_readonly_plan(plan) => Some(timeout),
+        Channel::Postgres => Some(timeout),
         _ => None,
     }
 }
@@ -2279,6 +2291,43 @@ mod tests {
         // Zero timeout disables the wrapper.
         query_ctx.set_query_timeout(Duration::ZERO);
         assert_eq!(derive_timeout(&explain, &query_ctx), None);
+    }
+
+    #[test]
+    fn test_derive_timeout_http_sql_combines_session_and_request_timeout() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .channel(Channel::HttpSql)
+                .build(),
+        );
+        let explain = parse_one_sql("EXPLAIN ANALYZE VERBOSE SELECT 1");
+
+        // Only the request-level timeout is set.
+        query_ctx.set_request_timeout(Duration::from_secs(30));
+        assert_eq!(
+            derive_timeout(&explain, &query_ctx),
+            Some(Duration::from_secs(30))
+        );
+
+        // The tighter of session and request timeout wins.
+        query_ctx.set_query_timeout(Duration::from_secs(10));
+        assert_eq!(
+            derive_timeout(&explain, &query_ctx),
+            Some(Duration::from_secs(10))
+        );
+        query_ctx.set_query_timeout(Duration::from_secs(60));
+        assert_eq!(
+            derive_timeout(&explain, &query_ctx),
+            Some(Duration::from_secs(30))
+        );
+
+        // A zero session timeout is treated as unset and does not disable
+        // the request-level timeout.
+        query_ctx.set_query_timeout(Duration::ZERO);
+        assert_eq!(
+            derive_timeout(&explain, &query_ctx),
+            Some(Duration::from_secs(30))
+        );
     }
 
     struct PendingDataSource {

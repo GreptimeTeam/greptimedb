@@ -481,6 +481,17 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
     }
 
+    /// Returns the request-level timeout imposed by the serving endpoint
+    /// (e.g. the HTTP server request timeout), if any.
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.mutable_session_data.read().unwrap().request_timeout
+    }
+
+    /// Sets the request-level timeout imposed by the serving endpoint.
+    pub fn set_request_timeout(&self, timeout: Duration) {
+        self.mutable_session_data.write().unwrap().request_timeout = Some(timeout);
+    }
+
     pub fn insert_cursor(&self, name: String, rb: RecordBatchStreamCursor) {
         let mut guard = self.mutable_session_data.write().unwrap();
         guard.cursors.insert(name, Arc::new(rb));

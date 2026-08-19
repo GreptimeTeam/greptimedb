@@ -54,6 +54,7 @@ use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
     HttpResponse, ResponseFormat,
 };
+use crate::http::timeout::RequestDeadline;
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -112,6 +113,21 @@ struct AnalyzeStreamState {
     done: bool,
 }
 
+/// Propagates the HTTP request deadline resolved by `DynamicTimeoutLayer`
+/// into the query context, so that statement execution can time out (and
+/// record diagnostics) before the HTTP layer aborts the request.
+fn apply_request_deadline(
+    query_ctx: &QueryContext,
+    deadline: Option<Extension<RequestDeadline>>,
+) {
+    if let Some(Extension(deadline)) = deadline {
+        let remaining = deadline.remaining();
+        if !remaining.is_zero() {
+            query_ctx.set_request_timeout(remaining);
+        }
+    }
+}
+
 /// Handler to execute sql
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
@@ -119,6 +135,7 @@ pub async fn sql(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    deadline: Option<Extension<RequestDeadline>>,
     Form(form_params): Form<SqlQuery>,
 ) -> HttpResponse {
     let start = Instant::now();
@@ -131,6 +148,7 @@ pub async fn sql(
     let db = query_ctx.get_db_string();
 
     query_ctx.set_channel(Channel::HttpSql);
+    apply_request_deadline(&query_ctx, deadline);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
@@ -210,6 +228,7 @@ pub async fn sql_analyze_stream(
     State(state): State<ApiState>,
     Query(query_params): Query<SqlQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    deadline: Option<Extension<RequestDeadline>>,
     form_params: std::result::Result<Form<SqlQuery>, FormRejection>,
 ) -> Response {
     let start = Instant::now();
@@ -235,6 +254,7 @@ pub async fn sql_analyze_stream(
     }
     query_ctx.set_channel(Channel::HttpSql);
     query_ctx.enable_live_analyze_metrics();
+    apply_request_deadline(&query_ctx, deadline);
     let query_ctx = Arc::new(query_ctx);
 
     let Some(sql) = query_params.sql.or(form_params.sql) else {

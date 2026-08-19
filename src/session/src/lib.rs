@@ -59,6 +59,10 @@ pub(crate) struct MutableInner {
     user_info: UserInfoRef,
     timezone: Timezone,
     query_timeout: Option<Duration>,
+    /// Request-level timeout imposed by the serving endpoint (e.g. the HTTP
+    /// server request timeout). Unlike `query_timeout` which is set via
+    /// session variables, this is injected by the protocol layer.
+    request_timeout: Option<Duration>,
     read_preference: ReadPreference,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
@@ -73,6 +77,7 @@ impl Default for MutableInner {
             user_info: auth::userinfo_by_name(None),
             timezone: get_timezone(None).clone(),
             query_timeout: None,
+            request_timeout: None,
             read_preference: ReadPreference::Leader,
             cursors: HashMap::with_capacity(0),
             warnings: VecDeque::new(),
