@@ -1276,7 +1276,16 @@ async fn test_range_cache_separates_or_equality_time_filters() {
 #[tokio::test]
 async fn test_exact_sequence_read_compacted_sst_with_preserve_row_sequence() {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    // Keep the explicit compaction below as the only compaction, so this test
+    // proves that the files are rewritten rather than observing an earlier
+    // background compaction.
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
     let region_id = RegionId::new(1, 1);
 
     env.get_schema_metadata_manager()
@@ -1313,14 +1322,24 @@ async fn test_exact_sequence_read_compacted_sst_with_preserve_row_sequence() {
         test_util::flush_region(&engine, region_id, None).await;
     }
 
-    let output = engine
+    engine
         .handle_request(
             region_id,
             RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
         .unwrap();
-    assert_eq!(output.affected_rows, 0);
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let output_files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, output_files.len(), "three input SSTs must be rewritten");
+    assert!(output_files[0].meta_ref().preserve_row_sequence);
 
     // The compacted SST still preserves per-row sequences: the exact (2, 7] range
     // returns rows with sequence 3..=7 even though C and H are older than the
