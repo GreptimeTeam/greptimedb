@@ -1049,15 +1049,18 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
-            preserve_row_sequence: false,
+            preserve_row_sequence: true,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
+        assert!(region_options_json_str.contains("preserve_row_sequence"));
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
         assert_eq!(options, got);
 
+        // Old manifests without the key default to false.
         let old_region_options_json_str = r#"{"ttl":null}"#;
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
+        assert!(!got.preserve_row_sequence);
 
         let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
         assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
@@ -1120,24 +1123,6 @@ mod tests {
             preserve_row_sequence: false,
         };
         assert_eq!(options, got);
-    }
-
-    #[test]
-    fn test_region_options_serde_preserve_row_sequence_roundtrip() {
-        let options = RegionOptions {
-            append_mode: true,
-            preserve_row_sequence: true,
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&options).unwrap();
-        assert!(json.contains("preserve_row_sequence"));
-        let got: RegionOptions = serde_json::from_str(&json).unwrap();
-        assert_eq!(options, got);
-
-        // Old manifests without the key default to false.
-        let old_json = r#"{"append_mode": true}"#;
-        let got: RegionOptions = serde_json::from_str(old_json).unwrap();
-        assert!(!got.preserve_row_sequence);
     }
 
     #[test]
