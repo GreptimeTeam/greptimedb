@@ -258,6 +258,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Files selected by the engine's capability check, when available.
+    selected_files: Option<Vec<FileHandle>>,
     /// Counters that should receive query-load metrics.
     query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -285,6 +287,7 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            selected_files: None,
             query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
@@ -351,6 +354,11 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    pub(crate) fn with_selected_files(mut self, files: Vec<FileHandle>) -> Self {
+        self.selected_files = Some(files);
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -438,15 +446,9 @@ impl ScanRegion {
 
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
-    async fn scan_input(self) -> Result<ScanInput> {
+    async fn scan_input(mut self) -> Result<ScanInput> {
         let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
-        // Exact `sequence_range` mode filters rows row-level on every
-        // time-matching SST. The legacy `sst_min_sequence` file-pruning hint
-        // would silently skip preserved files whose max sequence does not
-        // exceed it (e.g. `(5, 10]` with `sst_min_sequence = 8` drops a file
-        // with max = 8, losing sequences 6..8), so the conflicting combination
-        // is rejected explicitly instead of being silently approximated.
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
 
@@ -467,12 +469,10 @@ impl ScanRegion {
             mapper
         };
 
-        // `exact_sequence_range_files` applies time pruning and, for exact
-        // requests, removes only marked files that cannot contain `(C, H]`
-        // rows. This is the same selected set used by the engine's capability
-        // fence before its remaining scan-specific pruning.
         let files = if self.request.skip_sst_files {
             Vec::new()
+        } else if let Some(files) = self.selected_files.take() {
+            files
         } else {
             exact_sequence_range_files(&self.request, &self.version)
         };
