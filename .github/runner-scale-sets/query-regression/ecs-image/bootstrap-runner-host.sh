@@ -117,12 +117,16 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
 
 step "Move docker data-root to ${DATA_ROOT}/docker"
 systemctl stop docker containerd
-mkdir -p "${DATA_ROOT}/docker"
+mkdir -p "${DATA_ROOT}/docker" "${DATA_ROOT}/containerd"
 if [[ -f /etc/docker/daemon.json ]] && ! grep -q '"data-root"' /etc/docker/daemon.json; then
   echo "ERROR: /etc/docker/daemon.json exists without data-root; merge manually." >&2
   exit 1
 fi
 echo "{ \"data-root\": \"${DATA_ROOT}/docker\" }" > /etc/docker/daemon.json
+# containerd keeps its own content store (where build-time image data lands);
+# move it off the system disk too.
+mkdir -p /etc/containerd
+containerd config default | sed "s|root = \"/var/lib/containerd\"|root = \"${DATA_ROOT}/containerd\"|" > /etc/containerd/config.toml
 systemctl start containerd docker
 docker info | grep "Docker Root Dir"
 
