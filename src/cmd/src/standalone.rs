@@ -395,8 +395,6 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -404,6 +402,8 @@ impl StartCommand {
             None,
             Some(&opts.component.slow_query),
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
