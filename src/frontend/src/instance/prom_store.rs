@@ -47,7 +47,7 @@ use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, coll
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
 use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
-use servers::prom_store::{self, Metrics};
+use servers::prom_store;
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
@@ -648,10 +648,6 @@ impl PromStoreProtocolHandler for Instance {
             .fail(),
         }
     }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
-        todo!();
-    }
 }
 
 impl Instance {
@@ -789,10 +785,6 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         _request: ReadRequest,
         _ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
-        unreachable!();
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         unreachable!();
     }
 }

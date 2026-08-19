@@ -54,7 +54,6 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prom_store::Metrics;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -125,8 +124,6 @@ pub trait PromStoreProtocolHandler {
 
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
-    /// Handling push gateway requests
-    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
 #[async_trait]

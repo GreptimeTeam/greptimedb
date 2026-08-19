@@ -978,12 +978,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "auto_ops"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7460f7dd8e100147b82a63afca1a20eb6c231ee36b90ba7272e14951cb58af59"
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9803,17 +9797,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openmetrics-parser"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e40a68c62e09c5dfec2f6472af3bd5e8ddf506fcf14c78ece23794ffbb874eca"
-dependencies = [
- "auto_ops",
- "pest",
- "pest_derive",
-]
-
-[[package]]
 name = "opensrv-mysql"
 version = "0.8.0"
 source = "git+https://github.com/GreptimeTeam/opensrv?rev=6c5a451544194b7bb60a8318d155d4f892b49f2c#6c5a451544194b7bb60a8318d155d4f892b49f2c"
@@ -13461,7 +13444,6 @@ dependencies = [
  "notify",
  "object-pool",
  "once_cell",
- "openmetrics-parser",
  "opensrv-mysql",
  "opentelemetry-proto",
  "operator",
