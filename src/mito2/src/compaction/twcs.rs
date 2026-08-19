@@ -168,7 +168,7 @@ impl TwcsPicker {
         let found_runs = sorted_runs.len();
         // We only remove deletion markers if we found less than 2 runs and not in append mode.
         // because after compaction there will be no overlapping files.
-        let filter_deleted =
+        let mut filter_deleted =
             found_runs <= 2 && !self.append_mode && !window_has_overlap(files, windows);
         if found_runs == 0 {
             return (vec![], filter_deleted);
@@ -209,6 +209,14 @@ impl TwcsPicker {
             );
         }
 
+        // The inputs are only a subset of the window: `reduce_runs` and `merge_seq_files` both
+        // narrow the selection down and the file num limit above narrows it further. A deletion
+        // marker may only be dropped when every file that can hold a row it masks is compacted
+        // along with it, so re-check the final selection against what stays in the window.
+        if filter_deleted && overlaps_files_left_behind(&inputs, &files_to_merge) {
+            filter_deleted = false;
+        }
+
         if inputs.len() > 1 {
             // If we have more than one group to compact.
             log_pick_result(
@@ -224,6 +232,20 @@ impl TwcsPicker {
         }
         (inputs, filter_deleted)
     }
+}
+
+/// Returns whether any file group of `window_files` that is not part of `inputs` overlaps
+/// `inputs`. Such a group keeps rows a deletion marker in `inputs` masks, so the compaction
+/// must not filter deleted rows out.
+///
+/// Overlapping is inclusive on both boundaries here: two files that only share a boundary
+/// timestamp can still hold the same row.
+fn overlaps_files_left_behind(inputs: &[FileGroup], window_files: &[FileGroup]) -> bool {
+    let picked: HashSet<_> = inputs.iter().flat_map(|fg| fg.file_ids()).collect();
+    window_files
+        .iter()
+        .filter(|fg| !fg.file_ids().iter().any(|id| picked.contains(id)))
+        .any(|fg| inputs.iter().any(|input| input.overlap_inclusive(fg)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1453,6 +1475,99 @@ mod tests {
 
         assert_eq!(1, output.len());
         assert_eq!(output[0].inputs.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn test_limit_max_input_files_keeps_deletion_markers() {
+        common_telemetry::init_default_ut_logging();
+
+        // One large file group spanning the whole window plus 32 small ones nested inside
+        // it. That is exactly 2 runs, so the window on its own allows filtering deletions.
+        let mut files = vec![new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            0,
+            3_000_000,
+            0,
+            1,
+            1024 * 1024 * 1024,
+        )];
+        files.extend((0..32).map(|idx: i64| {
+            new_file_handle_with_size_and_sequence(
+                FileId::random(),
+                (idx + 1) * 10_000,
+                (idx + 1) * 10_000 + 1_000,
+                0,
+                (idx + 2) as u64,
+                1024,
+            )
+        }));
+
+        let windows = assign_to_windows(files.iter(), 3600);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3600),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3600);
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        // The input file num limit picks the smallest groups first, so the large group is
+        // left behind while the small groups that overlap it are compacted.
+        assert_eq!(32, output[0].inputs.len());
+        assert!(
+            !output[0].filter_deleted,
+            "deletion markers must be kept once the file num limit drops files they may mask"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_limit_max_input_files_still_filters_without_overlap() {
+        common_telemetry::init_default_ut_logging();
+
+        // 40 file groups with disjoint time ranges, i.e. a single run. Nothing the file num
+        // limit leaves behind can hold a row masked by a deletion marker we compact.
+        let files: Vec<_> = (0..40i64)
+            .map(|idx| {
+                new_file_handle_with_size_and_sequence(
+                    FileId::random(),
+                    (idx + 1) * 10_000,
+                    (idx + 1) * 10_000 + 1_000,
+                    0,
+                    (idx + 1) as u64,
+                    1024,
+                )
+            })
+            .collect();
+
+        let windows = assign_to_windows(files.iter(), 3600);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3600),
+            max_output_file_size: Some(1024 * 1024 * 1024),
+            append_mode: false,
+            max_background_tasks: None,
+            time_range: None,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3600);
+        let output = picker
+            .build_output_with_time_range(RegionId::from_u64(123), windows, active_window, None)
+            .await
+            .unwrap();
+
+        assert_eq!(1, output.len());
+        assert_eq!(32, output[0].inputs.len());
+        assert!(output[0].filter_deleted);
     }
 
     #[test]
