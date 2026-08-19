@@ -56,9 +56,8 @@ MANAGED_BY_TAG_VALUE = "query-regression-ci"
 RUN_TAG_KEY = "query-regression-run-id"
 
 CACHE_MOUNT = "/mnt/query-regression-cache"
-# Disk subdirectories mirror the PVC subPaths in
-# .github/runner-scale-sets/query-regression/values-8-cores.yaml so the workflow
-# cache contract is identical on both paths.
+# Disk subdirectories bind-mount to the runner paths the workflow's cache
+# contract expects; the layout mirrors the retired ARC PVC subPaths.
 CACHE_SUBDIRS = {
     "cargo-registry-v1": "/home/runner/.cargo/registry",
     "cargo-git-v1": "/home/runner/.cargo/git",

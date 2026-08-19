@@ -3,16 +3,17 @@
 - Keep GitHub Actions YAML thin. Put non-trivial control flow, case expansion,
   report generation, and metadata writing in scripts under `.github/scripts/`;
   workflow steps should mostly invoke those scripts.
-- Runner lifecycle: the default path is the ARC scale set
-  `perf-regression-8-cores`. The `aliyun-ecs` path provisions one ephemeral ECS
+- Runner lifecycle: the default path provisions one ephemeral Aliyun ECS
   instance per run via `.github/scripts/aliyun-ecs-runner-provision.py` and
   always releases it via `aliyun-ecs-runner-teardown.py`; a scheduled janitor
-  workflow sweeps leftovers. The retained ESSD cache disk mirrors the ARC PVC
-  subPath layout, so cache paths and the sccache single-writer constraint are
-  identical on both paths. The ECS custom image is built from the runner
-  Dockerfile by
+  workflow sweeps leftovers. Build caches live on a retained ESSD disk that
+  cloud-init bind-mounts to the runner paths, so cache paths and the sccache
+  single-writer constraint are unchanged from the retired ARC setup. The ECS
+  custom image is built from the runner Dockerfile by
   `.github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py`;
-  keep the Dockerfile the single source of the tool contract.
+  keep the Dockerfile the single source of the tool contract. Dispatching with
+  any other `runner` value treats it as a literal self-hosted runner label
+  (see `ecs-image/bootstrap-runner-host.sh` for preparing such a host).
 - Query regression PR runs should build base/candidate binaries once, then run
   the default case set. Do not hard-code a single case such as
   `promql_pushdown_7913` into the workflow path.

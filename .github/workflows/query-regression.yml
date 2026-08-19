@@ -32,10 +32,10 @@ on:
         type: string
         default: nightly
       runner:
-        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        description: Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance per run
         required: false
         type: string
-        default: perf-regression-8-cores
+        default: aliyun-ecs
   workflow_dispatch:
     inputs:
       case:
@@ -68,13 +68,12 @@ on:
           - release
           - dev
       runner:
-        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        description: >-
+          Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance
+          per run, any other value is used as a literal runner label
         required: true
-        type: choice
-        default: perf-regression-8-cores
-        options:
-          - perf-regression-8-cores
-          - aliyun-ecs
+        type: string
+        default: aliyun-ecs
   pull_request:
     types: [labeled]
 
@@ -83,9 +82,10 @@ permissions:
 
 jobs:
   provision:
-    # Only runs when the aliyun-ecs path is selected: explicitly via the
-    # runner input, or for PR labels via the QUERY_REGRESSION_PR_RUNNER
-    # repository variable. Uses trusted scripts from the PR base (or the
+    # Runs when the aliyun-ecs path is selected: explicitly via the runner
+    # input, or for PR labels by default (a QUERY_REGRESSION_PR_RUNNER
+    # repository variable set to another value redirects PRs to that literal
+    # runner label instead). Uses trusted scripts from the PR base (or the
     # dispatched ref), never from candidate code.
     if: >-
       ${{ (github.event_name != 'pull_request' && inputs.runner == 'aliyun-ecs') ||
@@ -93,7 +93,7 @@ jobs:
             !github.event.pull_request.draft &&
             (github.event.label.name == 'query-regression' ||
              github.event.label.name == 'heavy-regression') &&
-            (vars.QUERY_REGRESSION_PR_RUNNER || 'perf-regression-8-cores') == 'aliyun-ecs') }}
+            (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs') == 'aliyun-ecs') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -133,9 +133,9 @@ jobs:
   query-regression:
     needs: [provision]
     # `!failure() && !cancelled()` both suppresses the implicit success() and
-    # lets the job run when provision was intentionally skipped on the ARC
-    # path; a failed or cancelled provision still blocks the run because no
-    # ECS runner would be waiting.
+    # lets the job run when provision was intentionally skipped because a
+    # literal runner label was selected; a failed or cancelled provision still
+    # blocks the run because no ECS runner would be waiting.
     if: >-
       ${{ !failure() && !cancelled() &&
            (github.event_name != 'pull_request' ||
@@ -146,7 +146,7 @@ jobs:
     runs-on: >-
       ${{ needs.provision.outputs.label ||
           (github.event_name != 'pull_request' && inputs.runner ||
-           (vars.QUERY_REGRESSION_PR_RUNNER || 'perf-regression-8-cores')) }}
+           (vars.QUERY_REGRESSION_PR_RUNNER || 'aliyun-ecs')) }}
     timeout-minutes: 180
     concurrency:
       group: query-regression-persistent-cache-v1
@@ -172,6 +172,10 @@ jobs:
       EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
       EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
       EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+      # Runner identity contract. The ECS image uses 1001; a manually prepared
+      # host may override via repo variables when 1001 is already taken.
+      EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+      EXPECTED_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
     steps:
       - name: Report provisioned ECS runner
         if: ${{ needs.provision.outputs.instance_id != '' }}
@@ -334,8 +338,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(id -u)" == "1001" ]]
-          [[ "$(id -g)" == "1001" ]]
+          [[ "$(id -u)" == "${EXPECTED_RUNNER_UID}" ]]
+          [[ "$(id -g)" == "${EXPECTED_RUNNER_GID}" ]]
           [[ "${UV_CACHE_DIR}" == "/home/runner/.cargo/uv-cache" ]]
           [[ "$(protoc --version)" == "libprotoc 3.21.12" ]]
           temporary_proto_dir="$(mktemp --directory)"
@@ -775,8 +779,8 @@ jobs:
 
   teardown:
     # Releases the dynamically provisioned ECS runner. Runs even when the
-    # benchmark job fails or is cancelled; skipped on the ARC path because the
-    # provision outputs are empty.
+    # benchmark job fails or is cancelled; skipped when a literal runner label
+    # was selected because the provision outputs are empty.
     if: ${{ always() && needs.provision.outputs.instance_id != '' }}
     needs: [provision, query-regression]
     runs-on: ubuntu-latest
