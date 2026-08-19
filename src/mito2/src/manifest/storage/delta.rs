@@ -19,7 +19,7 @@ use common_telemetry::debug;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use object_store::{Entry, ErrorKind, Lister, ObjectStore};
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
@@ -216,13 +216,12 @@ impl<T: Tracker> DeltaStorage<T> {
             let bytes = match self.object_store.read(entry.path()).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == ErrorKind::NotFound => {
-                    return Err(ManifestDeltaNotFoundSnafu {
+                    return Err(error).context(ManifestDeltaNotFoundSnafu {
                         version: *v,
                         path: entry.path(),
-                    }
-                    .into_error(error));
+                    });
                 }
-                Err(error) => return Err(OpenDalSnafu.into_error(error)),
+                Err(error) => return Err(error).context(OpenDalSnafu),
             };
             let data = compress_type
                 .decode(bytes)

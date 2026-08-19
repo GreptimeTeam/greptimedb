@@ -365,7 +365,7 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_idempotent_downgrading_waits_for_pending_checkpoint() {
+async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
     let engine = env
@@ -401,36 +401,72 @@ async fn test_idempotent_downgrading_waits_for_pending_checkpoint() {
         .await
         .expect("checkpoint cleanup did not start");
 
-    // Arrange the state observed by a retried request after the first request
-    // entered Downgrading but its response was lost.
-    engine
-        .set_region_role(region_id, RegionRole::DowngradingLeader)
-        .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let wait_started = region
+    let first_wait_started = region
         .manifest_ctx
         .manifest_manager
         .read()
         .await
         .checkpointer()
         .pending_checkpoint_wait_started();
-    let wait_started = wait_started.notified();
-    let cloned_engine = engine.clone();
-    let retry_downgrade = tokio::spawn(async move {
-        cloned_engine
-            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+    // Register before starting the transition so the notification cannot be lost.
+    let first_wait_started = first_wait_started.notified();
+    // Call the region transition directly so aborting this task cancels the
+    // actual checkpoint waiter. The engine API submits the same transition to
+    // a detached worker task, so aborting its caller only drops the reply receiver.
+    let first_region = region.clone();
+    let first_downgrade = tokio::spawn(async move {
+        first_region
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), wait_started)
+    tokio::time::timeout(Duration::from_secs(5), first_wait_started)
         .await
-        .expect("idempotent downgrade did not start waiting for the checkpoint");
+        .expect("first downgrade did not start waiting for the checkpoint");
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Downgrading),
+        region.state()
+    );
+    assert!(
+        !first_downgrade.is_finished(),
+        "first downgrade did not wait for checkpoint cleanup"
+    );
+
+    // Cancelling the first caller must not remove the checkpoint handle from
+    // the manifest manager. A retried migration request observes Downgrading
+    // and must wait for the same checkpoint task before it can proceed.
+    first_downgrade.abort();
+    assert!(first_downgrade.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Downgrading),
+        region.state()
+    );
+
+    let second_wait_started = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+    // Register before spawning the retry so the notification cannot be lost.
+    let second_wait_started = second_wait_started.notified();
+    let retry_region = region.clone();
+    let retry_downgrade = tokio::spawn(async move {
+        retry_region
+            .set_role_state_gracefully(SettableRegionRoleState::DowngradingLeader)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), second_wait_started)
+        .await
+        .expect("retried downgrade did not start waiting for the checkpoint");
     assert!(
         !retry_downgrade.is_finished(),
-        "idempotent downgrade did not wait for checkpoint cleanup"
+        "retried downgrade did not wait for checkpoint cleanup"
     );
 
     blocker.release();
-    assert_success_response(&retry_downgrade.await.unwrap().unwrap(), 1);
+    retry_downgrade.await.unwrap().unwrap();
 }
 
 #[tokio::test]
