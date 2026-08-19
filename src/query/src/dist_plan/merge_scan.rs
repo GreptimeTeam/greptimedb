@@ -17,7 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
-use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
+use arrow_schema::{
+    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef, SortOptions,
+};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
@@ -76,6 +79,101 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
     remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions())
         .map_err(|err| DataFusionError::External(Box::new(err)))
+}
+
+fn remote_schema_mismatch(message: impl Into<String>) -> DataFusionError {
+    DataFusionError::ArrowError(Box::new(ArrowError::SchemaError(message.into())), None)
+}
+
+fn record_merge_scan_schema_error() {
+    MERGE_SCAN_ERRORS_TOTAL.inc();
+}
+
+/// Returns true when the field is a JSON column, identified either by its
+/// Arrow extension type or by its `greptime:type=Json` marker.
+fn is_json_field(field: &Field) -> bool {
+    is_json_extension_type(field)
+        || field
+            .metadata()
+            .get(datatypes::schema::TYPE_KEY)
+            .map(String::as_ref)
+            == Some("Json")
+}
+
+/// Returns true when two fields have the same semantic identity. Field
+/// metadata is auxiliary at the MergeScan boundary and is intentionally
+/// excluded from this comparison.
+fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
+    expected_field.name() == actual_field.name()
+        && expected_field.data_type() == actual_field.data_type()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+}
+
+fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    is_json_field(expected_field)
+        && is_json_field(actual_field)
+        && expected_field.name() == actual_field.name()
+        && expected_field.is_nullable() == actual_field.is_nullable()
+        && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
+            == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
+        && expected_field
+            .metadata()
+            .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+            == actual_field
+                .metadata()
+                .get(arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY)
+}
+
+fn validate_remote_schema(
+    expected: &ArrowSchema,
+    actual: &ArrowSchema,
+    source: &str,
+) -> Result<()> {
+    if expected.fields().len() != actual.fields().len() {
+        return Err(remote_schema_mismatch(format!(
+            "MergeScan {source} schema field count mismatch: expected {}, actual {}",
+            expected.fields().len(),
+            actual.fields().len()
+        )));
+    }
+
+    for (index, (expected_field, actual_field)) in expected
+        .fields()
+        .iter()
+        .zip(actual.fields().iter())
+        .enumerate()
+    {
+        // Field metadata is auxiliary information (for example, index and
+        // encoding hints), so it does not participate in field identity.
+        if fields_semantically_equal(expected_field, actual_field) {
+            continue;
+        }
+
+        // JSON may use Binary on the wire and a decoded Struct locally. This
+        // physical-type difference is allowed only when both fields retain
+        // the same JSON identity and JSON2 extension settings.
+        if json_fields_compatible(expected_field, actual_field) {
+            continue;
+        }
+
+        let timezone_only_difference = matches!(
+            (expected_field.data_type(), actual_field.data_type()),
+            (
+                ArrowDataType::Timestamp(expected_unit, expected_timezone),
+                ArrowDataType::Timestamp(actual_unit, actual_timezone),
+            ) if expected_unit == actual_unit
+                && expected_timezone != actual_timezone
+                && expected_field.name() == actual_field.name()
+                && expected_field.is_nullable() == actual_field.is_nullable()
+        );
+        if !timezone_only_difference {
+            return Err(remote_schema_mismatch(format!(
+                "MergeScan {source} schema field mismatch at position {index}: expected {:?}, actual {:?}",
+                expected_field, actual_field
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn acquire_remote_dyn_filter_registry_lease(
@@ -434,6 +532,13 @@ impl MergeScanExec {
                         MERGE_SCAN_ERRORS_TOTAL.inc();
                         DataFusionError::External(Box::new(e))
                     })?;
+                let mut advertised_schema = stream.schema().arrow_schema().clone();
+                validate_remote_schema(
+                    arrow_schema.as_ref(),
+                    advertised_schema.as_ref(),
+                    "advertised remote stream",
+                )
+                .inspect_err(|_| record_merge_scan_schema_error())?;
                 let do_get_cost = do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
@@ -478,10 +583,18 @@ impl MergeScanExec {
                     poll_duration += poll_elapsed;
 
                     let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    let batch = patch_batch_timezone(
-                        arrow_schema.clone(),
-                        batch.into_df_record_batch().columns().to_vec(),
-                    )?;
+                    let df_batch = batch.into_df_record_batch();
+                    if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
+                        validate_remote_schema(
+                            arrow_schema.as_ref(),
+                            df_batch.schema_ref().as_ref(),
+                            "remote record batch",
+                        )
+                        .inspect_err(|_| record_merge_scan_schema_error())?;
+                        advertised_schema = df_batch.schema_ref().clone();
+                    }
+                    let batch =
+                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
                     metric.record_output_batch_rows(batch.num_rows());
                     if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
@@ -1089,8 +1202,9 @@ impl MergeScanMetric {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap as StdHashMap};
 
+    use arrow_schema::{DataType as TestArrowDataType, Field};
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
@@ -1113,6 +1227,110 @@ mod tests {
     use super::*;
     use crate::dist_plan::{DynFilterRegistryManager, Subscriber};
     use crate::region_query::RegionQueryHandler;
+
+    fn expected_int64_schema() -> ArrowSchema {
+        ArrowSchema::new(vec![
+            Field::new("a", TestArrowDataType::Int64, false),
+            Field::new("b", TestArrowDataType::Int64, false),
+        ])
+    }
+
+    fn json_field_metadata(wire_form: bool, settings: &str) -> StdHashMap<String, String> {
+        let mut metadata = StdHashMap::from([
+            (datatypes::schema::TYPE_KEY.to_string(), "Json".to_string()),
+            (
+                arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY.to_string(),
+                settings.to_string(),
+            ),
+        ]);
+        if wire_form {
+            metadata.insert(
+                arrow_schema::extension::EXTENSION_TYPE_NAME_KEY.to_string(),
+                "greptime.json".to_string(),
+            );
+        }
+        metadata
+    }
+
+    #[test]
+    fn merge_scan_validates_remote_schema_semantics() {
+        let expected = expected_int64_schema();
+        let metadata_mismatch = ArrowSchema::new_with_metadata(
+            vec![
+                expected
+                    .field(0)
+                    .as_ref()
+                    .clone()
+                    .with_metadata(StdHashMap::from([(
+                        "remote".to_string(),
+                        "different".to_string(),
+                    )])),
+                expected.field(1).as_ref().clone(),
+            ],
+            expected.metadata().clone(),
+        );
+        assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_ok());
+        let wrong_type = ArrowSchema::new(vec![
+            Field::new("a", TestArrowDataType::Utf8, false),
+            expected.field(1).as_ref().clone(),
+        ]);
+        assert!(validate_remote_schema(&expected, &wrong_type, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_validates_json_binary_and_struct_compatibility() {
+        let settings = r#"{"json_settings":{"type_hints":[]}}"#;
+        let expected = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(json_field_metadata(true, settings)),
+        ]);
+        let actual =
+            ArrowSchema::new(vec![
+                Field::new(
+                    "j",
+                    TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Arc::new(
+                        Field::new("a", TestArrowDataType::Utf8View, true),
+                    )])),
+                    true,
+                )
+                .with_metadata(json_field_metadata(false, settings)),
+            ]);
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+
+        // JSON extension identity metadata is semantic only for the
+        // Binary-vs-Struct compatibility exemption. When the physical type
+        // already matches, all field metadata remains non-semantic, just as
+        // it is for ordinary fields.
+        let plain_binary = ArrowSchema::new(vec![Field::new("j", TestArrowDataType::Binary, true)]);
+        assert!(validate_remote_schema(&expected, &plain_binary, "test").is_ok());
+
+        let changed = ArrowSchema::new(vec![
+            Field::new(
+                "j",
+                TestArrowDataType::Struct(arrow_schema::Fields::empty()),
+                true,
+            )
+            .with_metadata(json_field_metadata(
+                false,
+                r#"{"json_settings":{"type_hints":[["a",{"JsonType":"Int64"}]]}}"#,
+            )),
+        ]);
+        assert!(validate_remote_schema(&expected, &changed, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_allows_top_level_schema_metadata_mismatch() {
+        let fields = expected_int64_schema().fields().clone();
+        let expected = ArrowSchema::new_with_metadata(
+            fields.clone(),
+            StdHashMap::from([("version".to_string(), "1".to_string())]),
+        );
+        let actual = ArrowSchema::new_with_metadata(
+            fields,
+            StdHashMap::from([("version".to_string(), "2".to_string())]),
+        );
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
+    }
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
