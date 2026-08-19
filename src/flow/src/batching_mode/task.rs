@@ -14,14 +14,17 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+#[cfg(test)]
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
-use common_telemetry::tracing::warn;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
+use common_telemetry::tracing::{Span, field, info, info_span, warn};
+use common_telemetry::tracing_context::FutureExt;
 use common_time::Timestamp;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
@@ -141,6 +144,68 @@ fn format_insert_target_columns(plan: &LogicalPlan) -> String {
         .map(|field| quote_identifier(field.name()).to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+struct AttemptStartedHook {
+    started: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+static ATTEMPT_STARTED_HOOK: OnceLock<StdMutex<Option<AttemptStartedHook>>> = OnceLock::new();
+
+#[cfg(test)]
+async fn wait_for_attempt_hook() {
+    let release = ATTEMPT_STARTED_HOOK.get().and_then(|hook| {
+        hook.lock()
+            .unwrap()
+            .as_ref()
+            .map(|hook| hook.release.clone())
+    });
+    if let Some(release) = release {
+        while !release.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+struct BatchingAttemptGuard {
+    span: Span,
+    finished: bool,
+}
+
+impl BatchingAttemptGuard {
+    fn new(span: Span) -> Self {
+        span.in_scope(|| info!(event = "flow_batching_attempt_start"));
+        #[cfg(test)]
+        if let Some(hook) = ATTEMPT_STARTED_HOOK.get()
+            && let Some(hook) = hook.lock().unwrap().as_ref()
+        {
+            if let Some(sender) = hook.started.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+        }
+        Self {
+            span,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.span
+            .in_scope(|| info!(event = "flow_batching_attempt_finish", outcome));
+    }
+}
+
+impl Drop for BatchingAttemptGuard {
+    fn drop(&mut self) {
+        self.finish("cancelled");
+    }
 }
 
 #[derive(Clone)]
@@ -423,8 +488,29 @@ impl BatchingTask {
         max_window_cnt: Option<usize>,
     ) -> ExecuteOnceOutcome {
         let _execution_guard = self.execution_lock.lock().await;
-        self.execute_once_unlocked(engine, frontend_client, max_window_cnt)
-            .await
+        let flow_id = self.config.flow_id;
+        let span = info_span!(
+            "flow_batching_attempt",
+            flow_id = flow_id,
+            scheduled_time = field::Empty,
+            mode = "batching",
+        );
+        async {
+            let mut attempt = BatchingAttemptGuard::new(Span::current());
+            #[cfg(test)]
+            wait_for_attempt_hook().await;
+            let outcome = self
+                .execute_once_unlocked(engine, frontend_client, max_window_cnt)
+                .await;
+            attempt.finish(if outcome.result.is_ok() {
+                "ok"
+            } else {
+                "error"
+            });
+            outcome
+        }
+        .trace(span)
+        .await
     }
 
     /// Executes one flow evaluation. Caller must hold `execution_lock`.
@@ -1277,9 +1363,28 @@ impl BatchingTask {
             old_ctx: Some(old_ctx),
         };
 
-        let outcome = self
-            .execute_once_unlocked(engine, frontend_client, None)
-            .await;
+        let span = info_span!(
+            "flow_batching_attempt",
+            flow_id = self.config.flow_id,
+            scheduled_time = scheduled_time_secs,
+            mode = "batching",
+        );
+        let outcome = async {
+            let mut attempt = BatchingAttemptGuard::new(Span::current());
+            #[cfg(test)]
+            wait_for_attempt_hook().await;
+            let outcome = self
+                .execute_once_unlocked(engine, frontend_client, None)
+                .await;
+            attempt.finish(if outcome.result.is_ok() {
+                "ok"
+            } else {
+                "error"
+            });
+            outcome
+        }
+        .trace(span)
+        .await;
 
         // Restore while still holding `execution_lock` so no future manual
         // flush can observe the temporary scheduled time. The guard also

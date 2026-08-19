@@ -25,7 +25,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::{Sampler, Tracer};
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing::callsite;
@@ -35,6 +35,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
+use tracing_subscriber::fmt::format::{FormatEvent, Writer};
 use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry, filter};
@@ -56,6 +57,57 @@ pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Target
 
 type DynSubscriber = Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>;
 type OtelTraceLayer = tracing_opentelemetry::OpenTelemetryLayer<DynSubscriber, Tracer>;
+
+#[derive(Clone, Copy)]
+struct CorrelatedFormat<F> {
+    inner: F,
+    json: bool,
+}
+
+impl<F> CorrelatedFormat<F> {
+    fn text(inner: F) -> Self {
+        Self { inner, json: false }
+    }
+    fn json(inner: F) -> Self {
+        Self { inner, json: true }
+    }
+}
+
+impl<S, N, F> FormatEvent<S, N> for CorrelatedFormat<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let ids = ctx
+            .event_scope()
+            .and_then(|scope| scope.from_root().last())
+            .and_then(|span| crate::tracing_context::current_trace_ids_for_span(Some(&span.id())));
+        let mut rendered = String::new();
+        self.inner
+            .format_event(ctx, Writer::new(&mut rendered), event)?;
+        let Some((trace_id, span_id)) = ids else {
+            return writer.write_str(&rendered);
+        };
+        if self.json {
+            let mut value: serde_json::Value =
+                serde_json::from_str(rendered.trim_end()).map_err(|_| std::fmt::Error)?;
+            let object = value.as_object_mut().ok_or(std::fmt::Error)?;
+            object.insert("trace_id".into(), trace_id.into());
+            object.insert("span_id".into(), span_id.into());
+            writer.write_str(&serde_json::to_string(&value).map_err(|_| std::fmt::Error)?)?;
+            writer.write_char('\n')
+        } else {
+            write!(writer, "trace_id={trace_id} span_id={span_id} {rendered}")
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TraceReloadHandle {
@@ -231,9 +283,44 @@ pub static TRACE_RELOAD_HANDLE: OnceCell<TraceReloadHandle> = OnceCell::new();
 static TRACER: OnceCell<Mutex<TraceState>> = OnceCell::new();
 
 #[derive(Debug)]
-enum TraceState {
-    Ready(Tracer),
-    Deferred(TraceContext),
+struct TraceState {
+    tracer: Tracer,
+    providers: Vec<SdkTracerProvider>,
+    app_name: String,
+    node_id: String,
+    options: LoggingOptions,
+    otlp_enabled: bool,
+}
+
+impl TraceState {
+    fn new(
+        app_name: &str,
+        node_id: &str,
+        options: &LoggingOptions,
+        provider: SdkTracerProvider,
+        tracer: Tracer,
+    ) -> Self {
+        Self {
+            tracer,
+            providers: vec![provider],
+            app_name: app_name.to_string(),
+            node_id: node_id.to_string(),
+            options: options.clone(),
+            otlp_enabled: options.enable_otlp_tracing,
+        }
+    }
+
+    fn get_or_init_tracer(&mut self) -> Tracer {
+        if !self.otlp_enabled {
+            let mut options = self.options.clone();
+            options.enable_otlp_tracing = true;
+            let (provider, tracer) = create_tracer(&self.app_name, &self.node_id, &options);
+            self.providers.push(provider);
+            self.tracer = tracer;
+            self.otlp_enabled = true;
+        }
+        self.tracer.clone()
+    }
 }
 
 /// The logging options that used to initialize the logger.
@@ -344,13 +431,6 @@ pub enum LogFormat {
     Text,
 }
 
-#[derive(Clone, Debug)]
-struct TraceContext {
-    app_name: String,
-    node_id: String,
-    logging_opts: LoggingOptions,
-}
-
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
@@ -443,6 +523,9 @@ pub fn init_global_logging(
                 Some(
                     Layer::new()
                         .json()
+                        .event_format(CorrelatedFormat::json(
+                            tracing_subscriber::fmt::format::json(),
+                        ))
                         .with_writer(writer)
                         .with_ansi(std::io::stdout().is_terminal())
                         .boxed(),
@@ -450,6 +533,7 @@ pub fn init_global_logging(
             } else {
                 Some(
                     Layer::new()
+                        .event_format(CorrelatedFormat::text(tracing_subscriber::fmt::format()))
                         .with_writer(writer)
                         .with_ansi(std::io::stdout().is_terminal())
                         .boxed(),
@@ -481,12 +565,21 @@ pub fn init_global_logging(
                 Some(
                     Layer::new()
                         .json()
+                        .event_format(CorrelatedFormat::json(
+                            tracing_subscriber::fmt::format::json(),
+                        ))
                         .with_writer(writer)
                         .with_ansi(false)
                         .boxed(),
                 )
             } else {
-                Some(Layer::new().with_writer(writer).with_ansi(false).boxed())
+                Some(
+                    Layer::new()
+                        .event_format(CorrelatedFormat::text(tracing_subscriber::fmt::format()))
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .boxed(),
+                )
             }
         } else {
             None
@@ -512,6 +605,9 @@ pub fn init_global_logging(
                 Some(
                     Layer::new()
                         .json()
+                        .event_format(CorrelatedFormat::json(
+                            tracing_subscriber::fmt::format::json(),
+                        ))
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(filter::LevelFilter::ERROR)
@@ -520,6 +616,7 @@ pub fn init_global_logging(
             } else {
                 Some(
                     Layer::new()
+                        .event_format(CorrelatedFormat::text(tracing_subscriber::fmt::format()))
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(filter::LevelFilter::ERROR)
@@ -550,18 +647,9 @@ pub fn init_global_logging(
             .set(reload_handle)
             .expect("reload handle already set, maybe init_global_logging get called twice?");
 
-        let mut initial_tracer = None;
-        let trace_state = if opts.enable_otlp_tracing {
-            let tracer = create_tracer(app_name, &node_id, opts);
-            initial_tracer = Some(tracer.clone());
-            TraceState::Ready(tracer)
-        } else {
-            TraceState::Deferred(TraceContext {
-                app_name: app_name.to_string(),
-                node_id: node_id.clone(),
-                logging_opts: opts.clone(),
-            })
-        };
+        let (provider, tracer) = create_tracer(app_name, &node_id, opts);
+        let initial_tracer = Some(tracer.clone());
+        let trace_state = TraceState::new(app_name, &node_id, opts, provider, tracer);
 
         TRACER
             .set(Mutex::new(trace_state))
@@ -628,7 +716,11 @@ pub fn init_global_logging(
     guards
 }
 
-fn create_tracer(app_name: &str, node_id: &str, opts: &LoggingOptions) -> Tracer {
+fn create_tracer(
+    app_name: &str,
+    node_id: &str,
+    opts: &LoggingOptions,
+) -> (SdkTracerProvider, Tracer) {
     let sampler = opts
         .tracing_sample_ratio
         .as_ref()
@@ -645,27 +737,25 @@ fn create_tracer(app_name: &str, node_id: &str, opts: &LoggingOptions) -> Tracer
         ])
         .build();
 
-    opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_batch_exporter(build_otlp_exporter(opts))
+    let builder = SdkTracerProvider::builder()
         .with_sampler(sampler)
-        .with_resource(resource)
-        .build()
-        .tracer("greptimedb")
+        .with_resource(resource);
+    let provider = if opts.enable_otlp_tracing {
+        builder
+            .with_batch_exporter(build_otlp_exporter(opts))
+            .build()
+    } else {
+        builder.build()
+    };
+    let tracer = provider.tracer("greptimedb");
+    (provider, tracer)
 }
 
 /// Ensure that the OTLP tracer has been constructed, building it lazily if needed.
 pub fn get_or_init_tracer() -> Result<Tracer, &'static str> {
     let state = TRACER.get().ok_or("trace state is not initialized")?;
     let mut guard = state.lock().expect("trace state lock poisoned");
-
-    match &mut *guard {
-        TraceState::Ready(tracer) => Ok(tracer.clone()),
-        TraceState::Deferred(context) => {
-            let tracer = create_tracer(&context.app_name, &context.node_id, &context.logging_opts);
-            *guard = TraceState::Ready(tracer.clone());
-            Ok(tracer)
-        }
-    }
+    Ok(guard.get_or_init_tracer())
 }
 
 fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
@@ -749,6 +839,9 @@ where
                 Some(
                     Layer::new()
                         .json()
+                        .event_format(CorrelatedFormat::json(
+                            tracing_subscriber::fmt::format::json(),
+                        ))
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(slow_query_filter)
@@ -757,6 +850,7 @@ where
             } else {
                 Some(
                     Layer::new()
+                        .event_format(CorrelatedFormat::text(tracing_subscriber::fmt::format()))
                         .with_writer(writer)
                         .with_ansi(false)
                         .with_filter(slow_query_filter)
@@ -773,7 +867,123 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use opentelemetry::trace::{Span as OtelSpan, Tracer as _, TracerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for BufferWriter {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn render_correlated(json: bool) -> (String, String, String) {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let provider = SdkTracerProvider::builder().build();
+        let telemetry = tracing_opentelemetry::layer().with_tracer(provider.tracer("log-test"));
+        let fmt = if json {
+            Layer::new()
+                .json()
+                .event_format(CorrelatedFormat::json(
+                    tracing_subscriber::fmt::format::json(),
+                ))
+                .with_writer(BufferWriter(out.clone()))
+                .boxed()
+        } else {
+            Layer::new()
+                .event_format(CorrelatedFormat::text(tracing_subscriber::fmt::format()))
+                .with_writer(BufferWriter(out.clone()))
+                .boxed()
+        };
+        let sub = Registry::default().with(telemetry).with(fmt);
+        let _g = sub.set_default();
+        let span = tracing::info_span!("known");
+        let _e = span.enter();
+        let ids = crate::tracing_context::current_trace_ids().unwrap();
+        tracing::info!("known");
+        drop(_e);
+        tracing::info!("none");
+        drop(_g);
+        (
+            String::from_utf8(out.lock().unwrap().clone()).unwrap(),
+            ids.0,
+            ids.1,
+        )
+    }
+    #[test]
+    fn test_dynamic_enable_promotes_local_provider_to_otlp_provider() {
+        let local_options = LoggingOptions {
+            enable_otlp_tracing: false,
+            ..Default::default()
+        };
+        let (local_provider, local_tracer) = create_tracer("test", "node", &local_options);
+        let mut state =
+            TraceState::new("test", "node", &local_options, local_provider, local_tracer);
+        assert!(!state.otlp_enabled);
+        let promoted = state.get_or_init_tracer();
+        assert!(state.otlp_enabled);
+        assert_eq!(state.providers.len(), 2);
+        let promoted_span = promoted.start("promoted");
+        assert!(promoted_span.span_context().is_valid());
+        assert!(state.options.otlp_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_disabled_tracing_builds_local_provider_without_exporter() {
+        let opts = LoggingOptions {
+            enable_otlp_tracing: false,
+            ..Default::default()
+        };
+        let (provider, tracer) = create_tracer("test", "node", &opts);
+        let span = tracer.start("local");
+        let context = span.span_context();
+        assert!(context.is_valid());
+        assert_ne!(
+            context.trace_id().to_string(),
+            "00000000000000000000000000000000"
+        );
+        assert_ne!(context.span_id().to_string(), "0000000000000000");
+        // Keeping the provider alive is the lifecycle contract for the SDK tracer.
+        drop(provider);
+        assert!(context.is_valid());
+    }
+    #[test]
+    fn test_text_logs_correlate_only_valid_context() {
+        let (r, t, s) = render_correlated(false);
+        assert!(r.contains(&format!("trace_id={t}")));
+        assert!(r.contains(&format!("span_id={s}")));
+        let no_context = r.lines().last().unwrap();
+        assert!(!no_context.contains("trace_id="));
+        assert!(!no_context.contains("span_id="));
+    }
+    #[test]
+    fn test_json_logs_correlate_only_valid_context() {
+        let (r, t, s) = render_correlated(true);
+        let v: serde_json::Value = serde_json::from_str(r.lines().next().unwrap()).unwrap();
+        assert_eq!(v["trace_id"], t);
+        assert_eq!(v["span_id"], s);
+        let v: serde_json::Value = serde_json::from_str(r.lines().last().unwrap()).unwrap();
+        assert!(v.get("trace_id").is_none());
+        assert!(v.get("span_id").is_none());
+    }
+    #[test]
+    fn test_no_context_has_no_correlation_ids() {
+        assert!(crate::tracing_context::current_trace_ids().is_none());
+    }
 
     #[test]
     fn test_logging_options_deserialization_default() {

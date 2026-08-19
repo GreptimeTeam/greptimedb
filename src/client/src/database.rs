@@ -44,8 +44,8 @@ use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatchStreamWrapper};
 use common_telemetry::tracing::Span;
-use common_telemetry::tracing_context::W3cTrace;
-use common_telemetry::{error, warn};
+use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{debug, error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
@@ -262,14 +262,34 @@ async fn output_from_flight_message_stream<S>(
 where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
+    debug!(
+        stage = "flight_first_message_wait",
+        "Waiting for the first Flight response message"
+    );
     let Some(first_flight_message) = flight_message_stream.next().await else {
+        debug!(
+            stage = "flight_terminal_eof",
+            outcome = "empty",
+            "Flight response ended before its first message"
+        );
         return IllegalFlightMessagesSnafu {
             reason: "Expect the response not to be empty",
         }
         .fail();
     };
 
-    let first_flight_message = first_flight_message?;
+    let first_flight_message = match first_flight_message {
+        Ok(message) => message,
+        Err(error) => {
+            debug!(stage = "flight_first_message", outcome = "error", error = ?error, "Flight response first message failed");
+            return Err(error);
+        }
+    };
+    debug!(
+        stage = "flight_first_message",
+        outcome = "ok",
+        "Received the first Flight response message"
+    );
 
     match first_flight_message {
         FlightMessage::AffectedRows { rows, metrics } => {
@@ -277,9 +297,22 @@ where
             if let Some(metrics) = metrics {
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
             }
-            let next_message = flight_message_stream.next().await.transpose()?;
+            let next_message = match flight_message_stream.next().await.transpose() {
+                Ok(message) => message,
+                Err(error) => {
+                    debug!(stage = "flight_terminal", outcome = "error", error = ?error, "Flight response terminal message failed");
+                    return Err(error);
+                }
+            };
             match next_message {
-                None => terminal_metrics.mark_ready(),
+                None => {
+                    debug!(
+                        stage = "flight_terminal_eof",
+                        outcome = "ok",
+                        "Flight response reached terminal EOF"
+                    );
+                    terminal_metrics.mark_ready()
+                }
                 Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
                     terminal_metrics.update(Some(parse_terminal_metrics(&s)?));
                     terminal_metrics.mark_ready();
@@ -661,8 +694,7 @@ impl Database {
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
                 timezone: self.timezone.clone(),
-                // TODO(Taylor-lagrange): add client grpc tracing
-                tracing_context: W3cTrace::new(),
+                tracing_context: TracingContext::from_current_span().to_w3c(),
             }),
             request: Some(request),
         }
@@ -869,10 +901,13 @@ mod tests {
     use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_query::OutputData;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
+    use common_telemetry::tracing::info_span;
+    use common_telemetry::tracing_context::current_trace_ids;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
+    use prost::Message;
     use tonic::codegen::http::{HeaderMap, HeaderValue};
     use tonic::metadata::MetadataMap;
     use tonic::{Code, Status};
@@ -978,6 +1013,28 @@ mod tests {
             .unwrap();
         let decoded: std::collections::HashMap<u64, u64> = serde_json::from_str(value).unwrap();
         assert_eq!(decoded, snapshot_seqs);
+    }
+
+    #[test]
+    fn test_database_flight_ticket_propagates_active_trace_context() {
+        common_telemetry::init_default_ut_logging();
+        let span = info_span!("client_ticket_parent");
+        let _entered = span.enter();
+        let (trace_id, span_id) = current_trace_ids().expect("test span must have IDs");
+        let database = Database::new("catalog", "schema", Client::default());
+        let request = database.to_rpc_request(Request::Query(QueryRequest {
+            query: Some(Query::Sql("SELECT 1".into())),
+        }));
+        let ticket = Ticket {
+            ticket: request.encode_to_vec().into(),
+        };
+        let decoded = api::v1::GreptimeRequest::decode(ticket.ticket.as_ref()).unwrap();
+        let traceparent = decoded.header.unwrap().tracing_context["traceparent"].clone();
+        let parts: Vec<_> = traceparent.split('-').collect();
+        assert_eq!(
+            parts.as_slice(),
+            ["00", trace_id.as_str(), span_id.as_str(), "01"]
+        );
     }
 
     #[test]

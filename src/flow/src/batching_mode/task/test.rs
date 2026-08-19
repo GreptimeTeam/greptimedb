@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
@@ -24,6 +25,13 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_telemetry::tracing::field::{Field, Visit};
+use common_telemetry::tracing::{self, Subscriber};
+use common_telemetry::tracing_subscriber::Registry;
+use common_telemetry::tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use common_telemetry::tracing_subscriber::registry::LookupSpan;
+use common_telemetry::tracing_subscriber::util::SubscriberInitExt;
+use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{
@@ -46,6 +54,95 @@ use crate::batching_mode::checkpoint::{
 use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
 use crate::test_utils::create_test_query_engine;
+
+#[derive(Clone)]
+struct AttemptEvents(Arc<Mutex<Vec<(String, String)>>>);
+
+impl<S> Layer<S> for AttemptEvents
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = AttemptEventVisitor::default();
+        event.record(&mut visitor);
+        if let Some(event_name) = visitor.event {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event_name, visitor.outcome.unwrap_or_default()));
+        }
+    }
+}
+
+#[derive(Default)]
+struct AttemptEventVisitor {
+    event: Option<String>,
+    outcome: Option<String>,
+}
+
+impl Visit for AttemptEventVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "event" => self.event = Some(value.to_string()),
+            "outcome" => self.outcome = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let value = format!("{value:?}").trim_matches('"').to_string();
+        match field.name() {
+            "event" => self.event = Some(value),
+            "outcome" => self.outcome = Some(value),
+            _ => {}
+        }
+    }
+}
+
+fn capture_attempt_events() -> Arc<Mutex<Vec<(String, String)>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn assert_attempt_events(finish: Option<&'static str>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = Registry::default().with(AttemptEvents(events.clone()));
+    let _default = subscriber.set_default();
+    let span = info_span!("flow_batching_attempt_test");
+    let _entered = span.enter();
+    let mut guard = BatchingAttemptGuard::new(Span::current());
+    if let Some(outcome) = finish {
+        guard.finish(outcome);
+    }
+    drop(guard);
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0],
+        ("flow_batching_attempt_start".into(), String::new())
+    );
+    assert_eq!(
+        events[1],
+        (
+            "flow_batching_attempt_finish".into(),
+            finish.unwrap_or("cancelled").into()
+        )
+    );
+}
+
+#[test]
+fn test_batching_attempt_lifecycle_cardinality_success() {
+    assert_attempt_events(Some("ok"));
+}
+
+#[test]
+fn test_batching_attempt_lifecycle_cardinality_error() {
+    assert_attempt_events(Some("error"));
+}
+
+#[test]
+fn test_batching_attempt_lifecycle_cardinality_cancellation() {
+    assert_attempt_events(None);
+}
 
 fn incremental_batch_opts() -> Arc<BatchingModeOptions> {
     Arc::new(BatchingModeOptions {
@@ -159,6 +256,101 @@ async fn test_dirty_time_windows_uses_batch_opts() {
     let state = task.state.read().unwrap();
     assert_eq!(7, state.dirty_time_windows.max_filter_num_per_query());
     assert_eq!(11, state.dirty_time_windows.time_window_merge_threshold());
+}
+
+#[tokio::test]
+async fn test_execute_once_serialized_emits_one_error_finish() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    let events = capture_attempt_events();
+    let subscriber = Registry::default().with(AttemptEvents(events.clone()));
+    let _default = subscriber.set_default();
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let result = task
+        .execute_once_serialized(&query_engine, &Arc::new(frontend_client), None)
+        .await;
+    assert!(result.is_err());
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.0 == "flow_batching_attempt_start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.0 == "flow_batching_attempt_finish")
+            .count(),
+        1
+    );
+    assert_eq!(events[1].1, "error");
+}
+
+#[tokio::test]
+async fn test_execute_once_serialized_can_be_dropped_with_cancelled_finish() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "missing_sink",
+    )
+    .await;
+    let events = capture_attempt_events();
+    let subscriber = Registry::default().with(AttemptEvents(events.clone()));
+    let _default = subscriber.set_default();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook = ATTEMPT_STARTED_HOOK.get_or_init(|| Mutex::new(None));
+    *hook.lock().unwrap() = Some(AttemptStartedHook {
+        started: Mutex::new(Some(started_tx)),
+        release: release.clone(),
+    });
+    let task = task.clone();
+    let client = Arc::new(FrontendClient::from_empty_grpc_handler(QueryOptions::default()).0);
+    let handle = tokio::spawn(async move {
+        let _ = task
+            .execute_once_serialized(&query_engine, &client, None)
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(1), started_rx)
+        .await
+        .expect("production attempt should start after emitting start event")
+        .expect("attempt start hook should remain connected");
+    handle.abort();
+    release.store(true, std::sync::atomic::Ordering::Release);
+    let _ = handle.await;
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.0 == "flow_batching_attempt_start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.0 == "flow_batching_attempt_finish")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e.0 == "flow_batching_attempt_finish")
+            .unwrap()
+            .1,
+        "cancelled"
+    );
+    *ATTEMPT_STARTED_HOOK.get().unwrap().lock().unwrap() = None;
 }
 
 #[tokio::test]

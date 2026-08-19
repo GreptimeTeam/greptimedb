@@ -64,6 +64,17 @@ use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
+fn flight_request_span(
+    request: &GreptimeRequest,
+    context: TracingContext,
+) -> common_telemetry::tracing::Span {
+    context.attach(info_span!(
+        "GreptimeRequestHandler::do_get",
+        protocol = "grpc",
+        request_type = get_request_type(request)
+    ))
+}
+
 /// A subset of [FlightService]
 #[async_trait]
 pub trait FlightCraft: Send + Sync + 'static {
@@ -204,6 +215,11 @@ impl FlightCraft for GreptimeRequestHandler {
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
         let query_ctx =
             create_query_context(Channel::Grpc, request.header.as_ref(), hints, snapshot_seqs)?;
+        let incoming_context = request
+            .header
+            .as_ref()
+            .map(|header| TracingContext::from_w3c(&header.tracing_context))
+            .unwrap_or_default();
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
@@ -214,13 +230,14 @@ impl FlightCraft for GreptimeRequestHandler {
             .is_some_and(|extensions| extensions.should_collect_region_watermark());
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
-        let span = info_span!(
-            "GreptimeRequestHandler::do_get",
-            protocol = "grpc",
-            request_type = get_request_type(&request)
-        );
+        let span = flight_request_span(&request, incoming_context);
         let flight_compression = self.flight_compression;
         async {
+            debug!(
+                protocol = "grpc",
+                event = "flight_admission",
+                "Flight request admitted"
+            );
             let output = self
                 .handle_request_with_query_ctx(request, query_ctx.clone())
                 .await?;
@@ -230,6 +247,11 @@ impl FlightCraft for GreptimeRequestHandler {
                 flight_compression,
                 query_ctx,
                 should_emit_terminal_metrics,
+            );
+            debug!(
+                protocol = "grpc",
+                event = "flight_response_stream_created",
+                "Flight response stream created"
             );
             Ok(Response::new(stream))
         }
@@ -631,6 +653,27 @@ mod tests {
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
+
+    #[test]
+    fn test_flight_request_span_inherits_inbound_context() {
+        common_telemetry::init_default_ut_logging();
+        let trace_id = "0123456789abcdef0123456789abcdef";
+        let parent_span_id = "0123456789abcdef";
+        let header = api::v1::RequestHeader {
+            tracing_context: std::collections::HashMap::from([(
+                "traceparent".to_string(),
+                format!("00-{trace_id}-{parent_span_id}-01"),
+            )]),
+            ..Default::default()
+        };
+        let incoming = TracingContext::from_w3c(&header.tracing_context);
+        let request = GreptimeRequest::default();
+        let span = flight_request_span(&request, incoming);
+        let _child = span.enter();
+        let ids = common_telemetry::tracing_context::current_trace_ids().unwrap();
+        assert_eq!(ids.0, trace_id);
+        assert_ne!(ids.1, parent_span_id);
+    }
 
     #[test]
     fn test_extract_flow_extensions_preserves_comma_bearing_values() {
