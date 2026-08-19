@@ -567,7 +567,7 @@ fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Durat
         return None;
     }
     match query_ctx.channel() {
-        Channel::Mysql if stmt.is_readonly() => Some(query_timeout),
+        Channel::Mysql | Channel::HttpSql if stmt.is_readonly() => Some(query_timeout),
         Channel::Postgres => Some(query_timeout),
         _ => None,
     }
@@ -580,7 +580,7 @@ fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> O
         return None;
     }
     match query_ctx.channel() {
-        Channel::Mysql if is_readonly_plan(plan) => Some(query_timeout),
+        Channel::Mysql | Channel::HttpSql if is_readonly_plan(plan) => Some(query_timeout),
         Channel::Postgres => Some(query_timeout),
         _ => None,
     }
@@ -721,6 +721,9 @@ impl Instance {
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
         let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+        // The statement is guaranteed to be EXPLAIN ANALYZE VERBOSE here, so
+        // attach a recorder to capture plan metrics if the stream times out.
+        let timeout_recorder = slow_query_timer.as_ref().map(SlowQueryTimer::recorder);
         let ticket = self.process_manager.register_query(
             catalog_name,
             vec![schema_name],
@@ -729,8 +732,12 @@ impl Instance {
             Some(query_ctx.process_id()),
             slow_query_timer,
         );
-        let query_fut =
-            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor, None);
+        let query_fut = self.exec_statement_with_timeout(
+            stmt,
+            query_ctx.clone(),
+            query_interceptor,
+            timeout_recorder,
+        );
         let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| error::CancelledSnafu.build())??;
@@ -2247,6 +2254,31 @@ mod tests {
                 .as_array()
                 .is_some_and(|metrics| !metrics.is_empty())
         );
+    }
+
+    #[test]
+    fn test_derive_timeout_for_http_sql_channel() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .channel(Channel::HttpSql)
+                .build(),
+        );
+        query_ctx.set_query_timeout(Duration::from_secs(10));
+
+        // Readonly statements are wrapped with the query timeout.
+        let explain = parse_one_sql("EXPLAIN ANALYZE VERBOSE SELECT 1");
+        assert_eq!(
+            derive_timeout(&explain, &query_ctx),
+            Some(Duration::from_secs(10))
+        );
+
+        // Non-readonly statements are not wrapped.
+        let insert = parse_one_sql("INSERT INTO demo VALUES (1)");
+        assert_eq!(derive_timeout(&insert, &query_ctx), None);
+
+        // Zero timeout disables the wrapper.
+        query_ctx.set_query_timeout(Duration::ZERO);
+        assert_eq!(derive_timeout(&explain, &query_ctx), None);
     }
 
     struct PendingDataSource {

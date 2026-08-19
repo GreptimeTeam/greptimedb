@@ -19,7 +19,7 @@ use common_time::Timezone;
 use lazy_static::lazy_static;
 use regex::Regex;
 use session::ReadPreference;
-use session::context::Channel::Postgres;
+use session::context::Channel::{HttpSql, Postgres};
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -328,7 +328,9 @@ pub fn set_query_timeout(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
             value: Value::DoubleQuotedString(timeout),
             ..
         }) => {
-            if ctx.channel() != Postgres {
+            // HTTP SQL defaults to the PostgreSQL dialect, so it accepts the
+            // same time-unit strings as the Postgres channel.
+            if ctx.channel() != Postgres && ctx.channel() != HttpSql {
                 return NotSupportedSnafu {
                     feat: format!("Invalid timeout expr {} in set variable statement", timeout),
                 }
