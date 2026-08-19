@@ -10675,6 +10675,36 @@ mod test {
     }
 
     #[tokio::test]
+    async fn nested_histogram_helpers_ignore_unparseable_bucket_labels() {
+        let state = build_query_engine_state();
+        for native_le in [None, Some("native")] {
+            for query in [
+                "histogram_quantile(0.5, histogram_quantile(0.5, mixed_histogram))",
+                "histogram_fraction(-Inf, +Inf, histogram_fraction(-Inf, +Inf, mixed_histogram))",
+            ] {
+                let plan = PromPlanner::stmt_to_plan(
+                    classic_and_native_histogram_table_provider(
+                        "native",
+                        native_le,
+                        direct_or_histogram(),
+                    ),
+                    &operator_eval_stmt(query),
+                    &state,
+                )
+                .await
+                .unwrap();
+
+                let (_, batches) = execute(plan, &state).await;
+                assert_eq!(
+                    batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                    0,
+                    "native_le={native_le:?}, query={query}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn native_histogram_quantile_rejects_multi_field_input() {
         let table_provider = build_test_multi_histogram_table_provider("some_metric").await;
         let result = PromPlanner::stmt_to_plan(

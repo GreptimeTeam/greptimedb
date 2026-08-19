@@ -33,7 +33,7 @@ use datafusion::physical_expr::{
     EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
 };
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
+use datafusion::physical_plan::expressions::{Column as PhyColumn, TryCastExpr as PhyTryCast};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, ExecutionPlanProperties,
@@ -554,17 +554,16 @@ impl ExecutionPlan for HistogramFoldExec {
         if self.histogram_column_index.is_none() {
             // add le ASC
             cols.push(PhysicalSortRequirement {
-                expr: Arc::new(PhyCast::new(
+                expr: Arc::new(PhyTryCast::new(
                     Arc::new(PhyColumn::new(
                         self.input.schema().field(self.le_column_index).name(),
                         self.le_column_index,
                     )),
                     DataType::Float64,
-                    None,
                 )),
                 options: Some(SortOptions {
-                    descending: false,  // +INF in the last
-                    nulls_first: false, // not nullable
+                    descending: false,  // numeric bounds ascending
+                    nulls_first: false, // unparseable bounds last
                 }),
             });
         }
@@ -978,6 +977,13 @@ impl HistogramFoldStream {
         if !Self::is_positive_infinity(le_array, inf_index) {
             return false;
         }
+        if (cursor..=inf_index).any(|row| {
+            string_array_value_at_index(le_array, row)
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_none()
+        }) {
+            return false;
+        }
 
         for offset in 1..bucket_num {
             let row = cursor + offset;
@@ -1075,6 +1081,9 @@ impl HistogramFoldStream {
             }
             return Ok(());
         }
+        if group.buckets.is_empty() {
+            return Ok(());
+        }
 
         let has_inf = group
             .buckets
@@ -1133,13 +1142,15 @@ impl HistogramFoldStream {
             let mixed = self.histogram_column_index.is_some();
             let bucket = string_array_value_at_index(le_array, row)
                 .and_then(|value| value.parse::<f64>().ok());
-            if !mixed || field_array.is_valid(row) && bucket.is_some() {
+            if let Some(bucket) = bucket
+                && (!mixed || field_array.is_valid(row))
+            {
                 let counter = if field_array.is_valid(row) {
                     field_array.value(row)
                 } else {
                     f64::NAN
                 };
-                group.buckets.push(bucket.unwrap_or(f64::NAN));
+                group.buckets.push(bucket);
                 group.counters.push(counter);
             }
             if let Some(histogram_column_index) = self.histogram_column_index {
@@ -1864,6 +1875,46 @@ mod test {
 +------+-----+",
         );
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn ignore_unparseable_bucket_bounds() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a", "b"])),
+                Arc::new(StringArray::from(vec![
+                    Some("bad"),
+                    Some("1"),
+                    Some("+Inf"),
+                    None,
+                ])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
+
+        let result =
+            datafusion::physical_plan::collect(fold_exec, SessionContext::default().task_ctx())
+                .await
+                .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 1);
+        assert_eq!(
+            string_array_value_at_index(result[0].column(0), 0),
+            Some("a")
+        );
+        assert_eq!(
+            result[0].column(1).as_primitive::<Float64Type>().value(0),
+            1.0
+        );
     }
 
     #[tokio::test]
