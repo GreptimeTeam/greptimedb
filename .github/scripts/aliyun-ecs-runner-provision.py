@@ -22,7 +22,7 @@
 # dependencies = [
 #   # Pin exactly after the first live run against the Aliyun API.
 #   "alibabacloud_ecs20140526>=4.1.0,<6",
-#   "alibabacloud_tea_openapi>=2,<3",
+#   "alibabacloud_tea_openapi>=0.3.12,<1",
 # ]
 # ///
 
