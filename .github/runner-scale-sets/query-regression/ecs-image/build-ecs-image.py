@@ -166,14 +166,16 @@ def make_ecs_client(region_id: str):
     )
 
 
-def wait_for_instance_status(client, instance_id: str, wanted: str, deadline: float) -> None:
+def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: str, deadline: float) -> None:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     import json
 
     while time.monotonic() < deadline:
         response = client.describe_instances(
-            ecs_models.DescribeInstancesRequest(instance_ids=json.dumps([instance_id]))
+            ecs_models.DescribeInstancesRequest(
+                region_id=region_id, instance_ids=json.dumps([instance_id])
+            )
         )
         instances = response.body.instances.instance
         if instances and instances[0].status == wanted:
@@ -182,12 +184,13 @@ def wait_for_instance_status(client, instance_id: str, wanted: str, deadline: fl
     raise TimeoutError(f"Instance {instance_id} did not reach status {wanted} in time")
 
 
-def run_check_command(client, instance_id: str, command: str) -> tuple[str, str]:
+def run_check_command(client, region_id: str, instance_id: str, command: str) -> tuple[str, str]:
     """Run a shell command via Cloud Assistant; return (status, decoded output)."""
     from alibabacloud_ecs20140526 import models as ecs_models
 
     invoke = client.run_command(
         ecs_models.RunCommandRequest(
+            region_id=region_id,
             type="RunShellScript",
             command_content=base64.b64encode(command.encode()).decode(),
             instance_id=[instance_id],
@@ -198,7 +201,7 @@ def run_check_command(client, instance_id: str, command: str) -> tuple[str, str]
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         description = client.describe_invocations(
-            ecs_models.DescribeInvocationsRequest(invoke_id=invoke_id)
+            ecs_models.DescribeInvocationsRequest(region_id=region_id, invoke_id=invoke_id)
         )
         invocations = description.body.invocations.invocation
         if invocations:
@@ -222,6 +225,7 @@ def main() -> int:
     parser.add_argument("--vswitch-id", default=os.environ.get("ALIYUN_ECS_VSWITCH_ID"))
     parser.add_argument("--security-group-id", default=os.environ.get("ALIYUN_ECS_SECURITY_GROUP_ID"))
     parser.add_argument("--base-image-id", default=os.environ.get("ALIYUN_ECS_BASE_IMAGE_ID"))
+    parser.add_argument("--resource-group-id", default=os.environ.get("ALIYUN_ECS_RESOURCE_GROUP_ID"))
     parser.add_argument("--instance-type", default="ecs.g7.xlarge")
     parser.add_argument("--image-name", default=None, help="Defaults to a timestamped name.")
     args = parser.parse_args()
@@ -249,7 +253,9 @@ def main() -> int:
     try:
         response = client.run_instances(
             ecs_models.RunInstancesRequest(
+                region_id=args.region_id,
                 image_id=args.base_image_id,
+                resource_group_id=args.resource_group_id,
                 instance_type=args.instance_type,
                 v_switch_id=args.vswitch_id,
                 security_group_id=args.security_group_id,
@@ -272,12 +278,12 @@ def main() -> int:
         )
         instance_id = response.body.instance_id_sets.instance_id_set[0]
         print(f"Builder instance: {instance_id}", flush=True)
-        wait_for_instance_status(client, instance_id, "Running", time.monotonic() + 10 * 60)
+        wait_for_instance_status(client, args.region_id, instance_id, "Running", time.monotonic() + 10 * 60)
 
         deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             status, output = run_check_command(
-                client, instance_id, f"test -f {DONE_SENTINEL} && echo done || echo pending"
+                client, args.region_id, instance_id, f"test -f {DONE_SENTINEL} && echo done || echo pending"
             )
             print(f"Build sentinel check: {status} {output.strip()}", flush=True)
             if "done" in output:
@@ -288,16 +294,18 @@ def main() -> int:
 
         print("Stopping builder before image creation", flush=True)
         client.stop_instance(ecs_models.StopInstanceRequest(instance_id=instance_id))
-        wait_for_instance_status(client, instance_id, "Stopped", time.monotonic() + 10 * 60)
+        wait_for_instance_status(client, args.region_id, instance_id, "Stopped", time.monotonic() + 10 * 60)
 
         image = client.create_image(
-            ecs_models.CreateImageRequest(instance_id=instance_id, image_name=image_name)
+            ecs_models.CreateImageRequest(
+                region_id=args.region_id, instance_id=instance_id, image_name=image_name
+            )
         )
         image_id = image.body.image_id
         deadline = time.monotonic() + 30 * 60
         while time.monotonic() < deadline:
             description = client.describe_images(
-                ecs_models.DescribeImagesRequest(image_id=image_id)
+                ecs_models.DescribeImagesRequest(region_id=args.region_id, image_id=image_id)
             )
             images = description.body.images.image
             if images and images[0].status == "Available":

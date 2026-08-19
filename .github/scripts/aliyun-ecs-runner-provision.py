@@ -82,6 +82,11 @@ class ProvisionConfig:
     repo: str
     run_id: str
     github_token: str
+    # Optional resource group; required when the RAM grant is scoped to one.
+    resource_group_id: str | None = None
+    # Runner identity inside the image; the workflow asserts the same values.
+    runner_uid: str = "1001"
+    runner_gid: str = "1001"
 
 
 def runner_name_for_run(run_id: str) -> str:
@@ -93,7 +98,13 @@ def runner_label_for_run(run_id: str) -> str:
 
 
 def render_user_data(
-    cache_disk_id: str, runner_name: str, runner_label: str, runner_token: str, repo: str
+    cache_disk_id: str,
+    runner_name: str,
+    runner_label: str,
+    runner_token: str,
+    repo: str,
+    runner_uid: str = "1001",
+    runner_gid: str = "1001",
 ) -> str:
     """Render the cloud-init shell script for the runner instance."""
     bind_mounts = "\n".join(
@@ -132,7 +143,7 @@ mkdir -p "{CACHE_MOUNT}"
 mount "${{device}}" "{CACHE_MOUNT}"
 
 mkdir -p {mkdirs}
-chown -R 1001:1001 "{CACHE_MOUNT}"
+chown -R {runner_uid}:{runner_gid} "{CACHE_MOUNT}"
 mkdir -p /home/runner/.cargo /home/runner/.cache
 
 bind_mount() {{
@@ -141,7 +152,7 @@ bind_mount() {{
   mount --bind "${{src}}" "${{dst}}"
 }}
 {bind_mounts}
-chown -R 1001:1001 /home/runner
+chown -R {runner_uid}:{runner_gid} /home/runner
 
 cat > /etc/query-regression-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
@@ -214,11 +225,13 @@ def make_ecs_client(config: ProvisionConfig):
     )
 
 
-def wait_for_disk_available(client, disk_id: str, deadline: float) -> None:
+def wait_for_disk_available(client, region_id: str, disk_id: str, deadline: float) -> None:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     while time.monotonic() < deadline:
-        response = client.describe_disks(ecs_models.DescribeDisksRequest(disk_ids=json.dumps([disk_id])))
+        response = client.describe_disks(
+            ecs_models.DescribeDisksRequest(region_id=region_id, disk_ids=json.dumps([disk_id]))
+        )
         disks = response.body.disks.disk
         if not disks:
             raise RuntimeError(f"Cache disk {disk_id} not found")
@@ -233,12 +246,14 @@ def wait_for_disk_available(client, disk_id: str, deadline: float) -> None:
     raise TimeoutError(f"Cache disk {disk_id} did not become Available in time")
 
 
-def wait_for_instance_status(client, instance_id: str, wanted: str, deadline: float) -> None:
+def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: str, deadline: float) -> None:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     while time.monotonic() < deadline:
         response = client.describe_instances(
-            ecs_models.DescribeInstancesRequest(instance_ids=json.dumps([instance_id]))
+            ecs_models.DescribeInstancesRequest(
+                region_id=region_id, instance_ids=json.dumps([instance_id])
+            )
         )
         instances = response.body.instances.instance
         if instances and instances[0].status == wanted:
@@ -247,12 +262,12 @@ def wait_for_instance_status(client, instance_id: str, wanted: str, deadline: fl
     raise TimeoutError(f"Instance {instance_id} did not reach status {wanted} in time")
 
 
-def dump_console_output(client, instance_id: str) -> None:
+def dump_console_output(client, region_id: str, instance_id: str) -> None:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     try:
         response = client.get_instance_console_output(
-            ecs_models.GetInstanceConsoleOutputRequest(instance_id=instance_id)
+            ecs_models.GetInstanceConsoleOutputRequest(region_id=region_id, instance_id=instance_id)
         )
         output = base64.b64decode(response.body.console_output or "").decode("utf-8", "replace")
     except Exception as error:  # noqa: BLE001
@@ -288,7 +303,9 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     request = ecs_models.RunInstancesRequest(
+        region_id=config.region_id,
         image_id=config.image_id,
+        resource_group_id=config.resource_group_id,
         instance_type=config.instance_type,
         v_switch_id=config.vswitch_id,
         security_group_id=config.security_group_id,
@@ -321,19 +338,27 @@ def provision(config: ProvisionConfig) -> int:
 
     print("::group::Wait for cache disk", flush=True)
     wait_for_disk_available(
-        client, config.cache_disk_id, time.monotonic() + DISK_WAIT_TIMEOUT_SECONDS
+        client, config.region_id, config.cache_disk_id, time.monotonic() + DISK_WAIT_TIMEOUT_SECONDS
     )
     print("::endgroup::", flush=True)
 
     registration_token = create_registration_token(config.github_token, config.repo)
     user_data = encode_user_data(
-        render_user_data(config.cache_disk_id, runner_name, runner_label, registration_token, config.repo)
+        render_user_data(
+            config.cache_disk_id,
+            runner_name,
+            runner_label,
+            registration_token,
+            config.repo,
+            config.runner_uid,
+            config.runner_gid,
+        )
     )
 
     print(f"::group::Run instance {runner_name}", flush=True)
     instance_id = run_instance(client, config, user_data)
     print(f"Instance id: {instance_id}", flush=True)
-    wait_for_instance_status(client, instance_id, "Running", time.monotonic() + 5 * 60)
+    wait_for_instance_status(client, config.region_id, instance_id, "Running", time.monotonic() + 5 * 60)
     client.attach_disk(
         ecs_models.AttachDiskRequest(
             instance_id=instance_id, disk_id=config.cache_disk_id, delete_with_instance=False
@@ -362,7 +387,7 @@ def provision(config: ProvisionConfig) -> int:
 
     print("::endgroup::", flush=True)
     print(f"Runner {runner_name} did not come online in time; deleting instance", flush=True)
-    dump_console_output(client, instance_id)
+    dump_console_output(client, config.region_id, instance_id)
     delete_instance_quietly(client, instance_id)
     return 1
 
@@ -378,12 +403,15 @@ def main() -> int:
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--github-token", default=os.environ.get("GH_PERSONAL_ACCESS_TOKEN"))
+    parser.add_argument("--runner-uid", default=os.environ.get("QUERY_REGRESSION_RUNNER_UID", "1001"))
+    parser.add_argument("--runner-gid", default=os.environ.get("QUERY_REGRESSION_RUNNER_GID", "1001"))
+    parser.add_argument("--resource-group-id", default=os.environ.get("ALIYUN_ECS_RESOURCE_GROUP_ID"))
     args = parser.parse_args()
 
     missing = [
         name
         for name, value in vars(args).items()
-        if value is None or (isinstance(value, str) and not value)
+        if name != "resource_group_id" and (value is None or (isinstance(value, str) and not value))
     ]
     if missing:
         flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
@@ -399,6 +427,9 @@ def main() -> int:
         repo=args.repo,
         run_id=args.run_id,
         github_token=args.github_token,
+        resource_group_id=args.resource_group_id or None,
+        runner_uid=args.runner_uid,
+        runner_gid=args.runner_gid,
     )
     return provision(config)
 

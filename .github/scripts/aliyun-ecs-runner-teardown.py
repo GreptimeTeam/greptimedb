@@ -129,13 +129,14 @@ def deregister_runner(token: str, repo: str, runner_name: str) -> bool:
         return False
 
 
-def list_managed_instances(client) -> list[tuple[str, str, str]]:
+def list_managed_instances(client, region_id: str) -> list[tuple[str, str, str]]:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     result: list[tuple[str, str, str]] = []
     next_token = None
     while True:
         request = ecs_models.DescribeInstancesRequest(
+            region_id=region_id,
             tag=[
                 ecs_models.DescribeInstancesRequestTag(
                     key=provision.MANAGED_BY_TAG_KEY, value=provision.MANAGED_BY_TAG_VALUE
@@ -153,7 +154,7 @@ def list_managed_instances(client) -> list[tuple[str, str, str]]:
 
 
 def sweep(client, region_id: str, repo: str, github_token: str, ttl: timedelta) -> int:
-    instances = list_managed_instances(client)
+    instances = list_managed_instances(client, region_id)
     print(f"Found {len(instances)} managed instance(s) in {region_id}", flush=True)
     expired = expired_instance_names(instances, datetime.now(timezone.utc), ttl)
     ok = True
