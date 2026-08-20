@@ -509,7 +509,6 @@ mod tests {
         ReconcileResponse, ResponseHeader, Role,
     };
     use async_trait::async_trait;
-    use session::context::Channel;
     use common_error::status_code::StatusCode;
     use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
@@ -520,6 +519,7 @@ mod tests {
     };
     use common_telemetry::common_error::ext::ErrorExt;
     use common_telemetry::info;
+    use session::context::Channel;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};

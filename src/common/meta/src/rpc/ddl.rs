@@ -42,10 +42,10 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
+use common_base::protocol::Channel;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 pub use common_event_recorder::{PersistentEventContext, TriggerReason};
-use common_session::channel_protocol;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -1661,11 +1661,13 @@ pub fn event_context_from_query_context(query_context: &QueryContext) -> Persist
         .get(TRIGGER_REASON_EXTENSION_KEY)
         .map(|value| TriggerReason::from_extension(value))
         .unwrap_or_default();
-    let mut context = PersistentEventContext::new(reason);
-    if let Some(protocol) = channel_protocol(query_context.channel) {
-        context = context.with_protocol(protocol);
+    let channel = Channel::from(u32::from(query_context.channel));
+    let context = PersistentEventContext::new(reason);
+    if channel == Channel::Unknown {
+        context
+    } else {
+        context.with_protocol(channel.as_ref())
     }
-    context
 }
 
 impl QueryContext {
@@ -1696,7 +1698,8 @@ impl QueryContext {
 
     /// Returns the protocol derived from the typed query channel.
     pub fn protocol(&self) -> Option<String> {
-        channel_protocol(self.channel).map(str::to_string)
+        let channel = Channel::from(u32::from(self.channel));
+        (channel != Channel::Unknown).then(|| channel.as_ref().to_string())
     }
 
     pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {

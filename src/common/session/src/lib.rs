@@ -15,27 +15,6 @@
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
-/// Returns the protocol name represented by a wire query channel value.
-pub fn channel_protocol(channel: u8) -> Option<&'static str> {
-    match channel {
-        1 => Some("mysql"),
-        2 => Some("postgres"),
-        3 => Some("httpsql"),
-        4 => Some("prometheus"),
-        5 => Some("otlp"),
-        6 => Some("grpc"),
-        7 => Some("influx"),
-        8 => Some("opentsdb"),
-        9 => Some("loki"),
-        10 => Some("elasticsearch"),
-        11 => Some("jaeger"),
-        12 => Some("log"),
-        13 => Some("promql"),
-        14 => Some("splunk"),
-        _ => None,
-    }
-}
-
 /// Defines the read preference for frontend route operations,
 /// determining whether to read from the region leader or follower.
 #[derive(
@@ -52,33 +31,7 @@ pub enum ReadPreference {
 mod tests {
     use std::str::FromStr;
 
-    use crate::{ReadPreference, channel_protocol};
-
-    #[test]
-    fn test_channel_protocol() {
-        let expected = [
-            (1, "mysql"),
-            (2, "postgres"),
-            (3, "httpsql"),
-            (4, "prometheus"),
-            (5, "otlp"),
-            (6, "grpc"),
-            (7, "influx"),
-            (8, "opentsdb"),
-            (9, "loki"),
-            (10, "elasticsearch"),
-            (11, "jaeger"),
-            (12, "log"),
-            (13, "promql"),
-            (14, "splunk"),
-        ];
-
-        for (channel, protocol) in expected {
-            assert_eq!(Some(protocol), channel_protocol(channel));
-        }
-        assert_eq!(None, channel_protocol(0));
-        assert_eq!(None, channel_protocol(15));
-    }
+    use crate::ReadPreference;
 
     #[test]
     fn test_read_preference() {
