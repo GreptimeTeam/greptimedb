@@ -174,9 +174,13 @@ impl FlowDualEngine {
         let mut last_exec_time_map = streaming.last_exec_time_map;
         last_exec_time_map.extend(batching.last_exec_time_map);
 
+        let mut start_time_map = streaming.start_time_map;
+        start_time_map.extend(batching.start_time_map);
+
         FlowStat {
             state_size,
             last_exec_time_map,
+            start_time_map,
         }
     }
 

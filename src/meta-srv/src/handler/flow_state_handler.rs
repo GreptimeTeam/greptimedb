@@ -55,6 +55,9 @@ impl HeartbeatHandler for FlowStateHandler {
                 .iter()
                 .map(|(k, v)| (*k, *v))
                 .collect();
+            // The beta2 heartbeat protobuf has only the two historical fields.
+            // Distributed start_time/uptime_seconds are intentionally unsupported and
+            // therefore remain NULL; start_time is retained only in local FlowStat.
             let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
             self.flow_state_manager
                 .put(value)
