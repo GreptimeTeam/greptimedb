@@ -1242,6 +1242,155 @@ async fn test_compaction_region_with_overlapping_delete_all_with_format(flat_for
     assert!(vec.is_empty());
 }
 
+#[tokio::test]
+async fn test_compaction_input_limit_keeps_rows_deleted() {
+    test_compaction_input_limit_keeps_rows_deleted_with_format(false).await;
+    test_compaction_input_limit_keeps_rows_deleted_with_format(true).await;
+}
+
+/// Creates a region that only compacts when asked, so that a test can build an exact file
+/// layout with `put_and_flush` and `delete_and_flush`.
+async fn env_for_manual_compaction(
+    env: &mut TestEnv,
+    region_id: RegionId,
+    flat_format: bool,
+) -> (MitoEngine, Vec<ColumnSchema>) {
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    (engine, column_schemas)
+}
+
+/// The picker caps a compaction at 32 input files and drops the largest file groups to get
+/// there. A deletion marker among the picked files must not be filtered out while the file
+/// holding the rows it masks stays behind, otherwise those rows become visible again.
+async fn test_compaction_input_limit_keeps_rows_deleted_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, column_schemas) =
+        env_for_manual_compaction(&mut env, region_id, flat_format).await;
+
+    // One large file spanning the whole time window.
+    put_and_flush(&engine, region_id, &column_schemas, 0..3000).await;
+    // Deletes 6 rows of that file. The markers land in a tiny file that overlaps it.
+    delete_and_flush(&engine, region_id, &column_schemas, 10..16).await;
+    // 31 more tiny files that overlap the large one but not each other, so the window holds
+    // 33 file groups forming 2 runs.
+    for i in 2..33 {
+        put_and_flush(&engine, region_id, &column_schemas, i * 10..i * 10 + 6).await;
+    }
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        33,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+
+    compact(&engine, region_id).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    // The 32 tiny files are merged into one; the large file exceeds the input file num limit
+    // and is left behind.
+    assert_eq!(
+        2,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
+    let vec = collect_stream_ts(stream).await;
+    assert!(
+        !(10..16).any(|ts| vec.contains(&(ts * 1000))),
+        "deleted rows are visible again after compaction"
+    );
+    assert_eq!(2994, vec.len());
+}
+
+#[tokio::test]
+async fn test_compaction_of_part_of_a_run_keeps_rows_deleted() {
+    test_compaction_of_part_of_a_run_keeps_rows_deleted_with_format(false).await;
+    test_compaction_of_part_of_a_run_keeps_rows_deleted_with_format(true).await;
+}
+
+/// A run is supposed to hold no overlapping files, which is what lets `merge_seq_files`
+/// compact part of a run and still filter deleted rows. Run detection compares time ranges
+/// exclusively though, so a file covering a single timestamp lands in the same run as the
+/// file it deletes rows from. The rows must stay deleted when only one of the two is picked.
+async fn test_compaction_of_part_of_a_run_keeps_rows_deleted_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, column_schemas) =
+        env_for_manual_compaction(&mut env, region_id, flat_format).await;
+
+    // One large file spanning the whole time window.
+    put_and_flush(&engine, region_id, &column_schemas, 0..3000).await;
+    // Deletes a single row of that file, so the marker lands in a file covering one timestamp.
+    delete_and_flush(&engine, region_id, &column_schemas, 1..2).await;
+    // 31 more single row files, each holding another key at its own timestamp.
+    for ts in 1..32 {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("b", ts * 10, ts * 10 + 1, 0),
+        };
+        put_rows(&engine, region_id, rows).await;
+        flush(&engine, region_id).await;
+    }
+
+    compact(&engine, region_id).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let vec = collect_stream_ts(stream).await;
+    assert!(
+        !vec.contains(&1000),
+        "deleted row is visible again after compaction"
+    );
+    assert_eq!(3030, vec.len());
+}
+
 // For issue https://github.com/GreptimeTeam/greptimedb/issues/3633
 #[tokio::test]
 async fn test_readonly_during_compaction() {
