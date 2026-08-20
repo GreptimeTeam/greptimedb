@@ -1488,8 +1488,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    #[cfg(feature = "enterprise")]
-    use common_base::protocol::Channel;
     use common_error::ext::BoxedError;
     #[cfg(feature = "enterprise")]
     use common_error::ext::ErrorExt;
@@ -1790,7 +1788,8 @@ mod tests {
         };
         let executor_context = || ExecutorContext {
             query_context: Some(QueryContext {
-                channel: Channel::Mysql as u8,
+                // MySQL's stable wire protocol value is 1.
+                channel: 1,
                 ..Default::default()
             }),
             actor: Some("test-user".to_string()),
