@@ -199,7 +199,9 @@ async fn run_target(
             let mut sample = post_query(client, port, query, db).await;
             let execution_time = sample
                 .get("response")
-                .and_then(extract_execution_time)
+                .and_then(|response| {
+                    extract_execution_time_for_kind(query.kind.as_deref(), response)
+                })
                 .cloned()
                 .unwrap_or(Value::Null);
             sample
@@ -263,6 +265,14 @@ fn response_text(body: &Value) -> String {
     body.as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| serde_json::to_string(body).unwrap_or_default())
+}
+
+fn extract_execution_time_for_kind<'a>(kind: Option<&str>, body: &'a Value) -> Option<&'a Value> {
+    if kind == Some("prom_http") {
+        None
+    } else {
+        extract_execution_time(body)
+    }
 }
 
 fn extract_execution_time(body: &Value) -> Option<&Value> {
@@ -399,6 +409,24 @@ mod tests {
         assert_eq!(
             extract_execution_time(&json!({"output": [{"elapsed": 3}]})),
             Some(&json!(3))
+        );
+    }
+
+    #[test]
+    fn prom_http_does_not_extract_execution_time_from_response() {
+        let response = json!({
+            "data": {
+                "result": [{"metric": {"job": "api", "elapsed": "label"}}],
+                "elapsed": 42
+            }
+        });
+        assert_eq!(
+            extract_execution_time_for_kind(Some("prom_http"), &response),
+            None
+        );
+        assert_eq!(
+            extract_execution_time_for_kind(Some("sql"), &response),
+            Some(&json!(42))
         );
     }
 
