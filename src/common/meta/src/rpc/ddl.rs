@@ -42,10 +42,10 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
-use common_base::protocol::Channel;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-pub use common_event_recorder::TriggerReason;
+pub use common_event_recorder::{PersistentEventContext, TriggerReason};
+use common_session::channel_protocol;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+/// Reserved query-context extension key for the trigger reason supplied by a legacy frontend.
+pub const TRIGGER_REASON_EXTENSION_KEY: &str = "__greptime_event.trigger_reason";
 /// Reserved query-context extension key for the authenticated database creator.
 pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
 /// Internal gRPC metadata key for the authenticated database creator.
@@ -1651,6 +1653,21 @@ pub struct QueryContext {
     pub sst_min_sequences: HashMap<u64, u64>,
 }
 
+/// Derives the persistent event context used by legacy DDL submitters that do
+/// not populate the newer protobuf `event_context` field.
+pub fn event_context_from_query_context(query_context: &QueryContext) -> PersistentEventContext {
+    let reason = query_context
+        .extensions
+        .get(TRIGGER_REASON_EXTENSION_KEY)
+        .map(|value| TriggerReason::from_extension(value))
+        .unwrap_or_default();
+    let mut context = PersistentEventContext::new(reason);
+    if let Some(protocol) = channel_protocol(query_context.channel) {
+        context = context.with_protocol(protocol);
+    }
+    context
+}
+
 impl QueryContext {
     /// Get the current catalog
     pub fn current_catalog(&self) -> &str {
@@ -1679,8 +1696,7 @@ impl QueryContext {
 
     /// Returns the protocol derived from the typed query channel.
     pub fn protocol(&self) -> Option<String> {
-        let channel = Channel::from(u32::from(self.channel));
-        (channel != Channel::Unknown).then(|| channel.as_ref().to_string())
+        channel_protocol(self.channel).map(str::to_string)
     }
 
     pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {
@@ -1855,6 +1871,29 @@ mod tests {
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
+
+    #[test]
+    fn test_legacy_event_context_fallback_uses_reason_and_typed_channel() {
+        let mut query_context = QueryContext::default();
+        query_context.channel = 4;
+        query_context.extensions.insert(
+            TRIGGER_REASON_EXTENSION_KEY.to_string(),
+            "auto_create".to_string(),
+        );
+        let request = api::v1::meta::DdlTaskRequest {
+            query_context: Some(query_context.clone().into()),
+            event_context: None,
+            ..Default::default()
+        };
+
+        // This is the wire shape sent by an older frontend: the new field is
+        // absent, while the legacy query context still carries both values.
+        assert!(request.event_context.is_none());
+        let query_context = QueryContext::from(request.query_context.unwrap());
+        let context = event_context_from_query_context(&query_context);
+        assert_eq!(context.reason, TriggerReason::AutoCreate);
+        assert_eq!(context.protocol.as_deref(), Some("prometheus"));
+    }
 
     #[test]
     fn test_ddl_timeout_secs() {

@@ -30,6 +30,7 @@ use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{
     CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
     CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
+    event_context_from_query_context,
 };
 use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
@@ -131,6 +132,10 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 param: "query_context",
             })?
             .into();
+        // Older frontends omit `event_context` and carry its reason in the
+        // query-context extensions. Preserve that context at the DDL boundary.
+        let event_context =
+            event_context.or_else(|| Some(event_context_from_query_context(&query_context)));
         let mut task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
