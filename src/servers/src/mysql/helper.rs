@@ -18,7 +18,8 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
-use common_time::{Date, Timestamp};
+use common_time::timestamp::TimeUnit;
+use common_time::{Date, Timestamp, Timezone};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
@@ -137,11 +138,15 @@ where
 
 /// Convert [`ParamValue`] into [`Value`] according to param type.
 /// It will try it's best to do type conversions if possible
-pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarValue> {
+pub fn convert_value(
+    param: &ParamValue,
+    t: &ConcreteDataType,
+    timezone: &Timezone,
+) -> Result<ScalarValue> {
     if let ConcreteDataType::Dictionary(dictionary) = t {
         return Ok(ScalarValue::Dictionary(
             Box::new(dictionary.key_type().as_arrow_type()),
-            Box::new(convert_value(param, dictionary.value_type())?),
+            Box::new(convert_value(param, dictionary.value_type(), timezone)?),
         ));
     }
 
@@ -221,7 +226,9 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                 }
             }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
-            ConcreteDataType::Timestamp(ts_type) => convert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Timestamp(ts_type) => {
+                convert_bytes_to_timestamp(b, ts_type, timezone)
+            }
             ConcreteDataType::Date(_) => convert_bytes_to_date(b),
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
@@ -234,15 +241,29 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             Ok(ScalarValue::Date32(Some(date.val())))
         }
         ValueInner::Datetime(_) => {
-            let timestamp_millis = to_naive_datetime(param.value)
+            let datetime = to_naive_datetime(param.value)
                 .map_err(|e| {
                     error::MysqlValueConversionSnafu {
                         err_msg: e.to_string(),
                     }
                     .build()
                 })?
-                .and_utc()
-                .timestamp_millis();
+                .to_string();
+            let timestamp_millis = Timestamp::from_str(&datetime, Some(timezone))
+                .map_err(|e| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?
+                .convert_to(TimeUnit::Millisecond)
+                .ok_or_else(|| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: "Overflow when converting timestamp to milliseconds".to_string(),
+                    }
+                    .build()
+                })?
+                .value();
 
             match t {
                 ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
@@ -308,8 +329,12 @@ pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Resul
     }
 }
 
-fn convert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
-    let ts = Timestamp::from_str_utc(&String::from_utf8_lossy(bytes))
+fn convert_bytes_to_timestamp(
+    bytes: &[u8],
+    ts_type: &TimestampType,
+    timezone: &Timezone,
+) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str(&String::from_utf8_lossy(bytes), Some(timezone))
         .map_err(|e| {
             error::MysqlValueConversionSnafu {
                 err_msg: e.to_string(),
@@ -502,6 +527,7 @@ mod tests {
 
     #[test]
     fn test_convert_bytes_to_timestamp() {
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
         let test_cases = vec![
             // input unix timestamp in seconds -> nanosecond.
             (
@@ -578,9 +604,21 @@ mod tests {
         ];
 
         for (input, ts_type, expected) in test_cases {
-            let result = convert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
+            let result = convert_bytes_to_timestamp(input.as_bytes(), &ts_type, &timezone).unwrap();
             assert_eq!(result, expected);
         }
+
+        let timezone = Timezone::from_tz_string("+08:00").unwrap();
+        let result = convert_bytes_to_timestamp(
+            b"2024-12-26 12:00:00",
+            &TimestampType::Millisecond(TimestampMillisecondType),
+            &timezone,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            ScalarValue::TimestampMillisecond(Some(1735185600000), None)
+        );
     }
 
     #[test]

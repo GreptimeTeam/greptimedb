@@ -669,6 +669,47 @@ async fn test_mysql_binary_protocol_timestamp_controls() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_mysql_prepared_timestamp_uses_session_timezone() -> Result<()> {
+    let timestamp = Timestamp::from_str_utc("2024-12-26 04:00:00")
+        .unwrap()
+        .value();
+    let (table, _) = timestamp_table("prepared_timestamp_with_session_timezone", Some(timestamp));
+    let query_handler = Arc::new(SessionTimezoneQueryHandler {
+        inner: create_testing_sql_query_handler(table),
+    });
+    let mut mysql_server =
+        create_mysql_server_with_query_handler(query_handler, Default::default())?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false).await?;
+    connection.query_drop("SET time_zone = '+08:00'").await?;
+
+    let text_result: Option<i32> = connection
+        .query_first(
+            "SELECT id FROM prepared_timestamp_with_session_timezone \
+             WHERE ts = '2024-12-26 12:00:00'",
+        )
+        .await?;
+    assert_eq!(Some(7), text_result);
+
+    let statement = connection
+        .prep("SELECT id FROM prepared_timestamp_with_session_timezone WHERE ts = ?")
+        .await?;
+    let binary_result: Option<i32> = connection
+        .exec_first(
+            statement,
+            vec![mysql_async::Value::Date(2024, 12, 26, 12, 0, 0, 0)],
+        )
+        .await?;
+    assert_eq!(Some(7), binary_result);
+
+    mysql_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_mysql_timestamp_precision_slot_isolation() -> Result<()> {
     let (result, health_check) = query_mysql_text_protocol(
         precision_timestamp_table("precision_timestamps"),

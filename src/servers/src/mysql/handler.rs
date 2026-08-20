@@ -25,6 +25,7 @@ use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
+use common_time::Timezone;
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -290,9 +291,12 @@ impl MysqlInstanceShim {
                 }
 
                 let replaced_plan = match params {
-                    Params::ProtocolParams(params) => {
-                        replace_params_with_values(&plan, param_types, &params)
-                    }
+                    Params::ProtocolParams(params) => replace_params_with_values(
+                        &plan,
+                        param_types,
+                        &params,
+                        &query_ctx.timezone(),
+                    ),
                     Params::CliParams(params) => {
                         replace_params_with_exprs(&plan, param_types, &params)
                     }
@@ -807,6 +811,7 @@ fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
     params: &[ParamValue],
+    timezone: &Timezone,
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
 
@@ -824,7 +829,7 @@ fn replace_params_with_values(
 
     for (i, param) in params.iter().enumerate() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
-            let value = helper::convert_value(param, t)?;
+            let value = helper::convert_value(param, t, timezone)?;
 
             values.push(value.into());
         }
