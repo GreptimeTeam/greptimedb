@@ -196,22 +196,16 @@ pub struct FlowStateValue {
     pub state_size: BTreeMap<FlowId, usize>,
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
-    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
-    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
-    #[serde(default)]
-    pub start_time_map: BTreeMap<FlowId, i64>,
 }
 
 impl FlowStateValue {
     pub fn new(
         state_size: BTreeMap<FlowId, usize>,
         last_exec_time_map: BTreeMap<FlowId, i64>,
-        start_time_map: BTreeMap<FlowId, i64>,
     ) -> Self {
         Self {
             state_size,
             last_exec_time_map,
-            start_time_map,
         }
     }
 }
@@ -300,7 +294,6 @@ impl FlowStateManager {
         let resp = self.in_memory.range(req).await?;
         let mut state_size = BTreeMap::new();
         let mut last_exec_time_map = BTreeMap::new();
-        let mut start_time_map = BTreeMap::new();
         for kv in resp.kvs {
             let state = FlowStateValue::try_from_raw_value(&kv.value)?;
             for (flow_id, size) in state.state_size {
@@ -315,16 +308,10 @@ impl FlowStateManager {
                     .and_modify(|v: &mut i64| *v = (*v).max(ts))
                     .or_insert(ts);
             }
-            for (flow_id, ts) in state.start_time_map {
-                start_time_map
-                    .entry(flow_id)
-                    .and_modify(|v: &mut i64| *v = (*v).max(ts))
-                    .or_insert(ts);
-            }
         }
 
         // 3. Write the aggregated value to the global key.
-        let aggregated = FlowStateValue::new(state_size, last_exec_time_map, start_time_map);
+        let aggregated = FlowStateValue::new(state_size, last_exec_time_map);
         let key = FlowStateKey::new().to_bytes();
         let value = aggregated.try_as_raw_value()?;
         let req = PutRequest::new().with_key(key).with_value(value);
@@ -341,7 +328,8 @@ pub struct FlowStat {
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
     /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
-    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    /// This is local runtime state and is not part of the beta2 persisted or
+    /// distributed heartbeat payload; distributed start_time/uptime_seconds are NULL.
     pub start_time_map: BTreeMap<FlowId, i64>,
 }
 
@@ -350,7 +338,7 @@ impl From<FlowStateValue> for FlowStat {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
-            start_time_map: value.start_time_map,
+            start_time_map: BTreeMap::new(),
         }
     }
 }
@@ -360,7 +348,6 @@ impl From<FlowStat> for FlowStateValue {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
-            start_time_map: value.start_time_map,
         }
     }
 }
@@ -368,61 +355,15 @@ impl From<FlowStat> for FlowStateValue {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-
-    use crate::key::FlowId;
-    use crate::key::flow::flow_state::FlowStateValue;
-
-    #[test]
-    fn test_deserialize_legacy_flow_state_value() {
-        // Legacy format: only state_size and last_exec_time_map are present,
-        // without the start_time_map field added in PR #8392.
-        let legacy_json =
-            r#"{"state_size":{"1":1024,"2":2048},"last_exec_time_map":{"1":1700000000000}}"#;
-        let value: FlowStateValue = serde_json::from_str(legacy_json).unwrap();
-
-        let mut expected_state_size = BTreeMap::new();
-        expected_state_size.insert(FlowId::from(1u32), 1024usize);
-        expected_state_size.insert(FlowId::from(2u32), 2048usize);
-        assert_eq!(value.state_size, expected_state_size);
-
-        let mut expected_last_exec_time_map = BTreeMap::new();
-        expected_last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
-        assert_eq!(value.last_exec_time_map, expected_last_exec_time_map);
-
-        // serde(default) kicks in: old persisted data must not break,
-        // and the new field defaults to empty.
-        assert!(value.start_time_map.is_empty());
-    }
-
-    #[test]
-    fn test_flow_state_value_roundtrip_includes_start_time_map() {
-        let mut state_size = BTreeMap::new();
-        state_size.insert(FlowId::from(1u32), 1024usize);
-        let mut last_exec_time_map = BTreeMap::new();
-        last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
-        let mut start_time_map = BTreeMap::new();
-        start_time_map.insert(FlowId::from(1u32), 1700000000000i64);
-
-        let value = FlowStateValue {
-            state_size,
-            last_exec_time_map,
-            start_time_map,
-        };
-
-        let json = serde_json::to_string(&value).unwrap();
-        assert!(json.contains("start_time_map"));
-
-        let decoded: FlowStateValue = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, value);
-    }
-
     use std::sync::Arc;
 
     use super::*;
+    use crate::key::FlowId;
+    use crate::key::flow::flow_state::FlowStateValue;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     fn state(last_exec_time_map: BTreeMap<FlowId, i64>) -> FlowStateValue {
-        FlowStateValue::new(BTreeMap::new(), last_exec_time_map, BTreeMap::new())
+        FlowStateValue::new(BTreeMap::new(), last_exec_time_map)
     }
 
     #[tokio::test]
@@ -504,22 +445,14 @@ mod tests {
         manager
             .merge(
                 1,
-                FlowStateValue::new(
-                    BTreeMap::from([(1, 1024)]),
-                    BTreeMap::from([(1, 100)]),
-                    BTreeMap::new(),
-                ),
+                FlowStateValue::new(BTreeMap::from([(1, 1024)]), BTreeMap::from([(1, 100)])),
             )
             .await
             .unwrap();
         manager
             .merge(
                 2,
-                FlowStateValue::new(
-                    BTreeMap::from([(1, 2048)]),
-                    BTreeMap::from([(1, 50)]),
-                    BTreeMap::new(),
-                ),
+                FlowStateValue::new(BTreeMap::from([(1, 2048)]), BTreeMap::from([(1, 50)])),
             )
             .await
             .unwrap();
