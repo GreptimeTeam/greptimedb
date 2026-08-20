@@ -134,8 +134,19 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .into();
         // Older frontends omit `event_context` and carry its reason in the
         // query-context extensions. Preserve that context at the DDL boundary.
-        let event_context =
-            event_context.or_else(|| Some(event_context_from_query_context(&query_context)));
+        let event_context = event_context
+            .map(PersistentEventContext::from)
+            .or_else(|| Some(event_context_from_query_context(&query_context)))
+            .map(|context| ProcedureEventInput {
+                reason: context.reason,
+                extensions: context
+                    .extensions
+                    .into_iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key, value.to_string()))
+                    })
+                    .collect(),
+            });
         let mut task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
@@ -145,7 +156,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             tracing_context: Some(header.tracing_context),
             query_context: Some(query_context),
             actor,
-            event_input: event_context.map(ProcedureEventInput::from),
+            event_input: event_context,
         };
         let resp = self
             .ddl_manager()
