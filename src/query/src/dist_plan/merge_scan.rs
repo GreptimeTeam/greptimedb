@@ -1231,7 +1231,10 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    use arrow_schema::{DataType as TestArrowDataType, Field};
+    use arrow_schema::extension::{
+        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+    };
+    use arrow_schema::{DataType as TestArrowDataType, Field, Fields};
     use async_trait::async_trait;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
@@ -1323,6 +1326,43 @@ mod tests {
             );
         }
         metadata
+    }
+
+    #[test]
+    fn test_amend_legacy_json2_field_preserves_json2_identity() {
+        let field = Field::new("j", TestArrowDataType::Struct(Fields::empty()), true)
+            .with_metadata(StdHashMap::from([
+                (
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    "greptime.json".to_string(),
+                ),
+                (
+                    EXTENSION_TYPE_METADATA_KEY.to_string(),
+                    serde_json::json!({
+                        "json_structure_settings": { "Structured": null }
+                    })
+                    .to_string(),
+                ),
+            ]));
+
+        let legacy_schema = ArrowSchema::new(vec![field]);
+        let amended = maybe_amend_json2_field(&legacy_schema);
+        let amended_field = amended.field(0);
+        assert_eq!(&TestArrowDataType::Binary, amended_field.data_type());
+        assert_eq!(
+            Some(Json2ExtensionType::NAME),
+            amended_field.extension_type_name()
+        );
+        assert!(is_json2_extension_type(amended_field));
+
+        // The remote wire schema is Binary, while the legacy advertised schema
+        // still carries the greptime.json identity. MergeScan must accept the
+        // amended JSON2 field as the corresponding remote column.
+        let wire_schema = ArrowSchema::new(vec![
+            Field::new("j", TestArrowDataType::Binary, true)
+                .with_metadata(legacy_schema.field(0).metadata().clone()),
+        ]);
+        assert!(validate_remote_schema(&wire_schema, amended.as_ref(), "legacy json2").is_ok());
     }
 
     #[test]
