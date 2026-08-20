@@ -441,6 +441,10 @@ pub struct MergeScanExec {
     /// Metrics for each partition
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
+    /// Snapshot of the statement's explain verbosity. The query context is shared by
+    /// all statements in a multi-statement request, while this execution plan may
+    /// start its stream later.
+    explain_verbose: bool,
     /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
@@ -542,6 +546,7 @@ impl MergeScanExec {
             sub_stage_metrics: Arc::default(),
             partition_metrics: Arc::default(),
             properties,
+            explain_verbose: query_ctx.explain_verbose(),
             query_ctx,
             remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: Arc::default(),
@@ -599,7 +604,7 @@ impl MergeScanExec {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
-        let explain_verbose = self.query_ctx.explain_verbose();
+        let explain_verbose = self.explain_verbose;
         let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
@@ -676,11 +681,17 @@ impl MergeScanExec {
                         );
                     }
                 }
+                // The execution plan owns the statement-scoped snapshot. Do not
+                // serialize the shared context's current value here: a later
+                // statement may have already reused and updated it.
+                let mut serialized_query_ctx: greptime_proto::v1::QueryContext =
+                    (&region_query_ctx).into();
+                serialized_query_ctx.explain.get_or_insert_default().verbose = explain_verbose;
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
-                        query_context: Some((&region_query_ctx).into()),
+                        query_context: Some(serialized_query_ctx),
                     }),
                     region_id,
                     plan: plan.clone(),
@@ -932,6 +943,7 @@ impl MergeScanExec {
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
+            explain_verbose: self.explain_verbose,
             remote_dyn_filter_producer_id: self.remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
             target_partition: self.target_partition,

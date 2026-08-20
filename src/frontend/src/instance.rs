@@ -228,7 +228,11 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
 }
 
 fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
-    matches!(stmt, Statement::Explain(explain) if explain.analyze && explain.verbose)
+    match stmt {
+        Statement::Explain(explain) => explain.analyze && explain.verbose,
+        Statement::Tql(Tql::Analyze(analyze)) => analyze.is_verbose,
+        _ => false,
+    }
 }
 
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
@@ -280,6 +284,8 @@ impl Instance {
     }
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+        query_ctx.set_explain_verbose(is_explain_analyze_verbose(&stmt));
+
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
@@ -714,6 +720,7 @@ impl Instance {
         );
         let mut stmt = stmts.remove(0);
         validate_analyze_stream_statement(&mut stmt)?;
+        query_ctx.set_explain_verbose(true);
         query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
 
         self.check_sql_permission(&stmt, &query_ctx).await?;
@@ -840,6 +847,7 @@ impl Instance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        query_ctx.set_explain_verbose(stmt.as_ref().is_some_and(is_explain_analyze_verbose));
 
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
@@ -1226,6 +1234,7 @@ impl PrometheusHandler for Instance {
         let QueryStatement::Promql(eval_stmt, _) = &stmt else {
             unreachable!("query is parsed from promql");
         };
+        query_ctx.set_explain_verbose(false);
 
         let plan = self
             .statement_executor
@@ -1769,6 +1778,47 @@ mod tests {
     }
 
     #[test]
+    fn test_is_explain_analyze_verbose_includes_tql() {
+        assert!(is_explain_analyze_verbose(
+            &parse_test_sql("TQL ANALYZE VERBOSE (0, 10, '5s') test")[0]
+        ));
+        assert!(!is_explain_analyze_verbose(
+            &parse_test_sql("TQL ANALYZE (0, 10, '5s') test")[0]
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_explain_analyze_verbose_is_scoped_to_statement() -> TestResult<()> {
+        let flags = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let interceptor = Arc::new(RecordingExplainVerboseInterceptor {
+            flags: flags.clone(),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(interceptor);
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let query_ctx = test_query_ctx(1);
+        let results = instance
+            .do_query_inner(
+                "EXPLAIN ANALYZE VERBOSE SELECT 1; SELECT 2",
+                query_ctx.clone(),
+            )
+            .await;
+        assert_eq!(2, results.len());
+        for result in results {
+            result.expect("multi-statement query should execute successfully");
+        }
+        assert_eq!(vec![true, false], *flags.lock().unwrap());
+        assert!(!query_ctx.explain_verbose());
+        Ok(())
+    }
+
+    #[test]
     fn test_validate_analyze_stream_statement_strictness() {
         for sql in [
             "select 1",
@@ -2100,6 +2150,19 @@ mod tests {
             _targets: PermissionTableTargets,
         ) -> auth::error::Result<PermissionResp> {
             self.check_permission(user_info, req)
+        }
+    }
+
+    struct RecordingExplainVerboseInterceptor {
+        flags: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl SqlQueryInterceptor for RecordingExplainVerboseInterceptor {
+        type Error = Error;
+
+        fn post_execute(&self, output: Output, query_ctx: QueryContextRef) -> Result<Output> {
+            self.flags.lock().unwrap().push(query_ctx.explain_verbose());
+            Ok(output)
         }
     }
 

@@ -468,6 +468,8 @@ impl DatafusionQueryEngine {
             // }
             // Arc::new(DistAnalyzeExec::new(new_plan))
         } else {
+            // Resetting belongs to the top-level statement boundary. A pushed-down
+            // plan inherits the coordinator's verbose state and must retain it.
             plan
             // let mut new_plan = plan;
             // for optimizer in state.physical_optimizers() {
