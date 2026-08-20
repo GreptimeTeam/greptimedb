@@ -142,9 +142,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 extensions: context
                     .extensions
                     .into_iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|value| (key, value.to_string()))
-                    })
+                    .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
                     .collect(),
             });
         let mut task: DdlTask = task
