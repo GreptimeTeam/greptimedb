@@ -39,6 +39,11 @@ use crate::vectors::{Helper, MutableVector, StructVectorBuilder};
 type JsonObjectValue = BTreeMap<String, JsonVariant>;
 
 /// Builds JSON2 vectors from object values.
+///
+/// Legacy mode merges all observed paths into the explicit Struct schema.
+/// Auto-expanding mode always materializes type-hinted paths, selects up to
+/// `max_auto_expanded_paths` compatible unhinted leaf paths by frequency, and stores
+/// conflicting or unselected paths in the Variant remainder field.
 #[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
     state: JsonVectorBuilderState,
@@ -469,10 +474,8 @@ fn split_to_explicit(
                 explicit.insert(name.clone(), value);
                 continue;
             }
-            let (value, child_remainder) = split_to_explicit(value, data_type)?;
-            if !value.is_empty() {
-                explicit.insert(name.clone(), JsonVariant::Object(value));
-            }
+            let (child_explicit, child_remainder) = split_to_explicit(value, data_type)?;
+            explicit.insert(name.clone(), JsonVariant::Object(child_explicit));
             if !child_remainder.is_empty() {
                 remainder.insert(name.clone(), JsonVariant::Object(child_remainder));
             }
@@ -522,6 +525,9 @@ fn json_variant_into_struct_value(
 fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType) -> Result<Value> {
     let value = match (value, expected_type) {
         (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => Value::Null,
+        (JsonVariant::Object(object), ConcreteDataType::Struct(struct_type)) => {
+            Value::Struct(json_variant_into_struct_value(object, struct_type.clone())?)
+        }
         (JsonVariant::Object(object), _) if object.is_empty() => Value::Null,
         (JsonVariant::Bool(x), ConcreteDataType::Boolean(_)) => Value::Boolean(x),
         (JsonVariant::Number(x), ConcreteDataType::UInt64(_)) => {
@@ -564,9 +570,6 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
                 .map(|v| json_variant_into_value(v, &item_type))
                 .collect::<Result<Vec<_>>>()?;
             Value::List(ListValue::new(values, Arc::new(item_type)))
-        }
-        (JsonVariant::Object(value), ConcreteDataType::Struct(struct_type)) => {
-            Value::Struct(json_variant_into_struct_value(value, struct_type.clone())?)
         }
         (value, ConcreteDataType::Binary(_)) => Value::from(encode_json_variant(value)?),
         (value, expected_type) => {
@@ -932,6 +935,40 @@ mod tests {
                 "tie_b": null
             }),
             decode_json_variant(reconstructed.value(2)).unwrap()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruct_nested_remainder_only_value() -> Result<()> {
+        let settings = JsonSettings::try_new(vec![], Some(1))?;
+        let values = [
+            json!({"a": {"hot": 1}}),
+            json!({"a": {"hot": 2}}),
+            json!({"a": {"cold": 3}}),
+        ];
+        let mut builder = JsonVectorBuilder::with_settings(&settings, values.len());
+        for value in values.clone() {
+            let value = settings.encode(value)?;
+            builder.try_push_value_ref(&value.as_value_ref())?;
+        }
+
+        let array = builder.to_vector().to_arrow_array();
+        let field = Field::new("data", array.data_type().clone(), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(settings))),
+        );
+        let reconstructed = JsonArray::from(&array).project_to_v2(&field, &DataType::Binary)?;
+        let reconstructed = reconstructed.as_binary::<i32>();
+        assert_eq!(
+            vec![
+                values[0].clone(),
+                values[1].clone(),
+                json!({"a": {"cold": 3, "hot": null}}),
+            ],
+            (0..reconstructed.len())
+                .map(|i| decode_json_variant(reconstructed.value(i)).unwrap())
+                .collect::<Vec<_>>()
         );
 
         Ok(())
