@@ -226,69 +226,28 @@ where
             "poll_flight_data_stream"
         ));
 
-        let mut buffered_message: Option<FlightMessage> = None;
-        let mut stream_ended = false;
-
-        while !stream_ended {
-            // get the next message from the buffered message or read from the flight message stream
-            let flight_message_item = if let Some(msg) = buffered_message.take() {
-                Some(Ok(msg))
-            } else {
-                flight_message_stream.next().await
-            };
-
+        while let Some(flight_message_item) = flight_message_stream.next().await {
             let flight_message = match flight_message_item {
-                Some(Ok(message)) => message,
-                Some(Err(e)) => {
+                Ok(message) => message,
+                Err(e) => {
                     yield Err(BoxedError::new(e)).context(ExternalSnafu);
                     break;
                 }
-                None => break,
             };
 
             match flight_message {
                 FlightMessage::RecordBatch(record_batch) => {
-                    let result_to_yield =
-                        RecordBatch::from_df_record_batch(schema_cloned.clone(), record_batch);
-
-                    // get the next message from the stream. normally it should be a metrics message.
-                    if let Some(next_flight_message_result) = flight_message_stream.next().await {
-                        match next_flight_message_result {
-                            Ok(FlightMessage::Metrics(s)) => {
-                                let m = serde_json::from_str(&s).ok().map(Arc::new);
-                                metrics_ref.swap(m);
-                            }
-                            Ok(FlightMessage::RecordBatch(rb)) => {
-                                // for some reason it's not a metrics message, so we need to buffer this record batch
-                                // and yield it in the next iteration.
-                                buffered_message = Some(FlightMessage::RecordBatch(rb));
-                            }
-                            Ok(_) => {
-                                yield IllegalFlightMessagesSnafu {
-                                    reason: "A RecordBatch message can only be succeeded by a Metrics message or another RecordBatch message"
-                                }
-                                .fail()
-                                .map_err(BoxedError::new)
-                                .context(ExternalSnafu);
-                                break;
-                            }
-                            Err(e) => {
-                                yield Err(BoxedError::new(e)).context(ExternalSnafu);
-                                break;
-                            }
-                        }
-                    } else {
-                        // the stream has ended
-                        stream_ended = true;
-                    }
-
-                    yield Ok(result_to_yield);
+                    // Deliver the batch before polling the next Flight message. In particular, do
+                    // not wait for a possibly trailing Metrics message here.
+                    yield Ok(RecordBatch::from_df_record_batch(
+                        schema_cloned.clone(),
+                        record_batch,
+                    ));
                 }
                 FlightMessage::Metrics(s) => {
-                    // just a branch in case of some metrics message comes after other things.
+                    // Metrics are updated when the message is polled after a batch.
                     let m = serde_json::from_str(&s).ok().map(Arc::new);
                     metrics_ref.swap(m);
-                    continue;
                 }
                 _ => {
                     yield IllegalFlightMessagesSnafu {
@@ -498,6 +457,36 @@ mod test {
             remote_request.action,
             Some(remote_dyn_filter_request::Action::Unregister(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_record_batch_is_yielded_without_waiting_for_next_message() {
+        let schema = test_schema();
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+        let flight_messages = futures_util::StreamExt::chain(
+            stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+            ]),
+            stream::pending(),
+        );
+
+        let mut recordbatches = recordbatches_from_flight_message_stream(flight_messages)
+            .await
+            .unwrap();
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            futures_util::StreamExt::next(&mut recordbatches),
+        )
+        .await
+        .expect("the first batch must not wait for a subsequent Flight message")
+        .unwrap()
+        .unwrap();
+        assert_eq!(batch.num_rows(), 1);
     }
 
     #[tokio::test]
