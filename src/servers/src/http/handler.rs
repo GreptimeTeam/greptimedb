@@ -148,6 +148,12 @@ pub async fn sql(
     let db = query_ctx.get_db_string();
 
     query_ctx.set_channel(Channel::HttpSql);
+    // Enable heartbeat-based live analyze metrics so that a timed out
+    // EXPLAIN ANALYZE VERBOSE can snapshot fresh execution metrics, instead
+    // of only the metrics received with the last record batch. All consumers
+    // additionally gate on `explain_verbose`, so this is a no-op for other
+    // statements.
+    query_ctx.enable_live_analyze_metrics();
     apply_request_deadline(&query_ctx, deadline);
     let query_ctx = Arc::new(query_ctx);
 
