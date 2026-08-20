@@ -1,5 +1,7 @@
 # Manual backport and aggregate delta ledger
 
+The canonical reviewer index is [`decisions/README.md`](decisions/README.md). This ledger preserves the per-carrier rationale; raw `.txt` range-diffs remain unabridged differences-only audit evidence.
+
 ## Flow / Frontend
 
 ### #8726 — adapted
@@ -29,9 +31,17 @@
 - Aggregate: `0ffca14740493d0c1afa556908345d9e135d7656`.
 - Updated `pgwire` to 0.40.7 while retaining the release `windows-sys 0.60.2` graph; lock conflict was resolved with Cargo's offline resolver.
 
+### #8858 — adapted
+- Aggregate: `065d0dfaadc2d6252adc5a671ec0658cfd51d4d6`.
+- Adapted the auth public-export hunk because the release baseline lacks `SEMANTIC_GRAPH_QUERY`; no behavioral divergence was identified. This is a release API/context adaptation, not evidence that every adapted item has semantic risk.
+
+### #8898 — adapted
+- Aggregate: `e2a85ff19b00edba80640123b17166704a0c1117`.
+- Updated the release dashboard baseline from v0.13.10 to v0.13.13; upstream starts from v0.13.12.
+
 ### Flow release extras
 - `84a83d31...`: restore the beta2 two-field heartbeat/persisted contract.
-- `0e477aa9...`: normalize DataFusion/Substrait lock identities and document NULL distributed Flow fields.
+- `0e477aa9...`: restore selected beta2 `Cargo.lock` dependency edges/versions and document the distributed Flow NULL-field contract.
 - `8b131f46...`, `2e908d51...`: SQLness result terminator handling; the real runner rewrote these generated EOF separators.
 
 ## Query / JSON / Storage
@@ -53,8 +63,9 @@
 
 ### #8824 — adapted, accepted breaking-format exception
 - Aggregate: `a024250fdb7808562b100b0ef2b4d8e9deaeb9a3`.
-- Included by release-owner decision.
-- Changes native-histogram persisted child names/types in place. There is no beta1 migration or downgrade compatibility layer. Review as an explicit risk acceptance, not a compatibility-preserving backport.
+- Accepted by explicit release-owner direction in this backport session.
+- Public artifacts do not identify a named approver or date; Issue comment [5352919911](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5352919911) is the public record of the accepted exception, not evidence of independent third-party approval.
+- Changes native-histogram persisted child names/types in place. There is no migration, downgrade, or mixed-version compatibility layer; the feature is only believed unused. Review as an explicit risk acceptance, not a compatibility-preserving backport.
 
 ### Other Query adaptations
 - #8659 differs because it is replayed on release protocol/server APIs.
@@ -66,6 +77,14 @@
 ### #8852 — adapted
 - Aggregate: `4cb869ace4f9ac05c3cd6a470c6dad19cdd82491`.
 - Aggregate conflict in `src/frontend/src/instance.rs` was a single test import adjacent to Flow changes. Retained both Flow imports and #8852's `api::v1::greptime_request::Request`.
+
+### #8834 — adapted
+- Aggregate: `e712162bd37f3e4aca3d339991c453153a3639fa`.
+- The release path materially retains `common_session::channel_protocol(u8)` and legacy `QueryContext` conversion rather than upstream Channel-enum handling. This is a visible mixed-version compatibility item: old frontends can still arrive without the newer event-context representation.
+
+### #8835 — adapted
+- Aggregate: `0d5585ba332fe63374ae72e5745643465bb78fc4`.
+- Builder imports and API context use the release `CatalogManagerRef` plus `EventRecorderRef` surface. `AdminFunctionRecordingLayer` remains installed, so the adaptation is context/API alignment rather than removal of admin execution recording.
 
 ### #8734 — dependency
 - Aggregate: `408929ffd8bad5aa75547274ab62e667f90a449c`.

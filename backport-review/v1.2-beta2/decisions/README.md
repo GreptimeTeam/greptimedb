@@ -1,0 +1,58 @@
+# Beta2 manual backport decisions
+
+**Start here.** This is the canonical, priority-ordered index of behavior that was
+reconstructed, sliced, folded, or adapted for v1.2.0-beta.2. The aggregate head
+is [`b5c38fb`](https://github.com/GreptimeTeam/greptimedb/commit/b5c38fbfc15053f42d4c1d843204bbdd52cb4a00);
+links to the shipping commits below are immutable commit links.
+
+A range-diff is an audit of the *difference between two patches*, not the full
+shipping patch. The unabridged `.txt` files remain the audit evidence and are
+not edited.
+
+## Canonical CI status
+
+The recorded [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112) completed with conclusion **failure** at aggregate HEAD `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`. Failed jobs were **Clippy**, **Check Unused Dependencies**, and **Check (ubuntu-latest)**. **SQLness**, **Compatibility Test**, binary builds, **Rustfmt**, license, and fuzz jobs passed. **`test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`, not because of failed prerequisites.** This is recorded CI evidence only; local verification claims remain limited to the existing top-level README and `manual-deltas.md`.
+
+## 1. BLOCKING / compatibility decisions
+
+| Status | Original PR(s) | Aggregate carrier(s) | Relative to original PR | Concern |
+| --- | --- | --- | --- | --- |
+| **Accepted breaking-format exception; rollback is operationally significant** | [#8824](https://github.com/GreptimeTeam/greptimedb/commit/3510ef7d4c13f9afa3ad8fdafa8842f98dfd5cb3) | [#8824 carrier](https://github.com/GreptimeTeam/greptimedb/commit/a024250fdb7808562b100b0ef2b4d8e9deaeb9a3) | Same intended unsigned-to-signed native-histogram format change, replayed on the release baseline; no migration layer was added. | [Native histogram format](native-histogram-format.md) |
+| **Release-compatible slice; mixed-version contract retained** | [#8392](https://github.com/GreptimeTeam/greptimedb/commit/cabc2f6cc667291d7bc3dcbb8f9cc82e27bd93a0) + [#8729](https://github.com/GreptimeTeam/greptimedb/commit/70470bafbe38df2d3fd21e70e1e7097ffd7317c6) | [slice](https://github.com/GreptimeTeam/greptimedb/commit/0b6702b7ccc0d0fdbd5f53490743dee6a197f516), [#8729](https://github.com/GreptimeTeam/greptimedb/commit/239c4e62b177203dc440fb3faabad8cb6fd70d4f), [contract correction](https://github.com/GreptimeTeam/greptimedb/commit/84a83d31f81bba0e041f69fbd2e4adb9bc04233d) | Statistics and status behavior ship, but the persisted/wire `FlowStateValue` remains two-field; distributed start/uptime values remain unsupported/NULL. | [Flow state contract](flow-state-contract.md) |
+
+## 2. Persisted/wire and mixed-version behavior
+
+| Status | Original PR(s) | Aggregate carrier(s) | Relative to original PR | Concern |
+| --- | --- | --- | --- | --- |
+| **Adapted chain; implemented Unflushed path retained** | [#8726](https://github.com/GreptimeTeam/greptimedb/commit/9f724aa5f6466a3e90c4f6407f2f6e00211ed925), [#8768](https://github.com/GreptimeTeam/greptimedb/commit/78084a9d4485ee61ff03e071f6428fc57c906332), [#8856](https://github.com/GreptimeTeam/greptimedb/commit/1af4c335242e7e5e06ee91bc428a71bb631d0798) | [#8726](https://github.com/GreptimeTeam/greptimedb/commit/45309752df03f6a5fdda03d741727637de28ed01) → [#8768](https://github.com/GreptimeTeam/greptimedb/commit/cf69ee5df93bb8a6ab43337c4941e103a12c6f2e) → [#8856](https://github.com/GreptimeTeam/greptimedb/commit/a451a16cd06d1c1936baaf011991f2c3e3a0cc7e), [lock/alignment extras](https://github.com/GreptimeTeam/greptimedb/commit/b5c38fbfc15053f42d4c1d843204bbdd52cb4a00) | Proto revisions #333/#334/#335 are staged against the release lock; final aggregate keeps `RegionRequest::Truncate(Unflushed)` and includes the release consumer signature. | [Proto and unflushed lock](proto-lock-unflushed.md) |
+| **Adapted and folded; compatibility validation retained** | [#8579](https://github.com/GreptimeTeam/greptimedb/commit/bbc91ea637516c4657a8cdb9f40289f126b9ef61) + [#8818](https://github.com/GreptimeTeam/greptimedb/commit/cd6efa0abf6ec99737ad8bce36376c4946023edc) | [reconstructed carrier](https://github.com/GreptimeTeam/greptimedb/commit/a7c296cf46cc4f1ce0241231cbb8b8031dfb1bcf) | #8818 metadata rules are folded into #8579; unrelated #8615 lifecycle APIs are not imported. | [Remote schema validation](remote-schema-validation.md) |
+| **Adapted; legacy event context remains visible** | [#8734](https://github.com/GreptimeTeam/greptimedb/commit/1f1c9270a806658d2c3d9700c8cd1445d687f89f), [#8834](https://github.com/GreptimeTeam/greptimedb/commit/72f6cf09bf7f7d78c84514163554ad2a29fc7f05), [#8835](https://github.com/GreptimeTeam/greptimedb/commit/943eee852f292bfffd7240867dc27248216c353f), [#8852](https://github.com/GreptimeTeam/greptimedb/commit/154f90b3652bf9b1b3e7eccc5f277f856a2f3079) | [#8734](https://github.com/GreptimeTeam/greptimedb/commit/408929ffd8bad5aa75547274ab62e667f90a449c), [#8834](https://github.com/GreptimeTeam/greptimedb/commit/e712162bd37f3e4aca3d339991c453153a3639fa), [#8835](https://github.com/GreptimeTeam/greptimedb/commit/0d5585ba332fe63374ae72e5745643465bb78fc4), [#8852](https://github.com/GreptimeTeam/greptimedb/commit/4cb869ace4f9ac05c3cd6a470c6dad19cdd82491), [rolling fallback](https://github.com/GreptimeTeam/greptimedb/commit/587f001adfee05e4446fbb1b14c51afad4647bc1), [single conversion](https://github.com/GreptimeTeam/greptimedb/commit/94a4bb78b3bb8dab0a8ae773c57dc39b3598172f) | Release APIs retain `channel_protocol(u8)` and legacy QueryContext conversion; builder imports use release context types while AdminFunctionRecordingLayer stays installed. | [Event context compatibility](event-context-compatibility.md) |
+
+## 3. Reconstructed/folded semantics
+
+| Status | Original PR(s) | Aggregate carrier(s) | Relative to original PR | Concern |
+| --- | --- | --- | --- | --- |
+| **Adapted with release helper/test extras** | [#8745](https://github.com/GreptimeTeam/greptimedb/commit/95d9d92e42bfaa3338cf460bdb031803e29368bf) | [carrier](https://github.com/GreptimeTeam/greptimedb/commit/ed184264fabf2076fe65a7bf6a30b0c6ce205dba), [helper](https://github.com/GreptimeTeam/greptimedb/commit/e897a65e16e1a5ebd1fa667a6c6ea6718e91a12d), [legacy test](https://github.com/GreptimeTeam/greptimedb/commit/234fea812fd2b0406cf148806aa8566a74a3fcd6) | JSON2 extension splitting is replayed on the release MergeScan model; helper wiring and legacy identity coverage are separate release additions. | [JSON2 MergeScan](json2-mergescan.md) |
+| **Adapted; overlap safety retained** | [#8872](https://github.com/GreptimeTeam/greptimedb/commit/3c80df043a46f0511bd81a64a072ca18436efac3) | [carrier](https://github.com/GreptimeTeam/greptimedb/commit/bc889665136f50067e5655757ff7f88ab07f177d) | Deletion-marker overlap recheck remains; newer-window priority from #8714 and MixedRange from #8784 are explicitly excluded. | [Deletion filtering](deletion-filtering.md) |
+
+## 4. Lower-risk context and dependency adaptations
+
+| Status | Original PR(s) | Aggregate carrier(s) | Relative to original PR | Concern |
+| --- | --- | --- | --- | --- |
+| **Release API adaptation** | [#8659](https://github.com/GreptimeTeam/greptimedb/commit/d90cca4b752b34d7ccdb54fe8445ce3bf832e5e0) | [carrier](https://github.com/GreptimeTeam/greptimedb/commit/8cc4cab224dee0991b0c96f7b88df7d8221572ea) | Custom timestamp/value-column remote reads target beta2 frontend/server APIs rather than upstream APIs. | [Prom custom columns](prom-custom-columns.md) |
+| **Adapted dependency/baseline context; no semantic risk identified for #8858** | [#8860](https://github.com/GreptimeTeam/greptimedb/commit/f2ffaef9dfee134fa46d54ba65e6f40b37982cef), [#8858](https://github.com/GreptimeTeam/greptimedb/commit/6249623cfb181b0222dfc03224945c625f326f1a), [#8898](https://github.com/GreptimeTeam/greptimedb/commit/b882e393dfadcf9406c76d1017fe64e0652f0202) | [#8860](https://github.com/GreptimeTeam/greptimedb/commit/0ffca14740493d0c1afa556908345d9e135d7656), [#8858](https://github.com/GreptimeTeam/greptimedb/commit/065d0dfaadc2d6252adc5a671ec0658cfd51d4d6), [#8898](https://github.com/GreptimeTeam/greptimedb/commit/e2a85ff19b00edba80640123b17166704a0c1117), [final lock](https://github.com/GreptimeTeam/greptimedb/commit/b5c38fbfc15053f42d4c1d843204bbdd52cb4a00) | pgwire and lock state follow the release graph; auth export adapts to the missing release symbol, and dashboard baseline is v0.13.10 → v0.13.13 (not upstream v0.13.12 → v0.13.13). | [Dependency and baseline adaptations](dependency-and-baseline-adaptations.md) |
+
+## Exact and base-present entries (collapsed)
+
+These entries are intentionally not given separate concern pages: stable patch-ID equality means patch equivalence, not necessarily a conflict-free cherry-pick. They remain auditable in [`patch-id-verdict.tsv`](../patch-id-verdict.tsv), [`upstream-pr-map.tsv`](../upstream-pr-map.tsv), and the corresponding raw range-diffs.
+
+| Status | Original PR(s) | Aggregate carrier(s) | Relative to original PR | Concern |
+| --- | --- | --- | --- | --- |
+| **Exact stable patch-ID** | #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772 | [ff8ea6d](https://github.com/GreptimeTeam/greptimedb/commit/ff8ea6d87d94401469813a05b9c9f87ead95836e), [f47fcbc](https://github.com/GreptimeTeam/greptimedb/commit/f47fcbc1658b5752982bf387fc1a4ac1abd1001d), [6c3f63f](https://github.com/GreptimeTeam/greptimedb/commit/6c3f63f05b477ef340f57f57981736f1bc3a4e6), [926d9bb](https://github.com/GreptimeTeam/greptimedb/commit/926d9bbd0ff038254c218e6e0e67de91a324e3c6), [00c2d7a](https://github.com/GreptimeTeam/greptimedb/commit/00c2d7a1a32b32cd3badb253f81cf79dd6445e6f), [a3de6c4](https://github.com/GreptimeTeam/greptimedb/commit/a3de6c4fa8cc9ff22faa844a08e6ff7f9fde8835), [66a13cb](https://github.com/GreptimeTeam/greptimedb/commit/66a13cb3b74457a1be1f28d7faaa3994280f3df4), [1ad6c2a](https://github.com/GreptimeTeam/greptimedb/commit/1ad6c2a1cdaa129bf744c4d3d70188916fba223e), [b632625](https://github.com/GreptimeTeam/greptimedb/commit/b6326257d1babcc8cf016af59b92ebfcdee862ae), [efe75d4](https://github.com/GreptimeTeam/greptimedb/commit/efe75d408b77312facd46adf411497bdfb375690), [ea747c5](https://github.com/GreptimeTeam/greptimedb/commit/ea747c53036afa8ba7ed4b19dd2531db95460e43), [f89d60a](https://github.com/GreptimeTeam/greptimedb/commit/f89d60adee3e8ad817fdbe2f2cf36aa660b0c717), [6e5cd11](https://github.com/GreptimeTeam/greptimedb/commit/6e5cd114b31cdb0a8ea6323e5d7f8c5c23198541) (in the same order) | Patch-equivalent to each upstream PR; any cherry-pick conflict is a replay detail, not a semantic delta. | No separate page; see audit TSVs and raw range-diffs |
+| **Base-present** | #8672, #8699 | Release base `8eeff8b4417e6fb675a66cecbdba40060322785c` (no aggregate carrier) | Already present in beta2 before this aggregate; no backport patch ships for either PR. | No separate page; see [`README.md`](../README.md) scope |
+
+Exact entries with nearby context can be reviewed from [dependency and baseline adaptations](dependency-and-baseline-adaptations.md) and the [event context page](event-context-compatibility.md).
+
+## Recorded verification context
+
+See the [canonical CI status](#canonical-ci-status) above. Aggregate history and range-diffs are linked evidence; this index makes no claim of tests beyond those recorded in the existing artifacts.
