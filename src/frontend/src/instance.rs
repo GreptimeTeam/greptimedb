@@ -1713,7 +1713,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
     use api::prom_store::remote::{
@@ -2325,12 +2325,19 @@ mod tests {
         );
         let explain = parse_one_sql("EXPLAIN ANALYZE VERBOSE SELECT 1");
 
-        // Only the request-level timeout is set.
-        query_ctx.set_request_timeout(Duration::from_secs(30));
-        assert_eq!(
-            derive_timeout(&explain, &query_ctx),
-            Some(Duration::from_secs(30))
-        );
+        // The request deadline is an absolute instant; the derived timeout is
+        // the remaining budget at derivation time.
+        let assert_remaining = |expected: Duration| {
+            let derived = derive_timeout(&explain, &query_ctx).unwrap();
+            assert!(
+                derived > expected - Duration::from_secs(1) && derived <= expected,
+                "derived timeout {derived:?} should be close to {expected:?}"
+            );
+        };
+
+        // Only the request-level deadline is set.
+        query_ctx.set_request_deadline(Instant::now() + Duration::from_secs(30));
+        assert_remaining(Duration::from_secs(30));
 
         // The tighter of session and request timeout wins.
         query_ctx.set_query_timeout(Duration::from_secs(10));
@@ -2339,18 +2346,12 @@ mod tests {
             Some(Duration::from_secs(10))
         );
         query_ctx.set_query_timeout(Duration::from_secs(60));
-        assert_eq!(
-            derive_timeout(&explain, &query_ctx),
-            Some(Duration::from_secs(30))
-        );
+        assert_remaining(Duration::from_secs(30));
 
         // A zero session timeout is treated as unset and does not disable
         // the request-level timeout.
         query_ctx.set_query_timeout(Duration::ZERO);
-        assert_eq!(
-            derive_timeout(&explain, &query_ctx),
-            Some(Duration::from_secs(30))
-        );
+        assert_remaining(Duration::from_secs(30));
     }
 
     struct PendingDataSource {

@@ -46,14 +46,7 @@ pub struct ResponseFuture<T> {
 /// extensions by [`DynamicTimeout`] so that downstream handlers can bound
 /// their work (e.g. derive a query timeout) before the request is aborted.
 #[derive(Debug, Clone, Copy)]
-pub struct RequestDeadline(pub Instant);
-
-impl RequestDeadline {
-    /// Returns the remaining time until the deadline.
-    pub fn remaining(&self) -> Duration {
-        self.0.saturating_duration_since(Instant::now())
-    }
-}
+pub struct RequestDeadline(pub std::time::Instant);
 
 impl<T> ResponseFuture<T> {
     pub(crate) fn new(inner: T, sleep: Sleep, status_code: StatusCode) -> Self {
@@ -176,9 +169,9 @@ where
             .unwrap_or(self.default_timeout);
         let mut request = request;
         if !timeout.is_zero() {
-            let deadline = Instant::now() + timeout;
             // Expose the resolved deadline to downstream handlers so they can
             // bound their work before this layer aborts the request.
+            let deadline = std::time::Instant::now() + timeout;
             let _ = request.extensions_mut().insert(RequestDeadline(deadline));
             let response = self.inner.call(request);
             let sleep = tokio::time::sleep(timeout);

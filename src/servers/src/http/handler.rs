@@ -116,15 +116,9 @@ struct AnalyzeStreamState {
 /// Propagates the HTTP request deadline resolved by `DynamicTimeoutLayer`
 /// into the query context, so that statement execution can time out (and
 /// record diagnostics) before the HTTP layer aborts the request.
-fn apply_request_deadline(
-    query_ctx: &QueryContext,
-    deadline: Option<Extension<RequestDeadline>>,
-) {
+fn apply_request_deadline(query_ctx: &QueryContext, deadline: Option<Extension<RequestDeadline>>) {
     if let Some(Extension(deadline)) = deadline {
-        let remaining = deadline.remaining();
-        if !remaining.is_zero() {
-            query_ctx.set_request_timeout(remaining);
-        }
+        query_ctx.set_request_deadline(deadline.0);
     }
 }
 

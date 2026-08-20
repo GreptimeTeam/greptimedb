@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::ExplainOptions;
 use api::v1::region::RegionRequestHeader;
@@ -481,15 +481,21 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
     }
 
-    /// Returns the request-level timeout imposed by the serving endpoint
-    /// (e.g. the HTTP server request timeout), if any.
+    /// Returns the remaining time until the request-level deadline imposed
+    /// by the serving endpoint (e.g. the HTTP server request timeout), if
+    /// any. Computing the remainder on read keeps the derived query timeout
+    /// aligned with the endpoint's own request deadline.
     pub fn request_timeout(&self) -> Option<Duration> {
-        self.mutable_session_data.read().unwrap().request_timeout
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .request_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
-    /// Sets the request-level timeout imposed by the serving endpoint.
-    pub fn set_request_timeout(&self, timeout: Duration) {
-        self.mutable_session_data.write().unwrap().request_timeout = Some(timeout);
+    /// Sets the request-level deadline imposed by the serving endpoint.
+    pub fn set_request_deadline(&self, deadline: Instant) {
+        self.mutable_session_data.write().unwrap().request_deadline = Some(deadline);
     }
 
     pub fn insert_cursor(&self, name: String, rb: RecordBatchStreamCursor) {
