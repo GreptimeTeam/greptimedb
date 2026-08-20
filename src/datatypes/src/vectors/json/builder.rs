@@ -178,7 +178,7 @@ impl JsonVectorBuilder {
 }
 
 fn build_legacy(values: &mut Vec<JsonVariant>, merged_type: &JsonNativeType) -> Result<VectorRef> {
-    build_explicit(values, merged_type, |value| match value {
+    build_explicit(values, merged_type, false, |value| match value {
         JsonVariant::Null => Ok(None),
         JsonVariant::Object(value) => Ok(Some(value)),
         _ => TryFromValueSnafu {
@@ -193,7 +193,7 @@ fn build_with_remainder(
     expanded_type: &JsonNativeType,
 ) -> Result<VectorRef> {
     let mut remainder = VariantArrayBuilder::new(values.len());
-    let explicit = build_explicit(values, expanded_type, |value| {
+    let explicit = build_explicit(values, expanded_type, true, |value| {
         if matches!(value, JsonVariant::Null) {
             remainder.append_null();
             return Ok(None);
@@ -209,6 +209,9 @@ fn build_with_remainder(
 fn build_explicit(
     values: &mut Vec<JsonVariant>,
     explicit_type: &JsonNativeType,
+    // Temporary compatibility switch for the legacy storage layout. Once JSON2 fully switches to
+    // the v2 storage layout, empty objects should always be preserved instead of treated as null.
+    preserve_empty_structs: bool,
     mut project: impl FnMut(JsonVariant) -> Result<Option<JsonObjectValue>>,
 ) -> Result<VectorRef> {
     let DataType::Struct(fields) = explicit_type.as_arrow_type() else {
@@ -227,7 +230,8 @@ fn build_explicit(
             builder.push_null();
             continue;
         };
-        let value = json_variant_into_struct_value(value, struct_type.clone())?;
+        let value =
+            json_variant_into_struct_value(value, struct_type.clone(), preserve_empty_structs)?;
         builder.push_struct_value_ref(StructValueRef::Ref(&value))?;
     }
     Ok(builder.to_vector())
@@ -489,6 +493,7 @@ fn split_to_explicit(
 fn json_variant_into_struct_value(
     object: JsonObjectValue,
     struct_type: StructType,
+    preserve_empty_structs: bool,
 ) -> Result<StructValue> {
     let mut entries = object.into_iter();
     let mut entry = entries.next();
@@ -497,7 +502,7 @@ fn json_variant_into_struct_value(
         let value = match entry.take() {
             Some((name, value)) if name == field.name() => {
                 entry = entries.next();
-                json_variant_into_value(value, field.data_type())?
+                json_variant_into_value(value, field.data_type(), preserve_empty_structs)?
             }
             Some((name, _)) if name.as_str() < field.name() => {
                 return TryFromValueSnafu {
@@ -522,13 +527,19 @@ fn json_variant_into_struct_value(
     Ok(StructValue::new(values, struct_type))
 }
 
-fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType) -> Result<Value> {
+fn json_variant_into_value(
+    value: JsonVariant,
+    expected_type: &ConcreteDataType,
+    preserve_empty_structs: bool,
+) -> Result<Value> {
     let value = match (value, expected_type) {
         (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => Value::Null,
-        (JsonVariant::Object(object), ConcreteDataType::Struct(struct_type)) => {
-            Value::Struct(json_variant_into_struct_value(object, struct_type.clone())?)
+        (JsonVariant::Object(object), _) if object.is_empty() && !preserve_empty_structs => {
+            Value::Null
         }
-        (JsonVariant::Object(object), _) if object.is_empty() => Value::Null,
+        (JsonVariant::Object(object), ConcreteDataType::Struct(struct_type)) => Value::Struct(
+            json_variant_into_struct_value(object, struct_type.clone(), preserve_empty_structs)?,
+        ),
         (JsonVariant::Bool(x), ConcreteDataType::Boolean(_)) => Value::Boolean(x),
         (JsonVariant::Number(x), ConcreteDataType::UInt64(_)) => {
             let Some(x) = x.as_u64() else {
@@ -567,7 +578,7 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
             let item_type = list_type.item_type().clone();
             let values = array
                 .into_iter()
-                .map(|v| json_variant_into_value(v, &item_type))
+                .map(|v| json_variant_into_value(v, &item_type, preserve_empty_structs))
                 .collect::<Result<Vec<_>>>()?;
             Value::List(ListValue::new(values, Arc::new(item_type)))
         }
@@ -1039,12 +1050,26 @@ mod tests {
 
     #[test]
     fn test_json_variant_into_struct_value() -> Result<()> {
+        let struct_type = StructType::new(Arc::new(vec![StructField::new(
+            "value".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        )]));
         assert_eq!(
             json_variant_into_value(
                 JsonVariant::Object(Default::default()),
-                &ConcreteDataType::string_datatype(),
+                &ConcreteDataType::struct_datatype(struct_type.clone()),
+                false,
             )?,
             Value::Null
+        );
+        assert_eq!(
+            json_variant_into_value(
+                JsonVariant::Object(Default::default()),
+                &ConcreteDataType::struct_datatype(struct_type.clone()),
+                true,
+            )?,
+            Value::Struct(StructValue::new(vec![Value::Null], struct_type))
         );
 
         let item_type =
@@ -1087,6 +1112,7 @@ mod tests {
         let value = Value::Struct(json_variant_into_struct_value(
             variant,
             struct_type.clone(),
+            true,
         )?);
 
         assert_eq!(
