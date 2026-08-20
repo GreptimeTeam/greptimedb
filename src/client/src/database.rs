@@ -15,8 +15,9 @@
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -50,6 +51,7 @@ use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::ResultExt;
+use tokio::sync::Notify;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -76,7 +78,20 @@ pub struct OutputMetrics {
 #[derive(Debug, Default)]
 struct OutputMetricsInner {
     metrics: RwLock<Option<RecordBatchMetrics>>,
+    error: RwLock<Option<String>>,
     ready: AtomicBool,
+    completion: Notify,
+    completion_task: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl Drop for OutputMetricsInner {
+    fn drop(&mut self) {
+        if let Ok(completion_task) = self.completion_task.get_mut() {
+            if let Some(completion_task) = completion_task.take() {
+                completion_task.abort();
+            }
+        }
+    }
 }
 
 impl OutputMetrics {
@@ -91,10 +106,34 @@ impl OutputMetrics {
 
     /// Marks the terminal metrics as final for this output.
     pub fn mark_ready(&self) {
-        let _ = self
+        if self
             .inner
             .ready
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.inner.completion.notify_waiters();
+        }
+    }
+
+    fn set_completion_task(&self, task: common_runtime::JoinHandle<()>) {
+        *self.inner.completion_task.lock().unwrap() = Some(task.abort_handle());
+    }
+
+    /// Waits until terminal metrics have reached their final state.
+    pub async fn wait_ready(&self) {
+        loop {
+            let notified = self.inner.completion.notified();
+            if self.is_ready() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Returns an error encountered while consuming a legacy trailing message.
+    pub fn completion_error(&self) -> Option<String> {
+        self.inner.error.read().unwrap().clone()
     }
 
     /// Returns whether terminal metrics are final.
@@ -177,6 +216,8 @@ impl OutputWithMetrics {
         self.output
     }
 }
+
+const LEGACY_TRAILING_METRICS_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn parse_terminal_metrics(metrics_json: &str) -> Result<RecordBatchMetrics> {
     serde_json::from_str(metrics_json).map_err(|e| {
@@ -275,34 +316,68 @@ where
         FlightMessage::AffectedRows { rows, metrics } => {
             let terminal_metrics = OutputMetrics::new();
             if let Some(metrics) = metrics {
+                // Inline metrics are authoritative and make this output final
+                // synchronously. In particular, do not consume or apply a
+                // legacy trailing message after marking the metrics ready.
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
-            }
-            // AffectedRows is a complete output and must not wait for a possible
-            // trailing Metrics message. Keep consuming the Flight stream in the
-            // background so old servers can still deliver their standalone metrics.
-            terminal_metrics.mark_ready();
-            let trailing_metrics = terminal_metrics.clone();
-            common_runtime::spawn_global(async move {
-                while let Some(message) = flight_message_stream.next().await {
-                    match message {
-                        Ok(FlightMessage::Metrics(s)) => match parse_terminal_metrics(&s) {
-                            Ok(metrics) => trailing_metrics.update(Some(metrics)),
-                            Err(e) => {
-                                warn!("Failed to parse trailing terminal metrics: {e}");
-                                break;
+                terminal_metrics.mark_ready();
+            } else {
+                // Old servers may put Metrics in a separate message. The
+                // AffectedRows result can be returned immediately, but its
+                // metrics are not final until this bounded compatibility read
+                // has completed.
+                let weak_metrics = Arc::downgrade(&terminal_metrics.inner);
+                let task = common_runtime::spawn_global(async move {
+                    let result = tokio::time::timeout(
+                        LEGACY_TRAILING_METRICS_TIMEOUT,
+                        flight_message_stream.next(),
+                    )
+                    .await;
+                    let Some(metrics_inner) = weak_metrics.upgrade() else {
+                        return;
+                    };
+                    let metrics = match result {
+                        Ok(Some(Ok(FlightMessage::Metrics(metrics)))) => {
+                            match parse_terminal_metrics(&metrics) {
+                                Ok(metrics) => Some((Some(metrics), None)),
+                                Err(error) => Some((
+                                    None,
+                                    Some(format!("Invalid trailing terminal metrics: {error}")),
+                                )),
                             }
-                        },
-                        Ok(other) => {
-                            warn!("Ignoring unexpected trailing Flight message: {other:?}");
-                            break;
                         }
-                        Err(e) => {
-                            warn!("Failed to consume trailing Flight message: {e}");
-                            break;
+                        Ok(Some(Ok(message))) => Some((
+                            None,
+                            Some(format!("Unexpected trailing Flight message: {message:?}")),
+                        )),
+                        Ok(Some(Err(error))) => Some((
+                            None,
+                            Some(format!(
+                                "Failed to consume trailing Flight message: {error}"
+                            )),
+                        )),
+                        Ok(None) => Some((None, None)),
+                        Err(_) => Some((
+                            None,
+                            Some("Timed out waiting for trailing terminal metrics".to_string()),
+                        )),
+                    };
+                    if let Some((metrics_value, error)) = metrics {
+                        *metrics_inner.metrics.write().unwrap() = metrics_value;
+                        if let Some(error) = error {
+                            *metrics_inner.error.write().unwrap() = Some(error);
+                        }
+                        if metrics_inner
+                            .ready
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            metrics_inner.completion.notify_waiters();
                         }
                     }
-                }
-            });
+                });
+                terminal_metrics.set_completion_task(task);
+            }
             Ok(OutputWithMetrics {
                 output: Output::new_with_affected_rows(rows),
                 metrics: terminal_metrics,
@@ -864,7 +939,9 @@ struct FlightContext {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     use api::v1::auth_header::AuthScheme;
@@ -878,12 +955,53 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
     use tonic::codegen::http::{HeaderMap, HeaderValue};
     use tonic::metadata::MetadataMap;
     use tonic::{Code, Status};
 
     use super::*;
     use crate::error::TonicSnafu;
+
+    struct InlineMetricsStream {
+        messages: VecDeque<Result<FlightMessage>>,
+        trailer_polled: Arc<AtomicBool>,
+    }
+
+    impl Stream for InlineMetricsStream {
+        type Item = Result<FlightMessage>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(message) = self.messages.pop_front() {
+                Poll::Ready(Some(message))
+            } else {
+                self.trailer_polled.store(true, Ordering::SeqCst);
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    struct CancelledMetricsStream {
+        first: Option<Result<FlightMessage>>,
+        dropped: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Stream for CancelledMetricsStream {
+        type Item = Result<FlightMessage>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.first.take() {
+                Some(message) => Poll::Ready(Some(message)),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for CancelledMetricsStream {
+        fn drop(&mut self) {
+            let _ = self.dropped.take().map(|sender| sender.send(()));
+        }
+    }
 
     struct MockMetricsStream {
         schema: datatypes::schema::SchemaRef,
@@ -1122,13 +1240,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_are_parsed() {
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![Ok(
-            FlightMessage::AffectedRows {
-                rows: 3,
-                metrics: Some(terminal_metrics_json()),
-            },
-        )]
-            as Vec<Result<FlightMessage>>))
+        let trailer_polled = Arc::new(AtomicBool::new(false));
+        let output = output_from_flight_message_stream(InlineMetricsStream {
+            messages: VecDeque::from([
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: Some(terminal_metrics_json_with_seq(42)),
+                }),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(99))),
+            ]),
+            trailer_polled: trailer_polled.clone(),
+        })
         .await
         .unwrap();
 
@@ -1138,6 +1260,7 @@ mod tests {
             output.metrics.region_watermark_map(),
             Some(std::collections::HashMap::from([(7, 42)]))
         );
+        assert!(!trailer_polled.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1166,19 +1289,126 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_accepts_trailing_metrics() {
-        let metrics_json = terminal_metrics_json();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::AffectedRows {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(FlightMessage::AffectedRows {
                 rows: 3,
-                metrics: Some(metrics_json.clone()),
-            }),
-            Ok(FlightMessage::Metrics(metrics_json)),
-        ]
+                metrics: None,
+            }))
+            .await
+            .unwrap();
+        let output = output_from_flight_message_stream(ReceiverStream::new(receiver))
+            .await
+            .unwrap();
+
+        assert!(matches!(output.output.data, OutputData::AffectedRows(3)));
+        assert!(!output.metrics.is_ready());
+        sender
+            .send(Ok(FlightMessage::Metrics(terminal_metrics_json())))
+            .await
+            .unwrap();
+        output.metrics.wait_ready().await;
+        assert_eq!(
+            output.metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 42)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_trailing_completion_errors_are_bounded() {
+        let cases = vec![
+            vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
+            ],
+            vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Ok(FlightMessage::Schema(
+                    Schema::new(vec![]).arrow_schema().clone(),
+                )),
+            ],
+            vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Err(IllegalFlightMessagesSnafu {
+                    reason: "transport error".to_string(),
+                }
+                .build()),
+            ],
+        ];
+
+        for messages in cases {
+            let output = output_from_flight_message_stream(futures_util::stream::iter(
+                messages as Vec<Result<FlightMessage>>,
+            ))
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), output.metrics.wait_ready())
+                .await
+                .expect("trailing completion must finish");
+            assert!(output.metrics.completion_error().is_some());
+        }
+
+        let output = output_from_flight_message_stream(
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            })] as Vec<Result<FlightMessage>>)
+            .chain(futures_util::stream::pending()),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), output.metrics.wait_ready())
+            .await
+            .expect("trailing timeout must finish");
+        assert!(output.metrics.completion_error().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_eof_without_trailer_is_ready_without_error() {
+        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![Ok(
+            FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            },
+        )]
             as Vec<Result<FlightMessage>>))
         .await
         .unwrap();
 
-        assert!(matches!(output.output.data, OutputData::AffectedRows(3)));
+        tokio::time::timeout(Duration::from_secs(1), output.metrics.wait_ready())
+            .await
+            .expect("EOF must complete terminal metrics");
+        assert!(output.metrics.completion_error().is_none());
+        assert!(output.metrics.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_completion_task_is_cancelled_when_metrics_drop() {
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let stream = CancelledMetricsStream {
+            first: Some(Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            })),
+            dropped: Some(dropped_tx),
+        };
+        let output = output_from_flight_message_stream(stream).await.unwrap();
+        let metrics = output.metrics.clone();
+        drop(output);
+        drop(metrics);
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("completion stream must be dropped")
+            .expect("drop sentinel must be delivered");
     }
 
     #[tokio::test]

@@ -770,6 +770,12 @@ impl BatchingTask {
         }
 
         let res = res?;
+        res.metrics.wait_ready().await;
+        if let Some(error) = res.metrics.completion_error() {
+            warn!(
+                "Flow {flow_id} completed with an error while collecting terminal metrics: {error}"
+            );
+        }
         let (affected_rows, _) = res.output.extract_rows_and_cost();
         debug!(
             "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
