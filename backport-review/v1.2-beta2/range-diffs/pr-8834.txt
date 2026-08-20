@@ -1,0 +1,107 @@
+PR #8834
+Upstream merge commit: 72f6cf09bf7f7d78c84514163554ad2a29fc7f05
+Aggregate commit: e712162bd37f3e4aca3d339991c453153a3639fa
+
+1:  72f6cf09b ! 1:  e712162bd refactor(procedure): centralize event context handling (#8834)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 72f6cf09bf7f7d78c84514163554ad2a29fc7f05)
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ src/common/meta/src/ddl/tests/alter_table.rs: async fn test_skip_wal_detects_reg
+              stale_region_locks,
+              ddl_context.clone(),
+          )
+    -@@ src/common/meta/src/ddl/tests/alter_table.rs: async fn test_skip_wal_rejects_no_leader_before_updating_metadata() {
+    -     let mut procedure = AlterTableProcedure::new_with_region_locks(
+    -         table_id,
+    -         alter_task,
+    --        EventContext::default(),
+    -         region_locks,
+    -         ddl_context.clone(),
+    -     )
+     @@ src/common/meta/src/ddl/tests/alter_table.rs: async fn test_skip_wal_updates_metadata_before_all_replicas() {
+          let mut procedure = AlterTableProcedure::new_with_region_locks(
+              table_id,
+    @@ src/common/meta/src/procedure_executor.rs: use crate::rpc::procedure::{
+      /// The procedure executor that accepts ddl, region migration task etc.
+     
+      ## src/common/meta/src/rpc/ddl.rs ##
+    -@@ src/common/meta/src/rpc/ddl.rs: use base64::engine::general_purpose;
+    - use common_base::protocol::Channel;
+    +@@ src/common/meta/src/rpc/ddl.rs: use api::v1::{
+    + use base64::Engine as _;
+    + use base64::engine::general_purpose;
+      use common_catalog::{format_full_flow_name, format_full_table_name};
+    ++use common_base::protocol::Channel;
+      use common_error::ext::BoxedError;
+    +-use common_session::channel_protocol;
+     +pub use common_event_recorder::{PersistentEventContext, TriggerReason};
+      use common_time::{DatabaseTimeToLive, Timestamp};
+      use prost::Message;
+    @@ src/common/meta/src/rpc/ddl.rs: pub struct QueryContext {
+          pub sst_min_sequences: HashMap<u64, u64>,
+      }
+      
+    +-impl QueryContext {
+    +-    /// Returns the protocol name represented by the wire channel value.
+    +-    pub fn channel_protocol(&self) -> Option<&'static str> {
+    +-        channel_protocol(self.channel)
+    ++/// Builds event context from frontend query context metadata.
+    ++pub fn event_context_from_query_context(query_context: &QueryContext) -> PersistentEventContext {
+    ++    let reason = query_context
+    ++        .extensions
+    ++        .get(TRIGGER_REASON_EXTENSION_KEY)
+    ++        .map(|reason| TriggerReason::from_extension(reason))
+    ++        .unwrap_or_default();
+    ++    let channel = Channel::from(u32::from(query_context.channel));
+    ++    let context = PersistentEventContext::new(reason);
+    ++    if channel == Channel::Unknown {
+    ++        context
+    ++    } else {
+    ++        context.with_protocol(channel.as_ref())
+    +     }
+    + }
+    +-
+     -/// The stable context recorded for a procedure event.
+     -#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+     -pub struct EventContext {
+    @@ src/common/meta/src/rpc/ddl.rs: pub struct QueryContext {
+     -            .get(TRIGGER_REASON_EXTENSION_KEY)
+     -            .map(|reason| TriggerReason::from_extension(reason))
+     -            .unwrap_or_default();
+    --        let channel = Channel::from(u32::from(query_context.channel));
+     -        let context = Self::new(reason);
+    --        if channel == Channel::Unknown {
+    --            context
+    +-        if let Some(protocol) = query_context.channel_protocol() {
+    +-            context.with_protocol(protocol)
+     -        } else {
+    --            context.with_protocol(channel.as_ref())
+    +-            context
+     -        }
+     -    }
+     -}
+    @@ src/common/meta/src/rpc/ddl.rs: pub struct QueryContext {
+     -impl TriggerReason {
+     -    pub fn from_extension(value: &str) -> Self {
+     -        value.parse().unwrap_or_default()
+    -+/// Builds event context from frontend query context metadata.
+    -+pub fn event_context_from_query_context(query_context: &QueryContext) -> PersistentEventContext {
+    -+    let reason = query_context
+    -+        .extensions
+    -+        .get(TRIGGER_REASON_EXTENSION_KEY)
+    -+        .map(|reason| TriggerReason::from_extension(reason))
+    -+        .unwrap_or_default();
+    -+    let channel = Channel::from(u32::from(query_context.channel));
+    -+    let context = PersistentEventContext::new(reason);
+    -+    if channel == Channel::Unknown {
+    -+        context
+    -+    } else {
+    -+        context.with_protocol(channel.as_ref())
+          }
+      }
+      

@@ -1,0 +1,193 @@
+PR #8860
+Upstream merge commit: f2ffaef9dfee134fa46d54ba65e6f40b37982cef
+Aggregate commit: 0ffca14740493d0c1afa556908345d9e135d7656
+
+1:  f2ffaef9d ! 1:  0ffca1474 feat: update to pgwire 0.40.7 (#8860)
+    @@ Metadata
+      ## Commit message ##
+         feat: update to pgwire 0.40.7 (#8860)
+     
+    +    (cherry picked from commit ae9795567690e946a44e10934ba4b18993a36d42)
+    +
+      ## Cargo.lock ##
+     @@ Cargo.lock: version = "0.22.1"
+      source = "registry+https://github.com/rust-lang/crates.io-index"
+    @@ Cargo.lock: dependencies = [
+       "maybe-owned",
+       "rustix 1.0.7",
+       "rustix-linux-procfs",
+    -- "windows-sys 0.61.2",
+    -+ "windows-sys 0.60.2",
+    +- "windows-sys 0.60.2",
+    ++ "windows-sys 0.61.2",
+       "winx",
+      ]
+      
+    @@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+      checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
+      dependencies = [
+       "libc",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    - ]
+    - 
+    - [[package]]
+    -@@ Cargo.lock: checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+    - dependencies = [
+    -  "io-lifetimes 2.0.4",
+    -  "rustix 1.0.7",
+    -- "windows-sys 0.52.0",
+    +- "windows-sys 0.60.2",
+     + "windows-sys 0.59.0",
+      ]
+      
+    @@ Cargo.lock: dependencies = [
+       "js-sys",
+       "log",
+       "wasm-bindgen",
+    -- "windows-core 0.57.0",
+    -+ "windows-core 0.61.2",
+    +- "windows-core 0.61.2",
+    ++ "windows-core 0.57.0",
+      ]
+      
+      [[package]]
+    @@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+      checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
+      dependencies = [
+       "io-lifetimes 3.0.1",
+    -- "windows-sys 0.52.0",
+    +- "windows-sys 0.60.2",
+     + "windows-sys 0.59.0",
+      ]
+      
+      [[package]]
+    -@@ Cargo.lock: checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
+    +@@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+    + checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
+      dependencies = [
+    -  "hermit-abi",
+    -  "libc",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    +  "cfg-if",
+    +- "windows-targets 0.53.5",
+    ++ "windows-targets 0.48.5",
+      ]
+      
+      [[package]]
+    @@ Cargo.lock: version = "0.50.3"
+      source = "registry+https://github.com/rust-lang/crates.io-index"
+      checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+      dependencies = [
+    -- "windows-sys 0.61.2",
+    +- "windows-sys 0.60.2",
+     + "windows-sys 0.59.0",
+      ]
+      
+    @@ Cargo.lock: dependencies = [
+       "bytes",
+       "chrono",
+       "derive-new",
+    -@@ Cargo.lock: dependencies = [
+    -  "once_cell",
+    -  "socket2 0.5.10",
+    -  "tracing",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    - ]
+    - 
+    - [[package]]
+    -@@ Cargo.lock: dependencies = [
+    -  "errno",
+    -  "libc",
+    -  "linux-raw-sys 0.4.15",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    - ]
+    - 
+    - [[package]]
+    -@@ Cargo.lock: dependencies = [
+    -  "errno",
+    -  "libc",
+    -  "linux-raw-sys 0.9.4",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    - ]
+    - 
+    - [[package]]
+    +@@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+    + checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
+    + dependencies = [
+    +  "bytes",
+    +- "heck 0.5.0",
+    ++ "heck 0.4.1",
+    +  "itertools 0.12.1",
+    +  "log",
+    +  "multimap",
+    +@@ Cargo.lock: version = "0.14.1"
+    + source = "registry+https://github.com/rust-lang/crates.io-index"
+    + checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
+    + dependencies = [
+    +- "heck 0.5.0",
+    ++ "heck 0.4.1",
+    +  "itertools 0.10.5",
+    +  "log",
+    +  "multimap",
+     @@ Cargo.lock: dependencies = [
+       "security-framework 3.7.0",
+       "security-framework-sys",
+       "webpki-root-certs",
+    -- "windows-sys 0.52.0",
+    +- "windows-sys 0.60.2",
+     + "windows-sys 0.59.0",
+      ]
+      
+      [[package]]
+    +@@ Cargo.lock: version = "0.8.6"
+    + source = "registry+https://github.com/rust-lang/crates.io-index"
+    + checksum = "1961e2ef424c1424204d3a5d6975f934f56b6d50ff5732382d84ebf460e147f7"
+    + dependencies = [
+    +- "heck 0.5.0",
+    ++ "heck 0.4.1",
+    +  "proc-macro2",
+    +  "quote",
+    +  "syn 2.0.117",
+     @@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+      checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+      dependencies = [
+       "libc",
+    -- "windows-sys 0.61.2",
+    -+ "windows-sys 0.60.2",
+    - ]
+    - 
+    - [[package]]
+    -@@ Cargo.lock: dependencies = [
+    -  "cfg-if",
+    -  "libc",
+    -  "psm",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    +- "windows-sys 0.60.2",
+    ++ "windows-sys 0.61.2",
+      ]
+      
+      [[package]]
+    @@ Cargo.lock: dependencies = [
+       "getrandom 0.3.4",
+       "once_cell",
+       "rustix 1.0.7",
+    -- "windows-sys 0.52.0",
+    -+ "windows-sys 0.59.0",
+    - ]
+    - 
+    - [[package]]
+    -@@ Cargo.lock: source = "registry+https://github.com/rust-lang/crates.io-index"
+    - checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+    - dependencies = [
+    -  "bitflags 2.12.1",
+    -- "windows-sys 0.52.0",
+    +- "windows-sys 0.60.2",
+     + "windows-sys 0.59.0",
+      ]
+      

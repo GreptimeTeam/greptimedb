@@ -1,0 +1,13 @@
+PR #8832
+Upstream merge commit: 00e45c860222195367943942b8ec21fef46b7cf5
+Aggregate commit: f47fcbc1658b5752982bf387fc1a4ac1abd1001d
+
+1:  00e45c860 ! 1:  f47fcbc16 test: fix unknown channel event context expectation (#8832)
+    @@ Commit message
+         test: fix unknown channel event context expectation (#8832)
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 00e45c860222195367943942b8ec21fef46b7cf5)
+     
+      ## tests-integration/tests/table_ddl_event.rs ##
+     @@ tests-integration/tests/table_ddl_event.rs: async fn test_table_ddl_procedure_events() {

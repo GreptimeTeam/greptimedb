@@ -1,0 +1,23 @@
+PR #8772
+Upstream merge commit: 9241e96fa2ea8ed3132e38dea93c655337d24040
+Aggregate commit: 6e5cd114b31cdb0a8ea6323e5d7f8c5c23198541
+
+1:  9241e96fa ! 1:  6e5cd114b fix(metric-engine): handle Utf8View tag/label columns without panicking (#8772)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 31a4061552eaa3456faef12b290ed1e10e722804)
+    +    (cherry picked from commit 5cef6fe4e14c2847b816009f5838e8e41c9dea94)
+     
+      ## src/datatypes/src/arrow_array.rs ##
+     @@ src/datatypes/src/arrow_array.rs: pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
+    @@ src/mito2/src/memtable/time_series.rs: mod tests {
+      }
+     
+      ## src/servers/src/http/result/prometheus_resp.rs ##
+    -@@ src/servers/src/http/result/prometheus_resp.rs: fn merge_annotations(target: &mut Option<Vec<String>>, source: Option<Vec<String
+    +@@ src/servers/src/http/result/prometheus_resp.rs: impl PrometheusJsonResponse {
+      mod tests {
+          use std::sync::Arc;
+      

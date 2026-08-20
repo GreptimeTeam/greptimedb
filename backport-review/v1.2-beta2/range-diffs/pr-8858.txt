@@ -1,0 +1,22 @@
+PR #8858
+Upstream merge commit: 6249623cfb181b0222dfc03224945c625f326f1a
+Aggregate commit: 065d0dfaadc2d6252adc5a671ec0658cfd51d4d6
+
+1:  6249623cf ! 1:  065d0dfaa chore: remove iceberg read (#8858)
+    @@ Commit message
+         chore: remove iceberg read (#8858)
+     
+         Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    +    (cherry picked from commit 6249623cfb181b0222dfc03224945c625f326f1a)
+     
+      ## src/auth/src/lib.rs ##
+     @@ src/auth/src/lib.rs: pub use common::{
+    @@ src/auth/src/lib.rs: pub use common::{
+     +    DefaultPermissionChecker, INFLUXDB_WRITE, JAEGER_QUERY, LOG_QUERY, LOG_WRITE, OPENTSDB_WRITE,
+     +    OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
+          PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
+    -     PermissionResp, PermissionTableTarget, PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
+    +     PermissionResp, PermissionTableTarget, PermissionTableTargets,
+      };
+     
+      ## src/auth/src/permission.rs ##

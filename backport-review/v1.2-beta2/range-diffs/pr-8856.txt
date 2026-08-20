@@ -1,0 +1,89 @@
+PR #8856
+Upstream merge commit: 1af4c335242e7e5e06ee91bc428a71bb631d0798
+Aggregate commit: a451a16cd06d1c1936baaf011991f2c3e3a0cc7e
+
+1:  1af4c3352 ! 1:  a451a16cd refactor(event): separate procedure submission context (#8856)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 1af4c335242e7e5e06ee91bc428a71bb631d0798)
+    +    (cherry picked from commit 1b6ee164f2b4a32afeb7c36fd926bcc651046294)
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ Cargo.lock: dependencies = [
+      dependencies = [
+       "prost 0.14.1",
+       "prost-types 0.14.1",
+    -@@ Cargo.lock: dependencies = [
+    -  "async-trait",
+    -  "common-base",
+    -  "common-error",
+    -+ "common-event-recorder",
+    -  "common-grpc",
+    -  "common-macro",
+    -  "common-meta",
+     
+      ## Cargo.toml ##
+     @@ Cargo.toml: fs2 = "0.4"
+    @@ src/common/meta/src/procedure_executor.rs: impl LocalProcedureExecutor {
+              self.ddl_manager.submit_ddl_task(ctx, request).await
+     
+      ## src/common/meta/src/rpc/ddl.rs ##
+    -@@ src/common/meta/src/rpc/ddl.rs: use base64::engine::general_purpose;
+    +@@ src/common/meta/src/rpc/ddl.rs: use api::v1::{
+    + };
+    + use base64::Engine as _;
+    + use base64::engine::general_purpose;
+    +-use common_catalog::{format_full_flow_name, format_full_table_name};
+      use common_base::protocol::Channel;
+    - use common_catalog::{format_full_flow_name, format_full_table_name};
+    ++use common_catalog::{format_full_flow_name, format_full_table_name};
+      use common_error::ext::BoxedError;
+     -pub use common_event_recorder::{PersistentEventContext, TriggerReason};
+     +pub use common_event_recorder::TriggerReason;
+    @@ src/common/meta/src/rpc/ddl.rs: pub struct QueryContext {
+     -        context.with_protocol(channel.as_ref())
+     -    }
+     -}
+    +-    }
+    +-}
+     -
+      impl QueryContext {
+          /// Get the current catalog
+    @@ src/common/procedure/src/store.rs: mod tests {
+              )
+     
+      ## src/frontend/src/instance.rs ##
+    +@@ src/frontend/src/instance.rs: mod tests {
+    +     use std::time::Duration;
+    + 
+    +     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
+    +-    use api::prom_store::remote::{
+    +-        Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
+    +-    };
+    ++    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
+    +     use api::v1::greptime_request::Request;
+    +     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    +     use api::v1::query_request::Query;
+     @@ src/frontend/src/instance.rs: mod tests {
+          impl ProcedureExecutor for NoopProcedureExecutor {
+              async fn submit_ddl_task(
+    @@ src/frontend/src/instance.rs: mod tests {
+                  _request: SubmitDdlTaskRequest,
+              ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+                  common_meta::error::UnsupportedSnafu {
+    -@@ src/frontend/src/instance.rs: mod tests {
+    -     impl ProcedureExecutor for MockProcedureExecutor {
+    -         async fn submit_ddl_task(
+    -             &self,
+    --            _ctx: &ExecutorContext,
+    -+            _ctx: ExecutorContext,
+    -             request: SubmitDdlTaskRequest,
+    -         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+    -             self.submitted.lock().unwrap().push(request.task.clone());
+     
+      ## src/meta-client/Cargo.toml ##
+     @@ src/meta-client/Cargo.toml: tokio-stream = { workspace = true, features = ["net"] }

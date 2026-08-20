@@ -1,0 +1,33 @@
+8729	70470bafbe38df2d3fd21e70e1e7097ffd7317c6	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8729	fix(flow): fix flow stats aggregation and df_plan_to_sql quoting 
+8672	2afcd4a55858da28bb4feeaf0fb4b12b32454422	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8672	fix: enforce permissions for restricted HTTP endpoints 
+8699	88606f0dffb4a569a5b21617805f667c3138eda8	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8699	fix(metric-engine): prevent stale metadata cache fills 
+8777	1aadfa565c32332146e9628dd82455f0f59ce3da	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8777	fix: cache physical table metadata lookups 
+8852	154f90b3652bf9b1b3e7eccc5f277f856a2f3079	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8852	fix: harden permission checks and process visibility 
+8858	6249623cfb181b0222dfc03224945c625f326f1a	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8858	chore: remove iceberg read 
+8832	00e45c860222195367943942b8ec21fef46b7cf5	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8832	test: fix unknown channel event context expectation 
+8787	32e215cad0aa0803991d751bc7b4f44ac1865e62	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8787	fix(event): preserve procedure lifecycle locators 
+8834	72f6cf09bf7f7d78c84514163554ad2a29fc7f05	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8834	refactor(procedure): centralize event context handling 
+8835	943eee852f292bfffd7240867dc27248216c353f	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8835	feat(event): record admin function executions 
+8856	1af4c335242e7e5e06ee91bc428a71bb631d0798	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8856	refactor(event): separate procedure submission context 
+8849	ed4271af403e6fa8898287ddd735c1c984644af7	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8849	feat(procedure): record event actor 
+8860	f2ffaef9dfee134fa46d54ba65e6f40b37982cef	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8860	feat: update to pgwire 0.40.7 
+8824	3510ef7d4c13f9afa3ad8fdafa8842f98dfd5cb3	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8824	feat!: update native histogram unsigned int types 
+8859	c3cd186997538e2ed665ed32ce1755baf62bd857	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8859	fix(query): respect query timezone in timestamp casts 
+8889	10f587bc30071f230c979da6c0d3ebbf1d736698	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8889	fix(query): preserve timestamp literal semantics in inserts 
+8745	95d9d92e42bfaa3338cf460bdb031803e29368bf	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8745	refactor: separate a json2 extension type 
+8833	6538db6d618279f640958c40cdbb5a1796fb40cd	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8833	refactor(json2): push down json2 type hints to parquet reads 
+8600	c59ec0154e83d1d50113ed3334585ca37eaba064	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8600	feat(mito2): discard unflushed region data safely 
+8726	9f724aa5f6466a3e90c4f6407f2f6e00211ed925	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8726	feat: make frontend heartbeat extensible and lifecycle-safe 
+8768	78084a9d4485ee61ff03e071f6428fc57c906332	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8768	feat: add admin function to discard unflushed data 
+8872	3c80df043a46f0511bd81a64a072ca18436efac3	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8872	fix(mito2): keep deletion markers when compacting part of a window 
+8808	e4175475bb7e630cefefa189b17282b063868a49	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8808	fix(mito): re-encode bulk WAL entry after filling missing columns 
+8709	d3b10d13a5712868d72969b4a453ae786f0d60e3	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8709	fix(mito2): fail open when Bloom IN predicate has non-literal or unencodable members 
+8522	fbbe5af76744eb93067a3bed099834656d7da4d6	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8522	fix(query): avoid unsafe count wildcard rewrites 
+8579	bbc91ea637516c4657a8cdb9f40289f126b9ef61	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8579	fix(query): validate merge scan remote schema 
+8818	cd6efa0abf6ec99737ad8bce36376c4946023edc	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8818	fix(query): ignore field metadata in MergeScan remote schema validation 
+8739	97ca104129536075fcd7329a924db8c40ef88d7f	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8739	fix(frontend): remove gRPC DDL panics for DropView and non-timestamp time index 
+8772	9241e96fa2ea8ed3132e38dea93c655337d24040	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8772	fix(metric-engine): handle Utf8View tag/label columns without panicking 
+8659	d90cca4b752b34d7ccdb54fe8445ce3bf832e5e0	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8659	fix(prometheus): custom column remote reads 
+8898	b882e393dfadcf9406c76d1017fe64e0652f0202	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8898	feat: update dashboard to v0.13.13 
+8734	1f1c9270a806658d2c3d9700c8cd1445d687f89f	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8734	feat(event): add event context to procedure events 
+8392	cabc2f6cc667291d7bc3dcbb8f9cc82e27bd93a0	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8392	feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (#7987) 

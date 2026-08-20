@@ -1,0 +1,13 @@
+PR #8777
+Upstream merge commit: 1aadfa565c32332146e9628dd82455f0f59ce3da
+Aggregate commit: ff8ea6d87d94401469813a05b9c9f87ead95836e
+
+1:  1aadfa565 ! 1:  ff8ea6d87 fix: cache physical table metadata lookups (#8777)
+    @@ Commit message
+         fix: physical table dont cache
+     
+         Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    +    (cherry picked from commit 1aadfa565c32332146e9628dd82455f0f59ce3da)
+     
+      ## src/catalog/src/kvbackend/manager.rs ##
+     @@ src/catalog/src/kvbackend/manager.rs: use common_meta::key::TableMetadataManagerRef;

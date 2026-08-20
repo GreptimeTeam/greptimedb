@@ -1,0 +1,1049 @@
+PR #8392
+Upstream merge commit: cabc2f6cc667291d7bc3dcbb8f9cc82e27bd93a0
+Aggregate commit: 0b6702b7ccc0d0fdbd5f53490743dee6a197f516
+
+1:  cabc2f6cc ! 1:  0b6702b7c feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (#7987) (#8392)
+    @@
+      ## Metadata ##
+    -Author: Palak Jha <palakjha916@gmail.com>
+    +Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+    -    feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (#7987) (#8392)
+    -
+    -    * feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (fixes #7987)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (fixes #7987)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * test(flow): add sqlness golden result for flow_status
+    -
+    -    Signed-off-by: Palak Jha <palakjha916@gmail.com>
+    -
+    -    * fix(catalog): remove unused OptionExt import in flow_statistics
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * docs(flow): fix stale 'recent errors' comment on QueryFlowExecStats
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * test: regenerate golden results for flow_statistics table
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * style: apply rustfmt to flow_statistics changes
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * refactor(catalog): hoist current_time_millis out of flow loop and clamp uptime
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * chore: remove accidentally committed fmt_check.log
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * Update flow_status.result
+    -
+    -    del eof trailing blank line as per review
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * test(flow): restore runner-generated trailing blank line for sqlness
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * postgres: include SHOW FLOW STATUS in extended-query describe (return flow_statistics fields)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix: address reviewer feedback on flow_statistics PR
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(flow): resolve merge conflicts with main
+    -
+    -    Signed-off-by: polar <palakjha916@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * sqlness check post gen (information_schema.result)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(flow): record start_time after req/snapshot_seqs built, before dispatch
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(sql): handle ShowFlowStatus in match statement at util.rs
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat: review patch implementation
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * chore: remove accidentally committed local tool output files and fix fmt
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix worker.rs return type formatting
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(flow): apply rustfmt to get_full_flow_stat return type
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix worker.rs return type formatting
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(flow): re-apply rustfmt to get_full_flow_stat return type after merge
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix: merge conflicts
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(auth): warn when credential load disables Postgres SCRAM or drops a line (#8652)
+    -
+    -    * fix(auth): warn when credential load disables Postgres SCRAM or drops a line
+    -
+    -    Static and watch user providers degraded silently in two ways:
+    -
+    -    - A single non-SCRAM verifier (mysql_native_password, or a legacy
+    -      pbkdf2_sha256 hash that predates SCRAM) disables Postgres SCRAM for
+    -      every user and falls back to cleartext, with no signal to the operator.
+    -    - A malformed credential line (commonly a plaintext password containing
+    -      '=', which splits into more than two parts) was dropped without a trace.
+    -
+    -    Emit a warning at each credential load for both cases so operators don't
+    -    unknowingly serve cleartext passwords over Postgres or lose a user. This
+    -    is logging only; authentication behavior is unchanged. The SCRAM check
+    -    never logs secrets, and the malformed-line warning logs the line number
+    -    and file, never the line content.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    * fix(auth): warn on credential file read error before truncating
+    -
+    -    A read error from lines() (I/O failure or invalid UTF-8) ends the
+    -    iterator via map_while, silently dropping every remaining credential.
+    -    Warn with the line number and file before truncating, matching the
+    -    malformed-line handling, so the drop is observable.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * test(object-store): fix racy SecureFs abort test (#8720)
+    -
+    -    test_writer_abort_is_unsupported_without_atomic_write asserted the file
+    -    content immediately after abort() returned Unsupported. SecureFsWriter
+    -    writes through tokio::fs::File, whose write_all() only enqueues a blocking
+    -    write task (tokio's poll_write returns Ready before the write completes),
+    -    so the data may not be visible yet when the test reads the file. Drop the
+    -    race-prone content assertion and only verify the Unsupported contract.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(query): plan native histogram functions (#8705)
+    -
+    -    * feat(query): plan native histogram functions
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    * fix: cr issue & add tests
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    * fix: cr issue
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    * fix: cr issue
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * perf(promql): avoid repeated scans in sliding range evaluation (#8646)
+    -
+    -    * perf(promql): use two pointers for sliding range boundaries
+    -
+    -    Replace the stale cursor heuristic in RangeManipulateStream::calculate_range
+    -    with monotonic left/right cursors. The old path rescanned each evaluation
+    -    window (O(E x samples-per-window)) and could lose valid samples after sparse
+    -    gaps or trailing empty windows. The two pointers keep strict monotonic
+    -    progress, reducing boundary generation to O(N + E) while preserving
+    -    (curr-range, curr] semantics, start/end shortening, and empty-window output.
+    -
+    -    Controlled release benchmarks (fixed CPU, ABBA):
+    -    - Public RangeManipulate wall time: ~28% faster at 1m/15s, ~66% at 5m/15s,
+    -      ~96% at 1h/15s.
+    -    - Warmed distributed TQL ANALYZE 1h queries: ~17-21% faster end to end;
+    -      shorter windows stayed within run-order noise.
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * perf(promql): specialize changes/resets with adaptive edge counting
+    -
+    -    The generic range_fn macro slices, downcasts, and rescans every overlapping
+    -    window for changes() and resets(). Replace the macro path for these two
+    -    functions with hand-written UDF wrappers backed by a shared private
+    -    edge-count kernel: direct raw-offset scans when requested edges are few,
+    -    otherwise one global u64 edge prefix so each window is answered by a prefix
+    -    difference.
+    -
+    -    Behavior is preserved bit-for-bit, including raw null-buffer values, NaN
+    -    semantics, signed zero, infinities, empty/singleton windows, independent
+    -    timestamp/value offsets, arbitrary window layouts, and exact DataFusion
+    -    error messages. The shared proc macro, planner, serializer, and other range
+    -    functions are untouched.
+    -
+    -    Controlled release benchmarks (fixed CPU, ABBA):
+    -    - Dense sliding windows (k=4/20/240): 91.7-95.6% less public UDF wall time.
+    -    - Low-coverage fallback (N=4096, 8 windows): 73.9-74.4% faster.
+    -    - Warmed distributed TQL ANALYZE 5m/1h changes/resets: 12.1-19.7% client
+    -      and 12.0-20.9% server latency improvement; controls stayed within drift.
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * ci(query-regression): include PromQL range boundary case in defaults
+    -
+    -    An audit of historical query-regression runs found zero range-query
+    -    coverage: all 208 PromQL ANALYZE samples were bare selectors, so range
+    -    evaluation could regress without CI noticing. Wire the
+    -    promql_range_boundary case (introduced in #8646) into DEFAULT_CASES so
+    -    label-triggered runs measure the range path. The case is cheap: a ~0.3s
+    -    synthetic fixture and about a minute of query execution per base/candidate
+    -    pass.
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * chore(promql): address sliding range review nits
+    -
+    -    Move test-only imports into their test modules and remove the unused
+    -    pre-specialization changes and resets helpers.
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * style(promql): apply pinned rustfmt
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * test(promql): cover sparse range results
+    -
+    -    Share the changes and resets test scaffolding while keeping their behavior
+    -    oracles independent. Add an end-to-end sqlness regression for sparse samples,
+    -    empty intermediate windows, and a valid trailing sample.
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * ci: optimize fuzz and split workflows (#8710)
+    -
+    -    * ci: batch fuzz targets in GitHub Actions
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: improve fuzz test observability
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(ci): preserve fuzz setup failure artifacts
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * test(ci): keep fuzz mock output in logs
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: optimize fuzz worker cache
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: warm fuzz target binaries
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: isolate fuzz workflow
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: centralize fuzz target preparation
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: split general workflows
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: streamline docs required checks
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix: transfer fuzz targets as artifacts
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix: preserve fuzz binary permissions
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: streamline fuzz workers
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: cache PR build dependencies
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: retain main build cache policy
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * ci: address fuzz review feedback
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix: add public constructor for compactor (#8724)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(logging): add enable_file_logging option to disable file logging (#8721)
+    -
+    -    Signed-off-by: xhwhis <hi@whis.me>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * avoid cloning final Prometheus remote write row (#8733)
+    -
+    -    perf: avoid cloning final Prometheus remote write row
+    -
+    -    Signed-off-by: lyang24 <lanqingy93@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(function): add json_object_keys scalar function (#8722)
+    -
+    -    Expose JSON object key listing for outermost objects, with sqlness coverage.
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * refactor(mito2): revise compaction trigger behavior (#8706)
+    -
+    -    * refactor(mito2): revise compaction trigger behavior
+    -
+    -    Distinguish automatic and manual triggers, coalesce explicit automatic follow-ups, and reject concurrent manual compactions.
+    -
+    -    Remove implicit post-execution continuation and transient idle statuses so scheduler entries always represent an active lifecycle.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix(mito2): track automatic compaction follow-ups
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * docs(mito2): fix compaction transition rustdoc
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix(mito2): mark manual compaction conflict retryable
+    -
+    -    Signed-off-by: Lei, HUANG <mrsatangel@gmail.com>
+    -
+    -    * refactor(mito2): drop unused RequestCancelResult::NotRunning variant
+    -
+    -    request_cancel is only called in tests where the region is guaranteed to be
+    -    running, so the NotRunning case was dead code. Simplify to unwrap() and
+    -    remove the variant.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix(mito2): gate test-only cancellation import
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix(mito2): prioritize DDL after compaction planning
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -    Signed-off-by: Lei, HUANG <mrsatangel@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat: update dashboard to v0.13.11 (#8737)
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(object-store): skip removed-entry lister test on Windows (#8735)
+    -
+    -    DirEntry on Windows is a snapshot from FindFirstFileW: file_type() and
+    -    metadata() keep returning cached data after the file is removed, so
+    -    read_list_entry() cannot observe the deletion. The test asserts the
+    -    Unix behavior (lstat returns ENOENT) and fails deterministically on
+    -    Windows nightly CI (4/4 tries). Gate it with #[cfg(not(windows))].
+    -
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(query): preserve remote dynamic filter target (#8615)
+    -
+    -    * fix(query): preserve remote dynamic filter target
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * fix(query): check RDF subscriber registration
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * fix(query): refresh initial dyn filter snapshot before dispatch and handle RDF unregister
+    -
+    -    The remote dynamic filter dispatch ordering regression: freeze the target,
+    -    pre-register subscribers, refresh the initial snapshot, then dispatch.
+    -    Also implement handle_remote_dyn_filter_unregister to keep unregister
+    -    targets consistent with do_get/update.
+    -
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -
+    -    * fix(query): update test-only RegionQueryHandler impl to new trait signatures
+    -
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * docs: rework README release badges, drop star history, fix grpc flag (#8743)
+    -
+    -    * docs: show stable, latest and nightly version badges in README
+    -
+    -    The single release badge rendered whatever GitHub considered newest, so a
+    -    pre-release such as v1.2.0-beta.1 looked like the recommended version.
+    -
+    -    Split it into three self-updating badges using the shields.io `filter`
+    -    parameter, keyed off the existing tag naming:
+    -
+    -    - stable: `!*-*` matches tags without a hyphen (v1.1.4)
+    -    - latest: `!*-*-*` excludes nightly and dev builds (v1.2.0-beta.1)
+    -    - nightly: `*-nightly-*` matches the weekly build (v1.2.0-nightly-20260706)
+    -
+    -    No workflow changes are needed; the badges track new releases on their own.
+    -    A one-line caption below them says which channel to pick. The release-date
+    -    badge is dropped as the three version badges already carry that signal.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    * docs: remove star history chart from README
+    -
+    -    The chart carried a sealed_token in three URLs and added a large
+    -    third-party image to the Project Status section without saying anything
+    -    the badges and case studies do not already cover.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    * docs: use --grpc-bind-addr in README quickstart
+    -
+    -    --rpc-bind-addr is now only a hidden alias of --grpc-bind-addr and no
+    -    longer shows up in --help.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    * Update README.md
+    -
+    -    Co-authored-by: Ning Sun <classicning@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -    Co-authored-by: Ning Sun <classicning@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * chore: check enterprise-gated files are listed in both license configs (#8750)
+    -
+    -    * chore: check enterprise-gated files are listed in both license configs
+    -
+    -    A file reachable only through `#[cfg(feature = "enterprise")] mod ...;` is
+    -    governed by the GreptimeDB Enterprise License, so it must appear in the
+    -    `includes` of licenserc-enterprise.toml and the `excludes` of licenserc.toml.
+    -    hawkeye stays silent when it does not: the file keeps its Apache-2.0 header and
+    -    passes the default check precisely because it was never excluded from it.
+    -
+    -    scripts/check-enterprise-license.py walks enterprise-gated `mod` declarations,
+    -    resolves them to files (submodules included) and diffs that set against both
+    -    configs, also reporting stale entries. It runs in the license job in CI and as
+    -    `make check-enterprise-license`.
+    -
+    -    Documents the split it cannot decide for you — whole enterprise features get
+    -    their own file, a gated match arm stays inline — in
+    -    .agents/architecture-invariants.md.
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    * fix: tighten enterprise license checks
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(operator): invalidate local cache after dropping view (#8748)
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * chore!: gate soft-drop table behind the enterprise feature (#8747)
+    -
+    -    * chore: gate soft-drop table behind the enterprise feature
+    -
+    -    Soft-drop table becomes an enterprise-only feature:
+    -
+    -    - metasrv rejects gc.experimental_soft_drop.enable=true at startup in
+    -      non-enterprise builds, and ddl_soft_drop_enabled is hard-disabled
+    -      without the enterprise feature as a second line of defense
+    -    - the UNDROP TABLE parser/AST/statement variant, ADMIN purge_table()
+    -      registration, and information_schema.recycle_bin registration are
+    -      compiled out unless the enterprise feature is enabled
+    -    - common-meta procedures, tombstone keys, and DdlTask serde stay
+    -      unconditional for persisted-procedure recovery and wire compatibility
+    -    - the [gc.experimental_soft_drop] section is removed from the OSS
+    -      example config and generated docs (moving to the enterprise repo)
+    -    - the soft-drop sqlness cases and their CI job are removed from OSS
+    -      (moving to the enterprise repo); affected information_schema .result
+    -      files are regenerated
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * refactor: limit unused_variables allow to non-enterprise builds
+    -
+    -    Addresses review comment: apply the allow via cfg_attr so enterprise
+    -    builds still catch accidental unused variables in register_admin_only.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * refactor: include the config key in the soft-drop enterprise gate error
+    -
+    -    Addresses review comment: name gc.experimental_soft_drop.enable in the
+    -    startup validation error so users can locate the setting quickly when
+    -    it is set via env vars or layered config.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * test: limit unused_mut allow to non-enterprise builds
+    -
+    -    Addresses review comment: apply the allow via cfg_attr so enterprise
+    -    builds still catch unused mut in the table_ddl_event test setup.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * feat: reject soft-drop DDL submissions in non-enterprise builds
+    -
+    -    Addresses review comment: clients could bypass the SQL-level gates by
+    -    submitting DdlTask::UndropTable or DdlTask::PurgeDroppedTable directly
+    -    to the procedure service. Reject fresh submissions at the DdlManager
+    -    boundary in non-enterprise builds while keeping the procedure loaders
+    -    registered for crash recovery and wire compatibility.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * test: stop --enable-gc from enabling soft drop in the sqlness template
+    -
+    -    Addresses review comment: the metasrv test template rendered
+    -    [gc.experimental_soft_drop] enable = true under the generic --enable-gc
+    -    flag, which non-enterprise metasrv now rejects at startup, making the
+    -    documented --enable-gc mode unusable in OSS. Keep the flag scoped to
+    -    plain GC; enterprise soft-drop coverage moves to the enterprise repo.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix: gate fresh soft-drop procedures
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * test: gate soft-drop fallback coverage
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * fix: gate soft-drop procedure implementation
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * refactor: gate drop table soft-drop behavior
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * refactor: gate expired soft-drop gc behavior
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * ci: test enterprise table ddl lifecycle
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * chore: mark purge_table as enterprise licensed
+    -
+    -    The purge_table module is compiled only with the enterprise feature, so
+    -    apply the Enterprise License header and register it with both license
+    -    header configurations.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * chore: mark recycle_bin as enterprise licensed
+    -
+    -    The recycle_bin module is compiled only with the enterprise feature, so
+    -    apply the Enterprise License header and register it with both license
+    -    header configurations.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    * chore: mark soft-drop procedure sources as enterprise licensed
+    -
+    -    The purge and undrop procedure implementations plus the recycle-bin test
+    -    module compile only with the enterprise feature. Apply the Enterprise
+    -    License header and register them with both license configurations.
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat: make frontend heartbeat extensible and lifecycle-safe (#8726)
+    -
+    -    * feat: make frontend heartbeat extensible and lifecycle-safe
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * fix: isolate heartbeat extension response handlers
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * fix: cancel in-flight heartbeat response handling
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * test: cover heartbeat wire compatibility
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * fix: clean up failed heartbeat startup
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * fix: address frontend heartbeat review feedback
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(meta): release region guards after drop rollback (#8751)
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * refactor!: move native histogram config and `prom_validation_mode` to prom_store (#8744)
+    -
+    -    * chore: adjust the position of experimental_enable_prometheus_native_histogram
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    * chore: move prom_validation_mode as well
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat: add health-aware gRPC client routing (#8684)
+    -
+    -    * feat: add gRPC client health routing
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix: harden gRPC client health routing
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix: defer gRPC client health checks until first use
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(mito2): discard unflushed region data safely (#8600)
+    -
+    -    * feat: support discarding unflushed region data
+    -
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -
+    -    * fix(mito2): wake stalled writers after discard
+    -
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -
+    -    * refactor(mito2): drop redundant manifest check for discarding unflushed data
+    -
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * docs: align wal.sync_period documented default with actual fallback (5s) (#8753)
+    -
+    -    The example TOMLs and generated config.md documented the default of
+    -    wal.sync_period as "10s", but since #5677 moved the WAL sync task to a
+    -    background RepeatedTask, an unset sync_period falls back to 5s in
+    -    RaftEngineLogStore. The two paths therefore had different fsync
+    -    periods: deployments based on the example configs used 10s while bare
+    -    configs used 5s.
+    -
+    -    Align the documentation with the actual code behavior (5s) instead of
+    -    changing the code fallback to 10s, so that no existing deployment
+    -    silently gets a larger data-loss window on host power loss.
+    -
+    -    - config/datanode.example.toml, config/standalone.example.toml: 10s -> 5s
+    -    - config/config.md: regenerated via make config-docs
+    -    - src/cmd/tests/load_config_test.rs: update assertions accordingly
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix: support Utf8View labels in Prometheus response (#8754)
+    -
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix(query): validate merge scan remote schema (#8579)
+    -
+    -    * fix(query): validate merge scan remote schema
+    -
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -
+    -    * fix(query): treat JSON columns as schema-compatible across wire/decode forms
+    -
+    -    CI (Sqlness json2_limit standalone + distributed) failed on the new
+    -    remote-schema validation: a JSON column is Binary + extension metadata
+    -    (ARROW:extension:name=greptime.json, greptime:type=Json) on the wire but
+    -    decodes to Struct(...) with the extension metadata — validate_remote_schema
+    -    compared raw arrow data_type and rejected it as a mismatch.
+    -
+    -    Adds json_fields_compatible(): JSON fields are equal when name and
+    -    nullability match, greptime:type matches, and the JSON2 settings
+    -    (ARROW:extension:metadata type hints) match, ignoring the physical arrow
+    -    type. Only JSON fields may bypass the raw-type comparison; non-JSON
+    -    validation stays strict.
+    -
+    -    Adds 4 regression tests mirroring the CI failure (wire-binary vs
+    -    decoded-struct accepted both directions; different JSON2 settings
+    -    rejected; JSON vs plain Binary rejected).
+    -
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -
+    -    ---------
+    +    feat(flow): add flow statistics and SHOW FLOW STATUS (release slice)
+     
+         Signed-off-by: discord9 <discord9@163.com>
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat(grafana): add events dashboard (#8725)
+    -
+    -    * feat(grafana): add events dashboard
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): tolerate evolving event schemas
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): address events dashboard review
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): restore events dashboard panels
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): bound events dashboard queries
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): include historical event catalogs
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): preserve events drill-down context
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): correct events lifecycle outcomes
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): handle empty event type ranges
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): scope event catalogs to submissions
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): handle empty events dashboard
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    * fix(grafana): refresh event schema variables
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * refactor: separate a json2 extension type (#8745)
+    -
+    -    Signed-off-by: luofucong <luofc@foxmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * feat: add admin function registrar (#8762)
+    -
+    -    * feat: add admin function registrar
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * fix: reject admin function name collisions
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    * chore: fix typo in admin function test
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * fix: information_schema.rs table initialization issue
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    * rustfmt fix
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -
+    -    ---------
+    -
+    -    Signed-off-by: onepizzateam <palakjha916@gmail.com>
+    -    Signed-off-by: Palak Jha <palakjha916@gmail.com>
+    -    Signed-off-by: polar <palakjha916@gmail.com>
+    -    Signed-off-by: Dennis Zhuang <killme2008@gmail.com>
+    -    Signed-off-by: Lei, HUANG <ratuthomm@gmail.com>
+    -    Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    -    Signed-off-by: discord9 <discord9@163.com>
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    -    Signed-off-by: xhwhis <hi@whis.me>
+    -    Signed-off-by: lyang24 <lanqingy93@gmail.com>
+    -    Signed-off-by: Lei, HUANG <mrsatangel@gmail.com>
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    -    Signed-off-by: evenyag <realevenyag@gmail.com>
+    -    Signed-off-by: luofucong <luofc@foxmail.com>
+    -    Co-authored-by: dennis zhuang <killme2008@gmail.com>
+    -    Co-authored-by: Lei, HUANG <6406592+v0y4g3r@users.noreply.github.com>
+    -    Co-authored-by: shuiyisong <113876041+shuiyisong@users.noreply.github.com>
+    -    Co-authored-by: discord9 <discord9@163.com>
+    -    Co-authored-by: Weny Xu <wenymedia@gmail.com>
+    -    Co-authored-by: Ning Sun <sunng@protonmail.com>
+    -    Co-authored-by: Whis Liao <xhwhis@gmail.com>
+    -    Co-authored-by: Lanqing Yang <lanqingy93@gmail.com>
+    -    Co-authored-by: sun <sunchang_long@163.com>
+    -    Co-authored-by: Ning Sun <classicning@gmail.com>
+    -    Co-authored-by: jeremyhi <jiachun_feng@proton.me>
+    -    Co-authored-by: Yingwen <realevenyag@gmail.com>
+    -    Co-authored-by: LFC <990479+MichaelScofield@users.noreply.github.com>
+    +    (cherry picked from commit 523c60c53bdc21fd1b1fa43b857e78de710f0d58)
+     
+      ## src/catalog/src/system_schema/information_schema.rs ##
+     @@
+    @@ src/common/catalog/src/consts.rs: pub const INFORMATION_SCHEMA_TABLE_SEMANTICS_T
+      // ----- End of information_schema tables -----
+      
+     
+    - ## src/common/meta/src/key/flow/flow_state.rs ##
+    -@@ src/common/meta/src/key/flow/flow_state.rs: impl<'a> MetadataKey<'a, FlowStateKey> for FlowStateKey {
+    - }
+    - 
+    - /// The value of flow state size
+    --#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    -+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+    - pub struct FlowStateValue {
+    -     /// For each key, the bytes of the state in memory
+    -     pub state_size: BTreeMap<FlowId, usize>,
+    -     /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    -     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    -+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    -+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    -+    #[serde(default)]
+    -+    pub start_time_map: BTreeMap<FlowId, i64>,
+    - }
+    - 
+    - impl FlowStateValue {
+    -     pub fn new(
+    -         state_size: BTreeMap<FlowId, usize>,
+    -         last_exec_time_map: BTreeMap<FlowId, i64>,
+    -+        start_time_map: BTreeMap<FlowId, i64>,
+    -     ) -> Self {
+    -         Self {
+    -             state_size,
+    -             last_exec_time_map,
+    -+            start_time_map,
+    -         }
+    -     }
+    - }
+    -@@ src/common/meta/src/key/flow/flow_state.rs: impl FlowStateManager {
+    - }
+    - 
+    - /// Flow's state report, send regularly through heartbeat message
+    --#[derive(Debug, Clone)]
+    -+#[derive(Debug, Clone, Default)]
+    - pub struct FlowStat {
+    -     /// For each key, the bytes of the state in memory
+    -     pub state_size: BTreeMap<u32, usize>,
+    -     /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    -     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    -+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    -+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    -+    pub start_time_map: BTreeMap<FlowId, i64>,
+    - }
+    - 
+    - impl From<FlowStateValue> for FlowStat {
+    -@@ src/common/meta/src/key/flow/flow_state.rs: impl From<FlowStateValue> for FlowStat {
+    -         Self {
+    -             state_size: value.state_size,
+    -             last_exec_time_map: value.last_exec_time_map,
+    -+            start_time_map: value.start_time_map,
+    -         }
+    -     }
+    - }
+    -@@ src/common/meta/src/key/flow/flow_state.rs: impl From<FlowStat> for FlowStateValue {
+    -         Self {
+    -             state_size: value.state_size,
+    -             last_exec_time_map: value.last_exec_time_map,
+    -+            start_time_map: value.start_time_map,
+    -         }
+    -     }
+    - }
+    -+
+    -+#[cfg(test)]
+    -+mod tests {
+    -+    use std::collections::BTreeMap;
+    -+
+    -+    use crate::key::FlowId;
+    -+    use crate::key::flow::flow_state::FlowStateValue;
+    -+
+    -+    #[test]
+    -+    fn test_deserialize_legacy_flow_state_value() {
+    -+        // Legacy format: only state_size and last_exec_time_map are present,
+    -+        // without the start_time_map field added in PR #8392.
+    -+        let legacy_json =
+    -+            r#"{"state_size":{"1":1024,"2":2048},"last_exec_time_map":{"1":1700000000000}}"#;
+    -+        let value: FlowStateValue = serde_json::from_str(legacy_json).unwrap();
+    -+
+    -+        let mut expected_state_size = BTreeMap::new();
+    -+        expected_state_size.insert(FlowId::from(1u32), 1024usize);
+    -+        expected_state_size.insert(FlowId::from(2u32), 2048usize);
+    -+        assert_eq!(value.state_size, expected_state_size);
+    -+
+    -+        let mut expected_last_exec_time_map = BTreeMap::new();
+    -+        expected_last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    -+        assert_eq!(value.last_exec_time_map, expected_last_exec_time_map);
+    -+
+    -+        // serde(default) kicks in: old persisted data must not break,
+    -+        // and the new field defaults to empty.
+    -+        assert!(value.start_time_map.is_empty());
+    -+    }
+    -+
+    -+    #[test]
+    -+    fn test_flow_state_value_roundtrip_includes_start_time_map() {
+    -+        let mut state_size = BTreeMap::new();
+    -+        state_size.insert(FlowId::from(1u32), 1024usize);
+    -+        let mut last_exec_time_map = BTreeMap::new();
+    -+        last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    -+        let mut start_time_map = BTreeMap::new();
+    -+        start_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    -+
+    -+        let value = FlowStateValue {
+    -+            state_size,
+    -+            last_exec_time_map,
+    -+            start_time_map,
+    -+        };
+    -+
+    -+        let json = serde_json::to_string(&value).unwrap();
+    -+        assert!(json.contains("start_time_map"));
+    -+
+    -+        let decoded: FlowStateValue = serde_json::from_str(&json).unwrap();
+    -+        assert_eq!(decoded, value);
+    -+    }
+    -+}
+    -
+      ## src/flow/src/adapter/flownode_impl.rs ##
+     @@ src/flow/src/adapter/flownode_impl.rs: impl FlowDualEngine {
+              let mut last_exec_time_map = streaming.last_exec_time_map;
+    @@ src/meta-srv/src/handler/flow_state_handler.rs: impl HeartbeatHandler for FlowSt
+                      .iter()
+                      .map(|(k, v)| (*k, *v))
+                      .collect();
+    --            let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
+    -+            // TODO(#7987-followup): start_time_map is not yet propagated through the heartbeat
+    -+            // wire format (`api::v1::meta::FlowStat`); it will always be empty in distributed
+    -+            // mode until a follow-up PR adds heartbeat propagation.
+    -+            let value: FlowStateValue =
+    -+                FlowStateValue::new(state_size, last_exec_time_map, Default::default());
+    ++            // The beta2 heartbeat protobuf has only the two historical fields.
+    ++            // Distributed start_time/uptime_seconds are intentionally unsupported and
+    ++            // therefore remain NULL; start_time is retained only in local FlowStat.
+    +             let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
+                  self.flow_state_manager
+                      .put(value)
+    -                 .await
+     
+      ## src/operator/src/statement.rs ##
+     @@ src/operator/src/statement.rs: impl StatementExecutor {

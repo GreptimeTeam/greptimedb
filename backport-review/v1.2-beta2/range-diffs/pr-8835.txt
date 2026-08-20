@@ -1,0 +1,24 @@
+PR #8835
+Upstream merge commit: 943eee852f292bfffd7240867dc27248216c353f
+Aggregate commit: 0d5585ba332fe63374ae72e5745643465bb78fc4
+
+1:  943eee852 ! 1:  0d5585ba3 feat(event): record admin function executions (#8835)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 943eee852f292bfffd7240867dc27248216c353f)
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ src/frontend/src/frontend.rs: impl Default for FrontendOptions {
+      
+     
+      ## src/frontend/src/instance/builder.rs ##
+    -@@ src/frontend/src/instance/builder.rs: use catalog::process_manager::ProcessManagerRef;
+    - use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
+    +@@ src/frontend/src/instance/builder.rs: use catalog::CatalogManagerRef;
+    + use catalog::process_manager::ProcessManagerRef;
+      use common_base::Plugins;
+      use common_datasource::object_store::LocalFileAccess;
+     -use common_event_recorder::EventRecorderImpl;

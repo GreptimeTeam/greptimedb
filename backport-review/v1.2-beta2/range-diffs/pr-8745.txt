@@ -1,0 +1,116 @@
+PR #8745
+Upstream merge commit: 95d9d92e42bfaa3338cf460bdb031803e29368bf
+Aggregate commit: ed184264fabf2076fe65a7bf6a30b0c6ce205dba
+
+1:  95d9d92e4 ! 1:  ed184264f refactor: separate a json2 extension type (#8745)
+    @@ Commit message
+         refactor: separate a json2 extension type (#8745)
+     
+         Signed-off-by: luofucong <luofc@foxmail.com>
+    +    (cherry picked from commit 0abc3bef18f10c622e3a57f94fd84c6352d12fc9)
+    +    (cherry picked from commit b11b0b42f4e2f323ed77e6e2518b75dfa9117469)
+     
+      ## src/common/function/src/scalars/json/json_get.rs ##
+     @@ src/common/function/src/scalars/json/json_get.rs: impl Function for JsonGetWithType {
+    @@ src/query/src/datafusion/json_expr_planner.rs: mod tests {
+                  &nested_names,
+              )?;
+     
+    - ## src/query/src/dist_plan/merge_scan.rs ##
+    -@@ src/query/src/dist_plan/merge_scan.rs: use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
+    - use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+    - use datafusion_physical_expr::expressions::Column;
+    - use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
+    --use datatypes::extension::json::is_json_extension_type;
+    -+use datatypes::extension::json::{
+    -+    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
+    -+    is_legacy_json2_extension_type,
+    -+};
+    - use futures_util::StreamExt;
+    - use greptime_proto::v1::region::RegionRequestHeader;
+    - use meter_core::data::ReadItem;
+    -@@ src/query/src/dist_plan/merge_scan.rs: fn merge_scan_schema_error_count_for_test() -> u64 {
+    - /// parts of the field and must match.
+    - fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    -     let is_json = |field: &Field| {
+    --        is_json_extension_type(field)
+    -+        is_any_json_extension_type(field)
+    -             || field
+    -                 .metadata()
+    -                 .get(datatypes::schema::TYPE_KEY)
+    -@@ src/query/src/dist_plan/merge_scan.rs: fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
+    -     let schema = schema.clone();
+    -     let mut new_fields = Vec::with_capacity(schema.fields().len());
+    -     for field in schema.fields().iter() {
+    --        let new_field = if is_json_extension_type(field)
+    -+        let new_field = if is_json2_extension_type(field)
+    -             && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
+    -         {
+    -+            let is_legacy_json2 = is_legacy_json2_extension_type(field);
+    -             let mut new_field = field.as_ref().clone();
+    -             new_field.set_data_type(DataType::Binary);
+    -+            if is_legacy_json2 {
+    -+                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
+    -+                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
+    -+                // identity.
+    -+                new_field = new_field.with_extension_type(Json2ExtensionType::default());
+    -+            }
+    -             Arc::new(new_field)
+    -         } else {
+    -             field.clone()
+    -@@ src/query/src/dist_plan/merge_scan.rs: mod tests {
+    -     use std::task::{Context, Poll};
+    - 
+    -     use arrow::array::{Int64Array, TimestampMillisecondArray};
+    --    use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
+    -+    use arrow_schema::extension::{
+    -+        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+    -+    };
+    -+    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
+    -     use async_trait::async_trait;
+    -     use common_base::Plugins;
+    -     use common_meta::peer::Peer;
+    -@@ src/query/src/dist_plan/merge_scan.rs: mod tests {
+    -     use datafusion_physical_expr::expressions::{
+    -         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
+    -     };
+    -+    use datatypes::extension::json::JsonExtensionType;
+    -     use datatypes::prelude::{ConcreteDataType, VectorRef};
+    -     use datatypes::schema::{ColumnSchema, Schema};
+    -     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
+    -@@ src/query/src/dist_plan/merge_scan.rs: mod tests {
+    -         QueryId::from(Uuid::from_u128(value))
+    -     }
+    - 
+    -+    #[test]
+    -+    fn test_amend_legacy_json2_field_preserves_json2_identity() {
+    -+        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
+    -+            StdHashMap::from([
+    -+                (
+    -+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+    -+                    JsonExtensionType::NAME.to_string(),
+    -+                ),
+    -+                (
+    -+                    EXTENSION_TYPE_METADATA_KEY.to_string(),
+    -+                    serde_json::json!({
+    -+                        "json_structure_settings": { "Structured": null }
+    -+                    })
+    -+                    .to_string(),
+    -+                ),
+    -+            ]),
+    -+        );
+    -+
+    -+        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
+    -+        let field = schema.field(0);
+    -+        assert_eq!(&DataType::Binary, field.data_type());
+    -+        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
+    -+        assert!(is_json2_extension_type(field));
+    -+    }
+    -+
+    -     fn merge_scan_exec_with_sorted_input(
+    -         region_count: u64,
+    -         target_partition: usize,
+    -
+      ## src/query/src/optimizer/json_type_concretize.rs ##
+     @@ src/query/src/optimizer/json_type_concretize.rs: mod tests {
+          use datafusion_expr::expr::ScalarFunction;

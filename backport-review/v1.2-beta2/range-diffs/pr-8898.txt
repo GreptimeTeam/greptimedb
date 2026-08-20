@@ -1,0 +1,16 @@
+PR #8898
+Upstream merge commit: b882e393dfadcf9406c76d1017fe64e0652f0202
+Aggregate commit: e2a85ff19b00edba80640123b17166704a0c1117
+
+1:  b882e393d ! 1:  e2a85ff19 feat: update dashboard to v0.13.13 (#8898)
+    @@ Metadata
+      ## Commit message ##
+         feat: update dashboard to v0.13.13 (#8898)
+     
+    +    (cherry picked from commit aa1f8202d40fdc4fb4224191d9654f951e25440e)
+    +
+      ## src/servers/dashboard/VERSION ##
+     @@
+    --v0.13.12
+    +-v0.13.10
+     +v0.13.13

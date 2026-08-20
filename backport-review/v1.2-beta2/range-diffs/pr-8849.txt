@@ -1,0 +1,14 @@
+PR #8849
+Upstream merge commit: ed4271af403e6fa8898287ddd735c1c984644af7
+Aggregate commit: 926d9bbd0ff038254c218e6e0e67de91a324e3c6
+
+1:  ed4271af4 ! 1:  926d9bbd0 feat(procedure): record event actor (#8849)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit ed4271af403e6fa8898287ddd735c1c984644af7)
+    +    (cherry picked from commit 23e65b404943d53905a2fbe992fcf462acc54556)
+     
+      ## src/common/event-recorder/src/event_table.rs ##
+     @@ src/common/event-recorder/src/event_table.rs: pub fn nullable_json(value: Option<&serde_json::Value>) -> Value {

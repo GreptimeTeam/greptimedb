@@ -1,0 +1,44 @@
+PR #8659
+Upstream merge commit: d90cca4b752b34d7ccdb54fe8445ce3bf832e5e0
+Aggregate commit: 8cc4cab224dee0991b0c96f7b88df7d8221572ea
+
+1:  d90cca4b7 ! 1:  8cc4cab22 fix(prometheus): custom column remote reads (#8659)
+    @@ Commit message
+         Signed-off-by: grezzko <me@gauravshokeen.com>
+         Signed-off-by: Lei, HUANG <mrsatangel@gmail.com>
+         Co-authored-by: Lei, HUANG <mrsatangel@gmail.com>
+    +    (cherry picked from commit 3d7d7e916c5c8643d57d61616c180396193f8911)
+     
+      ## src/frontend/src/error.rs ##
+     @@ src/frontend/src/error.rs: pub enum Error {
+    @@ src/frontend/src/instance.rs: mod tests {
+              let instance =
+     
+      ## src/frontend/src/instance/prom_store.rs ##
+    -@@ src/frontend/src/instance/prom_store.rs: use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_f
+    +@@ src/frontend/src/instance/prom_store.rs: use client::OutputData;
+    + use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
+      use common_error::ext::BoxedError;
+    - use common_meta::rpc::ddl::TriggerReason;
+      use common_query::Output;
+     -use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+     +use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
+    @@ src/servers/src/prom_store.rs: fn new_timeseries(table: &str, columns: &[LabelCo
+              .as_primitive_opt::<TimestampMillisecondType>()
+              .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+     @@ src/servers/src/prom_store.rs: fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
+    +             ),
+    +         })?;
+      
+    -     // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
+    -     // The current path intentionally returns scalar samples only.
+     -    let field_column = recordbatch.column_by_name(greptime_value()).context(
+     -        error::InvalidPromRemoteReadQueryResultSnafu {
+     -            msg: "missing greptime_value column in query result",
+     -        },
+     -    )?;
+    ++    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
+    ++    // The current path intentionally returns scalar samples only.
+     +    let field_column = recordbatch
+     +        .column_by_name(value_column_name)
+     +        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {

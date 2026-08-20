@@ -1,0 +1,13 @@
+PR #8739
+Upstream merge commit: 97ca104129536075fcd7329a924db8c40ef88d7f
+Aggregate commit: f89d60adee3e8ad817fdbe2f2cf36aa660b0c717
+
+1:  97ca10412 ! 1:  f89d60ade fix(frontend): remove gRPC DDL panics for DropView and non-timestamp time index (#8739)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 11e785ed5680dbb07b7cf88ec1b9642cde5ba1e1)
+     
+      ## src/frontend/src/instance.rs ##
+     @@ src/frontend/src/instance.rs: mod tests {

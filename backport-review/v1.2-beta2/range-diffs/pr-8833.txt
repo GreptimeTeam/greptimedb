@@ -1,0 +1,14 @@
+PR #8833
+Upstream merge commit: 6538db6d618279f640958c40cdbb5a1796fb40cd
+Aggregate commit: 66a13cb3b74457a1be1f28d7faaa3994280f3df4
+
+1:  6538db6d6 ! 1:  66a13cb3b refactor(json2): push down json2 type hints to parquet reads (#8833)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: fys <fengys1996@gmail.com>
+    +    (cherry picked from commit a4f2408141839518608df8a0b144da8383f2d022)
+    +    (cherry picked from commit 4a50fba3a2ed0be9a610ed18b295c2c3645d8cc7)
+     
+      ## src/cmd/src/datanode/parquetbench.rs ##
+     @@ src/cmd/src/datanode/parquetbench.rs: async fn run_flat_prune_iteration(

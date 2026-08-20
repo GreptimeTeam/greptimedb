@@ -1,0 +1,14 @@
+PR #8808
+Upstream merge commit: e4175475bb7e630cefefa189b17282b063868a49
+Aggregate commit: b6326257d1babcc8cf016af59b92ebfcdee862ae
+
+1:  e4175475b ! 1:  b6326257d fix(mito): re-encode bulk WAL entry after filling missing columns (#8808)
+    @@ Commit message
+           correctly.
+     
+         Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    +    (cherry picked from commit 1f4a8ad71cdfc135cf571ea7bca2cb87ed90ad72)
+    +    (cherry picked from commit 7fae38e667a17b3cd3de3f0540cb3a7b6d5a277a)
+     
+      ## src/mito2/src/engine/alter_test.rs ##
+     @@ src/mito2/src/engine/alter_test.rs: use std::collections::HashMap;

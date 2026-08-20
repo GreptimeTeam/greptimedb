@@ -1,0 +1,13 @@
+PR #8787
+Upstream merge commit: 32e215cad0aa0803991d751bc7b4f44ac1865e62
+Aggregate commit: 6c3f63f05b477ef340f57f57981736f1bc3a4e6d
+
+1:  32e215cad ! 1:  6c3f63f05 fix(event): preserve procedure lifecycle locators (#8787)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 32e215cad0aa0803991d751bc7b4f44ac1865e62)
+     
+      ## src/common/meta/src/ddl/alter_database.rs ##
+     @@ src/common/meta/src/ddl/alter_database.rs: impl Procedure for AlterDatabaseProcedure {

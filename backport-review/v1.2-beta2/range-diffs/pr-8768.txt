@@ -1,0 +1,58 @@
+PR #8768
+Upstream merge commit: 78084a9d4485ee61ff03e071f6428fc57c906332
+Aggregate commit: cf69ee5df93bb8a6ab43337c4941e103a12c6f2e
+
+1:  78084a9d4 ! 1:  cf69ee5df feat: add admin function to discard unflushed data (#8768)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: evenyag <realevenyag@gmail.com>
+    -
+    - ## AGENTS.md ##
+    -@@ AGENTS.md: blast radius requires it.
+    - 
+    - ## Before opening a PR
+    - 
+    --1. `make fmt`
+    --2. `make clippy`
+    --3. `make test`
+    --4. `make check-udeps` (run `make fix-udeps` if it reports unused dependencies).
+    --5. If you added or changed a public configuration option, update the applicable
+    -+1. If you added a `.rs`, `.py`, or `.ts` file, apply and verify its license
+    -+   header with `hawkeye format` followed by `hawkeye check`. Use the inception
+    -+   year from `licenserc.toml`, not the current year.
+    -+2. `make fmt`
+    -+3. `make clippy`
+    -+4. `make test`
+    -+5. `make check-udeps` (run `make fix-udeps` if it reports unused dependencies).
+    -+6. If you added or changed a public configuration option, update the applicable
+    -    example TOMLs, configuration-loading and serialized-config snapshot tests,
+    -    and related user-facing documentation. Run `make config-docs` (needs Docker)
+    -    and commit the regenerated `config/config.md`.
+    --6. If you changed a persisted or wire format, add a compatibility test case (see
+    -+7. If you changed a persisted or wire format, add a compatibility test case (see
+    -    `.agents/architecture-invariants.md`).
+    --7. If you added or gated an enterprise-only file, give it the enterprise license
+    -+8. If you added or gated an enterprise-only file, give it the enterprise license
+    -    header, list it in `licenserc-enterprise.toml` (`includes`) and
+    -    `licenserc.toml` (`excludes`), and run `make check-enterprise-license`.
+    --8. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
+    -+9. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
+    -    the CLA.
+    --9. When creating or updating a pull request, follow
+    -+10. When creating or updating a pull request, follow
+    -    [`.github/pull_request_template.md`](.github/pull_request_template.md): include
+    -    the CLA statement, fill the change-intention section with enough detail, and
+    -    update checklist items accurately.
+    +    (cherry picked from commit 68605aa64d25a24e14b3bbf0b62e453d97179947)
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ tests/cases/standalone/common/function/admin/discard_unflushed_data.result (new)
+     +DROP TABLE discard_unflushed_data_physical;
+     +
+     +Affected Rows: 0
+    -+
+     
+      ## tests/cases/standalone/common/function/admin/discard_unflushed_data.sql (new) ##
+     @@

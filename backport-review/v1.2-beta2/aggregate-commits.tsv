@@ -1,0 +1,40 @@
+45309752df03f6a5fdda03d741727637de28ed01	feat: make frontend heartbeat extensible and lifecycle-safe (#8726)
+1ad6c2a1cdaa129bf744c4d3d70188916fba223e	feat(mito2): discard unflushed region data safely (#8600)
+cf69ee5df93bb8a6ab43337c4941e103a12c6f2e	feat: add admin function to discard unflushed data (#8768)
+0b6702b7ccc0d0fdbd5f53490743dee6a197f516	feat(flow): add flow statistics and SHOW FLOW STATUS (release slice)
+239c4e62b177203dc440fb3faabad8cb6fd70d4f	fix(flow): fix flow stats aggregation and df_plan_to_sql quoting (#8729)
+84a83d31f81bba0e041f69fbd2e4adb9bc04233d	fix(flow): retain release heartbeat state compatibility
+f89d60adee3e8ad817fdbe2f2cf36aa660b0c717	fix(frontend): remove gRPC DDL panics for DropView and non-timestamp time index (#8739)
+8cc4cab224dee0991b0c96f7b88df7d8221572ea	fix(prometheus): custom column remote reads (#8659)
+0ffca14740493d0c1afa556908345d9e135d7656	feat: update to pgwire 0.40.7 (#8860)
+e2a85ff19b00edba80640123b17166704a0c1117	feat: update dashboard to v0.13.13 (#8898)
+0e477aa945d03dd131376cfff1f5cec0c3b47a69	chore: restore beta2 lock metadata and flow contract docs
+8b131f462abbdf4cd958be33119e21b8f4603694	test: remove trailing blank lines from flow sqlness results
+2e908d51e76788da2f7ea3fd2ae58a7d58b0b6da	test: restore sqlness result terminators
+ea747c53036afa8ba7ed4b19dd2531db95460e43	fix(query): avoid unsafe count wildcard rewrites (#8522)
+a7c296cf46cc4f1ce0241231cbb8b8031dfb1bcf	fix(query): validate merge scan remote schema (#8579)
+ed184264fabf2076fe65a7bf6a30b0c6ce205dba	refactor: separate a json2 extension type (#8745)
+66a13cb3b74457a1be1f28d7faaa3994280f3df4	refactor(json2): push down json2 type hints to parquet reads (#8833)
+efe75d408b77312facd46adf411497bdfb375690	fix(mito2): fail open when Bloom IN predicate has non-literal or unencodable members (#8709)
+b6326257d1babcc8cf016af59b92ebfcdee862ae	fix(mito): re-encode bulk WAL entry after filling missing columns (#8808)
+bc889665136f50067e5655757ff7f88ab07f177d	fix(mito2): keep deletion markers when compacting part of a window (#8872)
+a024250fdb7808562b100b0ef2b4d8e9deaeb9a3	feat!: update native histogram unsigned int types (#8824)
+00c2d7a1a32b32cd3badb253f81cf79dd6445e6f	fix(query): respect query timezone in timestamp casts (#8859)
+a3de6c4fa8cc9ff22faa844a08e6ff7f9fde8835	fix(query): preserve timestamp literal semantics in inserts (#8889)
+6e5cd114b31cdb0a8ea6323e5d7f8c5c23198541	fix(metric-engine): handle Utf8View tag/label columns without panicking (#8772)
+e897a65e16e1a5ebd1fa667a6c6ea6718e91a12d	fix(query): adapt MergeScan JSON extension helpers
+234fea812fd2b0406cf148806aa8566a74a3fcd6	test(query): cover legacy JSON2 remote schema identity
+ff8ea6d87d94401469813a05b9c9f87ead95836e	fix: cache physical table metadata lookups (#8777)
+4cb869ace4f9ac05c3cd6a470c6dad19cdd82491	fix: harden permission checks and process visibility (#8852)
+065d0dfaadc2d6252adc5a671ec0658cfd51d4d6	chore: remove iceberg read (#8858)
+408929ffd8bad5aa75547274ab62e667f90a449c	feat(event): add event context to procedure events (#8734)
+6c3f63f05b477ef340f57f57981736f1bc3a4e6d	fix(event): preserve procedure lifecycle locators (#8787)
+f47fcbc1658b5752982bf387fc1a4ac1abd1001d	test: fix unknown channel event context expectation (#8832)
+e712162bd37f3e4aca3d339991c453153a3639fa	refactor(procedure): centralize event context handling (#8834)
+0d5585ba332fe63374ae72e5745643465bb78fc4	feat(event): record admin function executions (#8835)
+a451a16cd06d1c1936baaf011991f2c3e3a0cc7e	refactor(event): separate procedure submission context (#8856)
+926d9bbd0ff038254c218e6e0e67de91a324e3c6	feat(procedure): record event actor (#8849)
+587f001adfee05e4446fbb1b14c51afad4647bc1	fix(event): preserve legacy DDL event context compatibility
+94a4bb78b3bb8dab0a8ae773c57dc39b3598172f	fix(event): convert legacy submission context once
+6735127c5cde424d49f1fe0fe15917d7e7e93d83	style: format beta2 aggregate backports
+b5c38fbfc15053f42d4c1d843204bbdd52cb4a00	fix: align aggregate lock with proto 335

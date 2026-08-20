@@ -1,0 +1,76 @@
+PR #8734
+Upstream merge commit: 1f1c9270a806658d2c3d9700c8cd1445d687f89f
+Aggregate commit: 408929ffd8bad5aa75547274ab62e667f90a449c
+
+1:  1f1c9270a ! 1:  408929ffd feat(event): add event context to procedure events (#8734)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit 1f1c9270a806658d2c3d9700c8cd1445d687f89f)
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ src/common/meta/src/ddl/tests/drop_table.rs: async fn test_on_rollback() {
+              procedure.on_prepare().await.unwrap();
+              assert!(procedure.rollback_supported());
+              procedure.on_delete_metadata().await.unwrap();
+    -@@ src/common/meta/src/ddl/tests/drop_table.rs: async fn test_on_rollback() {
+    - 
+    -         // The physical table can be dropped again after the metadata rollback.
+    -         let retry_task = new_drop_table_task("phy_table", physical_table_id, false);
+    --        let mut retry = DropTableProcedure::new(retry_task, ddl_context.clone());
+    +         assert!(procedure.rollback_supported());
+    +         procedure.rollback(&ctx).await.unwrap();
+    ++        assert!(procedure.dropping_regions.is_empty());
+    ++        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+    ++
+    ++        // The physical table can be dropped again after the metadata rollback.
+    ++        let retry_task = new_drop_table_task("phy_table", physical_table_id, false);
+     +        let mut retry =
+     +            DropTableProcedure::new(retry_task, ddl_context.clone(), EventContext::default());
+    -         retry.on_prepare().await.unwrap();
+    -         retry.on_delete_metadata().await.unwrap();
+    -         retry.rollback(&ctx).await.unwrap();
+    ++        retry.on_prepare().await.unwrap();
+    ++        retry.on_delete_metadata().await.unwrap();
+    ++        retry.rollback(&ctx).await.unwrap();
+    ++        assert!(retry.dropping_regions.is_empty());
+    ++        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+    +         // Rollback again
+    +         assert!(procedure.rollback_supported());
+    +         procedure.rollback(&ctx).await.unwrap();
+     @@ src/common/meta/src/ddl/tests/drop_table.rs: async fn test_on_rollback() {
+          // Drops the logical table
+          ddl_context.soft_drop_enabled = false;
+    @@ src/frontend/src/instance/prom_store.rs: use auth::{
+      use common_error::ext::BoxedError;
+     +use common_meta::rpc::ddl::TriggerReason;
+      use common_query::Output;
+    - use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+    + use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
+      use common_recordbatch::RecordBatches;
+     @@ src/frontend/src/instance/prom_store.rs: impl PendingRowsSchemaAlterer for Instance {
+                  AutoCreateTableType::Logical(_) => {
+    @@ src/operator/src/statement/ddl.rs: impl StatementExecutor {
+              query_ctx: QueryContextRef,
+     +        trigger_reason: TriggerReason,
+          ) -> Result<TableRef> {
+    -         ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
+    - 
+    +         ensure!(
+    +             !is_readonly_schema(&create_table.schema_name),
+     @@ src/operator/src/statement/ddl.rs: impl StatementExecutor {
+                          .await?;
+                  }
+    @@ src/operator/src/statement/ddl.rs: impl StatementExecutor {
+              query_context: QueryContextRef,
+     +        trigger_reason: TriggerReason,
+          ) -> Result<Output> {
+    -         ensure_table_writable(&expr.schema_name, &expr.table_name)?;
+    - 
+    +         ensure!(
+    +             !is_readonly_schema(&expr.schema_name),
+     @@ src/operator/src/statement/ddl.rs: impl StatementExecutor {
+                  .await
+                  .context(TableMetadataManagerSnafu)?;

@@ -1,0 +1,13 @@
+PR #8522
+Upstream merge commit: fbbe5af76744eb93067a3bed099834656d7da4d6
+Aggregate commit: ea747c53036afa8ba7ed4b19dd2531db95460e43
+
+1:  fbbe5af76 ! 1:  ea747c530 fix(query): avoid unsafe count wildcard rewrites (#8522)
+    @@ Commit message
+     
+         Signed-off-by: discord9 <discord9@163.com>
+         Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 7223f2a9b80a476448e3bded312e072cd1585e2a)
+     
+      ## src/query/src/optimizer/count_wildcard.rs ##
+     @@ src/query/src/optimizer/count_wildcard.rs: impl CountWildcardToTimeIndexRule {

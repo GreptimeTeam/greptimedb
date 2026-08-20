@@ -1,0 +1,179 @@
+PR #8729
+Upstream merge commit: 70470bafbe38df2d3fd21e70e1e7097ffd7317c6
+Aggregate commit: 239c4e62b177203dc440fb3faabad8cb6fd70d4f
+
+1:  70470bafb ! 1:  239c4e62b fix(flow): fix flow stats aggregation and df_plan_to_sql quoting (#8729)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 375dd569482235914ef09ef5c21e15cc79fcd052)
+     
+      ## src/common/meta/src/key/flow/flow_state.rs ##
+     @@ src/common/meta/src/key/flow/flow_state.rs: use std::collections::BTreeMap;
+    @@ src/common/meta/src/key/flow/flow_state.rs: impl<'a> MetadataKey<'a, FlowStateKe
+     +}
+     +
+      /// The value of flow state size
+    - #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+    +-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    ++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+      pub struct FlowStateValue {
+    +     /// For each key, the bytes of the state in memory
+    +     pub state_size: BTreeMap<FlowId, usize>,
+    +     /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    +     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    ++    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    ++    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    ++    #[serde(default)]
+    ++    pub start_time_map: BTreeMap<FlowId, i64>,
+    + }
+    + 
+    + impl FlowStateValue {
+    +     pub fn new(
+    +         state_size: BTreeMap<FlowId, usize>,
+    +         last_exec_time_map: BTreeMap<FlowId, i64>,
+    ++        start_time_map: BTreeMap<FlowId, i64>,
+    +     ) -> Self {
+    +         Self {
+    +             state_size,
+    +             last_exec_time_map,
+    ++            start_time_map,
+    +         }
+    +     }
+    + }
+     @@ src/common/meta/src/key/flow/flow_state.rs: pub type FlowStateManagerRef = Arc<FlowStateManager>;
+      ///
+      /// This is only used in distributed mode. When meta-srv use heartbeat to update the flow stat report
+    @@ src/common/meta/src/key/flow/flow_state.rs: impl FlowStateManager {
+      }
+      
+      /// Flow's state report, send regularly through heartbeat message
+    -@@ src/common/meta/src/key/flow/flow_state.rs: mod tests {
+    -         let decoded: FlowStateValue = serde_json::from_str(&json).unwrap();
+    -         assert_eq!(decoded, value);
+    +-#[derive(Debug, Clone)]
+    ++#[derive(Debug, Clone, Default)]
+    + pub struct FlowStat {
+    +     /// For each key, the bytes of the state in memory
+    +     pub state_size: BTreeMap<u32, usize>,
+    +     /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    +     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    ++    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    ++    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
+    ++    pub start_time_map: BTreeMap<FlowId, i64>,
+    + }
+    + 
+    + impl From<FlowStateValue> for FlowStat {
+    +@@ src/common/meta/src/key/flow/flow_state.rs: impl From<FlowStateValue> for FlowStat {
+    +         Self {
+    +             state_size: value.state_size,
+    +             last_exec_time_map: value.last_exec_time_map,
+    ++            start_time_map: value.start_time_map,
+    +         }
+          }
+    + }
+    +@@ src/common/meta/src/key/flow/flow_state.rs: impl From<FlowStat> for FlowStateValue {
+    +         Self {
+    +             state_size: value.state_size,
+    +             last_exec_time_map: value.last_exec_time_map,
+    ++            start_time_map: value.start_time_map,
+    +         }
+    +     }
+    + }
+    ++
+    ++#[cfg(test)]
+    ++mod tests {
+    ++    use std::collections::BTreeMap;
+    ++
+    ++    use crate::key::FlowId;
+    ++    use crate::key::flow::flow_state::FlowStateValue;
+    ++
+    ++    #[test]
+    ++    fn test_deserialize_legacy_flow_state_value() {
+    ++        // Legacy format: only state_size and last_exec_time_map are present,
+    ++        // without the start_time_map field added in PR #8392.
+    ++        let legacy_json =
+    ++            r#"{"state_size":{"1":1024,"2":2048},"last_exec_time_map":{"1":1700000000000}}"#;
+    ++        let value: FlowStateValue = serde_json::from_str(legacy_json).unwrap();
+    ++
+    ++        let mut expected_state_size = BTreeMap::new();
+    ++        expected_state_size.insert(FlowId::from(1u32), 1024usize);
+    ++        expected_state_size.insert(FlowId::from(2u32), 2048usize);
+    ++        assert_eq!(value.state_size, expected_state_size);
+    ++
+    ++        let mut expected_last_exec_time_map = BTreeMap::new();
+    ++        expected_last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    ++        assert_eq!(value.last_exec_time_map, expected_last_exec_time_map);
+    ++
+    ++        // serde(default) kicks in: old persisted data must not break,
+    ++        // and the new field defaults to empty.
+    ++        assert!(value.start_time_map.is_empty());
+    ++    }
+    ++
+    ++    #[test]
+    ++    fn test_flow_state_value_roundtrip_includes_start_time_map() {
+    ++        let mut state_size = BTreeMap::new();
+    ++        state_size.insert(FlowId::from(1u32), 1024usize);
+    ++        let mut last_exec_time_map = BTreeMap::new();
+    ++        last_exec_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    ++        let mut start_time_map = BTreeMap::new();
+    ++        start_time_map.insert(FlowId::from(1u32), 1700000000000i64);
+    ++
+    ++        let value = FlowStateValue {
+    ++            state_size,
+    ++            last_exec_time_map,
+    ++            start_time_map,
+    ++        };
+    ++
+    ++        let json = serde_json::to_string(&value).unwrap();
+    ++        assert!(json.contains("start_time_map"));
+    ++
+    ++        let decoded: FlowStateValue = serde_json::from_str(&json).unwrap();
+    ++        assert_eq!(decoded, value);
+    ++    }
+     +
+     +    use std::sync::Arc;
+     +
+    @@ src/common/meta/src/key/flow/flow_state.rs: mod tests {
+     +        let value = FlowStateValue::try_from_raw_value(dump.get(&global_key).unwrap()).unwrap();
+     +        assert_eq!(value.last_exec_time_map.get(&1), Some(&100));
+     +    }
+    - }
+    ++}
+     
+      ## src/flow/src/batching_mode/utils.rs ##
+     @@ src/flow/src/batching_mode/utils.rs: pub(crate) async fn gen_plan_with_matching_schema(
+    @@ src/meta-srv/src/handler/flow_state_handler.rs
+          flow_state_manager: FlowStateManager,
+      }
+     @@ src/meta-srv/src/handler/flow_state_handler.rs: impl HeartbeatHandler for FlowStateHandler {
+    -             // mode until a follow-up PR adds heartbeat propagation.
+    -             let value: FlowStateValue =
+    -                 FlowStateValue::new(state_size, last_exec_time_map, Default::default());
+    +             // The beta2 heartbeat protobuf has only the two historical fields.
+    +             // Distributed start_time/uptime_seconds are intentionally unsupported and
+    +             // therefore remain NULL; start_time is retained only in local FlowStat.
+    +-            let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
+     -            self.flow_state_manager
+     -                .put(value)
+     -                .await
+     -                .context(FlowStateHandlerSnafu)?;
+    ++            let value: FlowStateValue =
+    ++                FlowStateValue::new(state_size, last_exec_time_map, Default::default());
+     +            match node_identity(req) {
+     +                Some(node_id) => {
+     +                    // Merge by node so that reports from different flownodes
+    @@ src/meta-srv/src/handler/flow_state_handler.rs: impl HeartbeatHandler for FlowSt
+     +                        .await
+     +                        .context(FlowStateHandlerSnafu)?;
+     +                }
+    -+                // No usable identity in the request: ignore the report instead
+    -+                // of falling back to a whole-map replace, which would clobber
+    -+                // other nodes' reports.
+    -+                // Normal flownodes always carry header.member_id/peer.id; a
+    -+                // report without either indicates an old or malformed client.
+    -+                // Log at debug to avoid an anomalous sender spamming warn.
+     +                None => {
+     +                    debug!(
+     +                        "Ignore flow state report without node identity (no header.member_id and no peer.id): {value:?}"

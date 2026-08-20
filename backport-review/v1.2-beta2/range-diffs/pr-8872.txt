@@ -1,0 +1,48 @@
+PR #8872
+Upstream merge commit: 3c80df043a46f0511bd81a64a072ca18436efac3
+Aggregate commit: bc889665136f50067e5655757ff7f88ab07f177d
+
+1:  3c80df043 ! 1:  bc8896651 fix(mito2): keep deletion markers when compacting part of a window (#8872)
+    @@
+      ## Metadata ##
+    -Author: jeremyhi <jiachun_feng@proton.me>
+    +Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+         fix(mito2): keep deletion markers when compacting part of a window (#8872)
+     
+    -    `TwcsPicker::find_inputs` decides `filter_deleted` from the shape of the whole
+    -    time window, but the compaction inputs are only a subset of it: `reduce_runs`
+    -    and `merge_seq_files` narrow the selection down and the max input file num limit
+    -    narrows it further. When a deletion marker lands in the compacted set while the
+    -    file holding the row it masks stays behind, the marker is dropped from the
+    -    output and the old row becomes visible again.
+    +    Reconstructed from upstream efdd9ebf2e2e36b50090ff102422bd5ab6149d2a; included only final-selection overlap recheck, helper, and regression tests. Excluded #8714 reverse ordering and newer-window priority behavior.
+     
+    -    Re-check the final selection against the rest of the window and stop filtering
+    -    deleted rows whenever something left behind still overlaps the inputs. The check
+    -    compares ranges inclusively, so it also covers files that share only a boundary
+    -    timestamp: run detection treats those as non-overlapping, which is how a single
+    -    timestamp delete file ends up in the same run as the file it deletes rows from.
+    -
+    -    Signed-off-by: jeremyhi <fengjiachun@gmail.com>
+    +    Backport-of: 3c80df043
+    +    Signed-off-by: discord9 <discord9@163.com>
+    +    (cherry picked from commit b9afc44d735bcad3918359028aad05abde5bc2a7)
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## src/mito2/src/compaction/twcs.rs ##
+     @@ src/mito2/src/compaction/twcs.rs: impl TwcsPicker {
+    @@ src/mito2/src/compaction/twcs.rs: mod tests {
+     +        assert!(output[0].filter_deleted);
+     +    }
+     +
+    -     #[tokio::test]
+    -     async fn test_newer_windows_have_priority() {
+    -         let older_file_ids = [FileId::random(), FileId::random()];
+    +     #[test]
+    +     fn test_filter_time_windows_by_time_range() {
+    +         let time_range = TimestampRange::new(
+     
+      ## src/mito2/src/engine/compaction_test.rs ##
+     @@ src/mito2/src/engine/compaction_test.rs: async fn test_compaction_region_with_overlapping_delete_all_with_format(flat_for

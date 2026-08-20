@@ -1,0 +1,22 @@
+PR #8852
+Upstream merge commit: 154f90b3652bf9b1b3e7eccc5f277f856a2f3079
+Aggregate commit: 4cb869ace4f9ac05c3cd6a470c6dad19cdd82491
+
+1:  154f90b36 ! 1:  4cb869ace fix: harden permission checks and process visibility (#8852)
+    @@ Commit message
+         fix: harden permission checks and process visibility (#8852)
+     
+         Signed-off-by: shuiyisong <xixing.sys@gmail.com>
+    +    (cherry picked from commit 154f90b3652bf9b1b3e7eccc5f277f856a2f3079)
+     
+      ## src/auth/src/lib.rs ##
+     @@ src/auth/src/lib.rs: pub use common::{
+    @@ src/auth/src/lib.rs: pub use common::{
+     +    DefaultPermissionChecker, ICEBERG_READ, INFLUXDB_WRITE, JAEGER_QUERY, LOG_QUERY, LOG_WRITE,
+     +    OPENTSDB_WRITE, OTLP_WRITE, PIPELINE_DELETE, PIPELINE_INSERT, PIPELINE_QUERY, PROM_STORE_READ,
+          PROM_STORE_WRITE, PROMQL_QUERY, PermissionAction, PermissionChecker, PermissionReq,
+    -     PermissionResp, PermissionTableTarget, PermissionTableTargets, SEMANTIC_GRAPH_QUERY,
+    +     PermissionResp, PermissionTableTarget, PermissionTableTargets,
+      };
+     
+      ## src/auth/src/permission.rs ##

@@ -1,0 +1,14 @@
+PR #8709
+Upstream merge commit: d3b10d13a5712868d72969b4a453ae786f0d60e3
+Aggregate commit: efe75d408b77312facd46adf411497bdfb375690
+
+1:  d3b10d13a ! 1:  efe75d408 fix(mito2): fail open when Bloom IN predicate has non-literal or unencodable members (#8709)
+    @@ Commit message
+         ---------
+     
+         Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 70ddf1685eb63d6faca2d0009fe157369c950f73)
+    +    (cherry picked from commit 5cbab008ffcdd83c0c5603b81448e1a9b2790254)
+     
+      ## src/mito2/src/engine/index_build_test.rs ##
+     @@ src/mito2/src/engine/index_build_test.rs: use api::v1::{Rows, SemanticType};
