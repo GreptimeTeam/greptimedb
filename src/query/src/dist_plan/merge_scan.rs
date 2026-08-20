@@ -46,7 +46,10 @@ use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
+    is_legacy_json2_extension_type,
+};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -110,7 +113,7 @@ fn merge_scan_schema_error_count_for_test() -> u64 {
 /// Returns true when the field is a JSON column, identified either by its
 /// Arrow extension type or by its `greptime:type=Json` marker.
 fn is_json_field(field: &Field) -> bool {
-    is_json_extension_type(field)
+    is_any_json_extension_type(field)
         || field
             .metadata()
             .get(datatypes::schema::TYPE_KEY)
@@ -848,11 +851,15 @@ fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
     let schema = schema.clone();
     let mut new_fields = Vec::with_capacity(schema.fields().len());
     for field in schema.fields().iter() {
-        let new_field = if is_json_extension_type(field)
+        let new_field = if is_json2_extension_type(field)
             && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
         {
+            let is_legacy_json2 = is_legacy_json2_extension_type(field);
             let mut new_field = field.as_ref().clone();
             new_field.set_data_type(DataType::Binary);
+            if is_legacy_json2 {
+                new_field = new_field.with_extension_type(Json2ExtensionType::default());
+            }
             Arc::new(new_field)
         } else {
             field.clone()
