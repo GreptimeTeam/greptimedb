@@ -2959,6 +2959,8 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.json::<PrometheusJsonResponse>().await;
+    // Finite vector sample values use the HTTP response's ryu contract, so
+    // integral f64 values retain their explicit `.0`; timestamps remain JSON numbers.
     assert_eq!(
         serde_json::to_string_pretty(&body).unwrap(),
         r#"{
@@ -2974,7 +2976,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         },
         "value": [
           4.0,
-          "6"
+          "6.0"
         ]
       }
     ]
