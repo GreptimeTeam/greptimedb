@@ -413,6 +413,16 @@ pub enum Error {
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
 
+    /// The mutation was already written to the WAL but could not be applied to
+    /// the memtable, so its durability is unknown to the caller. This must
+    /// never use a definitive-rejection status class (e.g. `InvalidArguments`):
+    /// the row may still exist after a restart, or be gone permanently if a
+    /// flush truncates the WAL first.
+    #[snafu(display(
+        "Failed to apply a mutation to the memtable after writing to the WAL: {source}"
+    ))]
+    MemtableApply { source: Box<Error> },
+
     #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
     InvalidParquet {
         file: String,
@@ -1475,6 +1485,9 @@ impl ErrorExt for Error {
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
             WriteGroup { source, .. } => source.status_code(),
+            // The mutation is durable in the WAL regardless of the apply
+            // outcome, so the caller cannot treat this as a rejection.
+            MemtableApply { .. } => StatusCode::Internal,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
@@ -1622,6 +1635,8 @@ impl ErrorExt for Error {
             | EditRegion { source, .. }
             | ScanSeries { source, .. }
             | PruneFile { source, .. } => source.retry_hint(),
+
+            MemtableApply { source, .. } => source.retry_hint(),
 
             DataTypeMismatch { source, .. }
             | ConvertVector { source, .. }

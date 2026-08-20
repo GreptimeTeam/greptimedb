@@ -311,17 +311,31 @@ impl Memtable for TimeSeriesMemtable {
         }
 
         let mut local_stats = WriteMetrics::default();
+        let mut last_applied_sequence = 0;
 
-        for kv in kvs.iter() {
-            self.write_key_value(kv, &mut local_stats)?;
+        for (num_applied, kv) in kvs.iter().enumerate() {
+            if let Err(e) = self.write_key_value(kv, &mut local_stats) {
+                // The failed key-value itself has no side effects (the primary
+                // key length check and encoding both precede `push_to_series`),
+                // but any previously applied prefix is already visible in the
+                // series set. Count it so the stats always agree with the
+                // memtable contents; otherwise `ranges()` may prune those rows
+                // by time range even though they are still present.
+                if num_applied > 0 {
+                    local_stats.value_bytes += num_applied
+                        * (std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>());
+                    local_stats.max_sequence = last_applied_sequence;
+                    local_stats.num_rows = num_applied;
+                    self.update_stats(local_stats);
+                }
+                return Err(e);
+            }
+            last_applied_sequence = kv.sequence();
         }
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<Timestamp>();
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<OpType>();
         local_stats.max_sequence = kvs.max_sequence();
         local_stats.num_rows = kvs.num_rows();
-        // TODO(hl): this maybe inaccurate since for-iteration may return early.
-        // We may lift the primary key length check out of Memtable::write
-        // so that we can ensure writing to memtable will succeed.
         self.update_stats(local_stats);
         Ok(())
     }
