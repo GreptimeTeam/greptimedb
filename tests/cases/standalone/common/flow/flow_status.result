@@ -45,8 +45,8 @@ SELECT flow_name FROM information_schema.flow_statistics WHERE flow_name = 'test
 +------------------+
 
 -- SHOW FLOW STATUS is exercised below via the empty-result form (six-column header).
--- Full row values differ between standalone (populated) and distributed (heartbeat
--- has not yet propagated start_time), so assert only the stable columns here.
+-- In beta2 distributed mode, start_time/uptime_seconds are explicitly unsupported
+-- by the two-field heartbeat contract and therefore remain NULL; assert stable columns.
 -- SQLNESS REPLACE (\|\s+[0-9]+\s+\|) | ID |
 SELECT flow_id, flow_name FROM information_schema.flow_statistics WHERE flow_name = 'test_flow_status';
 
