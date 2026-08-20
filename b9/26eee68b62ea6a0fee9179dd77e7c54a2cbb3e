@@ -1,0 +1,22 @@
+src/mito2/src/engine/set_role_state_test.rs
+  s_8b303b46a38c84::t_8ea4b6a06c2f19 368-433
+  s_8b303b46a38c84::t_0b772db0396f1c 367
+src/mito2/src/region.rs
+  s_8b303b46a38c84::t_4778acddcdeda8 549,554
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b926eee68b62ea6a0fee9179dd77e7c54a2cbb3e",
+  "prompts": {},
+  "sessions": {
+    "s_8b303b46a38c84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea61-c84d-7091-8f30-ff6275e94ed9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
