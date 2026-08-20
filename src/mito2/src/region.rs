@@ -546,10 +546,12 @@ impl MitoRegion {
                         );
                         self.exit_staging()?;
                         self.set_role(RegionRole::Follower);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(_) => {
                         info!("Demoting region {} from leader to follower", self.region_id);
                         self.set_role(RegionRole::Follower);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Follower => {
                         // Already in desired state - no-op

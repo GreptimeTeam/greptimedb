@@ -365,6 +365,73 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_direct_follower_waits_for_pending_checkpoint() {
+    let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
+    let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            manifest_checkpoint_distance: 1,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
+        .await
+        .expect("checkpoint cleanup did not start");
+
+    let region = engine.get_region(region_id).unwrap();
+    let wait_started = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .checkpointer()
+        .pending_checkpoint_wait_started();
+    // The no-flush downgrade path requests Follower directly. It must still
+    // wait for checkpoint cleanup before replying to the caller.
+    let wait_started = wait_started.notified();
+    let cloned_engine = engine.clone();
+    let set_follower = tokio::spawn(async move {
+        cloned_engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), wait_started)
+        .await
+        .expect("follower transition did not start waiting for the checkpoint");
+    assert_eq!(RegionRoleState::Follower, region.state());
+    assert!(
+        !set_follower.is_finished(),
+        "follower transition returned before checkpoint cleanup finished"
+    );
+
+    blocker.release();
+    assert_success_response(&set_follower.await.unwrap().unwrap(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_retried_downgrade_waits_after_first_request_is_cancelled() {
     let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);
