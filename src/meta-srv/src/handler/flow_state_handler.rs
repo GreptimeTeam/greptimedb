@@ -70,11 +70,11 @@ impl HeartbeatHandler for FlowStateHandler {
                 .iter()
                 .map(|(k, v)| (*k, *v))
                 .collect();
-            // The beta2 heartbeat protobuf has only the two historical fields.
-            // Distributed start_time/uptime_seconds are intentionally unsupported and
-            // therefore remain NULL; start_time is retained only in local FlowStat.
-            let value: FlowStateValue =
-                FlowStateValue::new(state_size, last_exec_time_map, Default::default());
+            // Beta2 deliberately keeps the distributed heartbeat contract at the
+            // two persisted fields represented by FlowStateValue. The local FlowStat
+            // may track start_time_map, but the distributed start_time/uptime_seconds
+            // columns are explicitly unsupported and therefore remain NULL.
+            let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
             match node_identity(req) {
                 Some(node_id) => {
                     // Merge by node so that reports from different flownodes
@@ -84,6 +84,12 @@ impl HeartbeatHandler for FlowStateHandler {
                         .await
                         .context(FlowStateHandlerSnafu)?;
                 }
+                // No usable identity in the request: ignore the report instead
+                // of falling back to a whole-map replace, which would clobber
+                // other nodes' reports.
+                // Normal flownodes always carry header.member_id/peer.id; a
+                // report without either indicates an old or malformed client.
+                // Log at debug to avoid an anomalous sender spamming warn.
                 None => {
                     debug!(
                         "Ignore flow state report without node identity (no header.member_id and no peer.id): {value:?}"
