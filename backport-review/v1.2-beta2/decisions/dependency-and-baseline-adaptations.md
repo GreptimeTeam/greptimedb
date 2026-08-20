@@ -8,7 +8,7 @@ Immutable upstream commits: [#8860](https://github.com/GreptimeTeam/greptimedb/c
 
 ## Resulting backport patch — what ships
 
-Carriers are [#8860](https://github.com/GreptimeTeam/greptimedb/commit/0ffca14740493d0c1afa556908345d9e135d7656), [#8858](https://github.com/GreptimeTeam/greptimedb/commit/065d0dfaadc2d6252adc5a671ec0658cfd51d4d6), and [#8898](https://github.com/GreptimeTeam/greptimedb/commit/e2a85ff19b00edba80640123b17166704a0c1117), with [final lock alignment](https://github.com/GreptimeTeam/greptimedb/commit/b5c38fbfc15053f42d4c1d843204bbdd52cb4a00).
+Carriers are [#8860](https://github.com/GreptimeTeam/greptimedb/commit/0ffca14740493d0c1afa556908345d9e135d7656), [#8858](https://github.com/GreptimeTeam/greptimedb/commit/065d0dfaadc2d6252adc5a671ec0658cfd51d4d6), and [#8898](https://github.com/GreptimeTeam/greptimedb/commit/e2a85ff19b00edba80640123b17166704a0c1117), with [final lock alignment](https://github.com/GreptimeTeam/greptimedb/commit/b5c38fbfc15053f42d4c1d843204bbdd52cb4a00) before the #8825 carrier.
 
 ## Relative to original PR — exact differences
 

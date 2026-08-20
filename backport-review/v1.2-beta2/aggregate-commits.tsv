@@ -38,3 +38,6 @@ a451a16cd06d1c1936baaf011991f2c3e3a0cc7e	refactor(event): separate procedure sub
 94a4bb78b3bb8dab0a8ae773c57dc39b3598172f	fix(event): convert legacy submission context once
 6735127c5cde424d49f1fe0fe15917d7e7e93d83	style: format beta2 aggregate backports
 b5c38fbfc15053f42d4c1d843204bbdd52cb4a00	fix: align aggregate lock with proto 335
+6c1424a8eef66dc2c3abf9a7be25a69f2ab69f33	fix: adapt event context tests to release channel API
+b75c72c18d39453cc693a594c64b68d31beb62c1	fix: adapt frontend event context tests
+b7fdcb89568dc707c323f8c0a3b9413ec4e889ab	refactor: share query channel definition (#8825)

@@ -38,3 +38,6 @@ a451a16cd06d1c1936baaf011991f2c3e3a0cc7e	1af4c335242e7e5e06ee91bc428a71bb631d079
 94a4bb78b3bb8dab0a8ae773c57dc39b3598172f		3351de9102b6418207e49c090054b71cc632054d	fix(event): convert legacy submission context once 
 6735127c5cde424d49f1fe0fe15917d7e7e93d83		abaac4c2bb47a8409cea5eb49a26ac3dcff3abc7	style: format beta2 aggregate backports 
 b5c38fbfc15053f42d4c1d843204bbdd52cb4a00		3d6f2c76ef3f928a57b9505cb175e334685e33f0	fix: align aggregate lock with proto 335 
+6c1424a8eef66dc2c3abf9a7be25a69f2ab69f33		668df91d76785b93a00f279916d2584646a56080	fix: adapt event context tests to release channel API
+b75c72c18d39453cc693a594c64b68d31beb62c1		922a4f6141ea7ed051b9c891cb05bbcee0b51e69	fix: adapt frontend event context tests
+b7fdcb89568dc707c323f8c0a3b9413ec4e889ab	60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1	unavailable	refactor: share query channel definition (#8825)

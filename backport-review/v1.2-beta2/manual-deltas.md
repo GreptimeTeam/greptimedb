@@ -74,6 +74,15 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 ## Platform / Event
 
+### #8825 — adapted
+- Upstream PR head: `bf947141753a9ea554aa1ca31637fdd3ad1429f3`; merge: `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1`.
+- Requested by WenyXu in [Issue #8892 comment 5353700059](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5353700059).
+- Aggregate carrier and final head: `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab`.
+- Adds shared `common_base::protocol::Channel`, re-exports it as `session::context::Channel`, and retains stable wire values/names and `Unknown` behavior. Session dialect mapping remains through the `dialect_for_channel` helper; common-meta derives protocol names from shared `Channel`.
+- Semantic conflict resolution is explicit: shared mapping replaces `common_session::channel_protocol`, but the aggregate preserves the old-frontend fallback for omitted protobuf `event_context` and exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged.
+- Narrow test adaptations `6c1424a8` and `b75c72c18` are retained and not reverted.
+- Raw evidence: [`range-diffs/pr-8825.txt`](range-diffs/pr-8825.txt). The upstream PR-head object is unavailable locally, so no range-diff is fabricated.
+
 ### #8852 — adapted
 - Aggregate: `4cb869ace4f9ac05c3cd6a470c6dad19cdd82491`.
 - Aggregate conflict in `src/frontend/src/instance.rs` was a single test import adjacent to Flow changes. Retained both Flow imports and #8852's `api::v1::greptime_request::Request`.
