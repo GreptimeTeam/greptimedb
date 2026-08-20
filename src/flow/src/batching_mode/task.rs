@@ -181,10 +181,9 @@ impl BatchingAttemptGuard {
         #[cfg(test)]
         if let Some(hook) = ATTEMPT_STARTED_HOOK.get()
             && let Some(hook) = hook.lock().unwrap().as_ref()
+            && let Some(sender) = hook.started.lock().unwrap().take()
         {
-            if let Some(sender) = hook.started.lock().unwrap().take() {
-                let _ = sender.send(());
-            }
+            let _ = sender.send(());
         }
         Self {
             span,
