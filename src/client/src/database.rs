@@ -941,7 +941,7 @@ struct FlightContext {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     use api::v1::auth_header::AuthScheme;
@@ -965,24 +965,21 @@ mod tests {
 
     struct InlineMetricsStream {
         messages: VecDeque<Result<FlightMessage>>,
-        trailer_polled: Arc<AtomicBool>,
+        poll_count: Arc<AtomicUsize>,
     }
 
     impl Stream for InlineMetricsStream {
         type Item = Result<FlightMessage>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Some(message) = self.messages.pop_front() {
-                Poll::Ready(Some(message))
-            } else {
-                self.trailer_polled.store(true, Ordering::SeqCst);
-                Poll::Ready(None)
-            }
+            self.poll_count.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.messages.pop_front())
         }
     }
 
     struct CancelledMetricsStream {
         first: Option<Result<FlightMessage>>,
+        poll_started: Option<tokio::sync::oneshot::Sender<()>>,
         dropped: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
@@ -992,7 +989,10 @@ mod tests {
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match self.first.take() {
                 Some(message) => Poll::Ready(Some(message)),
-                None => Poll::Pending,
+                None => {
+                    let _ = self.poll_started.take().map(|sender| sender.send(()));
+                    Poll::Pending
+                }
             }
         }
     }
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_are_parsed() {
-        let trailer_polled = Arc::new(AtomicBool::new(false));
+        let poll_count = Arc::new(AtomicUsize::new(0));
         let output = output_from_flight_message_stream(InlineMetricsStream {
             messages: VecDeque::from([
                 Ok(FlightMessage::AffectedRows {
@@ -1249,7 +1249,7 @@ mod tests {
                 }),
                 Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(99))),
             ]),
-            trailer_polled: trailer_polled.clone(),
+            poll_count: poll_count.clone(),
         })
         .await
         .unwrap();
@@ -1260,7 +1260,9 @@ mod tests {
             output.metrics.region_watermark_map(),
             Some(std::collections::HashMap::from([(7, 42)]))
         );
-        assert!(!trailer_polled.load(Ordering::SeqCst));
+        // The first message is consumed, but the trailing message must not be
+        // polled after inline metrics have made the output final.
+        assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1393,21 +1395,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_completion_task_is_cancelled_when_metrics_drop() {
+        let (poll_started_tx, poll_started_rx) = tokio::sync::oneshot::channel();
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
         let stream = CancelledMetricsStream {
             first: Some(Ok(FlightMessage::AffectedRows {
                 rows: 3,
                 metrics: None,
             })),
+            poll_started: Some(poll_started_tx),
             dropped: Some(dropped_tx),
         };
         let output = output_from_flight_message_stream(stream).await.unwrap();
         let metrics = output.metrics.clone();
+        poll_started_rx
+            .await
+            .expect("completion task must poll the stream");
         drop(output);
         drop(metrics);
-        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+
+        // The stream is pending and the compatibility timeout is 100 ms, so
+        // this shorter watchdog can only observe cancellation, not timeout
+        // completion.
+        tokio::time::timeout(Duration::from_millis(50), dropped_rx)
             .await
-            .expect("completion stream must be dropped")
+            .expect("completion stream must be dropped before compatibility timeout")
             .expect("drop sentinel must be delivered");
     }
 
