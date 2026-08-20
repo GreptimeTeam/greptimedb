@@ -277,28 +277,32 @@ where
             if let Some(metrics) = metrics {
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
             }
-            let next_message = flight_message_stream.next().await.transpose()?;
-            match next_message {
-                None => terminal_metrics.mark_ready(),
-                Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
-                    terminal_metrics.update(Some(parse_terminal_metrics(&s)?));
-                    terminal_metrics.mark_ready();
-                }
-                Some(FlightMessage::Metrics(_)) => {
-                    return IllegalFlightMessagesSnafu {
-                        reason: "'AffectedRows' Flight metadata already carries Metrics and cannot be followed by another Metrics message",
+            // AffectedRows is a complete output and must not wait for a possible
+            // trailing Metrics message. Keep consuming the Flight stream in the
+            // background so old servers can still deliver their standalone metrics.
+            terminal_metrics.mark_ready();
+            let trailing_metrics = terminal_metrics.clone();
+            common_runtime::spawn_global(async move {
+                while let Some(message) = flight_message_stream.next().await {
+                    match message {
+                        Ok(FlightMessage::Metrics(s)) => match parse_terminal_metrics(&s) {
+                            Ok(metrics) => trailing_metrics.update(Some(metrics)),
+                            Err(e) => {
+                                warn!("Failed to parse trailing terminal metrics: {e}");
+                                break;
+                            }
+                        },
+                        Ok(other) => {
+                            warn!("Ignoring unexpected trailing Flight message: {other:?}");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Failed to consume trailing Flight message: {e}");
+                            break;
+                        }
                     }
-                    .fail();
                 }
-                Some(other) => {
-                    return IllegalFlightMessagesSnafu {
-                        reason: format!(
-                            "'AffectedRows' Flight message can only be followed by a Metrics message, got {other:?}"
-                        ),
-                    }
-                    .fail();
-                }
-            }
+            });
             Ok(OutputWithMetrics {
                 output: Output::new_with_affected_rows(rows),
                 metrics: terminal_metrics,
@@ -339,6 +343,7 @@ where
                                 }
                                 Err(e) => {
                                     yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                                    break;
                                 }
                             };
                         }
@@ -1136,9 +1141,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_affected_rows_inline_metrics_rejects_trailing_metrics() {
+    async fn test_affected_rows_returns_without_waiting_for_trailing_messages() {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            output_from_flight_message_stream(
+                futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: Some(terminal_metrics_json()),
+                })] as Vec<Result<FlightMessage>>)
+                .chain(futures_util::stream::pending()),
+            ),
+        )
+        .await
+        .expect("AffectedRows must not wait for a trailing Flight message")
+        .unwrap();
+
+        assert!(matches!(output.output.data, OutputData::AffectedRows(3)));
+        assert!(output.metrics.is_ready());
+        assert_eq!(
+            output.metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 42)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_accepts_trailing_metrics() {
         let metrics_json = terminal_metrics_json();
-        let err = output_from_flight_message_stream(futures_util::stream::iter(vec![
+        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
             Ok(FlightMessage::AffectedRows {
                 rows: 3,
                 metrics: Some(metrics_json.clone()),
@@ -1147,12 +1176,9 @@ mod tests {
         ]
             as Vec<Result<FlightMessage>>))
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            err.to_string().contains("already carries Metrics"),
-            "unexpected error: {err:?}"
-        );
+        assert!(matches!(output.output.data, OutputData::AffectedRows(3)));
     }
 
     #[tokio::test]
@@ -1170,6 +1196,7 @@ mod tests {
         let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
             Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
             Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
             Ok(FlightMessage::Metrics("{not-json}".to_string())),
         ]
             as Vec<Result<FlightMessage>>))
@@ -1191,7 +1218,10 @@ mod tests {
         );
         assert!(record_batch_stream.next().await.is_none());
         assert!(terminal_metrics.is_ready());
-        assert!(terminal_metrics.get().is_none());
+        assert_eq!(
+            terminal_metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 1)]))
+        );
     }
 
     #[tokio::test]

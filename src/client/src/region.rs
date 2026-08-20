@@ -244,11 +244,21 @@ where
                         record_batch,
                     ));
                 }
-                FlightMessage::Metrics(s) => {
-                    // Metrics are updated when the message is polled after a batch.
-                    let m = serde_json::from_str(&s).ok().map(Arc::new);
-                    metrics_ref.swap(m);
-                }
+                FlightMessage::Metrics(s) => match serde_json::from_str(&s) {
+                    Ok(m) => {
+                        // Metrics are updated when the message is polled after a batch.
+                        metrics_ref.swap(Some(Arc::new(m)));
+                    }
+                    Err(e) => {
+                        yield IllegalFlightMessagesSnafu {
+                            reason: format!("Invalid terminal metrics message: {e}"),
+                        }
+                        .fail()
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu);
+                        break;
+                    }
+                },
                 _ => {
                     yield IllegalFlightMessagesSnafu {
                         reason: "A Schema message must be succeeded exclusively by a set of RecordBatch messages"
