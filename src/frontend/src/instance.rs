@@ -57,7 +57,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, info, tracing};
 use dashmap::DashMap;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
@@ -608,6 +608,29 @@ fn record_explain_analyze_timeout(
     let metrics = plan
         .and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok())
         .unwrap_or_else(|| serde_json::json!([]));
+    // Helps diagnose whether remote (stage 1) metrics were captured: a zero
+    // `remote_stage_count` on a distributed plan usually means live analyze
+    // metrics were not enabled, so only stale per-batch metrics were available.
+    let (stage_count, remote_stage_count) = metrics
+        .as_array()
+        .map(|stages| {
+            (
+                stages.len(),
+                stages
+                    .iter()
+                    .filter(|stage| {
+                        stage.get("stage").and_then(serde_json::Value::as_u64) == Some(1)
+                    })
+                    .count(),
+            )
+        })
+        .unwrap_or((0, 0));
+    info!(
+        plan_present = plan.is_some(),
+        stage_count = stage_count,
+        remote_stage_count = remote_stage_count,
+        "Recorded metrics for timed out EXPLAIN ANALYZE VERBOSE"
+    );
     recorder.force_record_with_payload(serde_json::json!({
         "timed_out": true,
         "metrics": metrics,
