@@ -86,10 +86,10 @@ struct OutputMetricsInner {
 
 impl Drop for OutputMetricsInner {
     fn drop(&mut self) {
-        if let Ok(completion_task) = self.completion_task.get_mut() {
-            if let Some(completion_task) = completion_task.take() {
-                completion_task.abort();
-            }
+        if let Ok(completion_task) = self.completion_task.get_mut()
+            && let Some(completion_task) = completion_task.take()
+        {
+            completion_task.abort();
         }
     }
 }
