@@ -90,7 +90,7 @@ greptime.semantic.entity.<entity_type>.descriptive = comma-separated column name
 greptime.semantic.entity.<entity_type>.scope       = comma-separated column names   (optional)
 ```
 
-Values are column names, and **`id` columns must be tag/primary-key columns** so identity stays indexable and joinable; identity buried in a JSON attribute bag must be projected to a column first via a pipeline. A latency metric table that describes both a `service` and the `host` it runs on:
+Values are column names — tag or field: trace pipelines flatten identifying attributes (e.g. `span_attributes.gen_ai.agent.id`) into field columns, and the read-time derivation works on any column. Identity buried in a JSON attribute bag must be projected to a column first via a pipeline. A latency metric table that describes both a `service` and the `host` it runs on:
 
 ```sql
 CREATE TABLE app_request_latency (
@@ -109,9 +109,9 @@ CREATE TABLE app_request_latency (
 
 This is the relational image of OTel's `EntityRef`, and **the column name is the identifying attribute key**: OTLP-ingested tables carry attributes as flattened columns named after the keys, so the declaration lists columns and the names double as the semantic keys. Two tables share an entity's identity by naming the identifying columns consistently; an explicit `semantic_key=column` mapping form is reserved as a backwards-compatible extension for tables whose column names diverge. **`scope` is not part of identity**: an OTel entity id is an attribute map with no generic scope dimension, so a namespace-like attribute that disambiguates identity belongs in `id` (uniqueness then holds by construction); the `scope` role only surfaces a namespace/environment value as a filter/display column.
 
-The same mechanism declares agent-telemetry entities (`entity.agent.id`, `entity.session.id`, ...), so agent events, which ride the existing `trace`/`event` signals with GenAI semantic conventions, join the graph with no new surface. Declarations appear in `information_schema.table_semantics`.
+The same mechanism declares agent-telemetry entities, whose types are derived from the GenAI semantic-convention attributes (`entity.gen_ai.agent.id`, `entity.gen_ai.conversation.id`, ...), so agent events, which ride the existing `trace`/`event` signals with GenAI semantic conventions, join the graph with no new surface. In practice most agent telemetry today carries ad-hoc attributes rather than `gen_ai.agent.*`/`gen_ai.tool.*`; explicit declarations are what map those non-standard columns onto the same entity types. Declarations appear in `information_schema.table_semantics`.
 
-The semantic vocabulary stays a closed whitelist, but entity types are open-ended, so the `entity.*` sub-namespace is validated by prefix + shape (`greptime.semantic.entity.<type>.{id|descriptive|scope}`, `<type>` in the OTel entity-type charset) instead of membership; column existence and the id-must-be-tag rule are enforced against the table schema at DDL time.
+The semantic vocabulary stays a closed whitelist, but entity types are open-ended, so the `entity.*` sub-namespace is validated by prefix + shape (`greptime.semantic.entity.<type>.{id|descriptive|scope}`, `<type>` in the OTel entity-type charset) instead of membership; column existence is enforced against the table schema at DDL time.
 
 ### Zero-configuration conventions
 
@@ -160,10 +160,12 @@ The relationship vocabulary is small, typed, and inverse-paired; stored directio
 | `runs_on` | `service.instance`/`process`/`k8s.pod` runs on `host`/`node` | attribute | `hosts` |
 | `contains` | `pod`→`container` | attribute/declared | `part_of` |
 | `part_of` | `service.instance`→`service`, `k8s.pod`→`k8s.workload` | attribute/declared | `contains` |
+| `uses` | `gen_ai.agent` uses `gen_ai.model` | trace | `used_by` |
+| `invokes` | `gen_ai.agent` invokes `gen_ai.tool` | trace | `invoked_by` |
 | `depends_on` | logical/declared dependency | declared | `dependency_of` |
 | `owns` | team/service owns dst | declared | `owned_by` |
 
-`calls` lives at the *logical* `service` layer; `runs_on`/`contains` live at the *runtime* `service.instance`/`process`/`k8s.pod` layer, with `part_of` linking the two; this avoids "one logical service runs_on five hosts". A custom `rel_type` is just a string; only derivation rules and inverse names are built-in. The trace-derived `calls` edge is qualified by attributes such as `connection_type` (`database`, `messaging_system`, or `virtual_node`) rather than exploded into many edge types.
+`calls` lives at the *logical* `service` layer; `runs_on`/`contains` live at the *runtime* `service.instance`/`process`/`k8s.pod` layer, with `part_of` linking the two; this avoids "one logical service runs_on five hosts". A custom `rel_type` is just a string; only derivation rules and inverse names are built-in. The trace-derived `calls` edge is qualified by attributes such as `connection_type` (`database`, `messaging`, or `virtual_node`) rather than exploded into many edge types.
 
 ## Read-time derivation
 
@@ -201,7 +203,7 @@ Edge endpoints are built from each trace table's `service` entity declaration (t
 
 **Attribute edges.** Shared attributes provide join keys; co-declaration or a relationship template provides the relationship semantics. A shared value alone determines neither direction nor edge type, so the derivation is rule-based, not join-everything. A table declaring both a `service.instance` and a `host` identity on the same rows derives `runs_on` between them: the row itself witnesses the relationship, and the built-in vocabulary fixes the direction. Cross-table edges require a declared relationship template (endpoint mappings, `rel_type`, direction): a derivation *rule* declared on schema, not per-instance edge data.
 
-**Agent edges.** Agent-telemetry tables that declare `agent`/`session`/`model`/`tool` entities feed the registry like any other table, and span structure derives `agent uses model` / `agent invoked tool` / `parent_agent calls agent` edges. Agents may also insert `provenance = 'agent'` edges with `confidence < 1.0` through the declared-edge table; provenance-in-identity keeps an LLM-inferred edge visibly distinct from observed structure and unable to clobber it.
+**Agent edges.** Agent-telemetry tables that declare `gen_ai.agent`/`gen_ai.model`/`gen_ai.tool` entities feed the registry like any other table, and span structure derives `gen_ai.agent uses gen_ai.model` / `gen_ai.agent invokes gen_ai.tool` / `parent_agent calls agent` edges. Agents may also insert `provenance = 'agent'` edges with `confidence < 1.0` through the declared-edge table; provenance-in-identity keeps an LLM-inferred edge visibly distinct from observed structure and unable to clobber it.
 
 **The contract.** Three principles are normative for the read-time graph:
 
@@ -289,7 +291,7 @@ Drawbacks:
 
 # Implementation Plan
 
-**M0 — Declaration.** The `entity.*` option sub-namespace with prefix+shape validation and the id-columns-must-be-tags DDL check; auto-stamp of `entity.service.id` on the OTLP trace path; declarations visible in `information_schema.table_semantics`.
+**M0 — Declaration.** The `entity.*` option sub-namespace with prefix+shape validation and the column-existence DDL check; auto-stamp of `entity.service.id` on the OTLP trace path; declarations visible in `information_schema.table_semantics`.
 
 **M1 — The read-time graph.** The computed tables in `greptime_private`, read-only, derived via typed DataFusion plans: the entity registry and the trace-derived `calls` edge first; then the Prometheus/Kubernetes implicit declarations and Remote Write 2.0 metadata intake, virtual nodes, attribute-derived edges, agent edges, the declared-edge table and its union, and the derivation contract (caller authorization, explicit time windows). Queryable with plain SQL and `WITH RECURSIVE` throughout.
 
@@ -315,6 +317,8 @@ Drawbacks:
 # Future Work
 
 - **Scheduled materialisation of the derivations** into stored tables (idempotent upserts keyed by `generation_id`) for deployments where read-time derivation over very large trace tables is too expensive; a streaming, trace-id-keyed Flow operator is the faithful long-term form and a separate Flow-engine discussion.
+- **GenAI implicit declarations and parent-child agent-edge derivation**: synthesize `gen_ai.*` declarations for trace tables carrying the semconv identity columns, and derive `uses`/`invokes` from span parent-child structure — in the GenAI conventions the tool/model identity and the agent identity ride different spans, so same-row co-occurrence alone cannot witness them.
+- **`ALTER TABLE` support for `greptime.semantic.*` options** (today they are CREATE-only), so declarations can be retrofitted onto existing tables without recreating them.
 - **eBPF-derived edges** from network-flow data, for environments without trace propagation.
 - **Change/deploy events as graph context**: every serious RCA treats "what changed" as a primary candidate.
 - **Durable exemplars**: persist OTLP metric exemplars as a `metric → span` link table, a cross-signal edge only an all-in-one store can keep.
