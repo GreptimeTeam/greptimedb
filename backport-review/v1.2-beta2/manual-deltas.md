@@ -76,14 +76,14 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 ### Other Query adaptations
 - #8659 differs because it is replayed on release protocol/server APIs.
 - #8898 is the dashboard version update only, adapted to the release file state.
-- The 14 exact stable patch-ID relationships are #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901. The remaining 20 verdicts are adapted.
+- The 14 exact stable patch-ID relationships are #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901. The remaining 21 verdicts are adapted, including the production-only partial #8751 carrier.
 
 ## Platform / Event
 
 ### #8825 — adapted
 - Upstream PR head: `bf947141753a9ea554aa1ca31637fdd3ad1429f3`; merge: `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1`.
 - Requested by WenyXu in [Issue #8892 comment 5353700059](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5353700059).
-- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final aggregate head: `81fd630955f16b9c45811539aa8434b47d5a875b` (the pre-version carrier remains `40e02ff6b62ad3445f7035e437bd9e322c8af31b`).
+- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final aggregate head: `6f150e01cd4221d4c62c5f7082f6d318b3110e00` (the pre-version carrier remains `40e02ff6b62ad3445f7035e437bd9e322c8af31b`).
 - Adds shared `common_base::protocol::Channel`, re-exports it as `session::context::Channel`, and retains stable wire values/names and `Unknown` behavior. Session dialect mapping remains through the `dialect_for_channel` helper; common-meta derives protocol names from shared `Channel`.
 - Semantic conflict resolution is explicit: shared mapping replaces `common_session::channel_protocol`, but the aggregate preserves the old-frontend fallback for omitted protobuf `event_context` and exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged.
 - Narrow test adaptations `9bf878f5` and `6595b5d7b` are retained and not reverted.
@@ -153,4 +153,16 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 ## Final provenance scope
 
-The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.
+The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly three additional relationships—full #8734, the release-compatible slice of #8392, and #8751—for 39 unique provenance relationships total.
+
+
+### #8751 — adapted, dependency closure required by #8734
+- Upstream merge: `b70daafc77c87806afd00521c368545a60e5f574`; aggregate carrier: `6f150e01cd4221d4c62c5f7082f6d318b3110e00`.
+- #8751 is required by the selected upstream #8734 event-context chain and adds one provenance closure relationship.
+- The upstream patch has a production cleanup hunk and a rollback regression-test hunk. The regression test was already present through the existing backport sequence, so the aggregate carrier intentionally contains only the production hunk.
+- This production-only partial carrier is classified `adapted`, not `exact`: stable patch IDs differ (`4d065c99ef5f69e5a801dc261eb19a432748d760` upstream versus `1ef6788196f8233a3d2ab7183216271210049f9a` carrier).
+- Raw evidence: [`range-diffs/pr-8751.txt`](range-diffs/pr-8751.txt).
+
+### Release and local verification evidence
+- Release run [32462587383](https://github.com/GreptimeTeam/greptimedb/actions/runs/32462587383) used the pre-#8751 head `81fd630955f16b9c45811539aa8434b47d5a875b`. Windows job `96713326607` failed in the composite Windows-artifact step; the overall run was later cancelled, so this is not final CI for the refreshed head and is not attributed to #8751 without further evidence.
+- Recorded local before/after results: Main before #8751 4/4 failed; Main after #8751 20/20 passed without retry, log SHA `fa9ae951fa78dce66c7b0aedc81cd172c9fc898445712162c616c99aeb7000d8`; common-meta after #8751 546/546 passed without retry, log SHA `84b54cdff1767a2c0e0683e59a955472eacabc769871c5d893940f07d932a79a`.

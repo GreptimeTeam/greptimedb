@@ -1,0 +1,49 @@
+PR #8751
+Upstream PR merge commit: b70daafc77c87806afd00521c368545a60e5f574
+Aggregate carrier: 6f150e01cd4221d4c62c5f7082f6d318b3110e00
+Upstream range: b70daafc77c87806afd00521c368545a60e5f574^..b70daafc77c87806afd00521c368545a60e5f574
+Aggregate range: 6f150e01cd4221d4c62c5f7082f6d318b3110e00^..6f150e01cd4221d4c62c5f7082f6d318b3110e00
+Dependency closure: required by upstream #8734's event-context sequence.
+Adaptation notes: upstream #8751 includes a production cleanup hunk and a rollback regression-test hunk. The aggregate carrier contains only the production cleanup because the regression-test hunk was already present through the existing backport sequence (in carrier e9ad585975022b206275afb2735ac480869bcd33). This is a production-only partial carrier, so stable patch-ID equality is not expected and the verdict is adapted rather than exact.
+Command: git range-diff --creation-factor=100 b70daafc77c87806afd00521c368545a60e5f574^..b70daafc77c87806afd00521c368545a60e5f574 6f150e01cd4221d4c62c5f7082f6d318b3110e00^..6f150e01cd4221d4c62c5f7082f6d318b3110e00
+
+1:  b70daafc7 ! 1:  6f150e01c fix(meta): release region guards after drop rollback (#8751)
+    @@
+      ## Metadata ##
+    -Author: Weny Xu <wenymedia@gmail.com>
+    +Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+         fix(meta): release region guards after drop rollback (#8751)
+     
+    -    Signed-off-by: WenyXu <wenymedia@gmail.com>
+    +    (cherry picked from commit b70daafc77c87806afd00521c368545a60e5f574)
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## src/common/meta/src/ddl/drop_table.rs ##
+     @@ src/common/meta/src/ddl/drop_table.rs: impl Procedure for DropTableProcedure {
+    @@ src/common/meta/src/ddl/drop_table.rs: impl Procedure for DropTableProcedure {
+          }
+      }
+      
+    -
+    - ## src/common/meta/src/ddl/tests/drop_table.rs ##
+    -@@ src/common/meta/src/ddl/tests/drop_table.rs: async fn test_on_rollback() {
+    -         procedure.on_delete_metadata().await.unwrap();
+    -         assert!(procedure.rollback_supported());
+    -         procedure.rollback(&ctx).await.unwrap();
+    -+        assert!(procedure.dropping_regions.is_empty());
+    -+        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+    -+
+    -+        // The physical table can be dropped again after the metadata rollback.
+    -+        let retry_task = new_drop_table_task("phy_table", physical_table_id, false);
+    -+        let mut retry = DropTableProcedure::new(retry_task, ddl_context.clone());
+    -+        retry.on_prepare().await.unwrap();
+    -+        retry.on_delete_metadata().await.unwrap();
+    -+        retry.rollback(&ctx).await.unwrap();
+    -+        assert!(retry.dropping_regions.is_empty());
+    -+        assert_eq!(ddl_context.memory_region_keeper.len(), 0);
+    -+
+    -         // Rollback again
+    -         assert!(procedure.rollback_supported());
+    -         procedure.rollback(&ctx).await.unwrap();

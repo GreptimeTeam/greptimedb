@@ -3857,7 +3857,7 @@ index 1725b1255..783fb7796 100644
  
          Some(Box::new(event))
 diff --git a/src/common/meta/src/ddl/drop_table.rs b/src/common/meta/src/ddl/drop_table.rs
-index d03f8166b..5db98a5e0 100644
+index d03f8166b..b73bd95e1 100644
 --- a/src/common/meta/src/ddl/drop_table.rs
 +++ b/src/common/meta/src/ddl/drop_table.rs
 @@ -420,14 +420,14 @@ impl Procedure for DropTableProcedure {
@@ -3879,6 +3879,18 @@ index d03f8166b..5db98a5e0 100644
          };
  
          Some(Box::new(event))
+@@ -456,7 +456,10 @@ impl Procedure for DropTableProcedure {
+                 &self.data.region_wal_options,
+             )
+             .await
+-            .map_err(ProcedureError::external)
++            .map_err(ProcedureError::external)?;
++
++        self.dropping_regions.clear();
++        Ok(())
+     }
+ }
+ 
 diff --git a/src/common/meta/src/ddl/drop_view.rs b/src/common/meta/src/ddl/drop_view.rs
 index 3804df686..32d843fbd 100644
 --- a/src/common/meta/src/ddl/drop_view.rs

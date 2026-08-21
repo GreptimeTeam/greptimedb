@@ -4,10 +4,10 @@
 
 - Release base: `2f5e97850e55d86c0ed9eff1719994c88b4450a0`
 - Aggregate branch: `work/release-v1.2-beta2-complete`
-- Aggregate head: `81fd630955f16b9c45811539aa8434b47d5a875b`
-- Aggregate commits: 47 (the prior 43-commit aggregate ancestry, two JSON2 layout commits, the #8902 carrier, and the final non-PR version identity commit)
-- CI: Historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, completed with conclusion `failure` on the superseded-base aggregate. Failed jobs: Clippy, Check Unused Dependencies, and Check (ubuntu-latest). SQLness, Compatibility Test, binary builds, Rustfmt, license, and fuzz jobs passed; `test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`, not because of failed prerequisites. No CI run or result is recorded for the final range `2f5e97850e55d86c0ed9eff1719994c88b4450a0..81fd630955f16b9c45811539aa8434b47d5a875b`.
-- `release/v1.2` was not updated by this work.
+- Aggregate head: `6f150e01cd4221d4c62c5f7082f6d318b3110e00`
+- Aggregate commits: 48 (the prior 47-commit aggregate history plus the #8751 dependency-closure carrier)
+- CI evidence: Historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, failed on the superseded-base aggregate: Clippy, Check Unused Dependencies, and Check (ubuntu-latest) failed; SQLness, Compatibility Test, binary builds, Rustfmt, license, and fuzz passed; `test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`. The later [Release run 32462587383](https://github.com/GreptimeTeam/greptimedb/actions/runs/32462587383) was triggered at the pre-#8751 head `81fd630955f16b9c45811539aa8434b47d5a875b`: its Windows job `96713326607` failed in the composite Windows-artifact step, while the overall run was subsequently cancelled and dependent jobs were cancelled. This Windows result is evidence of that run's job outcome, not a diagnosis of #8751 and not final CI for the refreshed head. No final CI result is claimed for `2f5e97850e55d86c0ed9eff1719994c88b4450a0..6f150e01cd4221d4c62c5f7082f6d318b3110e00`.
+- `release/v1.2` was fast-forwarded to the aggregate head `6f150e01cd4221d4c62c5f7082f6d318b3110e00`; the range remains linear with zero merge commits.
 
 ## How to read the artifacts
 
@@ -25,7 +25,7 @@
 
 ## Scope
 
-The review scope has 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. The current Issue body contains the original 31 requests, while the public comments add #8825, #8921, #8895, and #8901; [comment 5366438434](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5366438434), posted by `discord9` at `2026-08-21T07:12:57Z`, publicly requests #8902. Official PR #8921 is now in the release base `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, so it is base-present and is not represented as an aggregate carrier. #8672 and #8699 remain base-present as well. The other public Issue-requested PRs are represented by backport mappings; #8825 remains carried by `d18430b874f9c8054747dbf688585cd7d2988e3e`, and #8902 is carried by the final pre-version carrier `40e02ff6b62ad3445f7035e437bd9e322c8af31b`, followed by the non-PR version identity commit `81fd630955f16b9c45811539aa8434b47d5a875b`. The dependency closure adds exactly two provenance relationships: full #8734 and a release-compatible slice of #8392, for 38 total provenance relationships. The patch-ID verdict contains 14 exact stable patch-ID relationships—#8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901—and 20 adapted relationships.
+The review scope has 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. The current Issue body contains the original 31 requests, while the public comments add #8825, #8921, #8895, and #8901; [comment 5366438434](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5366438434), posted by `discord9` at `2026-08-21T07:12:57Z`, publicly requests #8902. Official PR #8921 is now in the release base `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, so it is base-present and is not represented as an aggregate carrier. #8672 and #8699 remain base-present as well. The other public Issue-requested PRs are represented by backport mappings; #8825 remains carried by `d18430b874f9c8054747dbf688585cd7d2988e3e`, and #8902 is carried by the final pre-version carrier `40e02ff6b62ad3445f7035e437bd9e322c8af31b`, followed by the non-PR version identity commit `81fd630955f16b9c45811539aa8434b47d5a875b`. The dependency closure adds exactly three provenance relationships: full #8734, a release-compatible slice of #8392, and #8751 (upstream merge b70daafc77c87806afd00521c368545a60e5f574), for 39 total provenance relationships. The patch-ID verdict contains 14 exact stable patch-ID relationships—#8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901—and 21 adapted relationships, including the production-only partial #8751 carrier.
 
 ## Mapping classes
 
@@ -36,14 +36,28 @@ The review scope has 36 public Issue-requested PR relationships: the original 31
 - **dependency**: not listed in the original 31 but required by the selected event chain; #8734.
 - **release-extra**: compatibility, lock, regression-test, formatting, generated-result, or non-PR release-version correction that is not represented as an upstream PR. The final version identity commit is classified here.
 
+## Dependency closure: upstream #8751 required by #8734
+
+Upstream PR [#8751](https://github.com/GreptimeTeam/greptimedb/pull/8751), merge `b70daafc77c87806afd00521c368545a60e5f574`, is recorded as a dependency-closure relationship required by upstream [#8734](https://github.com/GreptimeTeam/greptimedb/pull/8734). The aggregate carrier is `6f150e01cd4221d4c62c5f7082f6d318b3110e00`, and the release-base parent remains `2f5e97850e55d86c0ed9eff1719994c88b4450a0`.
+
+The upstream PR has two hunks: a production cleanup in `src/common/meta/src/ddl/drop_table.rs` and a rollback regression-test hunk in `src/common/meta/src/ddl/tests/drop_table.rs`. The regression test was already present through the existing #8734 backport sequence, so the refreshed aggregate carrier contains only the production hunk. This is a production-only partial upstream carrier; its stable patch ID is therefore not equal to the full upstream patch, and `patch-id-verdict.tsv` classifies #8751 as **adapted**, not exact. The raw comparison is [`range-diffs/pr-8751.txt`](range-diffs/pr-8751.txt).
+
+### Verification evidence
+
+- Before #8751: local Main verification recorded a 4/4 failure.
+- After #8751: Main recorded a 20/20 no-retry pass, log SHA `fa9ae951fa78dce66c7b0aedc81cd172c9fc898445712162c616c99aeb7000d8`.
+- After #8751: common-meta recorded a 546/546 no-retry pass, log SHA `84b54cdff1767a2c0e0683e59a955472eacabc769871c5d893940f07d932a79a`.
+
+These are local before/after verification records; they do not overstate the cancelled Release run as final CI.
+
 ## Accepted breaking-format exception
 
 PR #8824 is accepted by explicit release-owner direction in this backport session. Public artifacts do not identify a named approver or date; Issue comment [5352919911](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5352919911) is the public record of the accepted exception, not evidence of independent third-party approval. It changes native-histogram persisted Struct children in place (`UInt32/UInt64` fields to `Int32/Int64`, including `count_u64`/`zero_count_u64` becoming `count_i64`/`zero_count_i64`) without a migration, downgrade, or mixed-version compatibility layer. This is an accepted release risk based on the feature being believed unused, not a compatibility guarantee.
 
-## Final rebased range and appended #8902
+## Final rebased range, appended #8902, and dependency closure #8751
 
-The final review range is `2f5e97850e55d86c0ed9eff1719994c88b4450a0..81fd630955f16b9c45811539aa8434b47d5a875b`, a linear 47-commit range. The superseded beta2 base `8eeff8b4417e6fb675a66cecbdba40060322785c` and endpoint `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab` are historical provenance only; all active aggregate carrier fields in the TSV indexes are remapped to the rebased commits. Official #8921 is the release-base commit `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, not a duplicate aggregate carrier.
+The final review range is `2f5e97850e55d86c0ed9eff1719994c88b4450a0..6f150e01cd4221d4c62c5f7082f6d318b3110e00`, a linear 48-commit range. The superseded beta2 base `8eeff8b4417e6fb675a66cecbdba40060322785c` and endpoint `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab` are historical provenance only; all active aggregate carrier fields in the TSV indexes are remapped to the rebased commits. Official #8921 is the release-base commit `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, not a duplicate aggregate carrier.
 
-The three selected PRs #8672, #8699, and #8921 are base-present; the other selected PRs have aggregate provenance. Thus the machine-readable indexes contain exactly 36 public Issue-requested PR rows plus exactly the two closure rows (#8734 and #8392): 38 unique provenance relationships.
+The three selected PRs #8672, #8699, and #8921 are base-present; the other selected PRs have aggregate provenance. Thus the machine-readable indexes contain exactly 36 public Issue-requested PR rows plus exactly the three closure rows (#8734, #8392, and #8751): 39 unique provenance relationships.
 
-PR #8902 is carried by pre-version commit `40e02ff6b62ad3445f7035e437bd9e322c8af31b`; the final version identity is recorded by non-PR release-extra commit `81fd630955f16b9c45811539aa8434b47d5a875b`; its readable decision is [Dictionary group-by fast path](decisions/dictionary-groupby-fast-path.md), and its raw patch comparison is [#8902](range-diffs/pr-8902.txt).
+PR #8902 is carried by pre-version commit `40e02ff6b62ad3445f7035e437bd9e322c8af31b`; the final version identity is recorded by non-PR release-extra commit `6f150e01cd4221d4c62c5f7082f6d318b3110e00`; its readable decision is [Dictionary group-by fast path](decisions/dictionary-groupby-fast-path.md), and its raw patch comparison is [#8902](range-diffs/pr-8902.txt).
