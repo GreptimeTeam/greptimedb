@@ -76,14 +76,14 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 ### Other Query adaptations
 - #8659 differs because it is replayed on release protocol/server APIs.
 - #8898 is the dashboard version update only, adapted to the release file state.
-- The 14 exact stable patch-ID relationships are #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901. The remaining 21 verdicts are adapted, including the production-only partial #8751 carrier.
+- The 14 exact stable patch-ID relationships are #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901. The remaining 22 verdicts are adapted, including the production-only partial #8751 carrier and the test-only #8752 follow-up.
 
 ## Platform / Event
 
 ### #8825 — adapted
 - Upstream PR head: `bf947141753a9ea554aa1ca31637fdd3ad1429f3`; merge: `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1`.
 - Requested by WenyXu in [Issue #8892 comment 5353700059](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5353700059).
-- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final aggregate head: `6f150e01cd4221d4c62c5f7082f6d318b3110e00` (the pre-version carrier remains `40e02ff6b62ad3445f7035e437bd9e322c8af31b`).
+- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final aggregate head: `cb52adcbf798d3d2f009874f46dc5d476073bd8c` (the pre-version carrier remains `40e02ff6b62ad3445f7035e437bd9e322c8af31b`).
 - Adds shared `common_base::protocol::Channel`, re-exports it as `session::context::Channel`, and retains stable wire values/names and `Unknown` behavior. Session dialect mapping remains through the `dialect_for_channel` helper; common-meta derives protocol names from shared `Channel`.
 - Semantic conflict resolution is explicit: shared mapping replaces `common_session::channel_protocol`, but the aggregate preserves the old-frontend fallback for omitted protobuf `event_context` and exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged.
 - Narrow test adaptations `9bf878f5` and `6595b5d7b` are retained and not reverted.
@@ -153,7 +153,7 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 ## Final provenance scope
 
-The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly three additional relationships—full #8734, the release-compatible slice of #8392, and #8751—for 39 unique provenance relationships total.
+The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure/follow-up contributes exactly four additional relationships—full #8734, the release-compatible slice of #8392, #8751, and test-only #8752—for 40 unique provenance relationships total.
 
 
 ### #8751 — adapted, dependency closure required by #8734
@@ -166,3 +166,9 @@ The final review records 36 public Issue-requested PR relationships: the origina
 ### Release and local verification evidence
 - Release run [32462587383](https://github.com/GreptimeTeam/greptimedb/actions/runs/32462587383) used the pre-#8751 head `81fd630955f16b9c45811539aa8434b47d5a875b`. Windows job `96713326607` failed in the composite Windows-artifact step; the overall run was later cancelled, so this is not final CI for the refreshed head and is not attributed to #8751 without further evidence.
 - Recorded local before/after results: Main before #8751 4/4 failed; Main after #8751 20/20 passed without retry, log SHA `fa9ae951fa78dce66c7b0aedc81cd172c9fc898445712162c616c99aeb7000d8`; common-meta after #8751 546/546 passed without retry, log SHA `84b54cdff1767a2c0e0683e59a955472eacabc769871c5d893940f07d932a79a`.
+
+### #8752 — adapted test-only secure_fs follow-up / dependency closure
+- Upstream merge: `4e43c279ff29e9071394f85b90b874906115d29f`; aggregate carrier: `cb52adcbf798d3d2f009874f46dc5d476073bd8c`.
+- This is the #8735/#8708 secure_fs behavior follow-up. The target parent lacks #8735 context, so the carrier is adapted to the release parent; the resulting `test_lister_skips_entry_removed_during_iteration` body matches final main and keeps the portable path assertion while gating `is_none()` to non-Windows.
+- It is test-only and adds the 40th provenance relationship. Raw evidence: [`range-diffs/pr-8752.txt`](range-diffs/pr-8752.txt).
+- Oracle: APPROVE. Focused Main 20/20 no-retry log SHA `fc831f2b2d51c79e8b1fbc6267e8fe8bac90d06c746e1136067e9bcbcbec40df`; fixer focused and full object-store 20/20 no-retry passes. No native Windows post-fix run yet; no final CI success claimed. Release run `32466550985`, Windows job `96725255397`, failed.

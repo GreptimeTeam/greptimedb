@@ -13,7 +13,7 @@
 - Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`
 - Aggregate carrier parent: `6595b5d7bf1f59587bf89676d420db7371cdc459`
 - Aggregate carrier link: [d18430b874f9c8054747dbf688585cd7d2988e3e](https://github.com/GreptimeTeam/greptimedb/commit/d18430b874f9c8054747dbf688585cd7d2988e3e)
-- Aggregate final head: `6f150e01cd4221d4c62c5f7082f6d318b3110e00` (pre-version carrier: `40e02ff6b62ad3445f7035e437bd9e322c8af31b`)
+- Aggregate final head: `cb52adcbf798d3d2f009874f46dc5d476073bd8c` (pre-version carrier: `40e02ff6b62ad3445f7035e437bd9e322c8af31b`)
 - Narrow release test adaptations retained before the carrier: `9bf878f562518d30a412138ad4244d7d8e7867e6`, `6595b5d7bf1f59587bf89676d420db7371cdc459`.
 
 ## Why no range-diff is recorded

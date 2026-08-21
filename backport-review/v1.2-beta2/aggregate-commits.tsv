@@ -46,3 +46,4 @@ fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d	feat: add JSON2 storage layout settings
 40e02ff6b62ad3445f7035e437bd9e322c8af31b	fix(query): restore columnar group-by for dictionary-encoded tags
 81fd630955f16b9c45811539aa8434b47d5a875b	chore: bump version to 1.2.0-beta.2
 6f150e01cd4221d4c62c5f7082f6d318b3110e00	fix(meta): release region guards after drop rollback (#8751)
+cb52adcbf798d3d2f009874f46dc5d476073bd8c	fix(object-store): make removed-entry lister test portable (#8752)

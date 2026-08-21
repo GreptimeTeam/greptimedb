@@ -1,0 +1,39 @@
+1:  4e43c279f ! 1:  cb52adcbf fix(object-store): fix unused import on Windows after #8735 (#8752)
+    @@ Metadata
+     Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+    -    fix(object-store): fix unused import on Windows after #8735 (#8752)
+    +    fix(object-store): make removed-entry lister test portable (#8752)
+     
+    -    fix(object-store): make removed-entry lister test portable
+    -
+    -    On Windows, DirEntry is a FindFirstFileW snapshot: file_type() and
+    -    metadata() keep returning cached data after the file is removed, so
+    -    read_list_entry() may yield the stale entry instead of None. The strong
+    -    assertion is Unix-specific; keep the portable checks (call succeeds,
+    -    path is correct) on all platforms and gate only the is_none() assertion.
+    -
+    -    Signed-off-by: discord9 <55937128+discord9@users.noreply.github.com>
+    +    (cherry picked from commit 4e43c279ff29e9071394f85b90b874906115d29f)
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## src/object-store/src/secure_fs.rs ##
+     @@ src/object-store/src/secure_fs.rs: mod tests {
+    -     // On Windows, `std::fs::DirEntry` is a snapshot taken by
+    -     // `FindFirstFileW`: `file_type()` and `metadata()` keep returning the
+    -     // cached data even after the file is removed, so `read_list_entry`
+    --    // cannot observe the deletion and returns `Some` instead of `None`.
+    --    // This test only applies to platforms where metadata is fetched from
+    --    // the live filesystem (e.g. Unix `lstat` returns `ENOENT` after
+    --    // removal, which `read_list_entry` turns into `None`).
+    --    #[cfg(not(windows))]
+    +         assert!(operator.list("file/").await.unwrap().is_empty());
+    +     }
+    + 
+    ++    // On Windows, `std::fs::DirEntry` is a snapshot taken by
+    ++    // `FindFirstFileW`: `file_type()` and `metadata()` keep returning the
+    ++    // cached data even after the file is removed, so `read_list_entry`
+     +    // may return `Some` with the stale entry. On platforms where metadata
+     +    // is fetched from the live filesystem (e.g. Unix `lstat` returns
+     +    // `ENOENT` after removal), `read_list_entry` returns `None` instead.

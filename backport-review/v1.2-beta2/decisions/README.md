@@ -2,7 +2,7 @@
 
 **Start here.** This is the canonical, priority-ordered index of behavior that was
 reconstructed, sliced, folded, or adapted for v1.2.0-beta.2. The aggregate head
-is [`6f150e01cd4`](https://github.com/GreptimeTeam/greptimedb/commit/6f150e01cd4221d4c62c5f7082f6d318b3110e00);
+is [`6f150e01cd4`](https://github.com/GreptimeTeam/greptimedb/commit/cb52adcbf798d3d2f009874f46dc5d476073bd8c);
 links to the shipping commits below are immutable commit links.
 
 A range-diff is an audit of the *difference between two patches*, not the full
@@ -11,9 +11,9 @@ not edited.
 
 ## Canonical CI status
 
-The recorded historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, failed on the superseded-base aggregate: Clippy, Check Unused Dependencies, and Check (ubuntu-latest) failed; SQLness, Compatibility Test, binary builds, Rustfmt, license, and fuzz passed; `test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`. The later [Release run 32462587383](https://github.com/GreptimeTeam/greptimedb/actions/runs/32462587383) ran at pre-#8751 head `81fd630955f16b9c45811539aa8434b47d5a875b`; Windows job `96713326607` failed in the composite Windows-artifact step, and the overall run was subsequently cancelled with dependent jobs cancelled. This is Windows job evidence, not a root-cause attribution to #8751 and not final CI for the refreshed head.
+The recorded historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, failed on the superseded-base aggregate: Clippy, Check Unused Dependencies, and Check (ubuntu-latest) failed; SQLness, Compatibility Test, binary builds, Rustfmt, license, and fuzz passed; `test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`. The later [Release run 32462587383](https://github.com/GreptimeTeam/greptimedb/actions/runs/32462587383) ran at pre-#8751 head `81fd630955f16b9c45811539aa8434b47d5a875b`; Windows job `96713326607` failed in the composite Windows-artifact step, and the overall run was subsequently cancelled with dependent jobs cancelled. The refreshed [Release run 32466550985](https://github.com/GreptimeTeam/greptimedb/actions/runs/32466550985) Windows job `96725255397` also failed. These are Windows job outcomes, not root-cause attribution and not final CI success for the refreshed head. Final-head tag-push [Release run 32470573285](https://github.com/GreptimeTeam/greptimedb/actions/runs/32470573285) has started at `cb52adcbf798d3d2f009874f46dc5d476073bd8c`; no final result is claimed yet.
 
-Recorded local before/after verification is: before #8751, Main 4/4 failed; after #8751, Main 20/20 passed with no retry (log SHA `fa9ae951fa78dce66c7b0aedc81cd172c9fc898445712162c616c99aeb7000d8`), and common-meta 546/546 passed with no retry (log SHA `84b54cdff1767a2c0e0683e59a955472eacabc769871c5d893940f07d932a79a`). No final CI result is claimed for the refreshed range `2f5e97850e55d86c0ed9eff1719994c88b4450a0..6f150e01cd4221d4c62c5f7082f6d318b3110e00`; these are recorded local verification results only.
+Recorded local before/after verification is: before #8751, Main 4/4 failed; after #8751, Main 20/20 passed with no retry (log SHA `fa9ae951fa78dce66c7b0aedc81cd172c9fc898445712162c616c99aeb7000d8`), and common-meta 546/546 passed with no retry (log SHA `84b54cdff1767a2c0e0683e59a955472eacabc769871c5d893940f07d932a79a`). For #8752, focused Main passed 20/20 without retry (log SHA `fc831f2b2d51c79e8b1fbc6267e8fe8bac90d06c746e1136067e9bcbcbec40df`); fixer focused and full object-store verification each recorded 20/20 without retry. No final CI result is claimed for the refreshed range `2f5e97850e55d86c0ed9eff1719994c88b4450a0..cb52adcbf798d3d2f009874f46dc5d476073bd8c`; these are recorded local verification results only.
 
 ## 1. BLOCKING / compatibility decisions
 
@@ -64,8 +64,14 @@ Exact entries with nearby context can be reviewed from [dependency and baseline 
 
 ## Final provenance scope
 
-The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Three selected PRs—#8672, #8699, and #8921—are base-present. The dependency closure adds exactly three relationships: full #8734, the release-compatible slice of #8392, and #8751 (upstream merge `b70daafc77c87806afd00521c368545a60e5f574`). The indexes therefore contain 39 unique PR provenance relationships total; the non-PR version identity commit is recorded separately in the aggregate provenance ledger. The patch-ID verdict contains 14 exact stable patch-ID relationships and 21 adapted relationships; its exact list includes #8901. The #8895 and #8901 mappings and complete upstream ranges are covered in [JSON2 merge/layout coverage](json2-mergescan.md) and [`manual-deltas.md`](../manual-deltas.md).
+The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Three selected PRs—#8672, #8699, and #8921—are base-present. The dependency closure/follow-up adds exactly four relationships: full #8734, the release-compatible slice of #8392, #8751, and test-only #8752 (upstream merge `4e43c279ff29e9071394f85b90b874906115d29f`). The indexes therefore contain 40 unique PR provenance relationships total; the non-PR version identity commit is recorded separately in the aggregate provenance ledger. The patch-ID verdict contains 14 exact stable patch-ID relationships and 22 adapted relationships; its exact list includes #8901. The #8895 and #8901 mappings and complete upstream ranges are covered in [JSON2 merge/layout coverage](json2-mergescan.md) and [`manual-deltas.md`](../manual-deltas.md).
 
 ## Recorded verification context
 
 See the [canonical CI status](#canonical-ci-status) above. Aggregate history and range-diffs are linked evidence; this index makes no claim of tests beyond those recorded in the existing artifacts.
+
+## Test-only follow-up: #8752 secure_fs portability
+
+Upstream [#8752](https://github.com/GreptimeTeam/greptimedb/pull/8752), merge `4e43c279ff29e9071394f85b90b874906115d29f`, is recorded as a test-only dependency-closure/follow-up relationship for the #8735/#8708 secure_fs behavior chain. The target parent lacked #8735 context; the adapted carrier `cb52adcbf798d3d2f009874f46dc5d476073bd8c` retains the final-main test body, with portable call/path checks and the stronger `is_none()` assertion only on non-Windows. It is the 40th relationship. Raw evidence is [`pr-8752.txt`](../range-diffs/pr-8752.txt).
+
+Oracle: **APPROVE**. Focused Main
