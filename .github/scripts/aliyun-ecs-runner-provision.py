@@ -117,19 +117,15 @@ set -euo pipefail
 
 DISK_SERIAL="{cache_disk_id.replace("-", "")}"
 
-# Wait for the attached cache disk. Prefer /dev/disk/by-id (virtio naming on
-# Aliyun carries the disk id) and fall back to the block device serial.
+# Wait for the attached cache disk. The guest-visible serial is the disk id
+# without dashes, but virtio serials are truncated to 20 characters (Aliyun
+# disk ids are longer), so match the device serial as a PREFIX of the full
+# disk serial, never the other way round. lsblk covers both virtio-blk
+# (/dev/vdX) and NVMe (/dev/nvmeXn1) attachments.
 device=""
 for _ in $(seq 1 150); do
-  for candidate in /dev/disk/by-id/virtio-*; do
-    [[ -e "${{candidate}}" ]] || continue
-    case "${{candidate}}" in
-      *"${{DISK_SERIAL}}"*) device="$(readlink -f "${{candidate}}")"; break ;;
-    esac
-  done
-  if [[ -z "${{device}}" ]]; then
-    device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" '$2 == serial {{ print $1; exit }}')"
-  fi
+  device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \
+    'length($2) > 0 && index(serial, $2) == 1 {{ print $1; exit }}')"
   [[ -n "${{device}}" ]] && break
   sleep 2
 done
