@@ -117,16 +117,17 @@ set -euo pipefail
 
 DISK_SERIAL="{cache_disk_id.replace("-", "")}"
 
-# Wait for the attached cache disk. The guest-visible serial is the disk id
-# without dashes, but virtio serials are truncated to 20 characters (Aliyun
-# disk ids are longer), so match the device serial as a PREFIX of the full
-# disk serial, never the other way round. lsblk covers both virtio-blk
-# (/dev/vdX) and NVMe (/dev/nvmeXn1) attachments.
+# Wait for the attached cache disk. The guest-visible serial derives from
+# the disk id without dashes, but the derivation differs by disk interface:
+# virtio keeps the first 20 characters (ids are longer than the 20-char
+# serial limit), NVMe drops the leading "d". A SUBSTRING match against the
+# full disk serial covers both, and lsblk covers both virtio-blk (/dev/vdX)
+# and NVMe (/dev/nvmeXn1) attachments.
 device=""
-echo "Waiting for cache disk with serial ${{DISK_SERIAL}} (virtio may truncate to 20 chars)"
+echo "Waiting for cache disk with serial ${{DISK_SERIAL}} (guest serial may be truncated/derived)"
 for i in $(seq 1 150); do
   device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \
-    'length($2) > 0 && index(serial, $2) == 1 {{ print $1; exit }}')"
+    'length($2) > 0 && index(serial, $2) > 0 {{ print $1; exit }}')"
   [[ -n "${{device}}" ]] && break
   if (( i % 15 == 1 )); then
     echo "Still waiting for cache disk; block devices seen so far:"
@@ -343,7 +344,11 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="200"),
+        # Sized for the per-run data, not the caches (those live on the
+        # retained disk): the image (~12G), the source checkout, and the
+        # base+candidate cluster data homes (WAL + SSTs, tens of GB for the
+        # routine cases). Deleted with the instance.
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="100"),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),
