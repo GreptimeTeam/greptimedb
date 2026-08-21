@@ -46,6 +46,7 @@ import base64
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
@@ -180,8 +181,20 @@ def github_api(token: str, method: str, path: str, body: dict | None = None) -> 
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        # GitHub's error body says exactly why (e.g. "Must have admin rights to
+        # Repository" for a PAT without the required scope); surface it instead
+        # of a bare "HTTP Error 403".
+        body = error.read().decode("utf-8", "replace")
+        raise SystemExit(
+            f"GitHub API {method} {path} failed: HTTP {error.code}: {body}\n"
+            "The token comes from the GH_PERSONAL_ACCESS_TOKEN secret; it needs "
+            "'repo' scope (classic PAT) or 'Administration: write' on the "
+            "repository (fine-grained PAT)."
+        ) from error
 
 
 def create_registration_token(github_token: str, repo: str) -> str:
