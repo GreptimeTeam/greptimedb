@@ -24,10 +24,11 @@ pub mod tests;
 pub use common::{
     DEFAULT_PBKDF2_SHA256_ITERATIONS, DEFAULT_PBKDF2_SHA256_SALT_LEN, HashedPassword, Identity,
     MAX_PBKDF2_SHA256_ITERATIONS, MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN,
-    PG_SCRAM_SHA256_KEY_LEN, Password, PgScramSha256Verifier, auth_mysql,
+    PG_SCRAM_SHA256_KEY_LEN, Password, PgScramSha256Verifier, auth_mysql, auth_mysql_with_verifier,
     format_mysql_native_password_verifier, format_pbkdf2_sha256_password_verifier,
     format_pg_scram_sha256_password_verifier, mysql_native_password_hash,
-    static_user_provider_from_option, user_provider_from_option, userinfo_by_name,
+    parse_pg_scram_sha256_password_verifier, static_user_provider_from_option,
+    user_provider_from_option, userinfo_by_name, validate_mysql_native_password_verifier,
 };
 pub use permission::{
     ALL_ACTIONS, AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,
@@ -38,7 +39,7 @@ pub use permission::{
 };
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;
-pub use user_provider::{PgAuthInfo, UserProvider};
+pub use user_provider::{MysqlAuthMethod, PgAuthInfo, UserProvider};
 
 /// pub type alias
 pub type UserInfoRef = std::sync::Arc<dyn UserInfo>;
