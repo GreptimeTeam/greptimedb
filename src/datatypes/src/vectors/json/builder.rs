@@ -35,7 +35,7 @@ use crate::types::StructType;
 use crate::types::json_type::{JsonNativeType, is_include};
 use crate::value::{ListValue, StructValue, StructValueRef, Value};
 use crate::vectors::json::variant::{append_json_variant, append_json_variant_ref, variant_field};
-use crate::vectors::{Helper, MutableVector, StructVectorBuilder};
+use crate::vectors::{Helper, MutableVector, NullVector, StructVectorBuilder};
 
 type JsonObjectValue = BTreeMap<String, JsonVariant>;
 
@@ -827,13 +827,19 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        self.try_build().unwrap_or_else(|e| panic!("{:?}", e))
+        self.try_build().unwrap_or_else(|e| {
+            // Just try to avoid panicking here.
+            common_telemetry::error!(e; "Unable to build JSON2 vector");
+            Arc::new(NullVector::new(self.len()))
+        })
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
-        self.state
-            .try_build_cloned()
-            .unwrap_or_else(|e| panic!("{:?}", e))
+        self.state.try_build_cloned().unwrap_or_else(|e| {
+            // Just try to avoid panicking here.
+            common_telemetry::error!(e; "Unable to build JSON2 vector");
+            Arc::new(NullVector::new(self.len()))
+        })
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
