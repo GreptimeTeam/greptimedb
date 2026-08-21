@@ -22,7 +22,7 @@ use snafu::ensure;
 use crate::error::{self, Result};
 use crate::key::schema_name::SchemaNameKey;
 use crate::reconciliation::reconcile_database::reconcile_tables::ReconcileTables;
-use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
+use crate::reconciliation::reconcile_database::{DatabasePhase, ReconcileDatabaseContext, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReconcileDatabaseStart;
@@ -54,6 +54,9 @@ impl State for ReconcileDatabaseStart {
             "Reconcile database: {}, catalog: {}, procedure_id: {}",
             ctx.persistent_ctx.schema, ctx.persistent_ctx.catalog, procedure_ctx.procedure_id,
         );
+        ctx.persistent_ctx
+            .result_summary
+            .mark_phase_completed(DatabasePhase::Start);
         Ok((Box::new(ReconcileTables), Status::executing(true)))
     }
 
