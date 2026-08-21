@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::status_to_tonic_code;
@@ -19,14 +21,20 @@ use common_telemetry::error;
 use futures::SinkExt;
 use otel_arrow_rust::Consumer;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsService;
-use otel_arrow_rust::proto::opentelemetry::arrow::v1::{BatchArrowRecords, BatchStatus};
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
+    BatchArrowRecords, BatchStatus, StatusCode as ArrowStatusCode,
+};
+use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
+use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 use tonic::metadata::{Entry, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 use crate::grpc::context_auth;
-use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::query_handler::{MetricsIngestOutcome, OpenTelemetryProtocolHandlerRef};
+
+const EXPONENTIAL_HISTOGRAM_UNSUPPORTED: &str = "OTel Arrow exponential histograms are unsupported because the Arrow wire format omits zero_threshold";
 
 pub struct OtelArrowServiceHandler<T> {
     handler: T,
@@ -39,6 +47,30 @@ impl<T> OtelArrowServiceHandler<T> {
             handler,
             user_provider,
         }
+    }
+}
+
+fn batch_status(
+    batch_id: i64,
+    outcome: MetricsIngestOutcome,
+    has_exponential_histogram_data_points: bool,
+) -> BatchStatus {
+    let status_code = if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+        ArrowStatusCode::InvalidArgument
+    } else {
+        ArrowStatusCode::Ok
+    };
+    let status_message = match outcome.error_message {
+        Some(_) if has_exponential_histogram_data_points => {
+            EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
+        }
+        Some(message) => message,
+        None => String::new(),
+    };
+    BatchStatus {
+        batch_id,
+        status_code: status_code as i32,
+        status_message,
     }
 }
 
@@ -55,6 +87,11 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
 
         let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
+        let query_ctx = {
+            let mut ctx = query_ctx.fork();
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx::default()));
+            Arc::new(ctx)
+        };
 
         let handler = self.handler.clone();
 
@@ -73,11 +110,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                let batch_status = BatchStatus {
-                    batch_id: batch.batch_id,
-                    status_code: 0,
-                    status_message: Default::default(),
-                };
+                let batch_id = batch.batch_id;
                 let request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
                     error::HandleOtelArrowRequestSnafu {
                         err_msg: e.to_string(),
@@ -98,17 +131,33 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                // use metric engine by default
-                if let Err(e) = handler.metrics(request, query_ctx.clone()).await {
-                    let _ = sender
-                        .send(Err(Status::new(
-                            status_to_tonic_code(e.status_code()),
-                            e.to_string(),
-                        )))
-                        .await;
-                    error!(e; "Failed to ingest metrics from otel-arrow");
-                    return;
-                }
+                let has_exponential_histogram_data_points = request
+                    .resource_metrics
+                    .iter()
+                    .flat_map(|resource| &resource.scope_metrics)
+                    .flat_map(|scope| &scope.metrics)
+                    .any(|item| {
+                        matches!(
+                            item.data.as_ref(),
+                            Some(metric::Data::ExponentialHistogram(histogram))
+                                if !histogram.data_points.is_empty()
+                        )
+                    });
+                let outcome = match handler.metrics(request, query_ctx.clone()).await {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        let _ = sender
+                            .send(Err(Status::new(
+                                status_to_tonic_code(e.status_code()),
+                                e.to_string(),
+                            )))
+                            .await;
+                        error!(e; "Failed to ingest metrics from otel-arrow");
+                        return;
+                    }
+                };
+                let batch_status =
+                    batch_status(batch_id, outcome, has_exponential_histogram_data_points);
                 let _ = sender.send(Ok(batch_status)).await;
             }
         });
@@ -129,5 +178,27 @@ impl Interceptor for HeaderInterceptor {
             }
         }
         Ok(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_status_explains_arrow_exponential_histogram_limit() {
+        let status = batch_status(
+            7,
+            MetricsIngestOutcome {
+                rejected_data_points: 1,
+                error_message: Some("internal OTLP rejection detail".to_string()),
+                ..Default::default()
+            },
+            true,
+        );
+
+        assert_eq!(7, status.batch_id);
+        assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
+        assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
     }
 }

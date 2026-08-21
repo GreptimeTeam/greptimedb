@@ -42,6 +42,7 @@ impl ProtocolCtx {
 ///     If true, all scope attributes will be promoted to the final table schema.
 ///     Along with the scope name, scope version and scope schema URL.
 /// - `with_metric_engine`
+/// - `experimental_enable_exponential_histogram`
 /// - `is_legacy`
 ///     If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
 ///     So we call this path 'legacy'.
@@ -53,6 +54,7 @@ pub struct OtlpMetricCtx {
     pub resource_attrs: HashSet<String>,
     pub promote_scope_attrs: bool,
     pub with_metric_engine: bool,
+    pub experimental_enable_exponential_histogram: bool,
     pub is_legacy: bool,
     pub metric_type: MetricType,
     pub metric_translation_strategy: OtlpMetricTranslationStrategy,

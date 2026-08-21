@@ -24,7 +24,7 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,
 };
 use mito2::config::MitoConfig;
@@ -56,6 +56,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub jaeger: JaegerOptions,
+    pub otlp: OtlpOptions,
     pub prom_store: PromStoreOptions,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
@@ -94,6 +95,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             jaeger: JaegerOptions::default(),
+            otlp: OtlpOptions::default(),
             prom_store: PromStoreOptions::default(),
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
@@ -153,6 +155,7 @@ impl StandaloneOptions {
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
             jaeger: cloned_opts.jaeger,
+            otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
             logging: cloned_opts.logging,
