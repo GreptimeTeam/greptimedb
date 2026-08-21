@@ -21,26 +21,34 @@ use std::time::Instant;
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::{tracing, warn};
+use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
-use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
 };
+use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, compute_parallel_channel_size, scan_flat_file_ranges,
+    scan_flat_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{ScannerMetrics, scan_util};
+use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+
+/// Maximum concurrent per-file scan tasks within one [UnorderedScan] partition.
+///
+/// The shared pruner caps its worker pool at the same magnitude, so additional
+/// permits would only add task/memory churn without extra pruning parallelism.
+const MAX_FILE_SCAN_CONCURRENCY: usize = 16;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -105,7 +113,14 @@ impl UnorderedScan {
         Ok(stream)
     }
 
-    /// Scans a [PartitionRange] by its `identifier` and returns a flat stream of RecordBatch.
+    /// Builds the ordered scan sources for one partition range.
+    ///
+    /// Sources are returned in row-group order. File sources are scanned
+    /// through [scan_flat_file_ranges]; the per-file parallelism itself is
+    /// driven by the caller (see [Self::scan_flat_batch_in_partition]), which
+    /// spawns one task per part range behind a semaphore and then consumes the
+    /// ordered sources. This mirrors how [SeqScan](crate::read::seq_scan::SeqScan)
+    /// builds per-file sources and re-orders them into `ordered_sources`.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -113,57 +128,77 @@ impl UnorderedScan {
             part_range_id = part_range_id
         )
     )]
-    fn scan_flat_partition_range(
-        stream_ctx: Arc<StreamContext>,
+    async fn build_flat_partition_range_sources(
+        stream_ctx: &Arc<StreamContext>,
         part_range_id: usize,
-        part_metrics: PartitionMetrics,
+        part_metrics: &PartitionMetrics,
         partition_pruner: Arc<PartitionPruner>,
-    ) -> impl Stream<Item = Result<RecordBatch>> {
-        try_stream! {
-            // Gets range meta.
-            let range_meta = &stream_ctx.ranges[part_range_id];
-            let part_range = range_meta.new_partition_range(part_range_id);
-            let pre_filter_mode = stream_ctx.range_pre_filter_mode(&part_range);
-            for index in &range_meta.row_group_indices {
-                if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_flat_mem_ranges(
-                        stream_ctx.clone(),
-                        part_metrics.clone(),
-                        *index,
-                        range_meta.time_range,
-                    );
-                    for await record_batch in stream {
-                        yield record_batch?;
-                    }
-                } else if stream_ctx.is_file_range_index(*index) {
-                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
-                    if partition_pruner
-                        .try_skip_manifest_pruned_file_range(*index, &part_metrics)
-                    {
-                        continue;
-                    }
-                    let stream = scan_flat_file_ranges(
-                        stream_ctx.clone(),
-                        part_metrics.clone(),
-                        *index,
-                        "unordered_scan_files",
-                        partition_pruner.clone(),
-                    ).await?;
-                    for await record_batch in stream {
-                        yield record_batch?;
-                    }
-                } else {
-                    let stream = scan_util::maybe_scan_flat_other_ranges(
-                        &stream_ctx,
-                        *index,
-                        &part_metrics,
-                        pre_filter_mode,
-                    ).await?;
-                    for await record_batch in stream {
-                        yield record_batch?;
-                    }
+    ) -> Result<Vec<BoxedRecordBatchStream>> {
+        // Gets range meta.
+        let range_meta = &stream_ctx.ranges[part_range_id];
+        let part_range = range_meta.new_partition_range(part_range_id);
+        let pre_filter_mode = stream_ctx.range_pre_filter_mode(&part_range);
+
+        let num_indices = range_meta.row_group_indices.len();
+        if num_indices == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut ordered_sources = Vec::with_capacity(num_indices);
+        ordered_sources.resize_with(num_indices, || None);
+        for (position, index) in range_meta.row_group_indices.iter().enumerate() {
+            if stream_ctx.is_mem_range_index(*index) {
+                let stream = scan_flat_mem_ranges(
+                    stream_ctx.clone(),
+                    part_metrics.clone(),
+                    *index,
+                    range_meta.time_range,
+                );
+                ordered_sources[position] = Some(Box::pin(stream) as _);
+            } else if stream_ctx.is_file_range_index(*index) {
+                // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                if partition_pruner.try_skip_manifest_pruned_file_range(*index, part_metrics) {
+                    continue;
                 }
+                let stream = scan_flat_file_ranges(
+                    stream_ctx.clone(),
+                    part_metrics.clone(),
+                    *index,
+                    "unordered_scan_files",
+                    partition_pruner.clone(),
+                )
+                .await?;
+                ordered_sources[position] = Some(Box::pin(stream) as _);
+            } else {
+                let stream = scan_util::maybe_scan_flat_other_ranges(
+                    stream_ctx,
+                    *index,
+                    part_metrics,
+                    pre_filter_mode,
+                )
+                .await?;
+                ordered_sources[position] = Some(stream);
             }
+        }
+
+        Ok(ordered_sources.into_iter().flatten().collect())
+    }
+
+    /// Creates a semaphore bounding concurrent file scans for one partition.
+    ///
+    /// [UnorderedScan] provides no output ordering guarantee, so file ranges
+    /// can be scanned concurrently as long as results are emitted in row-group
+    /// order. The permit count is derived from the query's target partitions
+    /// and capped to bound per-partition memory/backpressure. Scans that
+    /// explicitly request a single target partition stay sequential.
+    fn new_file_scan_semaphore(&self) -> Option<Arc<Semaphore>> {
+        let target_partitions = self.properties.target_partitions();
+        if target_partitions > 1 {
+            Some(Arc::new(Semaphore::new(
+                target_partitions.min(MAX_FILE_SCAN_CONCURRENCY),
+            )))
+        } else {
+            None
         }
     }
 
@@ -267,22 +302,81 @@ impl UnorderedScan {
         // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&part_ranges);
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
+        let file_scan_semaphore = self.new_file_scan_semaphore();
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            // Scans each part.
-            for part_range in part_ranges {
-                let mut metrics = ScannerMetrics::default();
-                let mut fetch_start = Instant::now();
+            // Builds the scan sources of all part ranges in parallel behind the
+            // semaphore, preserving part-range order. UnorderedScan yields no
+            // output ordering guarantee, but keeping row-group order matches the
+            // previous sequential behavior exactly (append mode has no dedup).
+            let mut ordered_sources: Vec<Option<Vec<BoxedRecordBatchStream>>> =
+                Vec::with_capacity(part_ranges.len());
+            ordered_sources.resize_with(part_ranges.len(), || None);
+            let mut part_scan_tasks = Vec::new();
+            for (position, part_range) in part_ranges.iter().enumerate() {
+                if let Some(semaphore) = file_scan_semaphore.as_ref() {
+                    // Run in parallel, controlled by the semaphore.
+                    let stream_ctx = stream_ctx.clone();
+                    let part_metrics = part_metrics.clone();
+                    let partition_pruner = partition_pruner.clone();
+                    let semaphore = Arc::clone(semaphore);
+                    let part_range = *part_range;
+                    part_scan_tasks.push(async move {
+                        let _permit = semaphore.acquire().await.unwrap();
+                        let sources = Self::build_flat_partition_range_sources(
+                            &stream_ctx,
+                            part_range.identifier,
+                            &part_metrics,
+                            partition_pruner,
+                        )
+                        .await?;
+                        Ok::<(usize, Vec<BoxedRecordBatchStream>), crate::error::Error>((
+                            position,
+                            sources,
+                        ))
+                    });
+                } else {
+                    let sources = Self::build_flat_partition_range_sources(
+                        &stream_ctx,
+                        part_range.identifier,
+                        &part_metrics,
+                        partition_pruner.clone(),
+                    )
+                    .await?;
+                    ordered_sources[position] = Some(sources);
+                }
+            }
+            if !part_scan_tasks.is_empty() {
+                let results = futures::future::try_join_all(part_scan_tasks).await?;
+                for (position, sources) in results {
+                    ordered_sources[position] = Some(sources);
+                }
+            }
 
-                let stream = Self::scan_flat_partition_range(
-                    stream_ctx.clone(),
-                    part_range.identifier,
-                    part_metrics.clone(),
-                    partition_pruner.clone(),
-                );
-                for await record_batch in stream {
+            // Reads batches from the ordered sources, fetching from multiple
+            // files concurrently behind the semaphore with bounded channels.
+            let sources: Vec<BoxedRecordBatchStream> =
+                ordered_sources.into_iter().flatten().flatten().collect();
+            let sources = if let Some(semaphore) = file_scan_semaphore.as_ref() {
+                if sources.len() > 1 {
+                    stream_ctx.input.create_parallel_flat_sources(
+                        sources,
+                        semaphore.clone(),
+                        compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
+                    )?
+                } else {
+                    sources
+                }
+            } else {
+                sources
+            };
+
+            let mut metrics = ScannerMetrics::default();
+            let mut fetch_start = Instant::now();
+            for mut source in sources {
+                while let Some(record_batch) = source.next().await {
                     let record_batch = record_batch?;
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
@@ -299,10 +393,10 @@ impl UnorderedScan {
 
                     fetch_start = Instant::now();
                 }
-
-                metrics.scan_cost += fetch_start.elapsed();
-                part_metrics.merge_metrics(&metrics);
             }
+
+            metrics.scan_cost += fetch_start.elapsed();
+            part_metrics.merge_metrics(&metrics);
 
             part_metrics.on_finish();
         };
@@ -405,5 +499,221 @@ impl UnorderedScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
         &self.stream_ctx.input
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use api::v1::Rows;
+    use common_recordbatch::RecordBatches;
+    use datatypes::arrow::array::TimestampMillisecondArray;
+    use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::{RegionId, ScanRequest};
+
+    use super::*;
+    use crate::config::MitoConfig;
+    use crate::read::scan_region::Scanner;
+    use crate::test_util::{
+        CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    };
+
+    /// Flushes `num_files` non-overlapping, ts-ascending SSTs and scans them
+    /// with [UnorderedScan], asserting that all rows are returned and that the
+    /// row-group (file) order is preserved both on the sequential path and on
+    /// the parallel path enabled by a raised `target_partitions`.
+    #[tokio::test]
+    async fn test_parallel_file_scan_preserves_rows_and_order() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("append_mode", "true")
+            .build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // Flush 4 non-overlapping ts ranges (5 rows each) into 4 SSTs. Each
+        // range is one row group, so 4 part ranges -> 4 files.
+        let ranges = [0..5, 5..10, 10..15, 15..20];
+        for range in &ranges {
+            let rows = Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(range.start, range.end),
+            };
+            put_rows(&engine, region_id, rows).await;
+            flush_region(&engine, region_id, None).await;
+        }
+
+        // Scans both with and without the parallel file-scan path. UnorderedScan
+        // makes no ordering guarantee, so the invariant is that the parallel
+        // path returns exactly the same rows in exactly the same row-group
+        // (version file) order as the sequential path.
+        let mut outputs = Vec::with_capacity(2);
+        for with_parallel in [false, true] {
+            let scanner = engine
+                .scanner(region_id, ScanRequest::default())
+                .await
+                .unwrap();
+            let Scanner::Unordered(mut unordered_scan) = scanner else {
+                panic!("expected unordered scan for an append-mode flat region");
+            };
+            if with_parallel {
+                // Enables the file-scan semaphore (target partitions > 1).
+                unordered_scan
+                    .prepare(PrepareRequest::default().with_target_partitions(4))
+                    .unwrap();
+            }
+            let stream = unordered_scan.build_stream().await.unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+            let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(
+                20, num_rows,
+                "all rows must be returned (with_parallel={with_parallel})"
+            );
+
+            // Collect the ts values in scan (row-group) order.
+            let schema = unordered_scan.schema();
+            let ts_idx = schema
+                .column_schemas()
+                .iter()
+                .position(|col| col.name == "ts")
+                .expect("ts column must exist in the output schema");
+            let mut ts_values = Vec::with_capacity(20);
+            for batch in batches.iter() {
+                let ts_arr = batch
+                    .column(ts_idx)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("ts column must be timestamp millis");
+                ts_values.extend(ts_arr.iter().flatten());
+            }
+            outputs.push(ts_values);
+        }
+        assert_eq!(
+            outputs[0], outputs[1],
+            "parallel file scan must preserve the sequential row-group order"
+        );
+        assert_eq!(20, outputs[0].len());
+    }
+
+    /// Micro-benchmark: full [UnorderedScan] over the same set of SSTs with the
+    /// file-scan semaphore disabled (sequential) vs enabled (parallel). Both
+    /// paths must return identical rows; the reported medians isolate the
+    /// parallel-scan effect from all other scanner overhead because only the
+    /// semaphore differs. Run with `-- --nocapture` to see the timings.
+    #[allow(clippy::print_stdout)]
+    #[tokio::test]
+    async fn bench_parallel_vs_sequential_file_scan() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("append_mode", "true")
+            .build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // 16 non-overlapping ts ranges (4096 rows each) -> 16 SSTs, exercising
+        // the same many-files append-mode scan shape as the perf case.
+        const NUM_FILES: usize = 16;
+        const ROWS_PER_FILE: usize = 4096;
+        for i in 0..NUM_FILES {
+            let start = i * ROWS_PER_FILE;
+            let rows = Rows {
+                schema: column_schemas.clone(),
+                rows: build_rows(start, start + ROWS_PER_FILE),
+            };
+            put_rows(&engine, region_id, rows).await;
+            flush_region(&engine, region_id, None).await;
+        }
+        let expected_rows = NUM_FILES * ROWS_PER_FILE;
+
+        async fn scan_all(
+            engine: &crate::engine::MitoEngine,
+            region_id: RegionId,
+            target_partitions: usize,
+            expected_rows: usize,
+        ) -> Duration {
+            let scanner = engine
+                .scanner(region_id, ScanRequest::default())
+                .await
+                .unwrap();
+            let Scanner::Unordered(mut unordered_scan) = scanner else {
+                panic!("expected unordered scan for an append-mode flat region");
+            };
+            unordered_scan
+                .prepare(PrepareRequest::default().with_target_partitions(target_partitions))
+                .unwrap();
+            let start = Instant::now();
+            let stream = unordered_scan.build_stream().await.unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            let elapsed = start.elapsed();
+            let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(
+                expected_rows, num_rows,
+                "all rows must be returned with target_partitions={target_partitions}"
+            );
+            elapsed
+        }
+
+        async fn median_of(
+            engine: &crate::engine::MitoEngine,
+            region_id: RegionId,
+            target_partitions: usize,
+            expected_rows: usize,
+            iterations: usize,
+        ) -> Duration {
+            let mut samples = Vec::with_capacity(iterations);
+            for _ in 0..iterations {
+                samples.push(scan_all(engine, region_id, target_partitions, expected_rows).await);
+            }
+            samples.sort();
+            samples[samples.len() / 2]
+        }
+
+        // Warmup both paths (object store caches, JIT, etc.).
+        let _ = scan_all(&engine, region_id, 1, expected_rows).await;
+        let _ = scan_all(&engine, region_id, NUM_FILES, expected_rows).await;
+
+        let sequential = median_of(&engine, region_id, 1, expected_rows, 5).await;
+        let parallel = median_of(&engine, region_id, NUM_FILES, expected_rows, 5).await;
+
+        println!(
+            "unordered_scan micro-bench ({} files x {} rows): sequential={:?} parallel={:?} speedup={:.2}x",
+            NUM_FILES,
+            ROWS_PER_FILE,
+            sequential,
+            parallel,
+            sequential.as_secs_f64() / parallel.as_secs_f64().max(f64::EPSILON),
+        );
+        // Both paths must be correct; no timing assertion (machine-dependent).
+        assert!(sequential > Duration::ZERO);
+        assert!(parallel > Duration::ZERO);
     }
 }
