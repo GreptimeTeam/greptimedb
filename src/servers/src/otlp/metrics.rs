@@ -569,6 +569,12 @@ fn encode_exponential_histogram(
         }
     }
 
+    let column_schema = native_histogram_column_schema().map_err(|error| {
+        error::InternalSnafu {
+            err_msg: error.to_string(),
+        }
+        .build()
+    })?;
     let mut emitted = false;
     for (index, data_point) in histogram.data_points.iter().enumerate() {
         let (value, timestamp_nanos) = match exponential_histogram_value(data_point) {
@@ -582,12 +588,6 @@ fn encode_exponential_histogram(
                 continue;
             }
         };
-        let column_schema = native_histogram_column_schema().map_err(|error| {
-            error::InternalSnafu {
-                err_msg: error.to_string(),
-            }
-            .build()
-        })?;
 
         let table = table_writer.get_or_default_table_data(
             name,
@@ -606,7 +606,7 @@ fn encode_exponential_histogram(
         )?;
         row_writer::write_by_schema(
             table,
-            std::iter::once((column_schema, Some(value))),
+            std::iter::once((column_schema.clone(), Some(value))),
             &mut row,
         )?;
         table.add_row(row);
