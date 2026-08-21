@@ -129,12 +129,6 @@ pub(crate) fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData
 fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> Result<()> {
     let exponential_overflow_index = validate_native_histogram_schema(histogram.schema)?;
     validate_native_histogram_custom_values(histogram)?;
-    ensure!(
-        histogram.zero_threshold.is_finite() && histogram.zero_threshold >= 0.0,
-        NativeHistogramSnafu {
-            message: "native histogram zero_threshold must be finite and non-negative"
-        }
-    );
 
     if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
         ensure!(
