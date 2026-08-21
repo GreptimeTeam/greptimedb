@@ -25,8 +25,10 @@ use common_event_recorder::{
     DEFAULT_EVENTS_TABLE_NAME, DEFAULT_FLUSH_INTERVAL_SECONDS, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
     EVENTS_TABLE_TYPE_COLUMN_NAME, PersistentEventContext, TriggerReason,
 };
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
+use common_meta::rpc::store::BatchDeleteRequest;
 use common_procedure::ProcedureContext;
 use common_procedure::event::{
     EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
@@ -46,6 +48,7 @@ use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::event::region_migration::REGION_MIGRATION_EVENT_TYPE;
+use meta_srv::key::DatanodeLeaseKey;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -102,6 +105,7 @@ macro_rules! region_migration_tests {
 
                 test_region_migration,
                 test_region_migration_by_sql,
+                test_region_migration_with_offline_source_by_sql,
                 test_region_migration_multiple_regions,
                 test_region_migration_all_regions,
                 test_region_migration_incorrect_from_peer,
@@ -419,8 +423,24 @@ pub async fn test_metric_table_region_migration_by_sql(
     .await;
 }
 
-/// A naive region migration test by SQL function
+/// A naive region migration test by SQL function.
 pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Vec<String>) {
+    test_region_migration_by_sql_inner(store_type, endpoints, false).await;
+}
+
+/// A region migration test by SQL function with an offline source datanode.
+pub async fn test_region_migration_with_offline_source_by_sql(
+    store_type: StorageType,
+    endpoints: Vec<String>,
+) {
+    test_region_migration_by_sql_inner(store_type, endpoints, true).await;
+}
+
+async fn test_region_migration_by_sql_inner(
+    store_type: StorageType,
+    endpoints: Vec<String>,
+    simulate_offline_source: bool,
+) {
     let cluster_name = "test_region_migration";
     let peer_factory = |id| Peer {
         id,
@@ -437,7 +457,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         peer_factory(2),
         peer_factory(3),
     ]));
-    let cluster = builder
+    let mut cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
@@ -463,6 +483,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .with_meta_selector(const_selector.clone())
         .build(true)
         .await;
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
     let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
         cluster.fe_instance().clone(),
         PROCEDURE_ACTOR,
@@ -487,7 +508,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let old_distribution = distribution.clone();
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.metasrv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager().clone();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -544,6 +565,114 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
 
     // Asserts the writes.
     assert_values(cluster.fe_instance()).await;
+
+    if simulate_offline_source {
+        let mut expected_distribution =
+            find_region_distribution_by_sql(&cluster, TEST_TABLE_NAME).await;
+        let (offline_from_peer_id, offline_region_number) = expected_distribution
+            .iter()
+            .find(|(peer_id, regions)| {
+                **peer_id != from_peer_id
+                    && **peer_id != to_peer_id
+                    && !regions.leader_regions.is_empty()
+            })
+            .map(|(peer_id, regions)| (*peer_id, regions.leader_regions[0]))
+            .unwrap();
+        let offline_region_id = RegionId::new(table_id, offline_region_number);
+
+        // Simulates scale-in: the source datanode stops and its lease disappears.
+        cluster
+            .datanode_instances
+            .get_mut(&offline_from_peer_id)
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        let source_lease_key: Vec<u8> = DatanodeLeaseKey {
+            node_id: offline_from_peer_id,
+        }
+        .try_into()
+        .unwrap();
+        cluster
+            .metasrv
+            .in_memory()
+            .batch_delete(BatchDeleteRequest {
+                keys: vec![source_lease_key],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+
+        let offline_procedure_id = trigger_migration_by_sql(
+            &cluster,
+            offline_region_id.as_u64(),
+            offline_from_peer_id,
+            from_peer_id,
+        )
+        .await;
+        let frontend = cluster.fe_instance().clone();
+        let procedure_id_for_closure = offline_procedure_id.clone();
+        wait_condition(
+            default_distributed_time_constants().region_lease + Duration::from_secs(10),
+            Box::pin(async move {
+                loop {
+                    let state = query_procedure_by_sql(&frontend, &procedure_id_for_closure).await;
+                    if state == "{\"status\":\"Done\"}" {
+                        info!("Offline-source migration done: {state}");
+                        break;
+                    }
+                    info!("Offline-source migration not finished: {state}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }),
+        )
+        .await;
+
+        check_region_migration_events_system_table(
+            cluster.fe_instance(),
+            &offline_procedure_id,
+            offline_region_id.as_u64(),
+            offline_from_peer_id,
+            from_peer_id,
+            None,
+        )
+        .await;
+
+        let remove_offline_source = {
+            let source_regions = expected_distribution
+                .get_mut(&offline_from_peer_id)
+                .unwrap();
+            source_regions
+                .leader_regions
+                .retain(|region_number| *region_number != offline_region_number);
+            source_regions.leader_regions.is_empty() && source_regions.follower_regions.is_empty()
+        };
+        if remove_offline_source {
+            expected_distribution.remove(&offline_from_peer_id);
+        }
+        let target_regions = expected_distribution.entry(from_peer_id).or_default();
+        target_regions.add_leader_region(offline_region_number);
+        target_regions.sort();
+
+        let table_metadata_manager = table_metadata_manager.clone();
+        wait_condition(
+            Duration::from_secs(10),
+            Box::pin(async move {
+                loop {
+                    let distribution =
+                        find_region_distribution(&table_metadata_manager, table_id).await;
+                    if distribution == expected_distribution {
+                        break;
+                    }
+                    info!("Offline-source migration has unexpected distribution: {distribution:?}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }),
+        )
+        .await;
+
+        assert_values(cluster.fe_instance()).await;
+    }
 
     // Triggers again.
     let err = region_migration_manager
