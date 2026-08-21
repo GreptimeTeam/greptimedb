@@ -123,13 +123,22 @@ DISK_SERIAL="{cache_disk_id.replace("-", "")}"
 # disk serial, never the other way round. lsblk covers both virtio-blk
 # (/dev/vdX) and NVMe (/dev/nvmeXn1) attachments.
 device=""
-for _ in $(seq 1 150); do
+echo "Waiting for cache disk with serial ${{DISK_SERIAL}} (virtio may truncate to 20 chars)"
+for i in $(seq 1 150); do
   device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \
     'length($2) > 0 && index(serial, $2) == 1 {{ print $1; exit }}')"
   [[ -n "${{device}}" ]] && break
+  if (( i % 15 == 1 )); then
+    echo "Still waiting for cache disk; block devices seen so far:"
+    lsblk -dpno NAME,SERIAL | sed 's/^/  /'
+  fi
   sleep 2
 done
-[[ -n "${{device}}" ]] || {{ echo "query-regression cache disk did not appear" >&2; exit 1; }}
+if [[ -z "${{device}}" ]]; then
+  echo "query-regression cache disk did not appear; final block device list:" >&2
+  lsblk -dpno NAME,SERIAL >&2
+  exit 1
+fi
 echo "Cache disk device: ${{device}}"
 
 # Format only on first use; a filesystem signature means the disk holds cache.
