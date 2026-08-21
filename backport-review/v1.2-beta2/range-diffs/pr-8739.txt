@@ -1,8 +1,8 @@
 PR #8739
 Upstream merge commit: 97ca104129536075fcd7329a924db8c40ef88d7f
-Aggregate commit: f89d60adee3e8ad817fdbe2f2cf36aa660b0c717
+Aggregate commit: be0985cc39c648a35328bf9c340a8d32b814ddc6
 
-1:  97ca10412 ! 1:  f89d60ade fix(frontend): remove gRPC DDL panics for DropView and non-timestamp time index (#8739)
+1:  97ca10412 ! 1:  be0985cc3 fix(frontend): remove gRPC DDL panics for DropView and non-timestamp time index (#8739)
     @@ Commit message
          ---------
      

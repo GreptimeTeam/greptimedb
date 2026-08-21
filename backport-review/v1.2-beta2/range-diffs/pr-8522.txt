@@ -1,8 +1,8 @@
 PR #8522
 Upstream merge commit: fbbe5af76744eb93067a3bed099834656d7da4d6
-Aggregate commit: ea747c53036afa8ba7ed4b19dd2531db95460e43
+Aggregate commit: 7d68d8dbe0600b86535293210ec70417e4b2b3d5
 
-1:  fbbe5af76 ! 1:  ea747c530 fix(query): avoid unsafe count wildcard rewrites (#8522)
+1:  fbbe5af76 ! 1:  7d68d8dbe fix(query): avoid unsafe count wildcard rewrites (#8522)
     @@ Commit message
      
          Signed-off-by: discord9 <discord9@163.com>

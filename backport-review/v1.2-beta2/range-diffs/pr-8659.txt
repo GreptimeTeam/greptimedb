@@ -1,8 +1,8 @@
 PR #8659
 Upstream merge commit: d90cca4b752b34d7ccdb54fe8445ce3bf832e5e0
-Aggregate commit: 8cc4cab224dee0991b0c96f7b88df7d8221572ea
+Aggregate commit: 5f6ae43ac64f0ea536af04b06c0379b8ae2eea8b
 
-1:  d90cca4b7 ! 1:  8cc4cab22 fix(prometheus): custom column remote reads (#8659)
+1:  d90cca4b7 ! 1:  5f6ae43ac fix(prometheus): custom column remote reads (#8659)
     @@ Commit message
          Signed-off-by: grezzko <me@gauravshokeen.com>
          Signed-off-by: Lei, HUANG <mrsatangel@gmail.com>

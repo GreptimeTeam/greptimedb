@@ -10,11 +10,11 @@
 - Upstream merge commit: `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1`
 - Upstream merge subject: `refactor: share query channel definition (#8825)`
 - Upstream compare: [PR head to merge commit](https://github.com/GreptimeTeam/greptimedb/compare/bf947141753a9ea554aa1ca31637fdd3ad1429f3...60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1)
-- Aggregate carrier: `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab`
-- Aggregate carrier parent: `b75c72c18d39453cc693a594c64b68d31beb62c1`
-- Aggregate carrier link: [b7fdcb89568dc707c323f8c0a3b9413ec4e889ab](https://github.com/GreptimeTeam/greptimedb/commit/b7fdcb89568dc707c323f8c0a3b9413ec4e889ab)
-- Aggregate final head: `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab`
-- Narrow release test adaptations retained before the carrier: `6c1424a8eef66dc2c3abf9a7be25a69f2ab69f33`, `b75c72c18d39453cc693a594c64b68d31beb62c1`.
+- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`
+- Aggregate carrier parent: `6595b5d7bf1f59587bf89676d420db7371cdc459`
+- Aggregate carrier link: [d18430b874f9c8054747dbf688585cd7d2988e3e](https://github.com/GreptimeTeam/greptimedb/commit/d18430b874f9c8054747dbf688585cd7d2988e3e)
+- Aggregate final head: `40e02ff6b62ad3445f7035e437bd9e322c8af31b`
+- Narrow release test adaptations retained before the carrier: `9bf878f562518d30a412138ad4244d7d8e7867e6`, `6595b5d7bf1f59587bf89676d420db7371cdc459`.
 
 ## Why no range-diff is recorded
 
@@ -29,11 +29,11 @@ fatal: Not a valid object name bf947141753a9ea554aa1ca31637fdd3ad1429f3^{commit}
 $ git show --no-patch --format=fuller bf947141753a9ea554aa1ca31637fdd3ad1429f3
 fatal: bad object bf947141753a9ea554aa1ca31637fdd3ad1429f3
 
-$ git range-diff --creation-factor=100 bf947141753a9ea554aa1ca31637fdd3ad1429f3^..bf947141753a9ea554aa1ca31637fdd3ad1429f3 60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1^..b7fdcb89568dc707c323f8c0a3b9413ec4e889ab
+$ git range-diff --creation-factor=100 bf947141753a9ea554aa1ca31637fdd3ad1429f3^..bf947141753a9ea554aa1ca31637fdd3ad1429f3 60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1^..d18430b874f9c8054747dbf688585cd7d2988e3e
 fatal: bad revision 'bf947141753a9ea554aa1ca31637fdd3ad1429f3^..bf947141753a9ea554aa1ca31637fdd3ad1429f3'
 ```
 
-The available-object checks succeeded for `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1` and `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab`. The carrier has parent `b75c72c18d39453cc693a594c64b68d31beb62c1`.
+The available-object checks succeeded for `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1` and `d18430b874f9c8054747dbf688585cd7d2988e3e`. The carrier has parent `6595b5d7bf1f59587bf89676d420db7371cdc459`.
 
 For reference only, the available-object patch IDs were calculated from the two one-parent commit diffs as follows; they are not presented as a range-diff:
 
@@ -41,7 +41,7 @@ For reference only, the available-object patch IDs were calculated from the two 
 $ git diff 60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1^ 60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1 | git patch-id --stable
 ebeb5334a33792aa6eb9616cc1c223c6eb9ee149 0000000000000000000000000000000000000000
 
-$ git diff b7fdcb89568dc707c323f8c0a3b9413ec4e889ab^ b7fdcb89568dc707c323f8c0a3b9413ec4e889ab | git patch-id --stable
+$ git diff d18430b874f9c8054747dbf688585cd7d2988e3e^ d18430b874f9c8054747dbf688585cd7d2988e3e | git patch-id --stable
 aa99de142ed1b40a210193150b353e691cc3ebf4 0000000000000000000000000000000000000000
 ```
 
@@ -49,4 +49,4 @@ aa99de142ed1b40a210193150b353e691cc3ebf4 000000000000000000000000000000000000000
 
 The carrier introduces `common_base::protocol::Channel` and re-exports it as `session::context::Channel`. The stable wire values and names, including `Unknown` behavior, are unchanged. Session SQL-dialect selection remains through the `dialect_for_channel` helper. `common-meta` now derives protocol names from the shared `Channel`; the old `common_session::channel_protocol` mapping is replaced by that shared mapping.
 
-The aggregate intentionally preserves the old-frontend fallback for omitted protobuf `event_context` and the exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged. The narrow test adaptations in `6c1424a8` and `b75c72c18` are retained and were not reverted.
+The aggregate intentionally preserves the old-frontend fallback for omitted protobuf `event_context` and the exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged. The narrow test adaptations in `9bf878f5` and `6595b5d7b` are retained and were not reverted.

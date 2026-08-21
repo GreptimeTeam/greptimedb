@@ -32,3 +32,5 @@
 8734	1f1c9270a806658d2c3d9700c8cd1445d687f89f	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8734	feat(event): add event context to procedure events
 8392	cabc2f6cc667291d7bc3dcbb8f9cc82e27bd93a0	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8392	feat(flow): add information_schema.flow_statistics and SHOW FLOW STATUS (#7987)
 8825	bf947141753a9ea554aa1ca31637fdd3ad1429f3	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8825	refactor: share query channel definition
+8902	8d887ddd00d67699d0fb873cda11eb50b5771555	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8902	fix(query): restore columnar group-by for dictionary-encoded tags (PR head 1a91c76c615afec71239b84af7787a0505bef914; range starts d99b0df374eec0329ac3f430e40b80a1e6c6963c)
+8921	2f5e97850e55d86c0ed9eff1719994c88b4450a0	BASE-PRESENT (official release base)	https://github.com/GreptimeTeam/greptimedb/pull/8921	fix: clear pooled Prometheus Remote Write decoder state

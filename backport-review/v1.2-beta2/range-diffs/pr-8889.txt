@@ -1,8 +1,8 @@
 PR #8889
 Upstream merge commit: 10f587bc30071f230c979da6c0d3ebbf1d736698
-Aggregate commit: a3de6c4fa8cc9ff22faa844a08e6ff7f9fde8835
+Aggregate commit: c894a2468c2bbb621bc26bf242046f1c60493460
 
-1:  10f587bc3 ! 1:  a3de6c4fa fix(query): preserve timestamp literal semantics in inserts (#8889)
+1:  10f587bc3 ! 1:  c894a2468 fix(query): preserve timestamp literal semantics in inserts (#8889)
     @@ Commit message
          ---------
      

@@ -1,8 +1,8 @@
 PR #8777
 Upstream merge commit: 1aadfa565c32332146e9628dd82455f0f59ce3da
-Aggregate commit: ff8ea6d87d94401469813a05b9c9f87ead95836e
+Aggregate commit: 1dd27e9162ef5438e9f44b5a48a040f5c399227a
 
-1:  1aadfa565 ! 1:  ff8ea6d87 fix: cache physical table metadata lookups (#8777)
+1:  1aadfa565 ! 1:  1dd27e916 fix: cache physical table metadata lookups (#8777)
     @@ Commit message
          fix: physical table dont cache
      

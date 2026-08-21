@@ -8,7 +8,7 @@ Immutable upstream patches: [#8734](https://github.com/GreptimeTeam/greptimedb/c
 
 ## Resulting backport patch — what ships
 
-Carriers are [#8734](https://github.com/GreptimeTeam/greptimedb/commit/408929ffd8bad5aa75547274ab62e667f90a449c), [#8834](https://github.com/GreptimeTeam/greptimedb/commit/e712162bd37f3e4aca3d339991c453153a3639fa), [#8835](https://github.com/GreptimeTeam/greptimedb/commit/0d5585ba332fe63374ae72e5745643465bb78fc4), and [#8852](https://github.com/GreptimeTeam/greptimedb/commit/4cb869ace4f9ac05c3cd6a470c6dad19cdd82491). The #8825 carrier is [b7fdcb89568dc707c323f8c0a3b9413ec4e889ab](https://github.com/GreptimeTeam/greptimedb/commit/b7fdcb89568dc707c323f8c0a3b9413ec4e889ab), which is also the aggregate final head. Rolling extras [legacy fallback](https://github.com/GreptimeTeam/greptimedb/commit/587f001adfee05e4446fbb1b14c51afad4647bc1) and [single conversion](https://github.com/GreptimeTeam/greptimedb/commit/94a4bb78b3bb8dab0a8ae773c57dc39b3598172f) complete compatibility. The narrow test adaptations [6c1424a8](https://github.com/GreptimeTeam/greptimedb/commit/6c1424a8eef66dc2c3abf9a7be25a69f2ab69f33) and [b75c72c18](https://github.com/GreptimeTeam/greptimedb/commit/b75c72c18d39453cc693a594c64b68d31beb62c1) are retained and not reverted.
+Carriers are [#8734](https://github.com/GreptimeTeam/greptimedb/commit/e9ad585975022b206275afb2735ac480869bcd33), [#8834](https://github.com/GreptimeTeam/greptimedb/commit/5d059c84bd2f7ecb724d5a84501196d57f27481a), [#8835](https://github.com/GreptimeTeam/greptimedb/commit/22174d32dadf9ea58073b15c72828db9927969c6), and [#8852](https://github.com/GreptimeTeam/greptimedb/commit/2927fa339ec677fb632a8940bcd0d43eea78881a). The #8825 carrier is [d18430b874f9c8054747dbf688585cd7d2988e3e](https://github.com/GreptimeTeam/greptimedb/commit/d18430b874f9c8054747dbf688585cd7d2988e3e), the final aggregate head is `40e02ff6b62ad3445f7035e437bd9e322c8af31b`. Rolling extras [legacy fallback](https://github.com/GreptimeTeam/greptimedb/commit/46edabe916a10c2cafe816b8fe01f0d5da8fffc8) and [single conversion](https://github.com/GreptimeTeam/greptimedb/commit/e61a6df6b2b110badd5755f68010b6439d69ac84) complete compatibility. The narrow test adaptations [9bf878f5](https://github.com/GreptimeTeam/greptimedb/commit/9bf878f562518d30a412138ad4244d7d8e7867e6) and [6595b5d7b](https://github.com/GreptimeTeam/greptimedb/commit/6595b5d7bf1f59587bf89676d420db7371cdc459) are retained and not reverted.
 
 ## PR #8825 mapping and exact conflict resolution
 
@@ -26,7 +26,7 @@ The semantic conflict resolution is deliberate: the shared Channel mapping repla
 | Old frontends | Newer event-context path | Existing fallback for omitted protobuf `event_context` retained |
 | Conversion | Centralized event context conversion | Exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` retained |
 | Schemas | Existing actor/event JSON and protobuf schema | Unchanged |
-| Tests | Upstream test context | Narrow release adaptations `6c1424a8` and `b75c72c18` retained |
+| Tests | Upstream test context | Narrow release adaptations `9bf878f5` and `6595b5d7b` retained |
 
 ## Intentionally excluded/not provided
 

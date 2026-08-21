@@ -8,7 +8,7 @@ Immutable upstream commits: [#8579](https://github.com/GreptimeTeam/greptimedb/c
 
 ## Resulting backport patch — what ships
 
-The reconstructed carrier is [a7c296c](https://github.com/GreptimeTeam/greptimedb/commit/a7c296cf46cc4f1ce0241231cbb8b8031dfb1bcf). It folds #8818 metadata behavior into #8579 and separately preserves JSON extension compatibility. No separate shipping carrier is claimed for #8818.
+The reconstructed carrier is [9d8894b](https://github.com/GreptimeTeam/greptimedb/commit/9d8894b7f8b3e3391e4347f1a7a9ce3d1c5182fa). It folds #8818 metadata behavior into #8579 and separately preserves JSON extension compatibility. No separate shipping carrier is claimed for #8818.
 
 ## Relative to original PR — exact differences
 

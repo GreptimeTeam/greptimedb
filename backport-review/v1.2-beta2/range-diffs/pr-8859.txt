@@ -1,8 +1,8 @@
 PR #8859
 Upstream merge commit: c3cd186997538e2ed665ed32ce1755baf62bd857
-Aggregate commit: 00c2d7a1a32b32cd3badb253f81cf79dd6445e6f
+Aggregate commit: 824c5acfa7cf1865d2c20b77281c6b12e8e73de7
 
-1:  c3cd18699 ! 1:  00c2d7a1a fix(query): respect query timezone in timestamp casts (#8859)
+1:  c3cd18699 ! 1:  824c5acfa fix(query): respect query timezone in timestamp casts (#8859)
     @@ Commit message
          ---------
      

@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index bc59d90af..fa84b02d3 100644
+index bc59d90af..08300887b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1225,6 +1225,12 @@ version = "0.22.1"
@@ -24,7 +24,15 @@ index bc59d90af..fa84b02d3 100644
  ]
  
  [[package]]
-@@ -2414,6 +2420,7 @@ dependencies = [
+@@ -2298,6 +2304,7 @@ dependencies = [
+  "pin-project",
+  "regex",
+  "serde",
++ "strum 0.27.1",
+  "tokio",
+  "toml 0.8.23",
+  "zeroize",
+@@ -2414,6 +2421,7 @@ dependencies = [
   "serde_json",
   "snafu 0.8.6",
   "store-api",
@@ -32,15 +40,320 @@ index bc59d90af..fa84b02d3 100644
   "tokio",
   "tokio-util",
   "toml 0.8.23",
-@@ -2639,6 +2646,7 @@ dependencies = [
-  "common-query",
-  "common-recordbatch",
-  "common-runtime",
-+ "common-session",
-  "common-telemetry",
-  "common-test-util",
-  "common-time",
-@@ -6041,7 +6049,7 @@ dependencies = [
+@@ -3732,7 +3740,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+ [[package]]
+ name = "datafusion"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "arrow-schema 58.3.0",
+@@ -3786,7 +3794,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-catalog"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -3810,7 +3818,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-catalog-listing"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -3832,7 +3840,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -3856,7 +3864,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-common-runtime"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "futures",
+  "log",
+@@ -3866,7 +3874,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-datasource"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-compression",
+@@ -3900,7 +3908,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-datasource-arrow"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "arrow-ipc 58.3.0",
+@@ -3923,7 +3931,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-datasource-csv"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -3945,7 +3953,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-datasource-json"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -3968,7 +3976,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-datasource-parquet"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -3997,12 +4005,12 @@ dependencies = [
+ [[package]]
+ name = "datafusion-doc"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ 
+ [[package]]
+ name = "datafusion-execution"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -4024,7 +4032,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-expr"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -4046,7 +4054,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-expr-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4058,7 +4066,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -4089,7 +4097,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-aggregate"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -4110,7 +4118,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-aggregate-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -4122,7 +4130,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-nested"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "arrow-ord 58.3.0",
+@@ -4146,7 +4154,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-table"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "async-trait",
+@@ -4161,7 +4169,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-window"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4178,7 +4186,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-functions-window-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "datafusion-common",
+  "datafusion-physical-expr-common",
+@@ -4187,7 +4195,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-macros"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "datafusion-doc",
+  "quote",
+@@ -4197,7 +4205,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-optimizer"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "chrono",
+@@ -4246,7 +4254,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-physical-expr"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -4269,7 +4277,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-physical-expr-adapter"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4283,7 +4291,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-physical-expr-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -4299,7 +4307,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-physical-optimizer"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4317,7 +4325,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-physical-plan"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "ahash 0.8.12",
+  "arrow 58.3.0",
+@@ -4348,7 +4356,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-proto"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "chrono",
+@@ -4375,7 +4383,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-proto-common"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4385,7 +4393,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-pruning"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "datafusion-common",
+@@ -4401,7 +4409,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-session"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "async-trait",
+  "datafusion-common",
+@@ -4414,7 +4422,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-sql"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "arrow 58.3.0",
+  "bigdecimal 0.4.8",
+@@ -4432,7 +4440,7 @@ dependencies = [
+ [[package]]
+ name = "datafusion-substrait"
+ version = "53.1.0"
+-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+ dependencies = [
+  "async-recursion",
+  "async-trait",
+@@ -4542,6 +4550,9 @@ dependencies = [
+  "num",
+  "num-traits",
+  "ordered-float 4.6.0",
++ "parquet-variant",
++ "parquet-variant-compute",
++ "parquet-variant-json",
+  "paste",
+  "regex",
+  "serde",
+@@ -6041,7 +6052,7 @@ dependencies = [
  [[package]]
  name = "greptime-proto"
  version = "0.1.0"
@@ -49,7 +362,7 @@ index bc59d90af..fa84b02d3 100644
  dependencies = [
   "prost 0.14.1",
   "prost-types 0.14.1",
-@@ -6587,7 +6595,7 @@ dependencies = [
+@@ -6587,7 +6598,7 @@ dependencies = [
   "libc",
   "percent-encoding",
   "pin-project-lite",
@@ -58,7 +371,7 @@ index bc59d90af..fa84b02d3 100644
   "tokio",
   "tower-service",
   "tracing",
-@@ -7827,7 +7835,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -7827,7 +7838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
  dependencies = [
   "cfg-if",
@@ -67,7 +380,7 @@ index bc59d90af..fa84b02d3 100644
  ]
  
  [[package]]
-@@ -8313,6 +8321,7 @@ dependencies = [
+@@ -8313,6 +8324,7 @@ dependencies = [
   "async-trait",
   "common-base",
   "common-error",
@@ -75,7 +388,7 @@ index bc59d90af..fa84b02d3 100644
   "common-grpc",
   "common-macro",
   "common-meta",
-@@ -8398,7 +8407,6 @@ dependencies = [
+@@ -8398,7 +8410,6 @@ dependencies = [
   "serde",
   "serde_json",
   "servers",
@@ -83,7 +396,7 @@ index bc59d90af..fa84b02d3 100644
   "snafu 0.8.6",
   "sqlx",
   "store-api",
-@@ -9289,7 +9297,7 @@ version = "0.7.4"
+@@ -9289,7 +9300,7 @@ version = "0.7.4"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
  dependencies = [
@@ -92,7 +405,7 @@ index bc59d90af..fa84b02d3 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -9942,6 +9950,7 @@ dependencies = [
+@@ -9942,6 +9953,7 @@ dependencies = [
   "common-catalog",
   "common-datasource",
   "common-error",
@@ -100,7 +413,61 @@ index bc59d90af..fa84b02d3 100644
   "common-frontend",
   "common-function",
   "common-grpc",
-@@ -10488,13 +10497,13 @@ dependencies = [
+@@ -10256,6 +10268,53 @@ dependencies = [
+  "zstd",
+ ]
+ 
++[[package]]
++name = "parquet-variant"
++version = "58.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "74c8db065291f088a2aad8ab831853eae1871c0d311c8d0b83bbc3b7e735d0fc"
++dependencies = [
++ "arrow 58.3.0",
++ "arrow-schema 58.3.0",
++ "chrono",
++ "half",
++ "indexmap 2.13.0",
++ "num-traits",
++ "simdutf8",
++ "uuid",
++]
++
++[[package]]
++name = "parquet-variant-compute"
++version = "58.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a530e8d5b5e14efcb39c9a6ec55432ad11f6afb7dc4455a79be0dc615fe3cc31"
++dependencies = [
++ "arrow 58.3.0",
++ "arrow-schema 58.3.0",
++ "chrono",
++ "half",
++ "indexmap 2.13.0",
++ "parquet-variant",
++ "parquet-variant-json",
++ "serde_json",
++ "uuid",
++]
++
++[[package]]
++name = "parquet-variant-json"
++version = "58.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "00ed89908289f67caa2ca078f9ff9aacd6229a313ec92b12bf4f48f613dc2b97"
++dependencies = [
++ "arrow-schema 58.3.0",
++ "base64 0.22.1",
++ "chrono",
++ "parquet-variant",
++ "serde_json",
++ "uuid",
++]
++
+ [[package]]
+ name = "parse-size"
+ version = "1.1.0"
+@@ -10488,13 +10547,13 @@ dependencies = [
  
  [[package]]
  name = "pgwire"
@@ -117,7 +484,7 @@ index bc59d90af..fa84b02d3 100644
   "bytes",
   "chrono",
   "derive-new",
-@@ -11284,7 +11293,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11284,7 +11343,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
  dependencies = [
   "heck 0.5.0",
@@ -126,7 +493,7 @@ index bc59d90af..fa84b02d3 100644
   "log",
   "multimap",
   "once_cell",
-@@ -11332,7 +11341,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11332,7 +11391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
  dependencies = [
   "anyhow",
@@ -135,7 +502,7 @@ index bc59d90af..fa84b02d3 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -11345,7 +11354,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11345,7 +11404,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
  dependencies = [
   "anyhow",
@@ -144,7 +511,15 @@ index bc59d90af..fa84b02d3 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -15549,9 +15558,9 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+@@ -13413,6 +13472,7 @@ dependencies = [
+  "api",
+  "arc-swap",
+  "auth",
++ "common-base",
+  "common-catalog",
+  "common-error",
+  "common-macro",
+@@ -15549,9 +15609,9 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
  
  [[package]]
  name = "tracing"
@@ -156,7 +531,7 @@ index bc59d90af..fa84b02d3 100644
  dependencies = [
   "log",
   "pin-project-lite",
-@@ -15573,9 +15582,9 @@ dependencies = [
+@@ -15573,9 +15633,9 @@ dependencies = [
  
  [[package]]
  name = "tracing-attributes"
@@ -168,7 +543,7 @@ index bc59d90af..fa84b02d3 100644
  dependencies = [
   "proc-macro2",
   "quote",
-@@ -15584,9 +15593,9 @@ dependencies = [
+@@ -15584,9 +15644,9 @@ dependencies = [
  
  [[package]]
  name = "tracing-core"
@@ -180,7 +555,7 @@ index bc59d90af..fa84b02d3 100644
  dependencies = [
   "once_cell",
   "valuable",
-@@ -15633,9 +15642,9 @@ dependencies = [
+@@ -15633,9 +15693,9 @@ dependencies = [
  
  [[package]]
  name = "tracing-subscriber"
@@ -192,7 +567,7 @@ index bc59d90af..fa84b02d3 100644
  dependencies = [
   "matchers",
   "nu-ansi-term",
-@@ -16459,7 +16468,7 @@ version = "0.1.9"
+@@ -16459,7 +16519,7 @@ version = "0.1.9"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
  dependencies = [
@@ -202,7 +577,7 @@ index bc59d90af..fa84b02d3 100644
  
  [[package]]
 diff --git a/Cargo.toml b/Cargo.toml
-index 711423b0a..a65fb501e 100644
+index 711423b0a..40f7c03bf 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -159,7 +159,7 @@ fs2 = "0.4"
@@ -214,6 +589,53 @@ index 711423b0a..a65fb501e 100644
  hex = "0.4"
  http = "1"
  humantime = "2.1"
+@@ -195,6 +195,9 @@ otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "5
+ ] }
+ parking_lot = "0.12"
+ parquet = { version = "58.3", default-features = false, features = ["arrow", "async", "object_store"] }
++parquet-variant = "58.3"
++parquet-variant-compute = "58.3"
++parquet-variant-json = "58.3"
+ paste = "1.0"
+ pin-project = "1.0"
+ pretty_assertions = "1.4.0"
+@@ -343,21 +346,21 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
+ rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+ 
+ [patch.crates-io]
+-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
++datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
++datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
+ 
+ [profile.release]
 diff --git a/config/config.md b/config/config.md
 index 90c346d09..7f9064300 100644
 --- a/config/config.md
@@ -1124,6 +1546,142 @@ index bdbaf720b..fe06d7001 100644
          ] {
              assert!(event_types.allows("region_migration"));
              assert!(!event_types.allows("other_event"));
+diff --git a/src/common/base/Cargo.toml b/src/common/base/Cargo.toml
+index 44c30cd54..760241a3e 100644
+--- a/src/common/base/Cargo.toml
++++ b/src/common/base/Cargo.toml
+@@ -21,6 +21,7 @@ lazy_static.workspace = true
+ pin-project.workspace = true
+ regex.workspace = true
+ serde = { version = "1.0", features = ["derive"] }
++strum.workspace = true
+ tokio.workspace = true
+ zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
+ 
+diff --git a/src/common/base/src/lib.rs b/src/common/base/src/lib.rs
+index 18e6ffb3e..04fc70380 100644
+--- a/src/common/base/src/lib.rs
++++ b/src/common/base/src/lib.rs
+@@ -18,6 +18,7 @@ pub mod cancellation;
+ pub mod hash;
+ pub mod memory_limit;
+ pub mod plugins;
++pub mod protocol;
+ pub mod range_read;
+ #[allow(clippy::all)]
+ pub mod readable_size;
+diff --git a/src/common/base/src/protocol.rs b/src/common/base/src/protocol.rs
+new file mode 100644
+index 000000000..66704dbc1
+--- /dev/null
++++ b/src/common/base/src/protocol.rs
+@@ -0,0 +1,106 @@
++// Copyright 2023 Greptime Team
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use std::fmt::{Display, Formatter};
++
++/// The protocol through which a query is received.
++#[derive(Debug, PartialEq, Default, Clone, Copy, strum::FromRepr)]
++#[repr(u8)]
++pub enum Channel {
++    #[default]
++    Unknown = 0,
++
++    Mysql = 1,
++    Postgres = 2,
++    HttpSql = 3,
++    Prometheus = 4,
++    Otlp = 5,
++    Grpc = 6,
++    Influx = 7,
++    Opentsdb = 8,
++    Loki = 9,
++    Elasticsearch = 10,
++    Jaeger = 11,
++    Log = 12,
++    Promql = 13,
++    Splunk = 14,
++}
++
++impl From<u32> for Channel {
++    fn from(value: u32) -> Self {
++        u8::try_from(value)
++            .ok()
++            .and_then(Self::from_repr)
++            .unwrap_or_default()
++    }
++}
++
++impl Display for Channel {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{}", self.as_ref())
++    }
++}
++
++impl AsRef<str> for Channel {
++    fn as_ref(&self) -> &str {
++        match self {
++            Self::Unknown => "unknown",
++            Self::Mysql => "mysql",
++            Self::Postgres => "postgres",
++            Self::HttpSql => "httpsql",
++            Self::Prometheus => "prometheus",
++            Self::Otlp => "otlp",
++            Self::Grpc => "grpc",
++            Self::Influx => "influx",
++            Self::Opentsdb => "opentsdb",
++            Self::Loki => "loki",
++            Self::Elasticsearch => "elasticsearch",
++            Self::Jaeger => "jaeger",
++            Self::Log => "log",
++            Self::Promql => "promql",
++            Self::Splunk => "splunk",
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::Channel;
++
++    #[test]
++    fn test_channel_name() {
++        let expected = [
++            (1, "mysql"),
++            (2, "postgres"),
++            (3, "httpsql"),
++            (4, "prometheus"),
++            (5, "otlp"),
++            (6, "grpc"),
++            (7, "influx"),
++            (8, "opentsdb"),
++            (9, "loki"),
++            (10, "elasticsearch"),
++            (11, "jaeger"),
++            (12, "log"),
++            (13, "promql"),
++            (14, "splunk"),
++        ];
++
++        for (value, name) in expected {
++            assert_eq!(name, Channel::from(value).as_ref());
++        }
++        assert_eq!("unknown", Channel::from(0).as_ref());
++        assert_eq!("unknown", Channel::from(15).as_ref());
++    }
++}
 diff --git a/src/common/catalog/src/consts.rs b/src/common/catalog/src/consts.rs
 index adbd3a8d4..3149f6ccd 100644
 --- a/src/common/catalog/src/consts.rs
@@ -2302,18 +2860,6 @@ index 726785f07..2b9f3a517 100644
          }
  
          #[async_trait]
-diff --git a/src/common/meta/Cargo.toml b/src/common/meta/Cargo.toml
-index 8e0cbbdf3..43714b7d5 100644
---- a/src/common/meta/Cargo.toml
-+++ b/src/common/meta/Cargo.toml
-@@ -41,6 +41,7 @@ common-procedure.workspace = true
- common-query.workspace = true
- common-recordbatch.workspace = true
- common-runtime.workspace = true
-+common-session.workspace = true
- common-telemetry.workspace = true
- common-time.workspace = true
- common-wal.workspace = true
 diff --git a/src/common/meta/src/ddl/alter_database.rs b/src/common/meta/src/ddl/alter_database.rs
 index dfa42f400..ac24ff77e 100644
 --- a/src/common/meta/src/ddl/alter_database.rs
@@ -3735,7 +4281,7 @@ index 816ba3cd9..73a361ffd 100644
  
          Some(Box::new(event))
 diff --git a/src/common/meta/src/ddl_manager.rs b/src/common/meta/src/ddl_manager.rs
-index e333b3ccb..7ba408ca2 100644
+index e333b3ccb..be2b2ca16 100644
 --- a/src/common/meta/src/ddl_manager.rs
 +++ b/src/common/meta/src/ddl_manager.rs
 @@ -19,9 +19,12 @@ use api::v1::Repartition;
@@ -4489,7 +5035,7 @@ index e333b3ccb..7ba408ca2 100644
          .await?;
  
      let procedure_id = id.to_string();
-@@ -1363,16 +1484,22 @@ async fn handle_comment_on_task(
+@@ -1363,6 +1484,8 @@ async fn handle_comment_on_task(
  #[cfg(test)]
  mod tests {
      use std::sync::Arc;
@@ -4497,10 +5043,8 @@ index e333b3ccb..7ba408ca2 100644
 +    use std::sync::Mutex;
      use std::time::Duration;
  
-+    #[cfg(feature = "enterprise")]
-+    use common_base::protocol::Channel;
      use common_error::ext::BoxedError;
-     #[cfg(feature = "enterprise")]
+@@ -1370,9 +1493,11 @@ mod tests {
      use common_error::ext::ErrorExt;
      #[cfg(feature = "enterprise")]
      use common_error::status_code::StatusCode;
@@ -4513,7 +5057,7 @@ index e333b3ccb..7ba408ca2 100644
      use store_api::storage::TableId;
      use table::table_name::TableName;
  
-@@ -1394,13 +1521,16 @@ mod tests {
+@@ -1394,13 +1519,16 @@ mod tests {
      use crate::kv_backend::memory::MemoryKvBackend;
      use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
      use crate::peer::Peer;
@@ -4531,7 +5075,7 @@ index e333b3ccb..7ba408ca2 100644
      use crate::sequence::SequenceBuilder;
      use crate::state_store::KvStateStore;
      use crate::test_util::{MockDatanodeManager, new_ddl_context};
-@@ -1467,6 +1597,50 @@ mod tests {
+@@ -1467,6 +1595,50 @@ mod tests {
          }
      }
  
@@ -4582,7 +5126,7 @@ index e333b3ccb..7ba408ca2 100644
      #[test]
      fn test_generic_loader_captures_configured_committer() {
          let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
-@@ -1602,13 +1776,77 @@ mod tests {
+@@ -1602,13 +1774,78 @@ mod tests {
          )
      }
  
@@ -4600,7 +5144,8 @@ index e333b3ccb..7ba408ca2 100644
 +        };
 +        let executor_context = || ExecutorContext {
 +            query_context: Some(QueryContext {
-+                channel: Channel::Mysql as u8,
++                // MySQL's stable wire protocol value is 1.
++                channel: 1,
 +                ..Default::default()
 +            }),
 +            actor: Some("test-user".to_string()),
@@ -4661,7 +5206,7 @@ index e333b3ccb..7ba408ca2 100644
              .await
              .unwrap_err();
  
-@@ -1622,13 +1860,19 @@ mod tests {
+@@ -1622,13 +1859,19 @@ mod tests {
          let ddl_manager = build_soft_drop_test_ddl_manager();
  
          let err = ddl_manager
@@ -4683,7 +5228,7 @@ index e333b3ccb..7ba408ca2 100644
              .await
              .unwrap_err();
          assert!(matches!(err, crate::error::Error::Unsupported { .. }));
-@@ -1645,8 +1889,11 @@ mod tests {
+@@ -1645,8 +1888,11 @@ mod tests {
          ] {
              let err = ddl_manager
                  .submit_ddl_task(
@@ -5213,15 +5758,17 @@ index c0165dd80..a873c26b3 100644
      ) -> Result<SubmitDdlTaskResponse> {
          self.ddl_manager.submit_ddl_task(ctx, request).await
 diff --git a/src/common/meta/src/rpc/ddl.rs b/src/common/meta/src/rpc/ddl.rs
-index 0b61d2b2a..b1c5ca8f2 100644
+index 0b61d2b2a..d8f52cd6d 100644
 --- a/src/common/meta/src/rpc/ddl.rs
 +++ b/src/common/meta/src/rpc/ddl.rs
-@@ -44,6 +44,8 @@ use base64::Engine as _;
+@@ -42,8 +42,10 @@ use api::v1::{
+ };
+ use base64::Engine as _;
  use base64::engine::general_purpose;
++use common_base::protocol::Channel;
  use common_catalog::{format_full_flow_name, format_full_table_name};
  use common_error::ext::BoxedError;
 +pub use common_event_recorder::{PersistentEventContext, TriggerReason};
-+use common_session::channel_protocol;
  use common_time::{DatabaseTimeToLive, Timestamp};
  use prost::Message;
  use serde::{Deserialize, Serialize};
@@ -5295,7 +5842,7 @@ index 0b61d2b2a..b1c5ca8f2 100644
          })
      }
  }
-@@ -1665,6 +1653,21 @@ pub struct QueryContext {
+@@ -1665,6 +1653,23 @@ pub struct QueryContext {
      pub sst_min_sequences: HashMap<u64, u64>,
  }
  
@@ -5307,29 +5854,32 @@ index 0b61d2b2a..b1c5ca8f2 100644
 +        .get(TRIGGER_REASON_EXTENSION_KEY)
 +        .map(|value| TriggerReason::from_extension(value))
 +        .unwrap_or_default();
-+    let mut context = PersistentEventContext::new(reason);
-+    if let Some(protocol) = channel_protocol(query_context.channel) {
-+        context = context.with_protocol(protocol);
++    let channel = Channel::from(u32::from(query_context.channel));
++    let context = PersistentEventContext::new(reason);
++    if channel == Channel::Unknown {
++        context
++    } else {
++        context.with_protocol(channel.as_ref())
 +    }
-+    context
 +}
 +
  impl QueryContext {
      /// Get the current catalog
      pub fn current_catalog(&self) -> &str {
-@@ -1691,6 +1694,11 @@ impl QueryContext {
+@@ -1691,6 +1696,12 @@ impl QueryContext {
          self.channel
      }
  
 +    /// Returns the protocol derived from the typed query channel.
 +    pub fn protocol(&self) -> Option<String> {
-+        channel_protocol(self.channel).map(str::to_string)
++        let channel = Channel::from(u32::from(self.channel));
++        (channel != Channel::Unknown).then(|| channel.as_ref().to_string())
 +    }
 +
      pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {
          &self.snapshot_seqs
      }
-@@ -1864,6 +1872,29 @@ mod tests {
+@@ -1864,6 +1875,29 @@ mod tests {
  
      use super::{AlterTableTask, CreateTableTask, *};
  
@@ -5359,7 +5909,7 @@ index 0b61d2b2a..b1c5ca8f2 100644
      #[test]
      fn test_ddl_timeout_secs() {
          assert_eq!(ddl_timeout_secs(Duration::ZERO), 0);
-@@ -1903,10 +1934,7 @@ mod tests {
+@@ -1903,10 +1937,7 @@ mod tests {
      #[test]
      fn test_undrop_table_task_pb_roundtrip() {
          let expected = UndropTableTask { table_id: 1024 };
@@ -5371,7 +5921,7 @@ index 0b61d2b2a..b1c5ca8f2 100644
  
          let pb = PbDdlTaskRequest::try_from(request).unwrap();
          let pb_task = pb.task.unwrap();
-@@ -1918,10 +1946,7 @@ mod tests {
+@@ -1918,10 +1949,7 @@ mod tests {
      #[test]
      fn test_purge_dropped_table_task_pb_roundtrip() {
          let expected = PurgeDroppedTableTask { table_id: 1024 };
@@ -5383,7 +5933,7 @@ index 0b61d2b2a..b1c5ca8f2 100644
  
          let pb = PbDdlTaskRequest::try_from(request).unwrap();
          let pb_task = pb.task.unwrap();
-@@ -1930,53 +1955,6 @@ mod tests {
+@@ -1930,53 +1958,6 @@ mod tests {
          assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
      }
  
@@ -5437,7 +5987,7 @@ index 0b61d2b2a..b1c5ca8f2 100644
      #[test]
      fn test_undrop_table_task_json_roundtrip() {
          let task = UndropTableTask { table_id: 1024 };
-@@ -2237,4 +2215,10 @@ mod tests {
+@@ -2237,4 +2218,10 @@ mod tests {
          assert_eq!(pb_roundtrip.channel, pb.channel);
          assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
      }
@@ -6694,73 +7244,6 @@ index 6257aabf8..48a275748 100644
          let arrow_schema = Arc::new(ArrowSchema::new(vec![field]));
          let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
          let columns: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(
-diff --git a/src/common/session/src/lib.rs b/src/common/session/src/lib.rs
-index f09baf928..418425df1 100644
---- a/src/common/session/src/lib.rs
-+++ b/src/common/session/src/lib.rs
-@@ -15,6 +15,27 @@
- use serde::{Deserialize, Serialize};
- use strum::{AsRefStr, Display, EnumString};
- 
-+/// Returns the protocol name represented by a wire query channel value.
-+pub fn channel_protocol(channel: u8) -> Option<&'static str> {
-+    match channel {
-+        1 => Some("mysql"),
-+        2 => Some("postgres"),
-+        3 => Some("httpsql"),
-+        4 => Some("prometheus"),
-+        5 => Some("otlp"),
-+        6 => Some("grpc"),
-+        7 => Some("influx"),
-+        8 => Some("opentsdb"),
-+        9 => Some("loki"),
-+        10 => Some("elasticsearch"),
-+        11 => Some("jaeger"),
-+        12 => Some("log"),
-+        13 => Some("promql"),
-+        14 => Some("splunk"),
-+        _ => None,
-+    }
-+}
-+
- /// Defines the read preference for frontend route operations,
- /// determining whether to read from the region leader or follower.
- #[derive(
-@@ -31,7 +52,33 @@ pub enum ReadPreference {
- mod tests {
-     use std::str::FromStr;
- 
--    use crate::ReadPreference;
-+    use crate::{ReadPreference, channel_protocol};
-+
-+    #[test]
-+    fn test_channel_protocol() {
-+        let expected = [
-+            (1, "mysql"),
-+            (2, "postgres"),
-+            (3, "httpsql"),
-+            (4, "prometheus"),
-+            (5, "otlp"),
-+            (6, "grpc"),
-+            (7, "influx"),
-+            (8, "opentsdb"),
-+            (9, "loki"),
-+            (10, "elasticsearch"),
-+            (11, "jaeger"),
-+            (12, "log"),
-+            (13, "promql"),
-+            (14, "splunk"),
-+        ];
-+
-+        for (channel, protocol) in expected {
-+            assert_eq!(Some(protocol), channel_protocol(channel));
-+        }
-+        assert_eq!(None, channel_protocol(0));
-+        assert_eq!(None, channel_protocol(15));
-+    }
- 
-     #[test]
-     fn test_read_preference() {
 diff --git a/src/common/sql/src/convert.rs b/src/common/sql/src/convert.rs
 index 3a10c5476..fdd90ebe3 100644
 --- a/src/common/sql/src/convert.rs
@@ -6801,6 +7284,20 @@ index 3a10c5476..fdd90ebe3 100644
              }
          },
          ConcreteDataType::Vector(d) => {
+diff --git a/src/datatypes/Cargo.toml b/src/datatypes/Cargo.toml
+index 3bf2a5d8e..124b1e0ea 100644
+--- a/src/datatypes/Cargo.toml
++++ b/src/datatypes/Cargo.toml
+@@ -27,6 +27,9 @@ jsonb.workspace = true
+ num = "0.4"
+ num-traits = "0.2"
+ ordered-float.workspace = true
++parquet-variant.workspace = true
++parquet-variant-compute.workspace = true
++parquet-variant-json.workspace = true
+ paste.workspace = true
+ regex.workspace = true
+ serde.workspace = true
 diff --git a/src/datatypes/src/arrow_array.rs b/src/datatypes/src/arrow_array.rs
 index e5ef7add8..848cc7c91 100644
 --- a/src/datatypes/src/arrow_array.rs
@@ -6849,11 +7346,37 @@ index e5ef7add8..848cc7c91 100644
  /// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
  ///
  /// Note: This method does not check for nulls and the value is arbitrary
+diff --git a/src/datatypes/src/error.rs b/src/datatypes/src/error.rs
+index cf76812c2..b34a5ffa9 100644
+--- a/src/datatypes/src/error.rs
++++ b/src/datatypes/src/error.rs
+@@ -196,6 +196,13 @@ pub enum Error {
+         location: Location,
+     },
+ 
++    #[snafu(display("Invalid JSON2 layout: {reason}"))]
++    InvalidJson2Layout {
++        reason: String,
++        #[snafu(implicit)]
++        location: Location,
++    },
++
+     #[snafu(display("Invalid Vector: {}", msg))]
+     InvalidVector {
+         msg: String,
+@@ -318,6 +325,7 @@ impl ErrorExt for Error {
+             | InvalidTimestampPrecision { .. }
+             | InvalidPrecisionOrScale { .. }
+             | InvalidJson { .. }
++            | InvalidJson2Layout { .. }
+             | InvalidJsonb { .. }
+             | InvalidVector { .. }
+             | InvalidFulltextOption { .. }
 diff --git a/src/datatypes/src/extension/json.rs b/src/datatypes/src/extension/json.rs
-index b78a9df49..26d470641 100644
+index b78a9df49..ab4a13842 100644
 --- a/src/datatypes/src/extension/json.rs
 +++ b/src/datatypes/src/extension/json.rs
-@@ -12,32 +12,85 @@
+@@ -12,32 +12,203 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
@@ -6861,41 +7384,159 @@ index b78a9df49..26d470641 100644
  use std::sync::Arc;
  
 -use arrow_schema::extension::ExtensionType;
--use arrow_schema::{ArrowError, DataType, Field, FieldRef};
 +use arrow_schema::extension::{
 +    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 +};
-+use arrow_schema::{ArrowError, DataType, Field};
+ use arrow_schema::{ArrowError, DataType, Field, FieldRef};
++use parquet_variant_compute::VariantType;
  use serde::{Deserialize, Serialize};
-+use snafu::ResultExt;
++use snafu::{ResultExt, ensure};
  
++use crate::error::InvalidJson2LayoutSnafu;
++pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
  use crate::json::JsonSettings;
  
+-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 +const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
++const JSON2_LAYOUT_V1: u8 = 1;
++const JSON2_LAYOUT_V2: u8 = 2;
 +
- #[derive(Debug, Clone, Serialize, Deserialize, Default)]
++/// Parsed physical layout of a JSON2 Arrow root field.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Json2PhysicalLayout {
++    version: u8,
++}
++
++impl Json2PhysicalLayout {
++    /// Parses the JSON2 layout version from a root field.
++    ///
++    /// The version is read from the extension metadata; missing metadata
++    /// defaults to V1.
++    ///
++    /// Supported versions:
++    /// - V1
++    /// - V2
++    ///
++    /// Errors when the field is not a JSON2 extension or the version is not
++    /// one of the supported versions.
++    pub fn try_from_root(field: &Field) -> crate::error::Result<Self> {
++        ensure!(
++            is_json2_extension_type(field),
++            InvalidJson2LayoutSnafu {
++                reason: format!("field '{}' is not a JSON2 extension", field.name()),
++            }
++        );
++
++        let version = match field.extension_type_name() {
++            Some(Json2ExtensionType::NAME) => field
++                .metadata()
++                .get(EXTENSION_TYPE_METADATA_KEY)
++                .map(|x| parse_version(x))
++                .transpose()?
++                .flatten()
++                .unwrap_or(JSON2_LAYOUT_V1),
++            _ => JSON2_LAYOUT_V1,
++        };
++        ensure!(
++            matches!(version, JSON2_LAYOUT_V1 | JSON2_LAYOUT_V2),
++            InvalidJson2LayoutSnafu {
++                reason: format!("unsupported JSON2 layout version: {version}"),
++            }
++        );
++        Ok(Self { version })
++    }
++
++    /// Returns whether this is the JSON2 physical layout version 2.
++    pub fn is_version_2(&self) -> bool {
++        self.version == JSON2_LAYOUT_V2
++    }
++}
++
++fn parse_version(metadata: &str) -> crate::error::Result<Option<u8>> {
++    serde_json::from_str::<JsonMetadata>(metadata)
++        .map(|x| x.layout_version)
++        .map_err(|e| {
++            InvalidJson2LayoutSnafu {
++                reason: format!(r#"invalid extension metadata: "{metadata}", error: {e}"#),
++            }
++            .build()
++        })
++}
++
++/// Returns the remainder field of a JSON2 v2 root.
++pub(crate) fn json2_remainder_field(field: &Field) -> crate::error::Result<Option<&FieldRef>> {
++    let layout = Json2PhysicalLayout::try_from_root(field)?;
++    if !layout.is_version_2() {
++        return Ok(None);
++    }
++
++    let remainder = if let DataType::Struct(fields) = field.data_type() {
++        fields
++            .iter()
++            .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
++    } else {
++        None
++    };
++
++    if let Some(remainder) = remainder {
++        let _ = remainder.try_extension_type::<VariantType>().map_err(|e| {
++            InvalidJson2LayoutSnafu {
++                reason: e.to_string(),
++            }
++            .build()
++        })?;
++    }
++    Ok(remainder)
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
  pub struct JsonMetadata {
 -    /// JSON2 settings stored in column schema metadata and represented through
 -    /// Arrow extension metadata.
 -    pub json_settings: Option<JsonSettings>,
 +    /// JSON2 settings stored in Arrow extension metadata.
 +    json_settings: JsonSettings,
++    /// Physical JSON2 layout used by this Arrow field.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    layout_version: Option<u8>,
  }
  
 -#[derive(Debug, Clone)]
 -pub struct JsonExtensionType(Arc<JsonMetadata>);
 +impl JsonMetadata {
-+    /// Creates JSON2 extension metadata.
++    /// Creates metadata for the legacy JSON2 layout.
 +    pub fn new(json_settings: JsonSettings) -> Self {
-+        Self { json_settings }
++        Self {
++            json_settings,
++            layout_version: None,
++        }
 +    }
  
 -impl JsonExtensionType {
 -    pub fn new(metadata: Arc<JsonMetadata>) -> Self {
 -        JsonExtensionType(metadata)
++    /// Creates metadata for the new JSON2 physical v2 layout.
++    pub fn new_v2(json_settings: JsonSettings) -> Self {
++        Self {
++            json_settings,
++            layout_version: Some(JSON2_LAYOUT_V2),
++        }
++    }
++
 +    /// Returns the JSON2 settings.
 +    pub fn json_settings(&self) -> &JsonSettings {
 +        &self.json_settings
++    }
++
++    /// Returns whether this metadata describes JSON2 layout version 2.
++    pub fn is_version_2(&self) -> bool {
++        self.layout_version == Some(JSON2_LAYOUT_V2)
++    }
++}
++
++impl Default for JsonMetadata {
++    fn default() -> Self {
++        Self::new(JsonSettings::default())
      }
  }
  
@@ -6949,7 +7590,7 @@ index b78a9df49..26d470641 100644
      type Metadata = Arc<JsonMetadata>;
  
      fn metadata(&self) -> &Self::Metadata {
-@@ -102,29 +155,130 @@ impl ExtensionType for JsonExtensionType {
+@@ -102,29 +273,205 @@ impl ExtensionType for JsonExtensionType {
      }
  }
  
@@ -7041,6 +7682,7 @@ index b78a9df49..26d470641 100644
 +    use arrow_schema::{Field, Fields};
 +
 +    use super::*;
++    use crate::vectors::json::variant::variant_field;
 +
 +    #[test]
 +    fn test_json2_extension_type_detection() {
@@ -7096,7 +7738,533 @@ index b78a9df49..26d470641 100644
 +        assert!(JsonExtensionType::try_new(&DataType::Null, ()).is_ok());
 +        assert!(JsonExtensionType::try_new(&DataType::Struct(Fields::empty()), ()).is_err());
 +    }
++
++    #[test]
++    fn test_json_metadata_layout_version_compatibility() -> serde_json::Result<()> {
++        let legacy: JsonMetadata = serde_json::from_str(r#"{"json_settings":{}}"#)?;
++        assert!(!legacy.is_version_2());
++
++        let metadata = JsonMetadata::new_v2(JsonSettings::default());
++        assert!(metadata.is_version_2());
++        let serialized = serde_json::to_string(&metadata)?;
++        let deserialized: JsonMetadata = serde_json::from_str(&serialized)?;
++        assert!(deserialized.is_version_2());
++        assert_eq!(deserialized, metadata);
++        Ok(())
++    }
++
++    #[test]
++    fn test_parse_json2_physical_layout() -> crate::error::Result<()> {
++        let legacy = Field::new("data", DataType::Struct(Fields::empty()), true)
++            .with_extension_type(Json2ExtensionType::default());
++        assert!(!Json2PhysicalLayout::try_from_root(&legacy)?.is_version_2());
++
++        let v2 = Field::new(
++            "data",
++            DataType::Struct(
++                vec![
++                    Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
++                    Arc::new(Field::new("count", DataType::Int64, true)),
++                ]
++                .into(),
++            ),
++            true,
++        )
++        .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(
++            JsonSettings::default(),
++        ))));
++        assert!(Json2PhysicalLayout::try_from_root(&v2)?.is_version_2());
++        let remainder = json2_remainder_field(&v2)?.unwrap();
++        assert_eq!(JSON2_REMAINDER_FIELD_NAME, remainder.name());
++        Ok(())
++    }
++
++    #[test]
++    fn test_reject_invalid_json2_physical_layout() {
++        let field = Field::new("data", DataType::Struct(Fields::empty()), true);
++        assert!(Json2PhysicalLayout::try_from_root(&field).is_err());
++
++        let metadata =
++            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default())));
++        let missing = Field::new("data", DataType::Struct(Fields::empty()), true)
++            .with_extension_type(metadata.clone());
++        assert!(json2_remainder_field(&missing).is_ok_and(|x| x.is_none()));
++
++        let invalid = Field::new(
++            "data",
++            DataType::Struct(
++                vec![Arc::new(Field::new(
++                    JSON2_REMAINDER_FIELD_NAME,
++                    DataType::Binary,
++                    true,
++                ))]
++                .into(),
++            ),
++            true,
++        )
++        .with_extension_type(metadata);
++        assert!(json2_remainder_field(&invalid).is_err());
++
++        let future = Field::new("data", DataType::Struct(Fields::empty()), true)
++            .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata {
++                json_settings: JsonSettings::default(),
++                layout_version: Some(JSON2_LAYOUT_V2 + 1),
++            })));
++        assert!(Json2PhysicalLayout::try_from_root(&future).is_err());
++    }
  }
+diff --git a/src/datatypes/src/json.rs b/src/datatypes/src/json.rs
+index 48a917402..ec9ca4ac7 100644
+--- a/src/datatypes/src/json.rs
++++ b/src/datatypes/src/json.rs
+@@ -29,21 +29,47 @@ use serde_json::{Map, Value as Json};
+ use snafu::ResultExt;
+ 
+ use crate::data_type::ConcreteDataType;
+-use crate::error::{self, Result, UnsupportedJsonTypeSnafu};
++use crate::error::{self, InvalidJson2LayoutSnafu, Result, UnsupportedJsonTypeSnafu};
+ use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
+ use crate::schema::ColumnDefaultConstraint;
+-use crate::types::json_type::JsonNativeType;
++use crate::types::json_type::{JsonNativeType, JsonObjectType};
+ use crate::value::{ListValue, StructValue, Value};
+ 
+ /// Maximum number of JSON container levels represented as nested Arrow types.
+ pub const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
++/// Reserved physical field containing unexpanded JSON2 paths.
++pub const JSON2_REMAINDER_FIELD_NAME: &str = "!__remainder__!";
+ 
+ /// JSON2 settings stored in column schema metadata and represented through
+ /// Arrow extension metadata.
+-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+ pub struct JsonSettings {
+     #[serde(default)]
+-    pub type_hints: Vec<JsonTypeHint>,
++    type_hints: Vec<JsonTypeHint>,
++    /// Maximum number of unhinted JSON paths expanded into Arrow fields.
++    ///
++    /// `None` preserves the legacy unlimited layout.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    max_auto_expanded_paths: Option<u32>,
++}
++
++#[derive(Deserialize)]
++struct JsonSettingsSerde {
++    #[serde(default)]
++    type_hints: Vec<JsonTypeHint>,
++    #[serde(default)]
++    max_auto_expanded_paths: Option<u32>,
++}
++
++impl<'de> Deserialize<'de> for JsonSettings {
++    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
++    where
++        D: serde::Deserializer<'de>,
++    {
++        let settings = JsonSettingsSerde::deserialize(deserializer)?;
++        Self::try_new(settings.type_hints, settings.max_auto_expanded_paths)
++            .map_err(serde::de::Error::custom)
++    }
+ }
+ 
+ /// Declares selected JSON2 subpaths as typed fields.
+@@ -79,8 +105,28 @@ pub struct JsonContext<'a> {
+ }
+ 
+ impl JsonSettings {
+-    pub fn new(type_hints: Vec<JsonTypeHint>) -> Self {
+-        Self { type_hints }
++    /// Creates and validates JSON2 settings.
++    pub fn try_new(
++        type_hints: Vec<JsonTypeHint>,
++        max_auto_expanded_paths: Option<u32>,
++    ) -> Result<Self> {
++        validate_type_hints(&type_hints)?;
++        Ok(Self {
++            type_hints,
++            max_auto_expanded_paths,
++        })
++    }
++
++    pub fn type_hints(&self) -> &[JsonTypeHint] {
++        &self.type_hints
++    }
++
++    pub fn max_auto_expanded_paths(&self) -> Option<u32> {
++        self.max_auto_expanded_paths
++    }
++
++    pub fn into_parts(self) -> (Vec<JsonTypeHint>, Option<u32>) {
++        (self.type_hints, self.max_auto_expanded_paths)
+     }
+ 
+     /// Decode an encoded StructValue back into a serde_json::Value.
+@@ -102,6 +148,87 @@ impl JsonSettings {
+     }
+ }
+ 
++fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
++    let mut object = JsonObjectType::new();
++    for hint in type_hints {
++        if hint.path.len() > JSON2_MAX_STRUCTURED_DEPTH {
++            return InvalidJson2LayoutSnafu {
++                reason: format!(
++                    "JSON2 type hint path cannot exceed {JSON2_MAX_STRUCTURED_DEPTH} segments"
++                ),
++            }
++            .fail();
++        }
++        if hint
++            .path
++            .first()
++            .is_some_and(|x| x == JSON2_REMAINDER_FIELD_NAME)
++        {
++            return InvalidJson2LayoutSnafu {
++                reason: format!(
++                    "JSON2 type hint path cannot be rooted at reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
++                ),
++            }
++            .fail();
++        }
++        let data_type = match &hint.data_type {
++            ConcreteDataType::Boolean(_)
++            | ConcreteDataType::UInt8(_)
++            | ConcreteDataType::UInt16(_)
++            | ConcreteDataType::UInt32(_)
++            | ConcreteDataType::UInt64(_)
++            | ConcreteDataType::Int8(_)
++            | ConcreteDataType::Int16(_)
++            | ConcreteDataType::Int32(_)
++            | ConcreteDataType::Int64(_)
++            | ConcreteDataType::Float32(_)
++            | ConcreteDataType::Float64(_)
++            | ConcreteDataType::String(_) => (&hint.data_type).into(),
++            data_type => {
++                return InvalidJson2LayoutSnafu {
++                    reason: format!("unsupported JSON2 type hint data type: {data_type}"),
++                }
++                .fail();
++            }
++        };
++        validate_type_hint(&mut object, &hint.path, data_type)?;
++    }
++    Ok(())
++}
++
++fn validate_type_hint(
++    object: &mut JsonObjectType,
++    path: &[String],
++    data_type: JsonNativeType,
++) -> Result<()> {
++    let Some((name, path)) = path.split_first() else {
++        return InvalidJson2LayoutSnafu {
++            reason: "JSON2 type hint path must not be empty".to_string(),
++        }
++        .fail();
++    };
++    if path.is_empty() {
++        if object.insert(name.clone(), data_type).is_some() {
++            return InvalidJson2LayoutSnafu {
++                reason: format!("duplicate JSON2 type hint path '{name}'"),
++            }
++            .fail();
++        }
++        return Ok(());
++    }
++
++    let child = object
++        .entry(name.clone())
++        .or_insert_with(|| JsonNativeType::Object(JsonObjectType::new()));
++    let JsonNativeType::Object(child) = child else {
++        return InvalidJson2LayoutSnafu {
++            reason: format!("conflicting JSON2 type hint path at '{name}'"),
++        }
++        .fail();
++    };
++    validate_type_hint(child, path, data_type)
++}
++
+ impl<'a> JsonContext<'a> {
+     fn type_hint(&self) -> Option<&'a JsonTypeHint> {
+         self.settings
+@@ -483,7 +610,8 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_json_settings_forward_compatibility() {
++    fn test_json_settings_forward_compatibility()
++    -> std::result::Result<(), Box<dyn std::error::Error>> {
+         let json_str = r#"{
+             "type_hints": [
+                 {
+@@ -512,11 +640,10 @@ mod tests {
+             ]
+         }"#;
+ 
+-        let deserialized = serde_json::from_str::<JsonSettings>(json_str).unwrap();
++        let deserialized = serde_json::from_str::<JsonSettings>(json_str)?;
+ 
+-        assert_eq!(
+-            deserialized,
+-            JsonSettings::new(vec![
++        let expected = JsonSettings::try_new(
++            vec![
+                 JsonTypeHint {
+                     path: vec!["user".to_string(), "age".to_string()],
+                     data_type: ConcreteDataType::int64_datatype(),
+@@ -531,13 +658,16 @@ mod tests {
+                     default_constraint: None,
+                     inverted_index: false,
+                 },
+-            ])
+-        );
++            ],
++            None,
++        )?;
++        assert_eq!(deserialized, expected);
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_json_settings_ser_de() {
+-        let settings = JsonSettings::new(vec![
++    fn test_json_settings_ser_de() -> std::result::Result<(), Box<dyn std::error::Error>> {
++        let type_hints = vec![
+             JsonTypeHint {
+                 path: vec!["user".to_string(), "age".to_string()],
+                 data_type: ConcreteDataType::int64_datatype(),
+@@ -552,12 +682,76 @@ mod tests {
+                 default_constraint: None,
+                 inverted_index: false,
+             },
+-        ]);
++        ];
+ 
+-        let serialized = serde_json::to_string(&settings).unwrap();
+-        let deserialized = serde_json::from_str::<JsonSettings>(&serialized).unwrap();
++        for settings in [
++            JsonSettings {
++                type_hints: type_hints.clone(),
++                max_auto_expanded_paths: None,
++            },
++            JsonSettings {
++                type_hints,
++                max_auto_expanded_paths: Some(1),
++            },
++        ] {
++            let serialized = serde_json::to_string(&settings)?;
++            let deserialized = serde_json::from_str::<JsonSettings>(&serialized)?;
++            assert_eq!(settings, deserialized);
++        }
++        Ok(())
++    }
+ 
+-        assert_eq!(settings, deserialized);
++    #[test]
++    fn test_json_settings_reject_invalid_type_hint_layout() {
++        for type_hints in [
++            json!([{"path": [], "type": {"Int64": {}}, "nullable": true, "inverted_index": false}]),
++            json!([
++                {"path": ["a"], "type": {"Int64": {}}, "nullable": true, "inverted_index": false},
++                {"path": ["a", "b"], "type": {"Int64": {}}, "nullable": true, "inverted_index": false}
++            ]),
++            json!([{"path": [JSON2_REMAINDER_FIELD_NAME], "type": {"Int64": {}}, "nullable": true, "inverted_index": false}]),
++        ] {
++            let settings = json!({"type_hints": type_hints});
++            assert!(serde_json::from_value::<JsonSettings>(settings).is_err());
++        }
++
++        let hint = |path, data_type| JsonTypeHint {
++            path,
++            data_type,
++            nullable: true,
++            default_constraint: None,
++            inverted_index: false,
++        };
++        assert!(
++            JsonSettings::try_new(
++                vec![hint(
++                    vec!["nested".to_string(), JSON2_REMAINDER_FIELD_NAME.to_string()],
++                    ConcreteDataType::string_datatype(),
++                )],
++                None,
++            )
++            .is_ok()
++        );
++        assert!(
++            JsonSettings::try_new(
++                vec![hint(
++                    vec!["nested".to_string(); JSON2_MAX_STRUCTURED_DEPTH + 1],
++                    ConcreteDataType::string_datatype(),
++                )],
++                None,
++            )
++            .is_err()
++        );
++        assert!(
++            JsonSettings::try_new(
++                vec![hint(
++                    vec!["date".to_string()],
++                    ConcreteDataType::date_datatype(),
++                )],
++                None,
++            )
++            .is_err()
++        );
+     }
+ 
+     #[test]
+@@ -702,14 +896,15 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_encode_json_respects_type_hint() {
+-        let settings = JsonSettings::new(vec![JsonTypeHint {
++    fn test_encode_json_respects_type_hint() -> Result<()> {
++        let type_hints = vec![JsonTypeHint {
+             path: vec!["age".to_string()],
+             data_type: ConcreteDataType::int64_datatype(),
+             nullable: false,
+             default_constraint: None,
+             inverted_index: false,
+-        }]);
++        }];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+         let result = settings
+             .encode(json!({
+@@ -731,17 +926,19 @@ mod tests {
+             }))
+             .unwrap_err();
+         assert!(err.to_string().contains("does not match JSON2 type hint"));
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_encode_json_respects_unsigned_type_hint() {
+-        let settings = JsonSettings::new(vec![JsonTypeHint {
++    fn test_encode_json_respects_unsigned_type_hint() -> Result<()> {
++        let type_hints = vec![JsonTypeHint {
+             path: vec!["count".to_string()],
+             data_type: ConcreteDataType::uint64_datatype(),
+             nullable: false,
+             default_constraint: None,
+             inverted_index: false,
+-        }]);
++        }];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+         let result = settings
+             .encode(json!({
+@@ -765,17 +962,19 @@ mod tests {
+             }))
+             .unwrap_err();
+         assert!(err.to_string().contains("does not match JSON2 type hint"));
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_encode_json_fills_missing_type_hint_with_default() {
+-        let settings = JsonSettings::new(vec![JsonTypeHint {
++    fn test_encode_json_fills_missing_type_hint_with_default() -> Result<()> {
++        let type_hints = vec![JsonTypeHint {
+             path: vec!["user".to_string(), "age".to_string()],
+             data_type: ConcreteDataType::int64_datatype(),
+             nullable: false,
+             default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
+             inverted_index: false,
+-        }]);
++        }];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+         let result = settings
+             .encode(json!({}))
+@@ -790,17 +989,19 @@ mod tests {
+             panic!("Expected user Struct value");
+         };
+         assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_encode_json_fills_missing_nullable_type_hint_with_null() {
+-        let settings = JsonSettings::new(vec![JsonTypeHint {
++    fn test_encode_json_fills_missing_nullable_type_hint_with_null() -> Result<()> {
++        let type_hints = vec![JsonTypeHint {
+             path: vec!["user".to_string(), "name".to_string()],
+             data_type: ConcreteDataType::string_datatype(),
+             nullable: true,
+             default_constraint: None,
+             inverted_index: false,
+-        }]);
++        }];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+         let result = settings
+             .encode(json!({ "user": {} }))
+@@ -815,28 +1016,31 @@ mod tests {
+             panic!("Expected user Struct value");
+         };
+         assert_eq!(struct_field_value(user, "name"), &Value::Null);
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_encode_json_rejects_missing_non_null_type_hint() {
+-        let settings = JsonSettings::new(vec![JsonTypeHint {
++    fn test_encode_json_rejects_missing_non_null_type_hint() -> Result<()> {
++        let type_hints = vec![JsonTypeHint {
+             path: vec!["user".to_string(), "age".to_string()],
+             data_type: ConcreteDataType::int64_datatype(),
+             nullable: false,
+             default_constraint: None,
+             inverted_index: false,
+-        }]);
++        }];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+         let err = settings.encode(json!({})).unwrap_err();
+         assert!(
+             err.to_string()
+                 .contains("missing non-null JSON2 type hint path user.age")
+         );
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_encode_json_merges_missing_type_hint_prefix() {
+-        let settings = JsonSettings::new(vec![
++    fn test_encode_json_merges_missing_type_hint_prefix() -> Result<()> {
++        let type_hints = vec![
+             JsonTypeHint {
+                 path: vec!["user".to_string(), "age".to_string()],
+                 data_type: ConcreteDataType::int64_datatype(),
+@@ -853,13 +1057,10 @@ mod tests {
+                 ))),
+                 inverted_index: false,
+             },
+-        ]);
++        ];
++        let settings = JsonSettings::try_new(type_hints, None)?;
+ 
+-        let result = settings
+-            .encode(json!({}))
+-            .unwrap()
+-            .into_json_inner()
+-            .unwrap();
++        let result = settings.encode(json!({}))?.into_json_inner().unwrap();
+ 
+         let Value::Struct(root) = result else {
+             panic!("Expected Struct value");
+@@ -872,6 +1073,7 @@ mod tests {
+             struct_field_value(user, "name"),
+             &Value::String("unknown".into())
+         );
++        Ok(())
+     }
+ 
+     #[test]
 diff --git a/src/datatypes/src/schema/column_schema.rs b/src/datatypes/src/schema/column_schema.rs
 index d3ecd9011..6efab380e 100644
 --- a/src/datatypes/src/schema/column_schema.rs
@@ -7176,6 +8344,584 @@ index 16ffcc690..9da93f6b4 100644
 +        self.fields().iter().any(json::is_any_json_extension_type)
      }
  }
+diff --git a/src/datatypes/src/vectors/json.rs b/src/datatypes/src/vectors/json.rs
+index 3dcb8d7bc..c68e6cf3d 100644
+--- a/src/datatypes/src/vectors/json.rs
++++ b/src/datatypes/src/vectors/json.rs
+@@ -14,3 +14,4 @@
+ 
+ pub mod array;
+ pub(crate) mod builder;
++pub mod variant;
+diff --git a/src/datatypes/src/vectors/json/array.rs b/src/datatypes/src/vectors/json/array.rs
+index afe9f5530..0426334c3 100644
+--- a/src/datatypes/src/vectors/json/array.rs
++++ b/src/datatypes/src/vectors/json/array.rs
+@@ -17,9 +17,12 @@ use std::sync::Arc;
+ 
+ use arrow::compute::{can_cast_types, cast};
+ use arrow_array::cast::AsArray;
+-use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
++use arrow_array::types::{
++    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
++    UInt32Type, UInt64Type,
++};
+ use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
+-use arrow_schema::{DataType, FieldRef};
++use arrow_schema::{DataType, Field, FieldRef};
+ use common_telemetry::trace;
+ use serde_json::Value;
+ use snafu::{OptionExt, ResultExt};
+@@ -29,9 +32,11 @@ use crate::data_type::ConcreteDataType;
+ use crate::error::{
+     AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
+ };
++use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
+ use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
+ use crate::prelude::{DataType as _, Value as GreptimeValue};
+ use crate::value::{ListValue, StructValue};
++use crate::vectors::json::variant::variant_to_json_values;
+ 
+ pub struct JsonArray<'a> {
+     inner: &'a ArrayRef,
+@@ -48,8 +53,15 @@ impl JsonArray<'_> {
+         let value = match array.data_type() {
+             DataType::Null => Value::Null,
+             DataType::Boolean => Value::Bool(array.as_boolean().value(i)),
++            DataType::Int8 => Value::from(array.as_primitive::<Int8Type>().value(i)),
++            DataType::Int16 => Value::from(array.as_primitive::<Int16Type>().value(i)),
++            DataType::Int32 => Value::from(array.as_primitive::<Int32Type>().value(i)),
+             DataType::Int64 => Value::from(array.as_primitive::<Int64Type>().value(i)),
++            DataType::UInt8 => Value::from(array.as_primitive::<UInt8Type>().value(i)),
++            DataType::UInt16 => Value::from(array.as_primitive::<UInt16Type>().value(i)),
++            DataType::UInt32 => Value::from(array.as_primitive::<UInt32Type>().value(i)),
+             DataType::UInt64 => Value::from(array.as_primitive::<UInt64Type>().value(i)),
++            DataType::Float32 => Value::from(array.as_primitive::<Float32Type>().value(i)),
+             DataType::Float64 => Value::from(array.as_primitive::<Float64Type>().value(i)),
+             DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                 Value::String(string_array_value(array, i).to_string())
+@@ -92,6 +104,60 @@ impl JsonArray<'_> {
+         Ok(value)
+     }
+ 
++    /// Projects a physical JSON2 array to a logical query type.
++    ///
++    /// TODO(LFC) Supersede `project_to_v2` to `project_to`.
++    pub fn project_to_v2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
++        if json2_remainder_field(field)?.is_some() {
++            project_json_values(self.json2_values()?, target)
++        } else {
++            self.project_to(target)
++        }
++    }
++
++    fn json2_values(&self) -> Result<Vec<Value>> {
++        let structs = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
++            reason: "JSON2 layout v2 root array must be a struct",
++        })?;
++        let remainder = structs.column_by_name(JSON2_REMAINDER_FIELD_NAME);
++        let mut remainders = if let Some(remainder) = remainder {
++            variant_to_json_values(remainder)?
++        } else {
++            vec![None; structs.len()]
++        };
++        let mut values = Vec::with_capacity(structs.len());
++        let mut path = Vec::new();
++
++        for (i, remainder) in remainders.iter_mut().enumerate() {
++            if structs.is_null(i) {
++                values.push(Value::Null);
++                continue;
++            }
++
++            let mut object = match remainder.take() {
++                None => serde_json::Map::new(),
++                Some(Value::Object(object)) => object,
++                Some(value) => {
++                    return InvalidJsonSnafu {
++                        value: format!("JSON2 layout v2 remainder must be an object, got {value}"),
++                    }
++                    .fail();
++                }
++            };
++
++            for (child, column) in structs.fields().iter().zip(structs.columns()) {
++                if child.name() == JSON2_REMAINDER_FIELD_NAME {
++                    continue;
++                }
++                let value = JsonArray::from(column).try_get_value(i)?;
++                merge_explicit_value(&mut object, child.name().clone(), value, &mut path)?;
++            }
++            values.push(Value::Object(object));
++        }
++
++        Ok(values)
++    }
++
+     /// Normalizes a JSON2 array to the wider `expect` data type without losing
+     /// information.
+     ///
+@@ -326,6 +392,34 @@ impl JsonArray<'_> {
+     }
+ }
+ 
++fn merge_explicit_value(
++    remainder: &mut serde_json::Map<String, Value>,
++    key: String,
++    explicit: Value,
++    path: &mut Vec<String>,
++) -> Result<()> {
++    let Some(existing) = remainder.get_mut(&key) else {
++        remainder.insert(key, explicit);
++        return Ok(());
++    };
++    path.push(key);
++
++    let (Value::Object(remainder), Value::Object(explicit)) = (existing, explicit) else {
++        return InvalidJsonSnafu {
++            value: format!(
++                "cannot merge '{}' in explicit fields and remainder: not both objects",
++                path.join("."),
++            ),
++        }
++        .fail();
++    };
++    for (key, value) in explicit {
++        merge_explicit_value(remainder, key, value, path)?;
++    }
++    path.pop();
++    Ok(())
++}
++
+ /// Returns whether Arrow can cast between the types without JSON-aware projection.
+ /// Binary and nested types require JSONB decoding or recursive projection.
+ fn can_fast_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
+@@ -453,13 +547,16 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
+ mod test {
+     use arrow_array::types::Int64Type;
+     use arrow_array::{
+-        BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
+-        UInt64Array,
++        BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
++        Int64Array, ListArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+     };
+     use arrow_schema::{Field, Fields};
+     use serde_json::json;
+ 
+     use super::*;
++    use crate::extension::json::{Json2ExtensionType, JsonMetadata};
++    use crate::json::JsonSettings;
++    use crate::vectors::json::variant::{json_values_to_variant, variant_field};
+ 
+     #[test]
+     fn test_try_get_value() -> Result<()> {
+@@ -474,6 +571,20 @@ mod test {
+         assert_eq!(JsonArray::from(&ints).try_get_value(0)?, json!(-7));
+         assert_eq!(JsonArray::from(&ints).try_get_value(1)?, Value::Null);
+ 
++        macro_rules! assert_number {
++            ($array:expr, $expected:expr) => {{
++                let array: ArrayRef = Arc::new($array);
++                assert_eq!(JsonArray::from(&array).try_get_value(0)?, json!($expected));
++            }};
++        }
++        assert_number!(Int8Array::from(vec![-8]), -8);
++        assert_number!(Int16Array::from(vec![-16]), -16);
++        assert_number!(Int32Array::from(vec![-32]), -32);
++        assert_number!(UInt8Array::from(vec![8]), 8);
++        assert_number!(UInt16Array::from(vec![16]), 16);
++        assert_number!(UInt32Array::from(vec![32]), 32);
++        assert_number!(Float32Array::from(vec![1.25]), 1.25);
++
+         let floats: ArrayRef = Arc::new(Float64Array::from(vec![Some(1.5)]));
+         assert_eq!(JsonArray::from(&floats).try_get_value(0)?, json!(1.5));
+ 
+@@ -529,15 +640,6 @@ mod test {
+             json!({"flag": null, "items": [2]})
+         );
+ 
+-        let unsupported: ArrayRef = Arc::new(Int32Array::from(vec![1]));
+-        assert_eq!(
+-            JsonArray::from(&unsupported)
+-                .try_get_value(0)
+-                .unwrap_err()
+-                .to_string(),
+-            "Invalid JSON: unknown JSON type Int32"
+-        );
+-
+         Ok(())
+     }
+ 
+@@ -915,4 +1017,124 @@ mod test {
+ 
+         Ok(())
+     }
++
++    #[test]
++    fn test_reconstruct_json2_v2_value() -> Result<()> {
++        let remainders = json_values_to_variant(&[
++            Some(json!({"cold": 1, "nested": {"right": true}})),
++            Some(json!({"!__remainder__!": "user value"})),
++        ])?;
++        let remainder = Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true));
++        let nested = Arc::new(Field::new_struct(
++            "nested",
++            [Arc::new(Field::new("left", DataType::Utf8, true))],
++            true,
++        ));
++        let nested_values: ArrayRef = Arc::new(StructArray::from(vec![(
++            Arc::new(Field::new("left", DataType::Utf8, true)),
++            Arc::new(StringArray::from(vec![Some("value"), None])) as ArrayRef,
++        )]));
++        let fields = Fields::from(vec![
++            remainder,
++            Arc::new(Field::new("count", DataType::Int64, true)),
++            nested,
++        ]);
++        let array: ArrayRef = Arc::new(StructArray::new(
++            fields.clone(),
++            vec![
++                remainders,
++                Arc::new(Int64Array::from(vec![Some(42), None])),
++                nested_values,
++            ],
++            None,
++        ));
++        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
++            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
++        );
++
++        assert_eq!(
++            json!({
++                "cold": 1,
++                "count": 42,
++                "nested": {"left": "value", "right": true}
++            }),
++            JsonArray::from(&array).json2_values()?[0]
++        );
++        assert_eq!(
++            json!({
++                "!__remainder__!": "user value",
++                "count": null,
++                "nested": {"left": null}
++            }),
++            JsonArray::from(&array).json2_values()?[1]
++        );
++
++        let target = DataType::Struct(
++            vec![
++                Arc::new(Field::new("cold", DataType::UInt64, true)),
++                Arc::new(Field::new("count", DataType::Int64, true)),
++            ]
++            .into(),
++        );
++        let projected = JsonArray::from(&array).project_to_v2(&field, &target)?;
++        assert_eq!(
++            json!({"cold": 1, "count": 42}),
++            JsonArray::from(&projected).try_get_value(0)?
++        );
++        assert_eq!(
++            json!({"cold": null, "count": null}),
++            JsonArray::from(&projected).try_get_value(1)?
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn test_project_partial_json2_v2_without_remainder() -> Result<()> {
++        let fields = Fields::from(vec![Arc::new(Field::new("hot", DataType::Int64, true))]);
++        let array: ArrayRef = Arc::new(StructArray::new(
++            fields.clone(),
++            vec![Arc::new(Int64Array::from(vec![1, 2]))],
++            None,
++        ));
++        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
++            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
++        );
++
++        let projected = JsonArray::from(&array).project_to_v2(&field, field.data_type())?;
++        assert!(Arc::ptr_eq(&array, &projected));
++        Ok(())
++    }
++
++    #[test]
++    fn test_reject_conflict_json2_v2_path() -> Result<()> {
++        let remainders = json_values_to_variant(&[Some(json!({"count": 1}))])?;
++        let fields = Fields::from(vec![
++            Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
++            Arc::new(Field::new("count", DataType::Int64, true)),
++        ]);
++        let array: ArrayRef = Arc::new(StructArray::new(
++            fields,
++            vec![remainders, Arc::new(Int64Array::from(vec![2]))],
++            None,
++        ));
++        let error = JsonArray::from(&array).json2_values().unwrap_err();
++        assert!(
++            error.to_string().contains(
++                "cannot merge 'count' in explicit fields and remainder: not both objects"
++            )
++        );
++
++        let Value::Object(mut remainder) = json!({"nested": {"count": 1}}) else {
++            unreachable!();
++        };
++        let error = merge_explicit_value(
++            &mut remainder,
++            "nested".to_string(),
++            json!({"count": 2}),
++            &mut Vec::new(),
++        )
++        .unwrap_err();
++        assert!(error.to_string().contains("cannot merge 'nested.count'"));
++        Ok(())
++    }
+ }
+diff --git a/src/datatypes/src/vectors/json/variant.rs b/src/datatypes/src/vectors/json/variant.rs
+new file mode 100644
+index 000000000..1a4b8a861
+--- /dev/null
++++ b/src/datatypes/src/vectors/json/variant.rs
+@@ -0,0 +1,239 @@
++// Copyright 2023 Greptime Team
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use std::sync::Arc;
++
++use arrow_array::ArrayRef;
++#[cfg(test)]
++use arrow_schema::ArrowError;
++use arrow_schema::{DataType, Field};
++#[cfg(test)]
++use parquet_variant::{ObjectFieldBuilder, Variant, VariantBuilderExt, VariantDecimal16};
++#[cfg(test)]
++use parquet_variant_compute::VariantArrayBuilder;
++use parquet_variant_compute::{VariantArray, VariantType};
++use parquet_variant_json::VariantToJson;
++use snafu::ResultExt;
++
++use crate::error::{ArrowComputeSnafu, Result};
++#[cfg(test)]
++use crate::json::value::{JsonNumber, JsonVariant, decode_json_variant};
++
++/// Returns the canonical Arrow field for an unshredded Parquet Variant array.
++pub fn variant_field(name: impl Into<String>, nullable: bool) -> Field {
++    Field::new_struct(
++        name,
++        [
++            Arc::new(Field::new("metadata", DataType::BinaryView, false)),
++            Arc::new(Field::new("value", DataType::BinaryView, false)),
++        ],
++        nullable,
++    )
++    .with_extension_type(VariantType)
++}
++
++#[cfg(test)]
++pub(crate) fn json_values_to_variant(values: &[Option<serde_json::Value>]) -> Result<ArrayRef> {
++    let mut builder = VariantArrayBuilder::new(values.len());
++    for value in values {
++        match value {
++            Some(value) => append_json_value(&mut builder, value).context(ArrowComputeSnafu)?,
++            None => builder.append_null(),
++        }
++    }
++    Ok(ArrayRef::from(builder.build()))
++}
++
++/// Encodes JSON variants as an unshredded Parquet Variant array.
++#[cfg(test)]
++fn json_variants_to_variant(values: &[Option<JsonVariant>]) -> Result<ArrayRef> {
++    let mut builder = VariantArrayBuilder::new(values.len());
++    for value in values {
++        match value {
++            Some(value) => append_json_variant(&mut builder, value).context(ArrowComputeSnafu)?,
++            None => builder.append_null(),
++        }
++    }
++    Ok(ArrayRef::from(builder.build()))
++}
++
++#[cfg(test)]
++fn append_json_variant(
++    builder: &mut impl VariantBuilderExt,
++    value: &JsonVariant,
++) -> std::result::Result<(), ArrowError> {
++    match value {
++        JsonVariant::Null => builder.append_value(Variant::Null),
++        JsonVariant::Bool(value) => builder.append_value(*value),
++        JsonVariant::Number(JsonNumber::PosInt(value)) => {
++            if let Ok(value) = i64::try_from(*value) {
++                builder.append_value(value);
++            } else {
++                append_large_u64(builder, *value)?;
++            }
++        }
++        JsonVariant::Number(JsonNumber::NegInt(value)) => builder.append_value(*value),
++        JsonVariant::Number(JsonNumber::Float(value)) => {
++            if value.0.is_finite() {
++                builder.append_value(value.0)
++            } else {
++                builder.append_value("NaN")
++            }
++        }
++        JsonVariant::String(value) => builder.append_value(value.as_str()),
++        JsonVariant::Array(values) => {
++            let mut list = builder.try_new_list()?;
++            for value in values {
++                append_json_variant(&mut list, value)?;
++            }
++            list.finish();
++        }
++        JsonVariant::Object(values) => {
++            let mut object = builder.try_new_object()?;
++            for (name, value) in values {
++                append_json_variant(&mut ObjectFieldBuilder::new(name, &mut object), value)?;
++            }
++            object.finish();
++        }
++        JsonVariant::Variant(value) => {
++            let value = decode_json_variant(value)
++                .map_err(|e| ArrowError::JsonError(format!("Failed to decode JSONB: {e}")))?;
++            append_json_value(builder, &value)?;
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++fn append_json_value(
++    builder: &mut impl VariantBuilderExt,
++    value: &serde_json::Value,
++) -> std::result::Result<(), ArrowError> {
++    match value {
++        serde_json::Value::Null => builder.append_value(Variant::Null),
++        serde_json::Value::Bool(value) => builder.append_value(*value),
++        serde_json::Value::Number(value) => {
++            if let Some(value) = value.as_i64() {
++                builder.append_value(value);
++            } else if let Some(value) = value.as_u64() {
++                append_large_u64(builder, value)?;
++            } else if let Some(value) = value.as_f64() {
++                builder.append_value(value);
++            } else {
++                return Err(ArrowError::InvalidArgumentError(format!(
++                    "Failed to encode JSON number as Variant: {value}"
++                )));
++            }
++        }
++        serde_json::Value::String(value) => builder.append_value(value.as_str()),
++        serde_json::Value::Array(values) => {
++            let mut list = builder.try_new_list()?;
++            for value in values {
++                append_json_value(&mut list, value)?;
++            }
++            list.finish();
++        }
++        serde_json::Value::Object(values) => {
++            let mut object = builder.try_new_object()?;
++            for (name, value) in values {
++                append_json_value(&mut ObjectFieldBuilder::new(name, &mut object), value)?;
++            }
++            object.finish();
++        }
++    }
++    Ok(())
++}
++
++/// Parquet Variant has no unsigned integer primitive. Treat u64 as i64 first, then use Decimal16
++/// to represent large (larger than i64::MAX) u64.
++#[cfg(test)]
++fn append_large_u64(
++    builder: &mut impl VariantBuilderExt,
++    value: u64,
++) -> std::result::Result<(), ArrowError> {
++    let value = VariantDecimal16::try_new(value as i128, 0).map_err(|e| {
++        ArrowError::InvalidArgumentError(format!(
++            "Failed to encode JSON large integer as Variant Decimal16: {e}"
++        ))
++    })?;
++    builder.append_value(value);
++    Ok(())
++}
++
++/// Decodes an unshredded Parquet Variant array into JSON values.
++pub fn variant_to_json_values(array: &ArrayRef) -> Result<Vec<Option<serde_json::Value>>> {
++    let variants = VariantArray::try_new(array.as_ref()).context(ArrowComputeSnafu)?;
++    (0..variants.len())
++        .map(|i| {
++            if variants.is_null(i) {
++                Ok(None)
++            } else {
++                variants
++                    .try_value(i)
++                    .and_then(|x| x.to_json_value())
++                    .context(ArrowComputeSnafu)
++                    .map(Some)
++            }
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use serde_json::json;
++
++    use super::*;
++
++    #[test]
++    fn test_variant_field_matches_canonical_layout() {
++        let expected = VariantArrayBuilder::new(0)
++            .build()
++            .field("remainder")
++            .with_nullable(true);
++        assert_eq!(expected, variant_field("remainder", true));
++    }
++
++    #[test]
++    fn test_variant_json_round_trip() -> Result<()> {
++        let values = vec![
++            None,
++            Some(serde_json::Value::Null),
++            Some(json!({})),
++            Some(json!({"nested": {"items": [1, "two", null]}})),
++            Some(json!({"unicode": "\u{503c}"})),
++            Some(json!({"max_u64": u64::MAX})),
++        ];
++
++        let array = json_values_to_variant(&values)?;
++        assert_eq!(values, variant_to_json_values(&array)?);
++
++        let variants = values
++            .clone()
++            .into_iter()
++            .map(|x| x.map(JsonVariant::from))
++            .collect::<Vec<_>>();
++        let array = json_variants_to_variant(&variants)?;
++        assert_eq!(values, variant_to_json_values(&array)?);
++
++        let variants = [Some(JsonVariant::Variant(
++            jsonb::parse_value(br#"{"nested": true}"#).unwrap().to_vec(),
++        ))];
++        let array = json_variants_to_variant(&variants)?;
++        assert_eq!(
++            vec![Some(json!({"nested": true}))],
++            variant_to_json_values(&array)?
++        );
++        Ok(())
++    }
++}
 diff --git a/src/flow/src/adapter/flownode_impl.rs b/src/flow/src/adapter/flownode_impl.rs
 index 9e3399c18..7e83d5131 100644
 --- a/src/flow/src/adapter/flownode_impl.rs
@@ -9812,7 +11558,7 @@ index d6c314afb..d3c651de3 100644
 +    assert_eq!(extension.shutdown_calls.load(Ordering::Acquire), 1);
  }
 diff --git a/src/frontend/src/instance.rs b/src/frontend/src/instance.rs
-index 7a4b2f9a4..8dd254e4d 100644
+index 7a4b2f9a4..6a653b2b1 100644
 --- a/src/frontend/src/instance.rs
 +++ b/src/frontend/src/instance.rs
 @@ -1559,6 +1559,11 @@ pub fn check_permission(
@@ -9835,10 +11581,14 @@ index 7a4b2f9a4..8dd254e4d 100644
      use std::collections::HashMap;
      use std::future::Future;
      use std::pin::Pin;
-@@ -1670,25 +1676,28 @@ mod tests {
+@@ -1669,26 +1675,31 @@ mod tests {
+     use std::time::Duration;
  
      use api::prom_store::remote::label_matcher::Type as PromMatcherType;
-     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
+-    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
++    use api::prom_store::remote::{
++        Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
++    };
 +    use api::v1::greptime_request::Request;
      use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
 +    use api::v1::query_request::Query;
@@ -9867,7 +11617,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      use common_query::{Output, OutputMeta};
      use common_recordbatch::{
          OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
-@@ -1700,8 +1709,12 @@ mod tests {
+@@ -1700,8 +1711,12 @@ mod tests {
      use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
      use datatypes::prelude::ConcreteDataType;
      use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
@@ -9881,7 +11631,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      use query::query_engine::options::QueryOptions;
      use servers::query_handler::{
          DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler, PipelineHandlerRef,
-@@ -1716,7 +1729,9 @@ mod tests {
+@@ -1716,7 +1731,9 @@ mod tests {
      };
      use store_api::storage::ScanRequest;
      use strfmt::Format;
@@ -9892,7 +11642,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      use table::table_name::TableName;
      use table::test_util::{EmptyTable, MemTable};
      use table::{Table, TableRef};
-@@ -1929,6 +1944,23 @@ mod tests {
+@@ -1929,6 +1946,23 @@ mod tests {
          )
      }
  
@@ -9916,7 +11666,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      struct RejectUnresolvedPermissionChecker;
  
      impl PermissionChecker for RejectUnresolvedPermissionChecker {
-@@ -2248,7 +2280,7 @@ mod tests {
+@@ -2248,7 +2282,7 @@ mod tests {
      impl ProcedureExecutor for NoopProcedureExecutor {
          async fn submit_ddl_task(
              &self,
@@ -9925,7 +11675,7 @@ index 7a4b2f9a4..8dd254e4d 100644
              _request: SubmitDdlTaskRequest,
          ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
              common_meta::error::UnsupportedSnafu {
-@@ -2301,6 +2333,139 @@ mod tests {
+@@ -2301,6 +2335,139 @@ mod tests {
          }
      }
  
@@ -9953,7 +11703,7 @@ index 7a4b2f9a4..8dd254e4d 100644
 +    impl ProcedureExecutor for MockProcedureExecutor {
 +        async fn submit_ddl_task(
 +            &self,
-+            _ctx: &ExecutorContext,
++            _ctx: ExecutorContext,
 +            request: SubmitDdlTaskRequest,
 +        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
 +            self.submitted.lock().unwrap().push(request.task.clone());
@@ -10065,7 +11815,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      fn test_cache_registry(
          kv_backend: common_meta::kv_backend::KvBackendRef,
      ) -> TestResult<common_meta::cache::LayeredCacheRegistryRef> {
-@@ -2479,10 +2644,29 @@ mod tests {
+@@ -2479,10 +2646,29 @@ mod tests {
          target_table: TableRef,
          plugins: Plugins,
          metric_names_table: Option<TableRef>,
@@ -10096,7 +11846,7 @@ index 7a4b2f9a4..8dd254e4d 100644
          let target_table_name = "target";
          catalog_manager
              .register_table_sync(catalog::RegisterTableRequest {
-@@ -2523,7 +2707,7 @@ mod tests {
+@@ -2523,7 +2709,7 @@ mod tests {
              cache_registry,
              catalog_manager,
              Arc::new(client::client_manager::NodeClients::default()),
@@ -10105,7 +11855,7 @@ index 7a4b2f9a4..8dd254e4d 100644
              process_manager,
          )
          .with_plugin(plugins)
-@@ -2566,6 +2750,206 @@ mod tests {
+@@ -2566,6 +2752,206 @@ mod tests {
          assert_eq!(CheckedAction { action, targets }, checker.take_check());
      }
  
@@ -10312,7 +12062,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      #[tokio::test]
      async fn test_event_recorder_is_exposed() -> TestResult<()> {
          let instance =
-@@ -2737,6 +3121,45 @@ mod tests {
+@@ -2737,6 +3123,45 @@ mod tests {
          Ok(())
      }
  
@@ -10358,7 +12108,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      #[tokio::test]
      async fn test_target_independent_checker_skips_target_resolution() -> TestResult<()> {
          let physical_table = "physical_metric";
-@@ -3073,6 +3496,57 @@ mod tests {
+@@ -3073,6 +3498,57 @@ mod tests {
          Ok(())
      }
  
@@ -10416,7 +12166,7 @@ index 7a4b2f9a4..8dd254e4d 100644
      #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
      async fn test_kill_query_cancels_insert_select() -> TestResult<()> {
          assert_kill_cancels_insert_select("KILL QUERY 4242").await
-@@ -3271,4 +3745,369 @@ mod tests {
+@@ -3271,4 +3747,369 @@ mod tests {
              assert_eq!(result.is_ok(), is_ok);
          }
      }
@@ -11398,7 +13148,7 @@ index 4fc6020ff..e0932af5a 100644
  
      pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
 diff --git a/src/meta-client/src/client/procedure.rs b/src/meta-client/src/client/procedure.rs
-index d7d5ccfaf..9c32b4fc8 100644
+index d7d5ccfaf..37a5b50cb 100644
 --- a/src/meta-client/src/client/procedure.rs
 +++ b/src/meta-client/src/client/procedure.rs
 @@ -20,11 +20,13 @@ use api::v1::meta::ddl_task_request::Task;
@@ -11553,11 +13303,9 @@ index d7d5ccfaf..9c32b4fc8 100644
          };
  
          let resp: GcTableResponse = self
-@@ -460,11 +509,14 @@ mod tests {
-         ReconcileResponse, ResponseHeader, Role,
+@@ -461,21 +510,24 @@ mod tests {
      };
      use async_trait::async_trait;
-+    use common_base::protocol::Channel;
      use common_error::status_code::StatusCode;
 +    use common_event_recorder::{PersistentEventContext, ProcedureEventInput};
 +    use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
@@ -11569,7 +13317,10 @@ index d7d5ccfaf..9c32b4fc8 100644
      };
      use common_telemetry::common_error::ext::ErrorExt;
      use common_telemetry::info;
-@@ -474,8 +526,8 @@ mod tests {
++    use session::context::Channel;
+     use tokio::net::TcpListener;
+     use tokio::sync::mpsc;
+     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
      use tonic::codec::CompressionEncoding;
      use tonic::{Request, Response, Status};
  
@@ -25053,22 +26804,96 @@ index a44583dcc..94d260d3f 100644
      );
      assert_eq!(
          list_i32_values(histogram_field_value(rows, 0, POSITIVE_SPAN_OFFSETS_FIELD)),
+diff --git a/src/session/Cargo.toml b/src/session/Cargo.toml
+index c7be8c2f7..889b911c3 100644
+--- a/src/session/Cargo.toml
++++ b/src/session/Cargo.toml
+@@ -15,6 +15,7 @@ ahash.workspace = true
+ api.workspace = true
+ arc-swap = "1.5"
+ auth.workspace = true
++common-base.workspace = true
+ common-catalog.workspace = true
+ common-error.workspace = true
+ common-macro.workspace = true
 diff --git a/src/session/src/context.rs b/src/session/src/context.rs
-index c554c0955..4780523e4 100644
+index c554c0955..d383aef47 100644
 --- a/src/session/src/context.rs
 +++ b/src/session/src/context.rs
-@@ -618,6 +618,7 @@ impl ConnInfo {
+@@ -22,6 +22,7 @@ use api::v1::ExplainOptions;
+ use api::v1::region::RegionRequestHeader;
+ use arc_swap::ArcSwap;
+ use auth::UserInfoRef;
++pub use common_base::protocol::Channel;
+ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+ use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
+ use common_recordbatch::cursor::RecordBatchStreamCursor;
+@@ -618,85 +619,12 @@ impl ConnInfo {
      }
  }
  
-+/// The protocol mapping for these wire values lives in [`common_session::channel_protocol`].
- #[derive(Debug, PartialEq, Default, Clone, Copy)]
- #[repr(u8)]
- pub enum Channel {
-@@ -680,23 +681,7 @@ impl Display for Channel {
- 
- impl AsRef<str> for Channel {
-     fn as_ref(&self) -> &str {
+-#[derive(Debug, PartialEq, Default, Clone, Copy)]
+-#[repr(u8)]
+-pub enum Channel {
+-    #[default]
+-    Unknown = 0,
+-
+-    Mysql = 1,
+-    Postgres = 2,
+-    HttpSql = 3,
+-    Prometheus = 4,
+-    Otlp = 5,
+-    Grpc = 6,
+-    Influx = 7,
+-    Opentsdb = 8,
+-    Loki = 9,
+-    Elasticsearch = 10,
+-    Jaeger = 11,
+-    Log = 12,
+-    Promql = 13,
+-    Splunk = 14,
+-}
+-
+-impl From<u32> for Channel {
+-    fn from(value: u32) -> Self {
+-        match value {
+-            1 => Self::Mysql,
+-            2 => Self::Postgres,
+-            3 => Self::HttpSql,
+-            4 => Self::Prometheus,
+-            5 => Self::Otlp,
+-            6 => Self::Grpc,
+-            7 => Self::Influx,
+-            8 => Self::Opentsdb,
+-            9 => Self::Loki,
+-            10 => Self::Elasticsearch,
+-            11 => Self::Jaeger,
+-            12 => Self::Log,
+-            13 => Self::Promql,
+-            14 => Self::Splunk,
+-            _ => Self::Unknown,
+-        }
+-    }
+-}
+-
+-impl Channel {
+-    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
+-        match self {
+-            Channel::Mysql => Arc::new(MySqlDialect {}),
+-            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+-            _ => Arc::new(GenericDialect {}),
+-        }
+-    }
+-}
+-
+-impl Display for Channel {
+-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+-        write!(f, "{}", self.as_ref())
+-    }
+-}
+-
+-impl AsRef<str> for Channel {
+-    fn as_ref(&self) -> &str {
 -        match self {
 -            Channel::Mysql => "mysql",
 -            Channel::Postgres => "postgres",
@@ -25086,40 +26911,327 @@ index c554c0955..4780523e4 100644
 -            Channel::Splunk => "splunk",
 -            Channel::Unknown => "unknown",
 -        }
-+        common_session::channel_protocol(*self as u8).unwrap_or("unknown")
++/// Returns the SQL dialect for the given query channel.
++pub fn dialect_for_channel(channel: Channel) -> Arc<dyn Dialect + Send + Sync> {
++    match channel {
++        Channel::Mysql => Arc::new(MySqlDialect {}),
++        Channel::Postgres => Arc::new(PostgreSqlDialect {}),
++        _ => Arc::new(GenericDialect {}),
      }
  }
  
+diff --git a/src/session/src/lib.rs b/src/session/src/lib.rs
+index 81ee7b0cd..110560b32 100644
+--- a/src/session/src/lib.rs
++++ b/src/session/src/lib.rs
+@@ -34,7 +34,7 @@ use common_time::timezone::get_timezone;
+ use context::{ConfigurationVariables, QueryContextBuilder};
+ use derive_more::Debug;
+ 
+-use crate::context::{Channel, ConnInfo, QueryContextRef};
++use crate::context::{Channel, ConnInfo, QueryContextRef, dialect_for_channel};
+ 
+ /// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
+ const MAX_WARNINGS: usize = 64;
+@@ -102,7 +102,7 @@ impl Session {
+             // string here
+             .current_catalog(self.catalog.read().unwrap().clone())
+             .mutable_session_data(self.mutable_inner.clone())
+-            .sql_dialect(self.conn_info.channel.dialect())
++            .sql_dialect(dialect_for_channel(self.conn_info.channel))
+             .configuration_parameter(self.configuration_variables.clone())
+             .channel(self.conn_info.channel)
+             .process_id(self.process_id)
 diff --git a/src/sql/src/error.rs b/src/sql/src/error.rs
-index e4323bb66..cc0b9f195 100644
+index e4323bb66..dc819bda0 100644
 --- a/src/sql/src/error.rs
 +++ b/src/sql/src/error.rs
-@@ -339,14 +339,6 @@ pub enum Error {
-         #[snafu(implicit)]
+@@ -340,12 +340,11 @@ pub enum Error {
          location: Location,
      },
--
+ 
 -    #[snafu(display("Failed to set JSON structure settings: {value}"))]
 -    SetJsonSettings {
 -        value: String,
 -        source: datatypes::error::Error,
--        #[snafu(implicit)]
--        location: Location,
--    },
++    #[snafu(transparent)]
++    Datatypes {
+         #[snafu(implicit)]
+         location: Location,
++        source: datatypes::error::Error,
+     },
  }
  
- impl ErrorExt for Error {
-@@ -392,9 +384,7 @@ impl ErrorExt for Error {
+@@ -392,7 +391,7 @@ impl ErrorExt for Error {
              #[cfg(feature = "enterprise")]
              InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
  
 -            SerializeColumnDefaultConstraint { source, .. } | SetJsonSettings { source, .. } => {
--                source.status_code()
--            }
-+            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
++            SerializeColumnDefaultConstraint { source, .. } | Datatypes { source, .. } => {
+                 source.status_code()
+             }
  
-             ConvertToGrpcDataType { source, .. } => source.status_code(),
-             SqlCommon { source, .. } => source.status_code(),
+diff --git a/src/sql/src/parsers/create_parser.rs b/src/sql/src/parsers/create_parser.rs
+index a257f029e..be7ed0670 100644
+--- a/src/sql/src/parsers/create_parser.rs
++++ b/src/sql/src/parsers/create_parser.rs
+@@ -711,8 +711,8 @@ impl<'a> ParserContext<'a> {
+         let mut extensions = ColumnExtensions::default();
+ 
+         let data_type =
+-            if let Some((data_type, type_hints)) = json::parse_json2_type_and_hints(parser)? {
+-                extensions.json_type_hints = type_hints;
++            if let Some((data_type, options)) = json::parse_json2_type_and_options(parser)? {
++                extensions.json2_options = options;
+                 data_type
+             } else {
+                 parser.parse_data_type().context(SyntaxSnafu)?
+diff --git a/src/sql/src/parsers/create_parser/json.rs b/src/sql/src/parsers/create_parser/json.rs
+index e2f493719..63399f81a 100644
+--- a/src/sql/src/parsers/create_parser/json.rs
++++ b/src/sql/src/parsers/create_parser/json.rs
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
+ use datatypes::json::JSON2_MAX_STRUCTURED_DEPTH;
+ use snafu::{ResultExt, ensure};
+ use sqlparser::ast::{DataType, ExactNumberInfo, Expr, ObjectName, UnaryOperator};
+@@ -22,14 +23,15 @@ use sqlparser::tokenizer::Token;
+ use crate::ast::Ident;
+ use crate::error::{InvalidSqlSnafu, Result, SyntaxSnafu};
+ use crate::parsers::create_parser::{INVERTED, SKIPPING};
+-use crate::statements::create::JsonTypeHint;
++use crate::statements::create::{Json2Options, JsonTypeHint};
+ use crate::statements::transform::type_alias::get_type_by_alias;
+ 
+ const JSON2_TYPE_NAME: &str = "JSON2";
++const MAX_AUTO_EXPANDED_PATHS: &str = "max_auto_expanded_paths";
+ 
+-pub(super) fn parse_json2_type_and_hints(
++pub(super) fn parse_json2_type_and_options(
+     parser: &mut Parser<'_>,
+-) -> Result<Option<(DataType, Vec<JsonTypeHint>)>> {
++) -> Result<Option<(DataType, Option<Json2Options>)>> {
+     let token = parser.peek_token();
+     let Token::Word(word) = &token.token else {
+         return Ok(None);
+@@ -41,26 +43,62 @@ pub(super) fn parse_json2_type_and_hints(
+ 
+     parser.next_token();
+     let data_type = DataType::Custom(ObjectName::from(vec![Ident::new(JSON2_TYPE_NAME)]), vec![]);
+-    let type_hints = if parser.consume_token(&Token::LParen) {
+-        parse_json2_type_hints(parser)?
++    let options = if parser.consume_token(&Token::LParen) {
++        parse_json2_options(parser)?
+     } else {
+-        vec![]
++        None
+     };
+ 
+-    Ok(Some((data_type, type_hints)))
++    Ok(Some((data_type, options)))
+ }
+ 
+-fn parse_json2_type_hints(parser: &mut Parser<'_>) -> Result<Vec<JsonTypeHint>> {
+-    let mut hints = Vec::new();
+-
++fn parse_json2_options(parser: &mut Parser<'_>) -> Result<Option<Json2Options>> {
+     if parser.consume_token(&Token::RParen) {
+-        return Ok(hints);
++        return Ok(None);
+     }
+ 
++    let mut max_auto_expanded_paths = None;
++    let mut type_hints = Vec::new();
+     loop {
+-        let hint = parse_json2_type_hint(parser)?;
+-        ensure_no_path_conflict(&hints, &hint.path)?;
+-        hints.push(hint);
++        let token = parser.peek_token();
++        let is_max_auto_expanded_paths = matches!(
++            &token.token,
++            Token::Word(word)
++                if word.quote_style.is_none()
++                    && word.value.eq_ignore_ascii_case(MAX_AUTO_EXPANDED_PATHS)
++        );
++        if is_max_auto_expanded_paths {
++            parser.next_token();
++            ensure!(
++                max_auto_expanded_paths.is_none(),
++                InvalidSqlSnafu {
++                    msg: format!("duplicated JSON2 option '{MAX_AUTO_EXPANDED_PATHS}'")
++                }
++            );
++            parser.expect_token(&Token::Eq).context(SyntaxSnafu)?;
++
++            let token = parser.next_token();
++            let Token::Number(value, _) = token.token else {
++                return InvalidSqlSnafu {
++                    msg: format!(
++                        "JSON2 option '{MAX_AUTO_EXPANDED_PATHS}' expects a non-negative integer"
++                    ),
++                }
++                .fail();
++            };
++            max_auto_expanded_paths = Some(value.parse::<u32>().map_err(|_| {
++                InvalidSqlSnafu {
++                    msg: format!(
++                        "JSON2 option '{MAX_AUTO_EXPANDED_PATHS}' expects a non-negative integer"
++                    ),
++                }
++                .build()
++            })?);
++        } else {
++            let hint = parse_json2_type_hint(parser)?;
++            ensure_no_path_conflict(&type_hints, &hint.path)?;
++            type_hints.push(hint);
++        }
+ 
+         if parser.consume_token(&Token::Comma) {
+             if parser.consume_token(&Token::RParen) {
+@@ -72,11 +110,22 @@ fn parse_json2_type_hints(parser: &mut Parser<'_>) -> Result<Vec<JsonTypeHint>>
+         }
+     }
+ 
+-    Ok(hints)
++    Ok(Some(Json2Options {
++        max_auto_expanded_paths,
++        type_hints,
++    }))
+ }
+ 
+ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
+     let path = parse_json2_path(parser)?;
++    ensure!(
++        path.first().is_none_or(|x| x != JSON2_REMAINDER_FIELD_NAME),
++        InvalidSqlSnafu {
++            msg: format!(
++                "JSON2 type hint path cannot be rooted at reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
++            )
++        }
++    );
+     ensure!(
+         path.len() <= JSON2_MAX_STRUCTURED_DEPTH,
+         InvalidSqlSnafu {
+@@ -309,7 +358,7 @@ CREATE TABLE traces (
+             column.column_def.data_type,
+             DataType::Custom(_, _)
+         ));
+-        let hints = column.extensions.json_type_hints;
++        let hints = column.extensions.json2_options.unwrap().type_hints;
+         assert_eq!(hints.len(), 4);
+ 
+         assert_eq!(hints[0].path, vec!["service.name"]);
+@@ -339,6 +388,71 @@ CREATE TABLE traces (
+         assert!(hints[3].nullable);
+     }
+ 
++    #[test]
++    fn test_parse_json2_max_auto_expanded_paths() {
++        let column = parse_json2_column(
++            r#"
++CREATE TABLE traces (
++    log_json_data JSON2 (
++        http.method STRING,
++        max_auto_expanded_paths = 0
++    ),
++    ts TIMESTAMP TIME INDEX,
++)"#,
++        );
++
++        let options = column.extensions.json2_options.unwrap();
++        assert_eq!(options.max_auto_expanded_paths, Some(0));
++        assert_eq!(options.type_hints.len(), 1);
++
++        let empty = parse_json2_column(
++            r#"
++CREATE TABLE traces (
++    log_json_data JSON2 (),
++    ts TIMESTAMP TIME INDEX,
++)"#,
++        );
++        assert!(empty.extensions.json2_options.is_none());
++
++        let quoted = parse_json2_column(
++            r#"
++CREATE TABLE traces (
++    log_json_data JSON2 (
++        "max_auto_expanded_paths" STRING,
++        nested."!__remainder__!" STRING
++    ),
++    ts TIMESTAMP TIME INDEX,
++)"#,
++        );
++        let options = quoted.extensions.json2_options.unwrap();
++        assert_eq!(options.max_auto_expanded_paths, None);
++        assert_eq!(options.type_hints.len(), 2);
++    }
++
++    #[test]
++    fn test_parse_json2_max_auto_expanded_paths_rejects_invalid_options() {
++        for options in [
++            "max_auto_expanded_paths = 0, max_auto_expanded_paths = 1",
++            "max_auto_expanded_paths = -1",
++            "max_auto_expanded_paths = 1.5",
++            "max_auto_expanded_paths = 4294967296",
++            r#""!__remainder__!".value STRING"#,
++        ] {
++            let sql = format!(
++                "CREATE TABLE traces (log_json_data JSON2 ({options}), ts TIMESTAMP TIME INDEX)"
++            );
++            assert!(
++                ParserContext::create_with_dialect(
++                    &sql,
++                    &GreptimeDbDialect {},
++                    ParseOptions::default()
++                )
++                .is_err(),
++                "{options}"
++            );
++        }
++    }
++
+     #[test]
+     fn test_parse_json2_type_hint_default_nullable() {
+         let column = parse_json2_column(
+@@ -349,7 +463,7 @@ CREATE TABLE traces (
+ )"#,
+         );
+ 
+-        let hints = column.extensions.json_type_hints;
++        let hints = column.extensions.json2_options.unwrap().type_hints;
+         assert_eq!(hints.len(), 1);
+         assert!(hints[0].nullable);
+     }
+@@ -369,7 +483,7 @@ CREATE TABLE traces (
+ )"#,
+         );
+ 
+-        let hints = column.extensions.json_type_hints;
++        let hints = column.extensions.json2_options.unwrap().type_hints;
+         assert_eq!(hints.len(), 4);
+         assert_eq!(hints[0].path, vec!["a", "b"]);
+         assert_eq!(hints[1].path, vec!["x", "y"]);
+@@ -402,7 +516,7 @@ CREATE TABLE traces (
+ )"#,
+         );
+ 
+-        let hints = column.extensions.json_type_hints;
++        let hints = column.extensions.json2_options.unwrap().type_hints;
+         assert_eq!(hints.len(), 14);
+         for hint in hints.iter().take(6) {
+             assert_eq!(hint.data_type, DataType::BigInt(None));
+@@ -428,7 +542,7 @@ CREATE TABLE traces (
+ )"#,
+         );
+ 
+-        let hints = column.extensions.json_type_hints;
++        let hints = column.extensions.json2_options.unwrap().type_hints;
+         assert_eq!(hints.len(), 2);
+         assert_eq!(
+             hints[0]
 diff --git a/src/sql/src/parsers/show_parser.rs b/src/sql/src/parsers/show_parser.rs
 index d6fc35c67..075c17dab 100644
 --- a/src/sql/src/parsers/show_parser.rs
@@ -25185,7 +27297,7 @@ index d6fc35c67..075c17dab 100644
      pub fn test_show_processlist() {
          let sql = "SHOW PROCESSLIST";
 diff --git a/src/sql/src/statements.rs b/src/sql/src/statements.rs
-index 3b6f6ad4f..aafe62d2e 100644
+index 3b6f6ad4f..4f96b66f8 100644
 --- a/src/sql/src/statements.rs
 +++ b/src/sql/src/statements.rs
 @@ -39,7 +39,7 @@ use api::helper::ColumnDataTypeWrapper;
@@ -25225,6 +27337,336 @@ index 3b6f6ad4f..aafe62d2e 100644
      }
  
      Ok(column_schema)
+@@ -724,11 +718,7 @@ mod tests {
+                         "true".to_string(),
+                     ),
+                 ])),
+-                vector_options: None,
+-                skipping_index_options: None,
+-                inverted_index_options: None,
+-                json_type_hints: vec![],
+-                vector_index_options: None,
++                ..Default::default()
+             },
+         };
+ 
+@@ -755,17 +745,13 @@ mod tests {
+                 options: vec![],
+             },
+             extensions: ColumnExtensions {
+-                fulltext_index_options: None,
+-                vector_options: None,
+-                skipping_index_options: None,
+-                inverted_index_options: None,
+-                json_type_hints: vec![],
+                 vector_index_options: Some(OptionMap::from([
+                     ("metric".to_string(), "cosine".to_string()),
+                     ("connectivity".to_string(), "32".to_string()),
+                     ("expansion_add".to_string(), "200".to_string()),
+                     ("expansion_search".to_string(), "100".to_string()),
+                 ])),
++                ..Default::default()
+             },
+         };
+ 
+@@ -796,12 +782,8 @@ mod tests {
+                 options: vec![],
+             },
+             extensions: ColumnExtensions {
+-                fulltext_index_options: None,
+-                vector_options: None,
+-                skipping_index_options: None,
+-                inverted_index_options: None,
+-                json_type_hints: vec![],
+                 vector_index_options: Some(OptionMap::default()),
++                ..Default::default()
+             },
+         };
+ 
+diff --git a/src/sql/src/statements/create.rs b/src/sql/src/statements/create.rs
+index dc94c7f88..f3fbc9083 100644
+--- a/src/sql/src/statements/create.rs
++++ b/src/sql/src/statements/create.rs
+@@ -136,7 +136,28 @@ pub struct ColumnExtensions {
+     pub inverted_index_options: Option<OptionMap>,
+     /// Vector index options for HNSW-based vector similarity search.
+     pub vector_index_options: Option<OptionMap>,
+-    pub json_type_hints: Vec<JsonTypeHint>,
++    /// JSON2-specific column options.
++    pub json2_options: Option<Json2Options>,
++}
++
++/// JSON2-specific options represented in the SQL AST.
++#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
++pub struct Json2Options {
++    /// Maximum number of unhinted JSON2 paths expanded into Arrow fields.
++    pub(crate) max_auto_expanded_paths: Option<u32>,
++    /// Paths stored as explicitly typed JSON2 fields.
++    pub(crate) type_hints: Vec<JsonTypeHint>,
++}
++
++impl Display for Json2Options {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        let mut options = Vec::with_capacity(self.type_hints.len() + 1);
++        if let Some(max) = self.max_auto_expanded_paths {
++            options.push(format!("max_auto_expanded_paths = {max}"));
++        }
++        options.extend(self.type_hints.iter().map(format_json_type_hint));
++        write!(f, "(\n    {}\n  )", options.iter().join(",\n    "))
++    }
+ }
+ 
+ #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+@@ -180,12 +201,8 @@ impl Display for Column {
+         }
+ 
+         write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
+-        if !self.extensions.json_type_hints.is_empty() {
+-            write!(
+-                f,
+-                "{}",
+-                format_json_type_hints(&self.extensions.json_type_hints)
+-            )?;
++        if let Some(options) = &self.extensions.json2_options {
++            write!(f, "{options}")?;
+         }
+         for option in &self.column_def.options {
+             write!(f, " {option}")?;
+@@ -335,29 +352,30 @@ impl ColumnExtensions {
+     }
+ 
+     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {
+-        if self.json_type_hints.is_empty() {
++        let Some(options) = &self.json2_options else {
+             return Ok(None);
+-        }
++        };
+ 
+-        Ok(Some(JsonSettings::new(
+-            self.json_type_hints
+-                .iter()
+-                .map(|hint| {
+-                    Ok(datatypes::json::JsonTypeHint {
+-                        path: hint.path.clone(),
+-                        data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
+-                        nullable: hint.nullable,
+-                        default_constraint: build_json_type_hint_default_constraint(hint)?,
+-                        inverted_index: hint.inverted_index,
+-                    })
++        let type_hints = options
++            .type_hints
++            .iter()
++            .map(|hint| {
++                Ok(datatypes::json::JsonTypeHint {
++                    path: hint.path.clone(),
++                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
++                    nullable: hint.nullable,
++                    default_constraint: build_json_type_hint_default_constraint(hint)?,
++                    inverted_index: hint.inverted_index,
+                 })
+-                .collect::<Result<Vec<_>>>()?,
+-        )))
++            })
++            .collect::<Result<Vec<_>>>()?;
++        let settings = JsonSettings::try_new(type_hints, options.max_auto_expanded_paths)?;
++        Ok(Some(settings))
+     }
+ 
+     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {
+-        self.json_type_hints = settings
+-            .type_hints
++        let (type_hints, max_auto_expanded_paths) = settings.into_parts();
++        let type_hints = type_hints
+             .into_iter()
+             .map(|hint| {
+                 let data_type = json_type_hint_sql_data_type(&hint.data_type)?;
+@@ -374,6 +392,11 @@ impl ColumnExtensions {
+                 })
+             })
+             .collect::<Result<Vec<_>>>()?;
++        self.json2_options = (max_auto_expanded_paths.is_some() || !type_hints.is_empty())
++            .then_some(Json2Options {
++                max_auto_expanded_paths,
++                type_hints,
++            });
+         Ok(())
+     }
+ }
+@@ -487,13 +510,6 @@ fn format_json_type_hint(hint: &JsonTypeHint) -> String {
+     )
+ }
+ 
+-fn format_json_type_hints(hints: &[JsonTypeHint]) -> String {
+-    format!(
+-        "(\n    {}\n  )",
+-        hints.iter().map(format_json_type_hint).join(",\n    ")
+-    )
+-}
+-
+ fn format_json_path_segment(segment: &str) -> String {
+     format!("\"{}\"", segment.replace('"', "\"\""))
+ }
+@@ -786,6 +802,7 @@ mod tests {
+     use datatypes::schema::ColumnDefaultConstraint;
+     use datatypes::value::Value;
+ 
++    use super::*;
+     use crate::dialect::GreptimeDbDialect;
+     use crate::error::Error;
+     use crate::parser::{ParseOptions, ParserContext};
+@@ -1066,7 +1083,7 @@ ENGINE=mito
+             .build_json_settings()
+             .unwrap()
+             .unwrap();
+-        let hints = settings.type_hints;
++        let hints = settings.type_hints();
+ 
+         assert_eq!(hints[0].data_type, ConcreteDataType::int64_datatype());
+         assert_eq!(
+@@ -1118,10 +1135,10 @@ ENGINE=mito
+     }
+ 
+     #[test]
+-    fn test_set_json_settings_normalizes_type_hint_sql_types() {
++    fn test_set_json_settings_normalizes_type_hint_sql_types() -> Result<()> {
+         let mut extensions = super::ColumnExtensions::default();
+-        extensions
+-            .set_json_settings(JsonSettings::new(vec![
++        let settings = JsonSettings::try_new(
++            vec![
+                 DatatypeJsonTypeHint {
+                     path: vec!["i".to_string()],
+                     data_type: ConcreteDataType::int32_datatype(),
+@@ -1157,36 +1174,51 @@ ENGINE=mito
+                     default_constraint: None,
+                     inverted_index: false,
+                 },
+-            ]))
+-            .unwrap();
++            ],
++            None,
++        )?;
++        extensions.set_json_settings(settings)?;
+ 
+         assert_eq!(
+             extensions
+-                .json_type_hints
++                .json2_options
++                .unwrap()
++                .type_hints
+                 .iter()
+                 .map(|hint| hint.data_type.to_string())
+                 .collect::<Vec<_>>(),
+             vec!["BIGINT", "DOUBLE", "BIGINT UNSIGNED", "STRING", "BOOLEAN"]
+         );
++        Ok(())
+     }
+ 
+     #[test]
+-    fn test_set_json_settings_rejects_unsupported_type_hint_type() {
+-        let mut extensions = super::ColumnExtensions::default();
+-        let err = extensions
+-            .set_json_settings(JsonSettings::new(vec![DatatypeJsonTypeHint {
++    fn test_set_json_settings_rejects_unsupported_type_hint_type() -> Result<()> {
++        let err = JsonSettings::try_new(
++            vec![DatatypeJsonTypeHint {
+                 path: vec!["u".to_string()],
+                 data_type: ConcreteDataType::date_datatype(),
+                 nullable: true,
+                 default_constraint: None,
+                 inverted_index: false,
+-            }]))
+-            .unwrap_err();
++            }],
++            None,
++        )
++        .unwrap_err();
+ 
+         assert!(
+             err.to_string()
+                 .contains("unsupported JSON2 type hint data type")
+         );
++        Ok(())
++    }
++
++    #[test]
++    fn test_set_empty_json_settings_omits_json2_options() -> Result<()> {
++        let mut extensions = ColumnExtensions::default();
++        extensions.set_json_settings(JsonSettings::default())?;
++        assert!(extensions.json2_options.is_none());
++        Ok(())
+     }
+ 
+     #[test]
+@@ -1364,15 +1396,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
+ 
+         // Test zero connectivity should fail
+         let extensions = ColumnExtensions {
+-            fulltext_index_options: None,
+-            vector_options: None,
+-            skipping_index_options: None,
+-            inverted_index_options: None,
+-            json_type_hints: vec![],
+             vector_index_options: Some(OptionMap::from([(
+                 "connectivity".to_string(),
+                 "0".to_string(),
+             )])),
++            ..Default::default()
+         };
+         let result = extensions.build_vector_index_options();
+         assert!(result.is_err());
+@@ -1385,15 +1413,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
+ 
+         // Test zero expansion_add should fail
+         let extensions = ColumnExtensions {
+-            fulltext_index_options: None,
+-            vector_options: None,
+-            skipping_index_options: None,
+-            inverted_index_options: None,
+-            json_type_hints: vec![],
+             vector_index_options: Some(OptionMap::from([(
+                 "expansion_add".to_string(),
+                 "0".to_string(),
+             )])),
++            ..Default::default()
+         };
+         let result = extensions.build_vector_index_options();
+         assert!(result.is_err());
+@@ -1406,15 +1430,11 @@ AS SELECT number FROM numbers_input where number > 10"#,
+ 
+         // Test zero expansion_search should fail
+         let extensions = ColumnExtensions {
+-            fulltext_index_options: None,
+-            vector_options: None,
+-            skipping_index_options: None,
+-            inverted_index_options: None,
+-            json_type_hints: vec![],
+             vector_index_options: Some(OptionMap::from([(
+                 "expansion_search".to_string(),
+                 "0".to_string(),
+             )])),
++            ..Default::default()
+         };
+         let result = extensions.build_vector_index_options();
+         assert!(result.is_err());
+@@ -1427,16 +1447,12 @@ AS SELECT number FROM numbers_input where number > 10"#,
+ 
+         // Test valid values should succeed
+         let extensions = ColumnExtensions {
+-            fulltext_index_options: None,
+-            vector_options: None,
+-            skipping_index_options: None,
+-            inverted_index_options: None,
+-            json_type_hints: vec![],
+             vector_index_options: Some(OptionMap::from([
+                 ("connectivity".to_string(), "32".to_string()),
+                 ("expansion_add".to_string(), "200".to_string()),
+                 ("expansion_search".to_string(), "100".to_string()),
+             ])),
++            ..Default::default()
+         };
+         let result = extensions.build_vector_index_options();
+         assert!(result.is_ok());
 diff --git a/src/sql/src/statements/show.rs b/src/sql/src/statements/show.rs
 index 77880e4a5..67624192b 100644
 --- a/src/sql/src/statements/show.rs
@@ -25909,6 +28351,142 @@ index ab8d3ee02..4dfda4f32 100644
    AND json_is_null(payload)"#
      );
      assert_single_event(instance, &lifecycle).await;
+diff --git a/tests-integration/tests/dict_groupby_sst.rs b/tests-integration/tests/dict_groupby_sst.rs
+new file mode 100644
+index 000000000..c7adf9b05
+--- /dev/null
++++ b/tests-integration/tests/dict_groupby_sst.rs
+@@ -0,0 +1,130 @@
++// Copyright 2023 Greptime Team
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use common_query::Output;
++use frontend::instance::Instance;
++use servers::query_handler::sql::SqlQueryHandler;
++use session::context::QueryContext;
++use tests_integration::standalone::GreptimeDbStandaloneBuilder;
++
++async fn execute_sql(instance: &Instance, sql: &str) -> Output {
++    SqlQueryHandler::do_query(instance, sql, QueryContext::arc())
++        .await
++        .remove(0)
++        .unwrap()
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn test_dict_groupby_sst() {
++    common_telemetry::init_default_ut_logging();
++
++    let standalone = GreptimeDbStandaloneBuilder::new("dict_groupby_sst")
++        .build()
++        .await;
++    let frontend = standalone.fe_instance();
++
++    execute_sql(
++        frontend,
++        r#"
++        CREATE TABLE cpu (
++            hostname STRING PRIMARY KEY,
++            usage_user DOUBLE,
++            usage_system DOUBLE,
++            usage_idle DOUBLE,
++            greptime_timestamp TIMESTAMP TIME INDEX
++        ) WITH (append_mode = 'true', sst_format = 'flat')
++        "#,
++    )
++    .await;
++
++    let mut rows = String::new();
++    for index in 0..1200 {
++        if index != 0 {
++            rows.push(',');
++        }
++        let hostname = match index % 3 {
++            0 => "host_a",
++            1 => "host_b",
++            _ => "host_c",
++        };
++        let usage_user = match index % 3 {
++            0 => 10.0,
++            1 => 20.0,
++            _ => 30.0,
++        };
++        let hour = 11 + index / 600;
++        let minute = (index % 600) / 60;
++        let second = index % 60;
++        rows.push_str(&format!(
++            "('{hostname}', {usage_user}, 1.0, 0.0, '2023-06-12T{hour:02}:{minute:02}:{second:02}Z')"
++        ));
++    }
++    execute_sql(frontend, &format!("INSERT INTO cpu VALUES {rows}")).await;
++
++    execute_sql(frontend, "ADMIN FLUSH_TABLE('cpu')").await;
++
++    let count = execute_sql(frontend, "SELECT count(*) FROM cpu")
++        .await
++        .data
++        .pretty_print()
++        .await;
++    assert!(
++        count.contains("| 1200     |"),
++        "unexpected row count:\n{count}"
++    );
++
++    let query = r#"
++        SELECT hostname, avg(usage_user), date_trunc('hour', greptime_timestamp)
++        FROM cpu
++        WHERE greptime_timestamp >= '2023-06-12T00:00:00Z'
++          AND greptime_timestamp < '2023-06-14T00:00:00Z'
++        GROUP BY date_trunc('hour', greptime_timestamp), hostname
++        ORDER BY hostname, date_trunc('hour', greptime_timestamp)
++    "#;
++    let groups = execute_sql(frontend, query).await.data.pretty_print().await;
++    let rows = groups
++        .lines()
++        .filter(|line| line.starts_with("| host_"))
++        .collect::<Vec<_>>();
++    let expected_rows = vec![
++        "| host_a   | 10.0                | 2023-06-12T11:00:00                             |",
++        "| host_a   | 10.0                | 2023-06-12T12:00:00                             |",
++        "| host_b   | 20.0                | 2023-06-12T11:00:00                             |",
++        "| host_b   | 20.0                | 2023-06-12T12:00:00                             |",
++        "| host_c   | 30.0                | 2023-06-12T11:00:00                             |",
++        "| host_c   | 30.0                | 2023-06-12T12:00:00                             |",
++    ];
++    assert_eq!(expected_rows, rows, "unexpected grouped rows:\n{groups}");
++
++    let explain = execute_sql(
++        frontend,
++        r#"
++        EXPLAIN ANALYZE VERBOSE
++        SELECT avg(usage_user), date_trunc('hour', greptime_timestamp)
++        FROM cpu
++        WHERE greptime_timestamp >= '2023-06-12T00:00:00Z'
++          AND greptime_timestamp < '2023-06-14T00:00:00Z'
++        GROUP BY date_trunc('hour', greptime_timestamp), hostname
++        "#,
++    )
++    .await
++    .data
++    .pretty_print()
++    .await;
++    // This query-shape assertion is not direct path-selection coverage; direct DictionaryGroupValuesColumn tests live in the pinned DataFusion fork because AggregateExec EXPLAIN/metrics do not expose the concrete GroupValues implementation.
++    assert!(
++        explain.contains("AggregateExec"),
++        "expected aggregate in physical plan:\n{explain}"
++    );
++}
 diff --git a/tests-integration/tests/event_recorder_test_util.rs b/tests-integration/tests/event_recorder_test_util.rs
 index 0441cc08d..38bb18861 100644
 --- a/tests-integration/tests/event_recorder_test_util.rs
@@ -26357,17 +28935,19 @@ index dbf085d97..784aa30e7 100644
          loop {
              let res = client
 diff --git a/tests-integration/tests/main.rs b/tests-integration/tests/main.rs
-index 1925b46d4..3112cb72c 100644
+index 1925b46d4..965a3a674 100644
 --- a/tests-integration/tests/main.rs
 +++ b/tests-integration/tests/main.rs
-@@ -14,6 +14,7 @@
+@@ -14,7 +14,9 @@
  
  #![recursion_limit = "256"]
  
 +mod admin_function_event;
  mod database_ddl_event;
++mod dict_groupby_sst;
  mod event_recorder_test_util;
  #[macro_use]
+ mod grpc;
 diff --git a/tests-integration/tests/region_migration.rs b/tests-integration/tests/region_migration.rs
 index 2d11966dc..17a58de2e 100644
 --- a/tests-integration/tests/region_migration.rs

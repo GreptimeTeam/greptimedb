@@ -1,8 +1,8 @@
 PR #8787
 Upstream merge commit: 32e215cad0aa0803991d751bc7b4f44ac1865e62
-Aggregate commit: 6c3f63f05b477ef340f57f57981736f1bc3a4e6d
+Aggregate commit: 0b499475dedfa462e9f951e0bb7b516011a195a0
 
-1:  32e215cad ! 1:  6c3f63f05 fix(event): preserve procedure lifecycle locators (#8787)
+1:  32e215cad ! 1:  0b499475d fix(event): preserve procedure lifecycle locators (#8787)
     @@ Commit message
          ---------
      

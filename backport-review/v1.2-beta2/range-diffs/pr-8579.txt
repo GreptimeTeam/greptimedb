@@ -1,8 +1,8 @@
 PR #8579
 Upstream merge commit: bbc91ea637516c4657a8cdb9f40289f126b9ef61
-Aggregate commit: a7c296cf46cc4f1ce0241231cbb8b8031dfb1bcf
+Aggregate commit: 9d8894b7f8b3e3391e4347f1a7a9ce3d1c5182fa
 
-1:  bbc91ea63 ! 1:  a7c296cf4 fix(query): validate merge scan remote schema (#8579)
+1:  bbc91ea63 ! 1:  9d8894b7f fix(query): validate merge scan remote schema (#8579)
     @@ Metadata
       ## Commit message ##
          fix(query): validate merge scan remote schema (#8579)

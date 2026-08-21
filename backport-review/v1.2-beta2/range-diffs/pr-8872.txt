@@ -1,8 +1,8 @@
 PR #8872
 Upstream merge commit: 3c80df043a46f0511bd81a64a072ca18436efac3
-Aggregate commit: bc889665136f50067e5655757ff7f88ab07f177d
+Aggregate commit: ec84c0f7177d2f14b1a148cee56d818c41701638
 
-1:  3c80df043 ! 1:  bc8896651 fix(mito2): keep deletion markers when compacting part of a window (#8872)
+1:  3c80df043 ! 1:  ec84c0f71 fix(mito2): keep deletion markers when compacting part of a window (#8872)
     @@
       ## Metadata ##
     -Author: jeremyhi <jiachun_feng@proton.me>

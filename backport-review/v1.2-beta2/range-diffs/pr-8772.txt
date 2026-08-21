@@ -1,8 +1,8 @@
 PR #8772
 Upstream merge commit: 9241e96fa2ea8ed3132e38dea93c655337d24040
-Aggregate commit: 6e5cd114b31cdb0a8ea6323e5d7f8c5c23198541
+Aggregate commit: 5e0a6436ee91fb4cb48a1a63564e019be02b3e22
 
-1:  9241e96fa ! 1:  6e5cd114b fix(metric-engine): handle Utf8View tag/label columns without panicking (#8772)
+1:  9241e96fa ! 1:  5e0a6436e fix(metric-engine): handle Utf8View tag/label columns without panicking (#8772)
     @@ Commit message
          ---------
      

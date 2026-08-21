@@ -8,7 +8,7 @@ The immutable upstream commits are [#8392](https://github.com/GreptimeTeam/grept
 
 ## Resulting backport patch — what ships
 
-The slice is [0b6702b](https://github.com/GreptimeTeam/greptimedb/commit/0b6702b7ccc0d0fdbd5f53490743dee6a197f516), followed by [#8729 carrier](https://github.com/GreptimeTeam/greptimedb/commit/239c4e62b177203dc440fb3faabad8cb6fd70d4f) and [contract correction](https://github.com/GreptimeTeam/greptimedb/commit/84a83d31f81bba0e041f69fbd2e4adb9bc04233d). The selected statistics/status behavior ships without importing the newer state layout.
+The slice is [f913538](https://github.com/GreptimeTeam/greptimedb/commit/f9135380b5591b82c9ec5bbf1706459672bd72db), followed by [#8729 carrier](https://github.com/GreptimeTeam/greptimedb/commit/c4baa56b23888fa2a2692b39ae01500d3f295efa) and [contract correction](https://github.com/GreptimeTeam/greptimedb/commit/be9106be721f8794f83694272a24b90360dc8cbe). The selected statistics/status behavior ships without importing the newer state layout.
 
 ## Relative to original PR — exact differences
 

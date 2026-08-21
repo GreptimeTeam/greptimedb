@@ -1,8 +1,8 @@
 PR #8860
 Upstream merge commit: f2ffaef9dfee134fa46d54ba65e6f40b37982cef
-Aggregate commit: 0ffca14740493d0c1afa556908345d9e135d7656
+Aggregate commit: 507dda2d88033216f6e12e423bf8c20dd1579ba4
 
-1:  f2ffaef9d ! 1:  0ffca1474 feat: update to pgwire 0.40.7 (#8860)
+1:  f2ffaef9d ! 1:  507dda2d8 feat: update to pgwire 0.40.7 (#8860)
     @@ Metadata
       ## Commit message ##
          feat: update to pgwire 0.40.7 (#8860)

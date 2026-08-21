@@ -1,0 +1,2 @@
+# Raw patch evidence contains intentional diff-added whitespace; do not lint its payload.
+aggregate.diff whitespace=-trailing-space

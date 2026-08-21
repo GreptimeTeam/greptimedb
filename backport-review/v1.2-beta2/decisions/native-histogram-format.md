@@ -8,7 +8,7 @@ The immutable upstream commit is [#8824](https://github.com/GreptimeTeam/greptim
 
 ## Resulting backport patch — what ships
 
-The immutable aggregate carrier is [a024250](https://github.com/GreptimeTeam/greptimedb/commit/a024250fdb7808562b100b0ef2b4d8e9deaeb9a3). It applies the same format change to the beta2 baseline. There is no migration or downgrade layer.
+The immutable aggregate carrier is [b0b6a98](https://github.com/GreptimeTeam/greptimedb/commit/b0b6a9821d9160d598d0a1e3a6cab1b5cfe59a1d). It applies the same format change to the beta2 baseline. There is no migration or downgrade layer.
 
 ## Relative to original PR — exact differences
 

@@ -1,8 +1,8 @@
 PR #8808
 Upstream merge commit: e4175475bb7e630cefefa189b17282b063868a49
-Aggregate commit: b6326257d1babcc8cf016af59b92ebfcdee862ae
+Aggregate commit: 1a2e7b81679c602ae76f868b66974af9397d4341
 
-1:  e4175475b ! 1:  b6326257d fix(mito): re-encode bulk WAL entry after filling missing columns (#8808)
+1:  e4175475b ! 1:  1a2e7b816 fix(mito): re-encode bulk WAL entry after filling missing columns (#8808)
     @@ Commit message
            correctly.
      

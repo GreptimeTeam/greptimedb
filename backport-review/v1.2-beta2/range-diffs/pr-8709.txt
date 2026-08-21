@@ -1,8 +1,8 @@
 PR #8709
 Upstream merge commit: d3b10d13a5712868d72969b4a453ae786f0d60e3
-Aggregate commit: efe75d408b77312facd46adf411497bdfb375690
+Aggregate commit: 0b6c40e7f465273ac424beca3475e82f4def7991
 
-1:  d3b10d13a ! 1:  efe75d408 fix(mito2): fail open when Bloom IN predicate has non-literal or unencodable members (#8709)
+1:  d3b10d13a ! 1:  0b6c40e7f fix(mito2): fail open when Bloom IN predicate has non-literal or unencodable members (#8709)
     @@ Commit message
          ---------
      

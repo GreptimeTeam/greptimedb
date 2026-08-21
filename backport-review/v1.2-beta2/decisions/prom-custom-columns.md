@@ -8,7 +8,7 @@ The immutable upstream patch is [#8659](https://github.com/GreptimeTeam/greptime
 
 ## Resulting backport patch — what ships
 
-The aggregate carrier is [8cc4cab](https://github.com/GreptimeTeam/greptimedb/commit/8cc4cab224dee0991b0c96f7b88df7d8221572ea). It adapts custom timestamp/value-column remote reads to beta2 frontend and server APIs; final paths include `src/frontend/src/instance/prom_store.rs` and `src/servers/src/prom_store.rs`.
+The aggregate carrier is [5f6ae43](https://github.com/GreptimeTeam/greptimedb/commit/5f6ae43ac64f0ea536af04b06c0379b8ae2eea8b). It adapts custom timestamp/value-column remote reads to beta2 frontend and server APIs; final paths include `src/frontend/src/instance/prom_store.rs` and `src/servers/src/prom_store.rs`.
 
 ## Relative to original PR — exact differences
 

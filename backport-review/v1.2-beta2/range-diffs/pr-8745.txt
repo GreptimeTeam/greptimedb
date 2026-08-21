@@ -1,8 +1,8 @@
 PR #8745
 Upstream merge commit: 95d9d92e42bfaa3338cf460bdb031803e29368bf
-Aggregate commit: ed184264fabf2076fe65a7bf6a30b0c6ce205dba
+Aggregate commit: 05c67e4d5f7bdadc9fe4393e95b7b5776b5e4bbf
 
-1:  95d9d92e4 ! 1:  ed184264f refactor: separate a json2 extension type (#8745)
+1:  95d9d92e4 ! 1:  05c67e4d5 refactor: separate a json2 extension type (#8745)
     @@ Commit message
          refactor: separate a json2 extension type (#8745)
      

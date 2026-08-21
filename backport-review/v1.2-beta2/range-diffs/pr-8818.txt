@@ -1,9 +1,9 @@
 PR #8818
 Upstream merge commit: cd6efa0abf6ec99737ad8bce36376c4946023edc
-Aggregate carrier commit: a7c296cf46cc4f1ce0241231cbb8b8031dfb1bcf (#8579 reconstruction)
+Aggregate carrier commit: 9d8894b7f8b3e3391e4347f1a7a9ce3d1c5182fa (#8579 reconstruction)
 Mapping: folded; auxiliary Arrow metadata semantics are carried in the reconstructed #8579 commit.
 
-1:  cd6efa0ab ! 1:  a7c296cf4 fix(query): ignore field metadata in MergeScan remote schema validation (#8818)
+1:  cd6efa0ab ! 1:  9d8894b7f fix(query): ignore field metadata in MergeScan remote schema validation (#8818)
     @@ Metadata
      Author: discord9 <discord9@163.com>
      

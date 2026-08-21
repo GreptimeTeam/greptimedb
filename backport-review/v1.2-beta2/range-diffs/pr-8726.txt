@@ -1,8 +1,8 @@
 PR #8726
 Upstream merge commit: 9f724aa5f6466a3e90c4f6407f2f6e00211ed925
-Aggregate commit: 45309752df03f6a5fdda03d741727637de28ed01
+Aggregate commit: 424e53d8413719e348bc8a694d9d22d3a051ce68
 
-1:  9f724aa5f ! 1:  45309752d feat: make frontend heartbeat extensible and lifecycle-safe (#8726)
+1:  9f724aa5f ! 1:  424e53d84 feat: make frontend heartbeat extensible and lifecycle-safe (#8726)
     @@ Commit message
          ---------
      

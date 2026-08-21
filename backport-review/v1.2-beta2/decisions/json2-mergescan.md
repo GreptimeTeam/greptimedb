@@ -8,7 +8,7 @@ The immutable upstream patch is [#8745](https://github.com/GreptimeTeam/greptime
 
 ## Resulting backport patch — what ships
 
-The primary carrier is [ed18426](https://github.com/GreptimeTeam/greptimedb/commit/ed184264fabf2076fe65a7bf6a30b0c6ce205dba). Release extras [MergeScan helper wiring](https://github.com/GreptimeTeam/greptimedb/commit/e897a65e16e1a5ebd1fa667a6c6ea6718e91a12d) and [legacy identity coverage](https://github.com/GreptimeTeam/greptimedb/commit/234fea812fd2b0406cf148806aa8566a74a3fcd6) complete the behavior on the beta2 model.
+The primary carrier is [05c67e4](https://github.com/GreptimeTeam/greptimedb/commit/05c67e4d5f7bdadc9fe4393e95b7b5776b5e4bbf). Release extras [MergeScan helper wiring](https://github.com/GreptimeTeam/greptimedb/commit/c9c7f0958a45fd1189072947e0df4d1d6de6be5b) and [legacy identity coverage](https://github.com/GreptimeTeam/greptimedb/commit/3dc37d9f9e955bc98ad7ef86b25ad19553a34136) complete the behavior on the beta2 model.
 
 ## Relative to original PR — exact differences
 

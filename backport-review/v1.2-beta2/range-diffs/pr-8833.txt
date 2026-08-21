@@ -1,8 +1,8 @@
 PR #8833
 Upstream merge commit: 6538db6d618279f640958c40cdbb5a1796fb40cd
-Aggregate commit: 66a13cb3b74457a1be1f28d7faaa3994280f3df4
+Aggregate commit: 4ab29b22f381156225cf9a50f73e5acc1ba8bbe8
 
-1:  6538db6d6 ! 1:  66a13cb3b refactor(json2): push down json2 type hints to parquet reads (#8833)
+1:  6538db6d6 ! 1:  4ab29b22f refactor(json2): push down json2 type hints to parquet reads (#8833)
     @@ Commit message
          ---------
      

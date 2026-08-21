@@ -8,7 +8,7 @@ The immutable upstream patch is [#8872](https://github.com/GreptimeTeam/greptime
 
 ## Resulting backport patch — what ships
 
-The aggregate carrier is [bc88966](https://github.com/GreptimeTeam/greptimedb/commit/bc889665136f50067e5655757ff7f88ab07f177d). It retains the deletion-marker overlap recheck on the beta2 compaction model.
+The aggregate carrier is [ec84c0f](https://github.com/GreptimeTeam/greptimedb/commit/ec84c0f7177d2f14b1a148cee56d818c41701638). It retains the deletion-marker overlap recheck on the beta2 compaction model.
 
 ## Relative to original PR — exact differences
 

@@ -1,0 +1,542 @@
+PR #8902
+Upstream range: d99b0df374eec0329ac3f430e40b80a1e6c6963c^..1a91c76c615afec71239b84af7787a0505bef914
+Aggregate range: 40e02ff6b62ad3445f7035e437bd9e322c8af31b^..40e02ff6b62ad3445f7035e437bd9e322c8af31b
+Upstream PR merge commit: 8d887ddd00d67699d0fb873cda11eb50b5771555
+Upstream PR head: 1a91c76c615afec71239b84af7787a0505bef914
+Aggregate carrier: 40e02ff6b62ad3445f7035e437bd9e322c8af31b
+Endpoint resolution: the second upstream pin commit 1a91c76 is shown below as folded/absorbed (<-: ---------); beta2 conflict resolution directly selected final DataFusion pin 4c8a6bf283.
+Command: git range-diff d99b0df374eec0329ac3f430e40b80a1e6c6963c^..1a91c76c615afec71239b84af7787a0505bef914 40e02ff6b62ad3445f7035e437bd9e322c8af31b^..40e02ff6b62ad3445f7035e437bd9e322c8af31b
+
+1:  d99b0df37 ! 1:  40e02ff6b fix(query): restore columnar group-by for dictionary-encoded tags
+    @@ Metadata
+      ## Commit message ##
+         fix(query): restore columnar group-by for dictionary-encoded tags
+     
+    -    Bump the DataFusion fork to be93ffd85 (feat/dict-group-column-53), which
+    -    backports apache/datafusion #23187: DictionaryGroupValuesColumn lets
+    -    dictionary-encoded group keys use the columnar GroupValuesColumn fast
+    -    path (hash distinct dictionary values once per batch, resolve rows by
+    -    key index) instead of falling back to row-based GroupValuesRows.
+    +    Bump the pinned DataFusion fork from 452cb4b786 to its linear successor
+    +    4c8a6bf283. The successor preserves the existing Dictionary-literal
+    +    Substrait fix, includes the intervening join-cardinality overflow fix,
+    +    and adds DictionaryGroupValuesColumn support so dictionary-encoded group
+    +    keys can use the columnar grouping path instead of GroupValuesRows.
+     
+    -    This fixes the TSBS double-groupby regression introduced by #8541
+    -    (preserve dictionary-encoded query labels): v1.2.0-beta.1 scan output
+    -    changed tag columns to Dictionary(UInt32, Utf8), which DataFusion 53.1.0
+    -    did not support in GroupValuesColumn's supported_type allow-list, so
+    -    GROUP BY queries silently dropped to the ~60% slower row path
+    -    (time_calculating_group_ids +57%, peak_mem +50%, end-to-end +38%).
+    +    Add an end-to-end integration test that writes 1,200 rows to an
+    +    append-mode flat SST, groups its dictionary-encoded hostname tag by hour,
+    +    and checks all six ordered result tuples exactly. AggregateExec does not
+    +    expose the concrete GroupValues implementation through EXPLAIN or metrics;
+    +    direct DictionaryGroupValuesColumn path coverage remains in the pinned
+    +    DataFusion fork tests.
+     
+    -    Adds an end-to-end integration test (dict_groupby_sst) that flushes a
+    -    flat-format SST with dictionary-encoded hostname, runs the tsbs-style
+    -    double-groupby query, and asserts correct results with no CastExec
+    -    inserted before the aggregate.
+    -
+    -    Signed-off-by: discord9 <discord9@greptime.dev>
+    +    (cherry picked from commit d99b0df374eec0329ac3f430e40b80a1e6c6963c)
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+      [[package]]
+      name = "datafusion"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "arrow-schema 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-catalog"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-catalog-listing"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-common-runtime"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "futures",
+       "log",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-datasource"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-compression",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-datasource-arrow"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "arrow-ipc 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-datasource-csv"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-datasource-json"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-datasource-parquet"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-doc"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      
+      [[package]]
+      name = "datafusion-execution"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "arrow-buffer 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-expr"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-expr-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "arrow-buffer 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-aggregate"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-aggregate-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-nested"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "arrow-ord 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-table"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "async-trait",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-window"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-functions-window-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "datafusion-common",
+       "datafusion-physical-expr-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-macros"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "datafusion-doc",
+       "quote",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-optimizer"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "chrono",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-physical-expr"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-physical-expr-adapter"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-physical-expr-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-physical-optimizer"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-physical-plan"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "ahash 0.8.12",
+       "arrow 58.3.0",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-proto"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "chrono",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-proto-common"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-pruning"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-session"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "async-trait",
+       "datafusion-common",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-sql"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "arrow 58.3.0",
+       "bigdecimal 0.4.8",
+    @@ Cargo.lock: dependencies = [
+      [[package]]
+      name = "datafusion-substrait"
+      version = "53.1.0"
+    --source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=d705d4433d2fcbe2bead54e3f1d6cc59727857e1#d705d4433d2fcbe2bead54e3f1d6cc59727857e1"
+    -+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=be93ffd85cdd8c05912df65c0e37630abd5c91ec#be93ffd85cdd8c05912df65c0e37630abd5c91ec"
+    +-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=452cb4b786ccadab24a2afa5a49034e85411135f#452cb4b786ccadab24a2afa5a49034e85411135f"
+    ++source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=4c8a6bf28347b346348136247eb67dfb933f1147#4c8a6bf28347b346348136247eb67dfb933f1147"
+      dependencies = [
+       "async-recursion",
+       "async-trait",
+    @@ Cargo.toml: git = "https://github.com/GreptimeTeam/greptime-meter.git"
+      rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+      
+      [patch.crates-io]
+    --datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    --datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "d705d4433d2fcbe2bead54e3f1d6cc59727857e1" }
+    -+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    -+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "be93ffd85cdd8c05912df65c0e37630abd5c91ec" }
+    +-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    +-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "452cb4b786ccadab24a2afa5a49034e85411135f" }
+    ++datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+    ++datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "4c8a6bf28347b346348136247eb67dfb933f1147" }
+      sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
+      
+      [profile.release]
+    @@ tests-integration/tests/dict_groupby_sst.rs (new)
+     +        ORDER BY hostname, date_trunc('hour', greptime_timestamp)
+     +    "#;
+     +    let groups = execute_sql(frontend, query).await.data.pretty_print().await;
+    -+    assert_eq!(
+    -+        6,
+    -+        groups
+    -+            .lines()
+    -+            .filter(|line| line.starts_with("| host_"))
+    -+            .count(),
+    -+        "expected one group per hostname and hour:\n{groups}"
+    -+    );
+    -+    for (hostname, average) in [("host_a", "10.0"), ("host_b", "20.0"), ("host_c", "30.0")] {
+    -+        assert_eq!(
+    -+            2,
+    -+            groups.matches(&format!("| {hostname} ")).count(),
+    -+            "expected two hourly groups for {hostname}:\n{groups}"
+    -+        );
+    -+        assert!(
+    -+            groups.contains(average),
+    -+            "expected average {average} for {hostname}:\n{groups}"
+    -+        );
+    -+    }
+    ++    let rows = groups
+    ++        .lines()
+    ++        .filter(|line| line.starts_with("| host_"))
+    ++        .collect::<Vec<_>>();
+    ++    let expected_rows = vec![
+    ++        "| host_a   | 10.0                | 2023-06-12T11:00:00                             |",
+    ++        "| host_a   | 10.0                | 2023-06-12T12:00:00                             |",
+    ++        "| host_b   | 20.0                | 2023-06-12T11:00:00                             |",
+    ++        "| host_b   | 20.0                | 2023-06-12T12:00:00                             |",
+    ++        "| host_c   | 30.0                | 2023-06-12T11:00:00                             |",
+    ++        "| host_c   | 30.0                | 2023-06-12T12:00:00                             |",
+    ++    ];
+    ++    assert_eq!(expected_rows, rows, "unexpected grouped rows:\n{groups}");
+     +
+     +    let explain = execute_sql(
+     +        frontend,
+    @@ tests-integration/tests/dict_groupby_sst.rs (new)
+     +    .data
+     +    .pretty_print()
+     +    .await;
+    ++    // This query-shape assertion is not direct path-selection coverage; direct DictionaryGroupValuesColumn tests live in the pinned DataFusion fork because AggregateExec EXPLAIN/metrics do not expose the concrete GroupValues implementation.
+     +    assert!(
+     +        explain.contains("AggregateExec"),
+     +        "expected aggregate in physical plan:\n{explain}"
+     +    );
+    -+    assert!(
+    -+        !explain.contains("CastExec") && !explain.contains("CAST(hostname"),
+    -+        "dictionary hostname must not be cast before aggregation:\n{explain}"
+    -+    );
+     +}
+     
+      ## tests-integration/tests/main.rs ##
+2:  1a91c76c6 < -:  --------- chore(deps): pin merged dictionary group-by support
