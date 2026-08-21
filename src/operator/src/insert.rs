@@ -29,10 +29,11 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
-    trace_operations_table_name, trace_services_table_name,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
+    TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine,
+    is_ddl_reserved_table, trace_operations_table_name, trace_services_table_name,
 };
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -88,12 +89,22 @@ pub struct Inserter {
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
     /// Server-side upper bound for auto table creation on write.
-    /// When `false`, missing tables are never auto-created regardless of the
-    /// per-request `auto_create_table` hint. When `true`, the hint still applies.
+    /// When `false`, missing user tables are never auto-created regardless of
+    /// the per-request `auto_create_table` hint. The internal events table is
+    /// the exception and may be created or reconciled during an event write.
+    /// When `true`, the hint still applies.
     auto_create_table: bool,
 }
 
 pub type InserterRef = Arc<Inserter>;
+
+/// The events table must reconcile its inferred schema during upgrades even
+/// when user table auto-creation is disabled.
+fn is_events_table(catalog: &str, schema: &str, table: &str) -> bool {
+    catalog == DEFAULT_CATALOG_NAME
+        && schema == DEFAULT_PRIVATE_SCHEMA_NAME
+        && table == DEFAULT_EVENTS_TABLE_NAME
+}
 
 /// Hint for the table type to create automatically.
 #[derive(Clone)]
@@ -575,8 +586,15 @@ impl Inserter {
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
 
+        let auto_create_disabled_reason = self.auto_create_disabled_reason(ctx)?;
         let mut table_infos = HashMap::new();
-        if let Some(disabled_reason) = self.auto_create_disabled_reason(ctx)? {
+        let has_events_insert = requests
+            .inserts
+            .iter()
+            .any(|req| is_events_table(catalog, &schema, &req.table_name));
+        if let Some(disabled_reason) = auto_create_disabled_reason
+            && !has_events_insert
+        {
             let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = match self.get_table(catalog, &schema, &req.table_name).await? {
@@ -604,11 +622,10 @@ impl Inserter {
                 }
                 table_infos.insert(table_info.table_id(), table.table_info());
             }
-            let ret = CreateAlterTableResult {
+            return Ok(CreateAlterTableResult {
                 instant_table_ids,
                 table_infos,
-            };
-            return Ok(ret);
+            });
         }
 
         let mut create_tables = vec![];
@@ -618,20 +635,24 @@ impl Inserter {
         let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
 
         for req in &mut requests.inserts {
+            let auto_alter_allowed = auto_create_disabled_reason.is_none()
+                || is_events_table(catalog, &schema, &req.table_name);
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
-                        req,
-                        &table,
-                        ctx,
-                        accommodate_existing_schema,
-                        is_single_value,
-                        auto_create_table_type.alter_existing(),
-                    )? {
+                    if auto_alter_allowed
+                        && let Some(alter_expr) = self.get_alter_table_expr_on_demand(
+                            req,
+                            &table,
+                            ctx,
+                            accommodate_existing_schema,
+                            is_single_value,
+                            auto_create_table_type.alter_existing(),
+                        )?
+                    {
                         alter_tables.push(alter_expr);
                         need_refresh_table_infos.insert((
                             catalog.to_string(),
@@ -654,6 +675,17 @@ impl Inserter {
                         instant_table_ids.insert(table_info.table_id());
                     }
                     table_infos.insert(table_info.table_id(), table_info);
+                }
+                None if let Some(disabled_reason) = auto_create_disabled_reason
+                    && !is_events_table(catalog, &schema, &req.table_name) =>
+                {
+                    return InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "Table `{}` does not exist, and {}",
+                            req.table_name, disabled_reason,
+                        ),
+                    }
+                    .fail();
                 }
                 None => {
                     let semantic_index = per_table_semantics

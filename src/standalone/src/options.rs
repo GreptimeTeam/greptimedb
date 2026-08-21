@@ -40,8 +40,9 @@ pub struct StandaloneOptions {
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
     /// Server-side global switch for auto table creation on write.
-    /// Upper bound: when `false`, missing tables are never auto-created even if a
-    /// request sets the `auto_create_table` hint to `true`. Default: `true`.
+    /// Upper bound: when `false`, missing user tables are never auto-created even
+    /// if a request sets the `auto_create_table` hint to `true`. The internal
+    /// events table may still be created or reconciled. Default: `true`.
     pub auto_create_table: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)

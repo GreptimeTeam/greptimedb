@@ -8,7 +8,7 @@ default_timezone = "UTC"
 default_column_prefix = "greptime"
 
 ## Server-side global switch for auto table creation on write.
-## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
+## When `false`, a missing user table is never auto-created even if the request sets the `auto_create_table` hint to `true`. The internal events table may still be created or reconciled. Default: `true`.
 #+ auto_create_table = true
 
 ## The user provider for authentication.
