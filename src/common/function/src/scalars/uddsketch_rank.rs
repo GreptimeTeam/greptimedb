@@ -22,7 +22,6 @@ use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use uddsketch::UddSketchRef;
 
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
@@ -99,9 +98,7 @@ impl Function for UddSketchRankFunction {
                 continue;
             }
 
-            match UddSketchRef::parse(sketches.value(i))
-                .and_then(|sketch| sketch.rank(values.value(i)))
-            {
+            match crate::uddsketch_compat::rank(sketches.value(i), values.value(i)) {
                 Ok(Some(rank)) => builder.append_value(rank),
                 Ok(None) => builder.append_null(),
                 Err(error) => {
@@ -184,6 +181,20 @@ mod tests {
     }
 
     #[test]
+    fn test_uddsketch_rank_function_reads_legacy_state() {
+        let function = UddSketchRankFunction::default();
+        let values = [f64::NEG_INFINITY, 0.0, 0.99, f64::INFINITY];
+        let states = BinaryArray::from_iter_values(
+            (0..values.len()).map(|_| uddsketch_compat::LEGACY_STATE),
+        );
+
+        let result = invoke(&function, Float64Array::from(values.to_vec()), states);
+
+        assert_eq!(result.null_count(), 0);
+        assert_eq!(result.values(), &[0.0, 0.375, 0.625, 1.0]);
+    }
+
+    #[test]
     fn test_uddsketch_rank_function_returns_null_for_invalid_rows() {
         let function = UddSketchRankFunction::default();
         let empty = UddSketch::new(128, 0.01).unwrap().encode().unwrap();
@@ -196,20 +207,13 @@ mod tests {
             None,
             Some(empty.as_slice()),
             Some(malformed.as_slice()),
-            Some(uddsketch_compat::LEGACY_STATE),
             Some(populated.as_slice()),
         ]);
-        let values = Float64Array::from(vec![
-            None,
-            Some(1.0),
-            Some(1.0),
-            Some(1.0),
-            Some(1.0),
-            Some(f64::NAN),
-        ]);
+        let values =
+            Float64Array::from(vec![None, Some(1.0), Some(1.0), Some(1.0), Some(f64::NAN)]);
 
         let result = invoke(&function, values, states);
 
-        assert_eq!(result.null_count(), 6);
+        assert_eq!(result.null_count(), 5);
     }
 }
