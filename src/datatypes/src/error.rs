@@ -77,6 +77,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unimplemented: {feat}"))]
+    Unimplemented {
+        feat: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse version in schema meta, value: {}", value))]
     ParseSchemaVersion {
         value: String,
@@ -312,6 +319,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             UnsupportedOperation { .. }
+            | Unimplemented { .. }
             | UnsupportedArrowType { .. }
             | UnsupportedJsonType { .. }
             | UnsupportedDefaultExpr { .. } => StatusCode::Unsupported,
