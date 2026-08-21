@@ -289,14 +289,43 @@ def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: s
     raise TimeoutError(f"Instance {instance_id} did not reach status {wanted} in time")
 
 
-def dump_console_output(client, region_id: str, instance_id: str) -> None:
+def fetch_console_output(client, region_id: str, instance_id: str) -> str:
     from alibabacloud_ecs20140526 import models as ecs_models
 
+    response = client.get_instance_console_output(
+        ecs_models.GetInstanceConsoleOutputRequest(region_id=region_id, instance_id=instance_id)
+    )
+    return base64.b64decode(response.body.console_output or "").decode("utf-8", "replace")
+
+
+class ConsoleTailer:
+    """Incrementally prints new serial-console lines so cloud-init progress is
+    visible in the CI log while waiting, not only after a failure dump."""
+
+    def __init__(self, client, region_id: str, instance_id: str) -> None:
+        self.client = client
+        self.region_id = region_id
+        self.instance_id = instance_id
+        self.printed_lines = 0
+
+    def poll(self) -> None:
+        try:
+            lines = fetch_console_output(self.client, self.region_id, self.instance_id).splitlines()
+        except Exception as error:  # noqa: BLE001
+            print(f"[console] unable to fetch console output: {error}", flush=True)
+            return
+        # The API returns a bounded tail; if it ever shrinks, restart from the
+        # beginning of the new buffer rather than skipping lines.
+        if len(lines) < self.printed_lines:
+            self.printed_lines = 0
+        for line in lines[self.printed_lines :]:
+            print(f"[console] {line}", flush=True)
+        self.printed_lines = len(lines)
+
+
+def dump_console_output(client, region_id: str, instance_id: str) -> None:
     try:
-        response = client.get_instance_console_output(
-            ecs_models.GetInstanceConsoleOutputRequest(region_id=region_id, instance_id=instance_id)
-        )
-        output = base64.b64decode(response.body.console_output or "").decode("utf-8", "replace")
+        output = fetch_console_output(client, region_id, instance_id)
     except Exception as error:  # noqa: BLE001
         print(f"Unable to fetch console output for {instance_id}: {error}", flush=True)
         return
@@ -405,6 +434,8 @@ def provision(config: ProvisionConfig) -> int:
 
     print("::group::Wait for runner online", flush=True)
     deadline = time.monotonic() + RUNNER_ONLINE_TIMEOUT_SECONDS
+    tailer = ConsoleTailer(client, config.region_id, instance_id)
+    last_console_poll = 0.0
     while time.monotonic() < deadline:
         runner = find_runner_by_name(config.github_token, config.repo, runner_name)
         if runner is not None:
@@ -414,6 +445,11 @@ def provision(config: ProvisionConfig) -> int:
                 print("::endgroup::", flush=True)
                 print(f"Runner {runner_name} is online with label {runner_label}", flush=True)
                 return 0
+        # The serial console lags the guest by a minute or so; 30s polling is
+        # enough to follow cloud-init without tripping API throttling.
+        if time.monotonic() - last_console_poll >= 30:
+            tailer.poll()
+            last_console_poll = time.monotonic()
         time.sleep(POLL_INTERVAL_SECONDS)
 
     print("::endgroup::", flush=True)
