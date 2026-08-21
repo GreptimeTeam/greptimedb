@@ -83,7 +83,7 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 ### #8825 — adapted
 - Upstream PR head: `bf947141753a9ea554aa1ca31637fdd3ad1429f3`; merge: `60c7bbcaf30a0e65ad7fa2b2b8ad0c1199a662b1`.
 - Requested by WenyXu in [Issue #8892 comment 5353700059](https://github.com/GreptimeTeam/greptimedb/issues/8892#issuecomment-5353700059).
-- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final head: `40e02ff6b62ad3445f7035e437bd9e322c8af31b`.
+- Aggregate carrier: `d18430b874f9c8054747dbf688585cd7d2988e3e`; final aggregate head: `81fd630955f16b9c45811539aa8434b47d5a875b` (the pre-version carrier remains `40e02ff6b62ad3445f7035e437bd9e322c8af31b`).
 - Adds shared `common_base::protocol::Channel`, re-exports it as `session::context::Channel`, and retains stable wire values/names and `Unknown` behavior. Session dialect mapping remains through the `dialect_for_channel` helper; common-meta derives protocol names from shared `Channel`.
 - Semantic conflict resolution is explicit: shared mapping replaces `common_session::channel_protocol`, but the aggregate preserves the old-frontend fallback for omitted protobuf `event_context` and exactly-once protobuf → `PersistentEventContext` → `ProcedureEventInput` conversion. Actor/event JSON and protobuf schemas are unchanged.
 - Narrow test adaptations `9bf878f5` and `6595b5d7b` are retained and not reverted.
@@ -125,6 +125,7 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 - `7b74b73d...`: rustfmt-only aggregate cleanup.
 - `3e8992f3...`: Cargo offline resolver update to align the final lock package dependency list with proto #335.
+- `81fd630955f16b9c45811539aa8434b47d5a875b`: non-PR `release-extra` version identity commit (`chore: bump version to 1.2.0-beta.2`), following the #8902 pre-version carrier; stable patch ID `9469fd7d7cb138515cd72d18861dd00b9dc2b74b`.
 
 ## Final proto chain
 

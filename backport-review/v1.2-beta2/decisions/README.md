@@ -2,7 +2,7 @@
 
 **Start here.** This is the canonical, priority-ordered index of behavior that was
 reconstructed, sliced, folded, or adapted for v1.2.0-beta.2. The aggregate head
-is [`40e02ff6b`](https://github.com/GreptimeTeam/greptimedb/commit/40e02ff6b62ad3445f7035e437bd9e322c8af31b);
+is [`81fd630955f`](https://github.com/GreptimeTeam/greptimedb/commit/81fd630955f16b9c45811539aa8434b47d5a875b);
 links to the shipping commits below are immutable commit links.
 
 A range-diff is an audit of the *difference between two patches*, not the full
@@ -11,7 +11,7 @@ not edited.
 
 ## Canonical CI status
 
-The recorded historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, completed with conclusion **failure** on the superseded-base aggregate. Failed jobs were **Clippy**, **Check Unused Dependencies**, and **Check (ubuntu-latest)**. **SQLness**, **Compatibility Test**, binary builds, **Rustfmt**, license, and fuzz jobs passed. **`test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`, not because of failed prerequisites.** No CI run or result is recorded for the final range `2f5e97850e55d86c0ed9eff1719994c88b4450a0..40e02ff6b62ad3445f7035e437bd9e322c8af31b`; this is recorded CI evidence only, and local verification claims remain limited to the existing top-level README and `manual-deltas.md`.
+The recorded historical [GitHub Actions run 32341712112](https://github.com/GreptimeTeam/greptimedb/actions/runs/32341712112), whose actual head SHA was `b5c38fbfc15053f42d4c1d843204bbdd52cb4a00`, completed with conclusion **failure** on the superseded-base aggregate. Failed jobs were **Clippy**, **Check Unused Dependencies**, and **Check (ubuntu-latest)**. **SQLness**, **Compatibility Test**, binary builds, **Rustfmt**, license, and fuzz jobs passed. **`test` was skipped downstream because Clippy and Check Unused Dependencies failed, while `coverage` was skipped independently because this was a `workflow_dispatch` run and coverage runs only for `merge_group`, not because of failed prerequisites.** No CI run or result is recorded for the final range `2f5e97850e55d86c0ed9eff1719994c88b4450a0..81fd630955f16b9c45811539aa8434b47d5a875b`; this is recorded CI evidence only, and local verification claims remain limited to the existing top-level README and `manual-deltas.md`.
 
 ## 1. BLOCKING / compatibility decisions
 
@@ -56,7 +56,7 @@ Exact entries with nearby context can be reviewed from [dependency and baseline 
 
 ## Final provenance scope
 
-The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Three selected PRs—#8672, #8699, and #8921—are base-present. The dependency closure adds exactly two relationships: full #8734 and the release-compatible slice of #8392. The indexes therefore contain 38 unique provenance relationships total. The patch-ID verdict contains 14 exact stable patch-ID relationships and 20 adapted relationships; its exact list includes #8901. The #8895 and #8901 mappings and complete upstream ranges are covered in [JSON2 merge/layout coverage](json2-mergescan.md) and [`manual-deltas.md`](../manual-deltas.md).
+The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Three selected PRs—#8672, #8699, and #8921—are base-present. The dependency closure adds exactly two relationships: full #8734 and the release-compatible slice of #8392. The indexes therefore contain 38 unique PR provenance relationships total; the non-PR version identity commit is recorded separately in the aggregate provenance ledger. The patch-ID verdict contains 14 exact stable patch-ID relationships and 20 adapted relationships; its exact list includes #8901. The #8895 and #8901 mappings and complete upstream ranges are covered in [JSON2 merge/layout coverage](json2-mergescan.md) and [`manual-deltas.md`](../manual-deltas.md).
 
 ## Recorded verification context
 
