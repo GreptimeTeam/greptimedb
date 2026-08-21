@@ -53,6 +53,20 @@ impl Inserter {
             return Ok(0);
         }
 
+        if let Some(interceptor) = &self.insert_limit_interceptor {
+            interceptor
+                .check_ingest(
+                    &table_info.catalog_name,
+                    &table_info.schema_name,
+                    record_batch.num_rows() as u64,
+                )
+                .await
+                .map_err(|source| error::Error::External {
+                    source,
+                    location: snafu::Location::default(),
+                })?;
+        }
+
         let body_size = raw_flight_data.data_body.len();
         // TODO(yingwen): Fill record batch impure default values. Note that we should override `raw_flight_data` if we have to fill defaults.
         // notify flownode to update dirty timestamps if flow is configured.

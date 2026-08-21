@@ -1507,6 +1507,18 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "CREATE DATABASE prometheus with ('ingest_rows_rate_limit'='1000');";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+                assert_eq!(c.options.get("ingest_rows_rate_limit").unwrap(), "1000");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
