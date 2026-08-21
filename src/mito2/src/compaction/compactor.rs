@@ -420,6 +420,21 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     max
 }
 
+/// Returns whether a compaction output may retain its inputs' per-row sequence
+/// trust. Inputs from another region are treated as untrusted rather than
+/// laundering their marker into the current region's output metadata.
+fn can_preserve_row_sequence(
+    region_id: RegionId,
+    preserve_row_sequence: bool,
+    inputs: &[FileHandle],
+) -> bool {
+    preserve_row_sequence
+        && inputs.iter().all(|f| {
+            let meta = f.meta_ref();
+            meta.region_id == region_id && meta.preserve_row_sequence
+        })
+}
+
 #[async_trait::async_trait]
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
@@ -457,17 +472,17 @@ impl SstMerger for DefaultSstMerger {
             .join(",");
         let input_max_sequence = known_max_input_sequence(&output.inputs);
         // The compaction output can only preserve per-row sequences when the
-        // region option is enabled AND every input file carries the
-        // preserved-sequence marker. Otherwise, rewrite the untrusted input as
-        // a sequence-less file. `committed_sequence + 1` is the region-local
-        // admission barrier for this compacted SST: once Flow's cursor reaches
-        // it, the input rows (which were all flushed in this snapshot) have
-        // already been consumed.
-        let output_preserves_sequence = compaction_region.region_options.preserve_row_sequence
-            && output
-                .inputs
-                .iter()
-                .all(|f| f.meta_ref().preserve_row_sequence);
+        // region option is enabled AND every input file belongs to this region
+        // and carries the preserved-sequence marker. Otherwise, rewrite the
+        // untrusted input as a sequence-less file. `committed_sequence + 1` is
+        // the region-local admission barrier for this compacted SST: once
+        // Flow's cursor reaches it, the input rows (which were all flushed in
+        // this snapshot) have already been consumed.
+        let output_preserves_sequence = can_preserve_row_sequence(
+            compaction_region.region_id,
+            compaction_region.region_options.preserve_row_sequence,
+            &output.inputs,
+        );
         let output_sequence = if output_preserves_sequence {
             input_max_sequence
         } else {
@@ -498,6 +513,7 @@ impl SstMerger for DefaultSstMerger {
         } else {
             Some(0)
         };
+
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -844,6 +860,22 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[test]
+    fn test_foreign_region_input_cannot_preserve_row_sequence() {
+        let region_id = RegionId::new(1, 1);
+        let foreign_input = new_file_handle(FileMeta {
+            region_id: RegionId::new(2, 1),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+
+        assert!(!can_preserve_row_sequence(
+            region_id,
+            true,
+            &[foreign_input]
+        ));
     }
 
     #[test]
