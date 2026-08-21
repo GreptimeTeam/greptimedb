@@ -166,6 +166,10 @@ RUNNER_NAME={runner_name}
 RUNNER_LABELS={runner_label}
 RUNNER_TOKEN={runner_token}
 REPO_URL=https://github.com/{repo}
+# The container image baked /opt/cargo/bin into PATH via Dockerfile ENV; on
+# the host nothing inherits that, so publish it through the unit's
+# EnvironmentFile: runner job processes inherit the runner's environment.
+PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENVEOF
 systemctl start ephemeral-github-runner.service
 """

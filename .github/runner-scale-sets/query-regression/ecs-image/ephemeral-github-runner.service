@@ -19,6 +19,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# The toolchain lives in the image at /opt/cargo/bin (the Dockerfile's ENV
+# PATH does not survive materialization onto the host). Publish it here so
+# every runner job inherits it. /etc/ephemeral-github-runner.env currently
+# carries the same PATH line as a bridge for images built before this
+# directive existed; EnvironmentFile is applied after Environment=, and the
+# two values are kept identical, so there is no conflict.
+Environment=PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/etc/ephemeral-github-runner.env
 ExecStart=/opt/ephemeral-github-runner/start-runner.sh
 Restart=no
