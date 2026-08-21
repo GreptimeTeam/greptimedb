@@ -33,8 +33,9 @@ image tools" step holds unchanged, installs the ephemeral-runner systemd unit,
 and snapshots the result as a custom image. The temporary instance is deleted
 afterwards.
 
-Sentinel polling uses Cloud Assistant (RunCommand/DescribeInvocations), which
-is preinstalled on Aliyun public Ubuntu images.
+Sentinel polling reads the instance's serial console output
+(GetInstanceConsoleOutput) and looks for marker lines the user data writes to
+/dev/console. This has no in-guest agent dependency.
 
 Usage:
   uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
@@ -51,8 +52,10 @@ import time
 from pathlib import Path
 
 ASSETS_DIR = Path(__file__).resolve().parent
-DONE_SENTINEL = "/var/lib/qreg-image-done"
+DONE_MARKER = "QREG_IMAGE_BUILD_DONE"
+FAILED_MARKER = "QREG_IMAGE_BUILD_FAILED"
 POLL_INTERVAL_SECONDS = 15
+CONSOLE_POLL_INTERVAL_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 60 * 60
 
 # Same apt package contract as the runner Dockerfile; the base
@@ -96,6 +99,11 @@ def render_user_data(dockerfile: str, start_runner: str, unit: str) -> str:
     packages = " ".join(APT_PACKAGES)
     return f"""#!/bin/bash
 set -euo pipefail
+trap 'echo "{FAILED_MARKER} at line $LINENO" > /dev/console' ERR
+# Stream the full build log to the serial console so the poller (and anyone
+# watching GetInstanceConsoleOutput) sees real progress, not a silent login
+# prompt for the whole build.
+exec > >(tee -a /dev/console) 2>&1
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {packages}
@@ -142,13 +150,13 @@ EOF
 systemctl daemon-reload
 systemctl enable ephemeral-github-runner.service
 
-# Keep the image free of the build-time docker state.
+# Keep the image free of the build-time docker state (also shrinks the
+# snapshot: buildkit cache is several GB).
 docker rm -f "${{container}}" >/dev/null
-docker image rm qreg-runner:local >/dev/null
+docker system prune -af >/dev/null
 trap - EXIT
 
-touch {DONE_SENTINEL}
-echo "query-regression image build completed"
+echo "{DONE_MARKER}" > /dev/console
 """
 
 
@@ -172,10 +180,13 @@ def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: s
     import json
 
     while time.monotonic() < deadline:
-        response = client.describe_instances(
-            ecs_models.DescribeInstancesRequest(
-                region_id=region_id, instance_ids=json.dumps([instance_id])
-            )
+        response = call_api_with_retry(
+            lambda: client.describe_instances(
+                ecs_models.DescribeInstancesRequest(
+                    region_id=region_id, instance_ids=json.dumps([instance_id])
+                )
+            ),
+            "DescribeInstances",
         )
         instances = response.body.instances.instance
         if instances and instances[0].status == wanted:
@@ -184,39 +195,51 @@ def wait_for_instance_status(client, region_id: str, instance_id: str, wanted: s
     raise TimeoutError(f"Instance {instance_id} did not reach status {wanted} in time")
 
 
-def run_check_command(client, region_id: str, instance_id: str, command: str) -> tuple[str, str]:
-    """Run a shell command via Cloud Assistant; return (status, decoded output)."""
+# Aliyun error codes worth retrying: throttling and server-side faults. Client
+# errors (4xx: permissions, bad parameters) are configuration problems and must
+# fail fast instead of being retried.
+TRANSIENT_ERROR_CODES = {"Throttling", "Throttling.User", "InternalError", "ServiceUnavailable"}
+
+
+def is_transient(error: Exception) -> bool:
+    # UnretryableException comes from the darabonba network layer: connection
+    # reset, read timeout, DNS blip.
+    if type(error).__name__ == "UnretryableException":
+        return True
+    code = getattr(error, "code", "") or ""
+    status = getattr(error, "statusCode", None)
+    return code in TRANSIENT_ERROR_CODES or (isinstance(status, int) and status >= 500)
+
+
+def call_api_with_retry(fn, description: str, attempts: int = 5):
+    """Retry transient API/network failures; the build is too long to die on a blip.
+
+    Only call this with idempotent or safely-repeatable requests (reads,
+    StopInstance, CreateImage). Never with RunInstances: if the request
+    succeeded but the response was lost, a retry double-creates instances.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as error:  # noqa: BLE001
+            if attempt == attempts or not is_transient(error):
+                raise
+            print(f"{description} failed (attempt {attempt}/{attempts}): {error}", flush=True)
+            time.sleep(POLL_INTERVAL_SECONDS)
+    raise RuntimeError("unreachable: retry loop exited without returning")
+
+
+def read_console_output(client, region_id: str, instance_id: str) -> str:
+    """Fetch the instance's serial console output; no in-guest agent needed."""
     from alibabacloud_ecs20140526 import models as ecs_models
 
-    invoke = client.run_command(
-        ecs_models.RunCommandRequest(
-            region_id=region_id,
-            type="RunShellScript",
-            command_content=base64.b64encode(command.encode()).decode(),
-            instance_id=[instance_id],
-            timeout=60,
-        )
+    response = call_api_with_retry(
+        lambda: client.get_instance_console_output(
+            ecs_models.GetInstanceConsoleOutputRequest(region_id=region_id, instance_id=instance_id)
+        ),
+        "GetInstanceConsoleOutput",
     )
-    invoke_id = invoke.body.invoke_id
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        description = client.describe_invocations(
-            ecs_models.DescribeInvocationsRequest(region_id=region_id, invoke_id=invoke_id)
-        )
-        invocations = description.body.invocations.invocation
-        if invocations:
-            invocation = invocations[0]
-            status = invocation.invocation_status
-            if status in ("Finished", "Failed", "Stopped", "PartialFailed"):
-                results = invocation.invoke_instances.invoke_instance
-                output = ""
-                if results and results[0].invocation_result.output:
-                    output = base64.b64decode(results[0].invocation_result.output).decode(
-                        "utf-8", "replace"
-                    )
-                return status, output
-        time.sleep(POLL_INTERVAL_SECONDS)
-    return "Timeout", ""
+    return base64.b64decode(response.body.console_output or "").decode("utf-8", "replace")
 
 
 def main() -> int:
@@ -266,8 +289,12 @@ def main() -> int:
                 spot_strategy="NoSpot",
                 internet_charge_type="PayByTraffic",
                 internet_max_bandwidth_out=100,
+                # Peak usage is ~18G (OS+apt, docker image, and the materialized
+                # toolchain coexist briefly): deliberately tight, and a smaller
+                # disk makes the image snapshot faster. Instances created from
+                # the image get a larger system disk from the provision side.
                 system_disk=ecs_models.RunInstancesRequestSystemDisk(
-                    category="cloud_essd", size="100"
+                    category="cloud_essd", size="20"
                 ),
                 user_data=user_data,
                 tag=[
@@ -282,37 +309,70 @@ def main() -> int:
 
         deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
-            status, output = run_check_command(
-                client, args.region_id, instance_id, f"test -f {DONE_SENTINEL} && echo done || echo pending"
-            )
-            print(f"Build sentinel check: {status} {output.strip()}", flush=True)
-            if "done" in output:
+            console = read_console_output(client, args.region_id, instance_id)
+            if DONE_MARKER in console:
                 break
-            time.sleep(POLL_INTERVAL_SECONDS)
+            if FAILED_MARKER in console:
+                tail = "\n".join(console.splitlines()[-20:])
+                raise RuntimeError(f"Image build failed on the builder; console tail:\n{tail}")
+            lines = console.splitlines()
+            print(f"Build in progress; last console line: {lines[-1] if lines else '(none yet)'}", flush=True)
+            time.sleep(CONSOLE_POLL_INTERVAL_SECONDS)
         else:
             raise TimeoutError("Image build did not finish in time")
 
         print("Stopping builder before image creation", flush=True)
-        client.stop_instance(ecs_models.StopInstanceRequest(instance_id=instance_id))
+        try:
+            call_api_with_retry(
+                lambda: client.stop_instance(
+                    ecs_models.StopInstanceRequest(
+                        instance_id=instance_id,
+                        # The instance is deleted right after the snapshot, but
+                        # there is no reason to keep billing vCPU during the stop.
+                        stopped_mode="StopCharging",
+                    )
+                ),
+                "StopInstance",
+            )
+        except Exception as error:  # noqa: BLE001
+            # Instance families with local disks do not support StopCharging.
+            print(f"StopCharging unavailable ({error}); stopping with default mode", flush=True)
+            call_api_with_retry(
+                lambda: client.stop_instance(ecs_models.StopInstanceRequest(instance_id=instance_id)),
+                "StopInstance",
+            )
         wait_for_instance_status(client, args.region_id, instance_id, "Stopped", time.monotonic() + 10 * 60)
 
-        image = client.create_image(
-            ecs_models.CreateImageRequest(
-                region_id=args.region_id, instance_id=instance_id, image_name=image_name
-            )
+        image = call_api_with_retry(
+            lambda: client.create_image(
+                ecs_models.CreateImageRequest(
+                    region_id=args.region_id, instance_id=instance_id, image_name=image_name
+                )
+            ),
+            "CreateImage",
         )
         image_id = image.body.image_id
-        deadline = time.monotonic() + 30 * 60
+        deadline = time.monotonic() + 60 * 60
         while time.monotonic() < deadline:
-            description = client.describe_images(
-                ecs_models.DescribeImagesRequest(region_id=args.region_id, image_id=image_id)
+            description = call_api_with_retry(
+                lambda: client.describe_images(
+                    ecs_models.DescribeImagesRequest(region_id=args.region_id, image_id=image_id)
+                ),
+                "DescribeImages",
             )
             images = description.body.images.image
-            if images and images[0].status == "Available":
-                break
+            if images:
+                status = images[0].status
+                print(f"Image {image_id} status: {status} (progress {images[0].progress})", flush=True)
+                if status == "Available":
+                    break
             time.sleep(POLL_INTERVAL_SECONDS)
         else:
-            raise TimeoutError(f"Image {image_id} did not become Available in time")
+            raise TimeoutError(
+                f"Image {image_id} did not become Available in time. The snapshot "
+                f"continues server-side: check its status in the console and reuse it "
+                f"once Available instead of rebuilding."
+            )
 
         print(f"Custom image ready: {image_id} ({image_name})", flush=True)
         print(f"Set the repo variable QUERY_REGRESSION_ECS_IMAGE_ID={image_id}", flush=True)
