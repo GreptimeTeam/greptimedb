@@ -76,7 +76,7 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 ### Other Query adaptations
 - #8659 differs because it is replayed on release protocol/server APIs.
 - #8898 is the dashboard version update only, adapted to the release file state.
-- #8859, #8889, #8833, #8808, #8709, #8522, #8739, and #8772 have exact stable patch IDs in the final aggregate.
+- The 14 exact stable patch-ID relationships are #8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901. The remaining 20 verdicts are adapted.
 
 ## Platform / Event
 
@@ -152,4 +152,4 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 ## Final provenance scope
 
-The final review records 36 explicit Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.
+The final review records 36 selected PR relationships: 35 public Issue-requested PRs (the original 31 plus #8825, #8921, #8895, and #8901) plus separately selected #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.

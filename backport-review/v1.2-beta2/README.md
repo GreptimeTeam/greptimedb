@@ -25,7 +25,7 @@
 
 ## Scope
 
-The review scope has 36 explicit PRs: the original 31 plus Issue-requested #8825, #8921, #8895, #8901, and #8902. Official PR #8921 is now in the release base `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, so it is base-present and is not represented as an aggregate carrier. #8672 and #8699 remain base-present as well. The other explicit PRs are represented by backport mappings; #8825 remains carried by `d18430b874f9c8054747dbf688585cd7d2988e3e`, and #8902 is appended at final head `40e02ff6b62ad3445f7035e437bd9e322c8af31b`. The dependency closure adds exactly two provenance relationships: full #8734 and a release-compatible slice of #8392, for 38 total provenance relationships.
+The review scope has 36 selected PR relationships: 35 public Issue-requested PRs (the original 31 plus #8825, #8921, #8895, and #8901) and separately selected #8902. Official PR #8921 is now in the release base `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, so it is base-present and is not represented as an aggregate carrier. #8672 and #8699 remain base-present as well. The other selected PRs are represented by backport mappings; #8825 remains carried by `d18430b874f9c8054747dbf688585cd7d2988e3e`, and #8902 is appended at final head `40e02ff6b62ad3445f7035e437bd9e322c8af31b`. The dependency closure adds exactly two provenance relationships: full #8734 and a release-compatible slice of #8392, for 38 total provenance relationships. The patch-ID verdict contains 14 exact stable patch-ID relationships—#8777, #8832, #8787, #8849, #8859, #8889, #8833, #8600, #8808, #8709, #8522, #8739, #8772, and #8901—and 20 adapted relationships.
 
 ## Mapping classes
 
@@ -44,6 +44,6 @@ PR #8824 is accepted by explicit release-owner direction in this backport sessio
 
 The final review range is `2f5e97850e55d86c0ed9eff1719994c88b4450a0..40e02ff6b62ad3445f7035e437bd9e322c8af31b`, a linear 46-commit range. The superseded beta2 base `8eeff8b4417e6fb675a66cecbdba40060322785c` and endpoint `b7fdcb89568dc707c323f8c0a3b9413ec4e889ab` are historical provenance only; all active aggregate carrier fields in the TSV indexes are remapped to the rebased commits. Official #8921 is the release-base commit `2f5e97850e55d86c0ed9eff1719994c88b4450a0`, not a duplicate aggregate carrier.
 
-The three explicit PRs #8672, #8699, and #8921 are base-present; the other explicit PRs have aggregate provenance. Thus the machine-readable indexes contain exactly 36 explicit PR rows plus exactly the two closure rows (#8734 and #8392): 38 unique provenance relationships.
+The three selected PRs #8672, #8699, and #8921 are base-present; the other selected PRs have aggregate provenance. Thus the machine-readable indexes contain exactly 36 selected PR rows (35 public Issue-requested plus separately selected #8902) plus exactly the two closure rows (#8734 and #8392): 38 unique provenance relationships.
 
 PR #8902 is appended as final carrier `40e02ff6b62ad3445f7035e437bd9e322c8af31b`; its readable decision is [Dictionary group-by fast path](decisions/dictionary-groupby-fast-path.md), and its raw patch comparison is [#8902](range-diffs/pr-8902.txt).
