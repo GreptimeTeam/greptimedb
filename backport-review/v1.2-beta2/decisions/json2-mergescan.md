@@ -39,3 +39,12 @@ Recorded CI status is documented in the [canonical CI status](README.md#canonica
 ## Raw audit evidence — unabridged differences only
 
 [`range-diffs/pr-8745.txt`](../range-diffs/pr-8745.txt) is an unabridged patch-to-patch range-diff, not the full shipping patch.
+
+## Additional JSON2 layout provenance
+
+The explicit Issue-requested JSON2 layout PRs are also represented in the machine-readable indexes and have complete raw range evidence:
+
+- **#8895**: upstream merge `d7f1233f775d54380318d6ad9ff62504a7cbcff1`, head `6b8645bf584a04b45828c7e8d0fb19418db70d2e`, complete upstream range `0a6a22033e3ebb4d6c7243874d840558a9eb7216^..6b8645bf584a04b45828c7e8d0fb19418db70d2e`, aggregate carrier `fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d`. The carrier folds the two upstream commits, retains JSON2 DDL/layout settings, and omits the upstream-only >=v1.3.0 compatibility case; it is `adapted`.
+- **#8901**: upstream merge `b96ea86a621e7283e77e4e37dd4e3ec8dfc44f73`, head `b450abd46e473a07cb1b42a9c7c62d0b0d551e17`, complete upstream range `6e637fbe58f36643fea40f38d5ff352fe00254f9^..b450abd46e473a07cb1b42a9c7c62d0b0d551e17`, aggregate carrier `5a642091cd2b6185fbe6a08d6f76d8295955152f`. The carrier folds the three upstream commits and is `exact` by stable patch ID.
+
+These are part of the 36 explicit Issue-requested PR relationships. Together with base-present #8672/#8699/#8921 and the two closure relationships (#8734 full, #8392 release-compatible slice), the review contains 38 provenance relationships.

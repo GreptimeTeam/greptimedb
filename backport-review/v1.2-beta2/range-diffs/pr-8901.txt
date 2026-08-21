@@ -1,0 +1,215 @@
+PR #8901
+Upstream PR range: 6e637fbe58f36643fea40f38d5ff352fe00254f9^..b450abd46e473a07cb1b42a9c7c62d0b0d551e17
+Aggregate range: 5a642091cd2b6185fbe6a08d6f76d8295955152f^..5a642091cd2b6185fbe6a08d6f76d8295955152f
+Upstream PR merge commit: b96ea86a621e7283e77e4e37dd4e3ec8dfc44f73
+Upstream PR head: b450abd46e473a07cb1b42a9c7c62d0b0d551e17
+Aggregate carrier: 5a642091cd2b6185fbe6a08d6f76d8295955152f
+Endpoint metadata: the upstream PR contains 6e637fbe58f36643fea40f38d5ff352fe00254f9, f2e3d6d6e16c24fdede441cf54ff1c04a3effd91, and b450abd46e473a07cb1b42a9c7c62d0b0d551e17; GitHub records b96ea86a621e7283e77e4e37dd4e3ec8dfc44f73 as its merge commit. Beta2 carries the requested behavior in one final carrier.
+Adaptation/folding notes: the carrier folds all three upstream PR commits into one commit and changes the subject to the exact aggregate subject. The JSON2 v2 physical-layout primitives and dependency updates are retained; release lock/context resolution is represented by the final carrier. This is an exact stable patch-ID replay with a folded commit message.
+Command: git range-diff --creation-factor=100 6e637fbe58f36643fea40f38d5ff352fe00254f9^..b450abd46e473a07cb1b42a9c7c62d0b0d551e17 5a642091cd2b6185fbe6a08d6f76d8295955152f^..5a642091cd2b6185fbe6a08d6f76d8295955152f
+
+1:  6e637fbe5 ! 1:  5a642091c refactor(json2): add JSON2 v2 physical layout primitives
+    @@
+      ## Metadata ##
+    -Author: luofucong <luofc@foxmail.com>
+    +Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+    -    refactor(json2): add JSON2 v2 physical layout primitives
+    +    feat: add JSON2 physical layout primitives
+     
+    -    Signed-off-by: luofucong <luofc@foxmail.com>
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## Cargo.lock ##
+     @@ Cargo.lock: dependencies = [
+    @@ src/datatypes/Cargo.toml: jsonb.workspace = true
+      serde.workspace = true
+     
+      ## src/datatypes/src/extension/json.rs ##
+    -@@
+    - use std::collections::HashMap;
+    - use std::sync::Arc;
+    - 
+    -+#[cfg(test)]
+    -+use arrow_schema::FieldRef;
+    +@@ src/datatypes/src/extension/json.rs: use std::sync::Arc;
+      use arrow_schema::extension::{
+          EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+      };
+    - use arrow_schema::{ArrowError, DataType, Field};
+    -+#[cfg(test)]
+    +-use arrow_schema::{ArrowError, DataType, Field};
+    ++use arrow_schema::{ArrowError, DataType, Field, FieldRef};
+     +use parquet_variant_compute::VariantType;
+      use serde::{Deserialize, Serialize};
+     -use snafu::ResultExt;
+    -+#[cfg(test)]
+    -+use snafu::OptionExt;
+     +use snafu::{ResultExt, ensure};
+      
+     +use crate::error::InvalidJson2LayoutSnafu;
+    @@ src/datatypes/src/extension/json.rs
+      const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
+     +const JSON2_LAYOUT_V1: u8 = 1;
+     +const JSON2_LAYOUT_V2: u8 = 2;
+    -+
+    + 
+    +-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+     +/// Parsed physical layout of a JSON2 Arrow root field.
+     +#[derive(Debug, Clone, PartialEq, Eq)]
+     +pub struct Json2PhysicalLayout {
+    @@ src/datatypes/src/extension/json.rs
+     +}
+     +
+     +impl Json2PhysicalLayout {
+    -+    /// Parses and validates the JSON2 layout version from a root field.
+    ++    /// Parses the JSON2 layout version from a root field.
+    ++    ///
+    ++    /// The version is read from the extension metadata; missing metadata
+    ++    /// defaults to V1.
+    ++    ///
+    ++    /// Supported versions:
+    ++    /// - V1
+    ++    /// - V2
+    ++    ///
+    ++    /// Errors when the field is not a JSON2 extension or the version is not
+    ++    /// one of the supported versions.
+     +    pub fn try_from_root(field: &Field) -> crate::error::Result<Self> {
+     +        ensure!(
+     +            is_json2_extension_type(field),
+    @@ src/datatypes/src/extension/json.rs
+     +}
+     +
+     +/// Returns the remainder field of a JSON2 v2 root.
+    -+#[cfg(test)]
+    -+fn json2_remainder_field(field: &Field) -> crate::error::Result<&FieldRef> {
+    -+    if !Json2PhysicalLayout::try_from_root(field)?.is_version_2() {
+    -+        return InvalidJson2LayoutSnafu {
+    -+            reason: format!("JSON2 root '{}' is not layout v2", field.name()),
+    -+        }
+    -+        .fail();
+    ++pub(crate) fn json2_remainder_field(field: &Field) -> crate::error::Result<Option<&FieldRef>> {
+    ++    let layout = Json2PhysicalLayout::try_from_root(field)?;
+    ++    if !layout.is_version_2() {
+    ++        return Ok(None);
+     +    }
+    - 
+    --#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    -+    let DataType::Struct(fields) = field.data_type() else {
+    -+        return InvalidJson2LayoutSnafu {
+    -+            reason: format!(
+    -+                "expecting the Struct datatype, actual: '{}'",
+    -+                field.data_type(),
+    -+            ),
+    -+        }
+    -+        .fail();
+    ++
+    ++    let remainder = if let DataType::Struct(fields) = field.data_type() {
+    ++        fields
+    ++            .iter()
+    ++            .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
+    ++    } else {
+    ++        None
+     +    };
+    -+    let remainder = fields
+    -+        .iter()
+    -+        .find(|x| x.name() == JSON2_REMAINDER_FIELD_NAME)
+    -+        .context(InvalidJson2LayoutSnafu {
+    -+            reason: "remainder field not found",
+    ++
+    ++    if let Some(remainder) = remainder {
+    ++        let _ = remainder.try_extension_type::<VariantType>().map_err(|e| {
+    ++            InvalidJson2LayoutSnafu {
+    ++                reason: e.to_string(),
+    ++            }
+    ++            .build()
+     +        })?;
+    -+    let _ = remainder.try_extension_type::<VariantType>().map_err(|e| {
+    -+        InvalidJson2LayoutSnafu {
+    -+            reason: e.to_string(),
+    -+        }
+    -+        .build()
+    -+    })?;
+    ++    }
+     +    Ok(remainder)
+     +}
+     +
+    @@ src/datatypes/src/extension/json.rs: mod tests {
+     +            JsonSettings::default(),
+     +        ))));
+     +        assert!(Json2PhysicalLayout::try_from_root(&v2)?.is_version_2());
+    -+        let remainder = json2_remainder_field(&v2)?;
+    ++        let remainder = json2_remainder_field(&v2)?.unwrap();
+     +        assert_eq!(JSON2_REMAINDER_FIELD_NAME, remainder.name());
+     +        Ok(())
+     +    }
+    @@ src/datatypes/src/extension/json.rs: mod tests {
+     +            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default())));
+     +        let missing = Field::new("data", DataType::Struct(Fields::empty()), true)
+     +            .with_extension_type(metadata.clone());
+    -+        assert!(json2_remainder_field(&missing).is_err());
+    ++        assert!(json2_remainder_field(&missing).is_ok_and(|x| x.is_none()));
+     +
+     +        let invalid = Field::new(
+     +            "data",
+    @@ src/datatypes/src/vectors/json/array.rs: use crate::data_type::ConcreteDataType;
+      use crate::error::{
+          AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
+      };
+    -+use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2PhysicalLayout};
+    ++use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
+      use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
+      use crate::prelude::{DataType as _, Value as GreptimeValue};
+      use crate::value::{ListValue, StructValue};
+    @@ src/datatypes/src/vectors/json/array.rs: impl JsonArray<'_> {
+          }
+      
+     +    /// Projects a physical JSON2 array to a logical query type.
+    -+    pub fn project_json2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
+    -+        let layout = Json2PhysicalLayout::try_from_root(field)?;
+    -+        if !layout.is_version_2() {
+    -+            return self.project_to(target);
+    -+        }
+    -+
+    -+        let has_remainder = match field.data_type() {
+    -+            DataType::Struct(fields) => fields
+    -+                .iter()
+    -+                .any(|x| x.name() == JSON2_REMAINDER_FIELD_NAME),
+    -+            _ => false,
+    -+        };
+    -+        if !has_remainder {
+    -+            return self.project_to(target);
+    ++    ///
+    ++    /// TODO(LFC) Supersede `project_to_v2` to `project_to`.
+    ++    pub fn project_to_v2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
+    ++        if json2_remainder_field(field)?.is_some() {
+    ++            project_json_values(self.json2_values()?, target)
+    ++        } else {
+    ++            self.project_to(target)
+     +        }
+    -+
+    -+        project_json_values(self.json2_values()?, target)
+     +    }
+     +
+     +    fn json2_values(&self) -> Result<Vec<Value>> {
+    @@ src/datatypes/src/vectors/json/array.rs: mod test {
+     +            ]
+     +            .into(),
+     +        );
+    -+        let projected = JsonArray::from(&array).project_json2(&field, &target)?;
+    ++        let projected = JsonArray::from(&array).project_to_v2(&field, &target)?;
+     +        assert_eq!(
+     +            json!({"cold": 1, "count": 42}),
+     +            JsonArray::from(&projected).try_get_value(0)?
+    @@ src/datatypes/src/vectors/json/array.rs: mod test {
+     +            Json2ExtensionType::new(Arc::new(JsonMetadata::new_v2(JsonSettings::default()))),
+     +        );
+     +
+    -+        let projected = JsonArray::from(&array).project_json2(&field, field.data_type())?;
+    ++        let projected = JsonArray::from(&array).project_to_v2(&field, field.data_type())?;
+     +        assert!(Arc::ptr_eq(&array, &projected));
+     +        Ok(())
+     +    }
+2:  f2e3d6d6e < -:  --------- resolve PR comments
+3:  b450abd46 < -:  --------- fix ci

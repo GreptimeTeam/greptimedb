@@ -34,3 +34,5 @@
 8825	bf947141753a9ea554aa1ca31637fdd3ad1429f3	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8825	refactor: share query channel definition
 8902	8d887ddd00d67699d0fb873cda11eb50b5771555	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8902	fix(query): restore columnar group-by for dictionary-encoded tags (PR head 1a91c76c615afec71239b84af7787a0505bef914; range starts d99b0df374eec0329ac3f430e40b80a1e6c6963c)
 8921	2f5e97850e55d86c0ed9eff1719994c88b4450a0	BASE-PRESENT (official release base)	https://github.com/GreptimeTeam/greptimedb/pull/8921	fix: clear pooled Prometheus Remote Write decoder state
+8895	d7f1233f775d54380318d6ad9ff62504a7cbcff1	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8895	refactor(json2): support JSON2 storage layout settings in DDL
+8901	b96ea86a621e7283e77e4e37dd4e3ec8dfc44f73	MERGED	https://github.com/GreptimeTeam/greptimedb/pull/8901	refactor(json2): add JSON2 v2 physical layout primitives

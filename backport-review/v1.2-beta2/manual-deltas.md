@@ -137,3 +137,19 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 - DataFusion `452cb4b` advances to linear successor `4c8a6bf`, preserving #8842 and adding `DictionaryGroupValuesColumn`.
 - GreptimeDB adds `tests-integration/tests/dict_groupby_sst.rs` plus module registration. The test writes 1,200 rows, flushes append-mode flat SST, and exactly verifies six ordered tuples.
 - This integration test is not direct fast-path proof: AggregateExec EXPLAIN/metrics do not expose GroupValues identity. Direct `DictionaryGroupValuesColumn` coverage is in the pinned DataFusion fork tests.
+
+### #8895 — adapted, two-commit upstream range folded into one carrier
+- Upstream PR range: `0a6a22033e3ebb4d6c7243874d840558a9eb7216` followed by `6b8645bf584a04b45828c7e8d0fb19418db70d2e`; PR head: `6b8645bf584a04b45828c7e8d0fb19418db70d2e`; merge: `d7f1233f775d54380318d6ad9ff62504a7cbcff1`.
+- Aggregate carrier: `fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d`.
+- The final carrier folds the complete upstream PR range, retains the JSON2 DDL/layout-settings behavior, and omits the upstream-only >=v1.3.0 compatibility-test case. Stable patch IDs therefore differ and the verdict is `adapted`.
+- Complete range-diff evidence, including endpoint metadata and the exact generation command, is [`range-diffs/pr-8895.txt`](range-diffs/pr-8895.txt).
+
+### #8901 — exact patch-id, three-commit upstream range folded into one carrier
+- Upstream PR range: `6e637fbe58f36643fea40f38d5ff352fe00254f9`, `f2e3d6d6e16c24fdede441cf54ff1c04a3effd91`, and `b450abd46e473a07cb1b42a9c7c62d0b0d551e17`; PR head: `b450abd46e473a07cb1b42a9c7c62d0b0d551e17`; merge: `b96ea86a621e7283e77e4e37dd4e3ec8dfc44f73`.
+- Aggregate carrier: `5a642091cd2b6185fbe6a08d6f76d8295955152f`.
+- The final carrier folds the complete upstream PR range and retains the JSON2 v2 physical-layout primitives and dependency updates. Its stable patch ID equals the upstream merge patch ID; the changed subject is an aggregate adaptation, so the verdict records `exact` patch equivalence.
+- Complete range-diff evidence, including endpoint metadata and the exact generation command, is [`range-diffs/pr-8901.txt`](range-diffs/pr-8901.txt).
+
+## Final provenance scope
+
+The final review records 36 explicit Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.

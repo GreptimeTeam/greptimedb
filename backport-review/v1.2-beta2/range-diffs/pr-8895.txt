@@ -1,0 +1,330 @@
+PR #8895
+Upstream PR range: 0a6a22033e3ebb4d6c7243874d840558a9eb7216^..6b8645bf584a04b45828c7e8d0fb19418db70d2e
+Aggregate range: fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d^..fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d
+Upstream PR merge commit: d7f1233f775d54380318d6ad9ff62504a7cbcff1
+Upstream PR head: 6b8645bf584a04b45828c7e8d0fb19418db70d2e
+Aggregate carrier: fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d
+Endpoint metadata: the upstream PR contains 0a6a22033e3ebb4d6c7243874d840558a9eb7216 and 6b8645bf584a04b45828c7e8d0fb19418db70d2e; GitHub records d7f1233f775d54380318d6ad9ff62504a7cbcff1 as its merge commit. Beta2 carries the requested behavior in one final carrier.
+Adaptation/folding notes: the carrier folds both upstream PR commits into one commit, changes the subject to the exact aggregate subject, and omits the upstream-only compatibility-test case (which targets >=v1.3.0). The JSON2 layout-settings implementation is retained; this is an adapted backport, not a claim of exact commit identity.
+Command: git range-diff --creation-factor=100 0a6a22033e3ebb4d6c7243874d840558a9eb7216^..6b8645bf584a04b45828c7e8d0fb19418db70d2e fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d^..fed5c80d7e94bd2c8ab1f7ddac8ab205d993156d
+
+1:  0a6a22033 ! 1:  fed5c80d7 refactor(json2): add JSON2 storage layout settings
+    @@
+      ## Metadata ##
+    -Author: luofucong <luofc@foxmail.com>
+    +Author: discord9 <discord9@163.com>
+     
+      ## Commit message ##
+    -    refactor(json2): add JSON2 storage layout settings
+    +    feat: add JSON2 storage layout settings
+     
+    -    Signed-off-by: luofucong <luofc@foxmail.com>
+    +    Signed-off-by: discord9 <discord9@163.com>
+     
+      ## src/datatypes/src/error.rs ##
+     @@ src/datatypes/src/error.rs: pub enum Error {
+    @@ src/datatypes/src/json.rs: pub struct JsonContext<'a> {
+     +        })
+     +    }
+     +
+    -+    #[cfg(test)]
+    -+    fn new(type_hints: Vec<JsonTypeHint>) -> Self {
+    -+        Self {
+    -+            type_hints,
+    -+            max_auto_expanded_paths: None,
+    -+        }
+    -+    }
+    -+
+     +    pub fn type_hints(&self) -> &[JsonTypeHint] {
+     +        &self.type_hints
+     +    }
+    @@ src/datatypes/src/json.rs: impl JsonSettings {
+     +                .fail();
+     +            }
+     +        };
+    -+        insert_type_hint(&mut object, &hint.path, data_type)?;
+    ++        validate_type_hint(&mut object, &hint.path, data_type)?;
+     +    }
+     +    Ok(())
+     +}
+     +
+    -+fn insert_type_hint(
+    ++fn validate_type_hint(
+     +    object: &mut JsonObjectType,
+     +    path: &[String],
+     +    data_type: JsonNativeType,
+    @@ src/datatypes/src/json.rs: impl JsonSettings {
+     +        }
+     +        .fail();
+     +    };
+    -+    insert_type_hint(child, path, data_type)
+    ++    validate_type_hint(child, path, data_type)
+     +}
+     +
+      impl<'a> JsonContext<'a> {
+    @@ src/datatypes/src/json.rs: impl JsonSettings {
+     @@ src/datatypes/src/json.rs: mod tests {
+          }
+      
+    +     #[test]
+    +-    fn test_json_settings_forward_compatibility() {
+    ++    fn test_json_settings_forward_compatibility()
+    ++    -> std::result::Result<(), Box<dyn std::error::Error>> {
+    +         let json_str = r#"{
+    +             "type_hints": [
+    +                 {
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             ]
+    +         }"#;
+    + 
+    +-        let deserialized = serde_json::from_str::<JsonSettings>(json_str).unwrap();
+    ++        let deserialized = serde_json::from_str::<JsonSettings>(json_str)?;
+    + 
+    +-        assert_eq!(
+    +-            deserialized,
+    +-            JsonSettings::new(vec![
+    ++        let expected = JsonSettings::try_new(
+    ++            vec![
+    +                 JsonTypeHint {
+    +                     path: vec!["user".to_string(), "age".to_string()],
+    +                     data_type: ConcreteDataType::int64_datatype(),
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +                     default_constraint: None,
+    +                     inverted_index: false,
+    +                 },
+    +-            ])
+    +-        );
+    ++            ],
+    ++            None,
+    ++        )?;
+    ++        assert_eq!(deserialized, expected);
+    ++        Ok(())
+    +     }
+    + 
+          #[test]
+     -    fn test_json_settings_ser_de() {
+     -        let settings = JsonSettings::new(vec![
+    @@ src/datatypes/src/json.rs: mod tests {
+     +        );
+          }
+      
+    +     #[test]
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_respects_type_hint() {
+    +-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    ++    fn test_encode_json_respects_type_hint() -> Result<()> {
+    ++        let type_hints = vec![JsonTypeHint {
+    +             path: vec!["age".to_string()],
+    +             data_type: ConcreteDataType::int64_datatype(),
+    +             nullable: false,
+    +             default_constraint: None,
+    +             inverted_index: false,
+    +-        }]);
+    ++        }];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +         let result = settings
+    +             .encode(json!({
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             }))
+    +             .unwrap_err();
+    +         assert!(err.to_string().contains("does not match JSON2 type hint"));
+    ++        Ok(())
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_respects_unsigned_type_hint() {
+    +-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    ++    fn test_encode_json_respects_unsigned_type_hint() -> Result<()> {
+    ++        let type_hints = vec![JsonTypeHint {
+    +             path: vec!["count".to_string()],
+    +             data_type: ConcreteDataType::uint64_datatype(),
+    +             nullable: false,
+    +             default_constraint: None,
+    +             inverted_index: false,
+    +-        }]);
+    ++        }];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +         let result = settings
+    +             .encode(json!({
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             }))
+    +             .unwrap_err();
+    +         assert!(err.to_string().contains("does not match JSON2 type hint"));
+    ++        Ok(())
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_fills_missing_type_hint_with_default() {
+    +-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    ++    fn test_encode_json_fills_missing_type_hint_with_default() -> Result<()> {
+    ++        let type_hints = vec![JsonTypeHint {
+    +             path: vec!["user".to_string(), "age".to_string()],
+    +             data_type: ConcreteDataType::int64_datatype(),
+    +             nullable: false,
+    +             default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
+    +             inverted_index: false,
+    +-        }]);
+    ++        }];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +         let result = settings
+    +             .encode(json!({}))
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             panic!("Expected user Struct value");
+    +         };
+    +         assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
+    ++        Ok(())
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_fills_missing_nullable_type_hint_with_null() {
+    +-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    ++    fn test_encode_json_fills_missing_nullable_type_hint_with_null() -> Result<()> {
+    ++        let type_hints = vec![JsonTypeHint {
+    +             path: vec!["user".to_string(), "name".to_string()],
+    +             data_type: ConcreteDataType::string_datatype(),
+    +             nullable: true,
+    +             default_constraint: None,
+    +             inverted_index: false,
+    +-        }]);
+    ++        }];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +         let result = settings
+    +             .encode(json!({ "user": {} }))
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             panic!("Expected user Struct value");
+    +         };
+    +         assert_eq!(struct_field_value(user, "name"), &Value::Null);
+    ++        Ok(())
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_rejects_missing_non_null_type_hint() {
+    +-        let settings = JsonSettings::new(vec![JsonTypeHint {
+    ++    fn test_encode_json_rejects_missing_non_null_type_hint() -> Result<()> {
+    ++        let type_hints = vec![JsonTypeHint {
+    +             path: vec!["user".to_string(), "age".to_string()],
+    +             data_type: ConcreteDataType::int64_datatype(),
+    +             nullable: false,
+    +             default_constraint: None,
+    +             inverted_index: false,
+    +-        }]);
+    ++        }];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +         let err = settings.encode(json!({})).unwrap_err();
+    +         assert!(
+    +             err.to_string()
+    +                 .contains("missing non-null JSON2 type hint path user.age")
+    +         );
+    ++        Ok(())
+    +     }
+    + 
+    +     #[test]
+    +-    fn test_encode_json_merges_missing_type_hint_prefix() {
+    +-        let settings = JsonSettings::new(vec![
+    ++    fn test_encode_json_merges_missing_type_hint_prefix() -> Result<()> {
+    ++        let type_hints = vec![
+    +             JsonTypeHint {
+    +                 path: vec!["user".to_string(), "age".to_string()],
+    +                 data_type: ConcreteDataType::int64_datatype(),
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +                 ))),
+    +                 inverted_index: false,
+    +             },
+    +-        ]);
+    ++        ];
+    ++        let settings = JsonSettings::try_new(type_hints, None)?;
+    + 
+    +-        let result = settings
+    +-            .encode(json!({}))
+    +-            .unwrap()
+    +-            .into_json_inner()
+    +-            .unwrap();
+    ++        let result = settings.encode(json!({}))?.into_json_inner().unwrap();
+    + 
+    +         let Value::Struct(root) = result else {
+    +             panic!("Expected Struct value");
+    +@@ src/datatypes/src/json.rs: mod tests {
+    +             struct_field_value(user, "name"),
+    +             &Value::String("unknown".into())
+    +         );
+    ++        Ok(())
+    +     }
+    + 
+          #[test]
+     
+      ## src/sql/src/error.rs ##
+    @@ src/sql/src/statements/create.rs: AS SELECT number FROM numbers_input where numb
+              };
+              let result = extensions.build_vector_index_options();
+              assert!(result.is_ok());
+    -
+    - ## tests/compatibility/cases/json2_storage_layout_settings/case.toml (new) ##
+    -@@
+    -+name = "json2_storage_layout_settings"
+    -+reason = "Verify JSON2 storage layout settings in Arrow extension metadata survive restarts and upgrades."
+    -+introduced_by = "PR #8895"
+    -+topologies = ["distributed", "standalone"]
+    -+from_range = [">=v1.3.0"]
+    -+to_range = [">=v1.3.0"]
+    -+features = ["json2", "table", "metadata", "read"]
+    -+owner = "query"
+    -
+    - ## tests/compatibility/cases/json2_storage_layout_settings/setup.sql (new) ##
+    -@@
+    -+CREATE TABLE t_json2_storage_layout_settings (
+    -+  ts TIMESTAMP TIME INDEX,
+    -+  j JSON2(max_auto_expanded_paths = 0)
+    -+) WITH (
+    -+  'append_mode' = 'true'
+    -+);
+    -+
+    -+INSERT INTO t_json2_storage_layout_settings VALUES
+    -+  ('2026-08-17 00:00:00+0000', '{"a": 1}');
+    -+
+    -+ADMIN FLUSH_TABLE('t_json2_storage_layout_settings');
+    -
+    - ## tests/compatibility/cases/json2_storage_layout_settings/verify.result (new) ##
+    -@@
+    -+SELECT j.a AS a
+    -+FROM t_json2_storage_layout_settings;
+    -+
+    -++---+
+    -+| a |
+    -++---+
+    -+| 1 |
+    -++---+
+    -+
+    -+SHOW CREATE TABLE t_json2_storage_layout_settings;
+    -+
+    -++---------------------------------+----------------------------------------------------------------+
+    -+| Table                           | Create Table                                                   |
+    -++---------------------------------+----------------------------------------------------------------+
+    -+| t_json2_storage_layout_settings | CREATE TABLE IF NOT EXISTS "t_json2_storage_layout_settings" ( |
+    -+|                                 |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+    -+|                                 |   "j" JSON2(                                                   |
+    -+|                                 |     max_auto_expanded_paths = 0                                |
+    -+|                                 |   ) NULL,                                                      |
+    -+|                                 |   TIME INDEX ("ts")                                            |
+    -+|                                 | )                                                              |
+    -+|                                 |                                                                |
+    -+|                                 | ENGINE=mito                                                    |
+    -+|                                 | WITH(                                                          |
+    -+|                                 |   append_mode = 'true'                                         |
+    -+|                                 | )                                                              |
+    -++---------------------------------+----------------------------------------------------------------+
+    -
+    - ## tests/compatibility/cases/json2_storage_layout_settings/verify.sql (new) ##
+    -@@
+    -+SELECT j.a AS a
+    -+FROM t_json2_storage_layout_settings;
+    -+
+    -+SHOW CREATE TABLE t_json2_storage_layout_settings;
+2:  6b8645bf5 < -:  --------- resolve PR comments
