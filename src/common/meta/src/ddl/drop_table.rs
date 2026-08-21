@@ -456,7 +456,10 @@ impl Procedure for DropTableProcedure {
                 &self.data.region_wal_options,
             )
             .await
-            .map_err(ProcedureError::external)
+            .map_err(ProcedureError::external)?;
+
+        self.dropping_regions.clear();
+        Ok(())
     }
 }
 
