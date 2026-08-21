@@ -265,7 +265,20 @@ impl RegionFileCopier {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hdfs-object-store")]
+    use object_store::ObjectStore;
+    #[cfg(feature = "hdfs-object-store")]
+    use object_store::layers::HdfsCompatibilityLayer;
+    #[cfg(feature = "hdfs-object-store")]
+    use object_store::services::Fs;
+
     use super::*;
+    #[cfg(feature = "hdfs-object-store")]
+    use crate::access_layer::AccessLayer;
+    #[cfg(feature = "hdfs-object-store")]
+    use crate::sst::index::intermediate::IntermediateManager;
+    #[cfg(feature = "hdfs-object-store")]
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
     fn test_build_copy_file_paths() {
@@ -342,6 +355,57 @@ mod tests {
         assert_eq!(
             path,
             format!("/table_dir/1_0000000002/index/{}.1.puffin", file_id)
+        );
+    }
+
+    #[cfg(feature = "hdfs-object-store")]
+    #[tokio::test]
+    async fn test_copy_region_files_with_hdfs_fallback() {
+        let (temp_dir, puffin_manager) =
+            PuffinManagerFactory::new_for_test_async("hdfs-copy-region").await;
+        let intermediate_manager = IntermediateManager::init_fs(temp_dir.path().to_string_lossy())
+            .await
+            .unwrap();
+        let storage_dir = temp_dir.path().join("storage");
+        std::fs::create_dir(&storage_dir).unwrap();
+        let object_store = ObjectStore::new(Fs::default().root(storage_dir.to_str().unwrap()))
+            .unwrap()
+            .layer(HdfsCompatibilityLayer::new_for_test())
+            .finish();
+        let access_layer = Arc::new(AccessLayer::new(
+            "table_dir",
+            PathType::Bare,
+            object_store.clone(),
+            puffin_manager,
+            intermediate_manager,
+        ));
+        let copier = RegionFileCopier::new(access_layer);
+        let source_region_id = RegionId::new(1, 1);
+        let target_region_id = RegionId::new(1, 2);
+        let file_id = FileId::random();
+        let descriptor = FileDescriptor::Data { file_id, size: 8 };
+        let (source_path, target_path) = build_copy_file_paths(
+            source_region_id,
+            target_region_id,
+            descriptor,
+            "table_dir",
+            PathType::Bare,
+        );
+        object_store.write(&source_path, "contents").await.unwrap();
+
+        copier
+            .copy_files(source_region_id, target_region_id, vec![descriptor], 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            b"contents",
+            object_store
+                .read(&target_path)
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref()
         );
     }
 }

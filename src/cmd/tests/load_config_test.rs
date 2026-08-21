@@ -34,6 +34,7 @@ use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
+use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
@@ -77,6 +78,43 @@ fn test_load_runtime_options_without_max_blocking_threads() {
         RuntimeOptions::default().compact_rt_max_blocking_threads,
         options.runtime.compact_rt_max_blocking_threads
     );
+}
+
+#[test]
+#[cfg(feature = "hdfs-object-store")]
+fn test_load_datanode_hdfs_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        r#"
+            [storage]
+            type = "Hdfs"
+            name = "local-hdfs"
+            root = "/greptimedb"
+            name_node = "hdfs://127.0.0.1:9000"
+            enable_read_cache = false
+            options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+        "#,
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    let ObjectStoreConfig::Hdfs(hdfs) = options.component.storage.store else {
+        unreachable!()
+    };
+
+    assert_eq!("local-hdfs", hdfs.name);
+    assert_eq!("/greptimedb", hdfs.connection.root);
+    assert_eq!("hdfs://127.0.0.1:9000", hdfs.connection.name_node);
+    assert_eq!(
+        Some(&"true".to_string()),
+        hdfs.connection
+            .options
+            .get("dfs.client.block.write.replace-datanode-on-failure.enable")
+    );
+    assert!(!hdfs.cache.enable_read_cache);
 }
 
 #[allow(deprecated)]
