@@ -152,4 +152,4 @@ The canonical reviewer index is [`decisions/README.md`](decisions/README.md). Th
 
 ## Final provenance scope
 
-The final review records 36 selected PR relationships: 35 public Issue-requested PRs (the original 31 plus #8825, #8921, #8895, and #8901) plus separately selected #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.
+The final review records 36 public Issue-requested PR relationships: the original 31 plus #8825, #8921, #8895, #8901, and #8902. Of those, #8672, #8699, and #8921 are base-present. The dependency closure contributes exactly two additional relationships—full #8734 and the release-compatible slice of #8392—for 38 unique provenance relationships total.
