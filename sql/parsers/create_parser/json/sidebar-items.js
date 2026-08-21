@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JSON2_TYPE_NAME","MAX_AUTO_EXPANDED_PATHS"],"fn":["ensure_json2_default_expr_is_literal","ensure_no_path_conflict","normalize_json2_type_hint_type","parse_json2_options","parse_json2_path","parse_json2_type_and_options","parse_json2_type_hint"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["TableMetadataAllocator"],"type":["TableMetadataAllocatorRef"]};

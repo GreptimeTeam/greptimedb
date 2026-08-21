@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["QUERY_FALLBACK_HINT","QUERY_PARALLELISM_HINT"],"fn":["query_load_region_id","query_stat_counters"],"mod":["error","json_expr_planner","planner"],"struct":["DatafusionQueryEngine","DfContextProviderAdapter"]};

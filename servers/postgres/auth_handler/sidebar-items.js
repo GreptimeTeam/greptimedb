@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DbResolution","PgAuthenticationResult","PgAuthenticationState"],"fn":["resolve_db_info","send_error","send_password_authentication_failed","set_client_info"],"struct":["LoginInfo","PgLoginVerifier","ScramClientFinal","ScramClientFirst"]};

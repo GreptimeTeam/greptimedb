@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["DefaultQueryRuntimeProvider","QueryRuntimeContext"],"trait":["QueryRuntimeProvider"],"type":["QueryRuntimeProviderRef"]};

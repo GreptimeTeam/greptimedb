@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_database_creator_metadata_value","gc_timeout_secs","procedure_actor","procedure_event_context"],"struct":["Client","Inner"]};

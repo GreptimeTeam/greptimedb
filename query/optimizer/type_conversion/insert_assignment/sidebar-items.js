@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["assignment_input_column","lineage_literal","rewrite_insert_assignments","unalias"],"struct":["InsertAssignmentConverter"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["series_index_schema"],"mod":["writer"],"struct":["SeriesIndexWriter","SeriesIndexWriterMetrics","SeriesIndexWriterOptions"]};

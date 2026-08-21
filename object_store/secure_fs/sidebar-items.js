@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LIST_BATCH_SIZE"],"fn":["backend_path","metadata_from_fs","normalize_relative_path","parse_write_error","read_list_batch","read_list_entry"],"struct":["SecureFsBackend","SecureFsDeleter","SecureFsLister","SecureFsReader","SecureFsRoot","SecureFsWriter"]};

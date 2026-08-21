@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["compute_input_arrow_schema","flat_projected_columns","is_empty_json2_type","json2_read_datatype","single_value_string_dictionary"],"struct":["CompactionProjectionMapper","DfBatchAssembler","FlatProjectionMapper"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHECKPOINT_DECISION_ADVANCE","CHECKPOINT_DECISION_CONTINUE_REPAIR","CHECKPOINT_DECISION_FALLBACK","CHECKPOINT_REASON_NONE"],"enum":["FlowCheckpointDecision","FlowQueryFallbackReason"],"fn":["checkpoint_mode_label"]};

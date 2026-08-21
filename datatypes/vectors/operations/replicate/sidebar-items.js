@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["replicate_list","replicate_scalar"]};

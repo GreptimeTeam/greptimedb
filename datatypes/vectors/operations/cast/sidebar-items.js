@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["cast_non_constant"]};
