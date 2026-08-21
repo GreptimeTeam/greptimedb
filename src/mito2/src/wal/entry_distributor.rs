@@ -133,24 +133,7 @@ impl WalEntryReader for WalEntryReceiver {
         }
 
         let stream = stream! {
-            let mut buffered_entry: Option<Entry> = None;
-            while let Some(next_entry) = entry_receiver.recv().await {
-                match buffered_entry.take() {
-                    Some(entry) => {
-                        if entry.is_complete() {
-                            yield decode_raw_entry(entry);
-                        } else {
-                            warn!("Ignoring incomplete entry: {}", entry);
-                        }
-                        buffered_entry = Some(next_entry);
-                    },
-                    None => {
-                        buffered_entry = Some(next_entry);
-                    }
-                };
-            }
-            if let Some(entry) = buffered_entry {
-                // Ignores tail corrupted data.
+            while let Some(entry) = entry_receiver.recv().await {
                 if entry.is_complete() {
                     yield decode_raw_entry(entry);
                 } else {
@@ -220,8 +203,10 @@ pub fn build_wal_entry_distributor_and_receivers(
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::{TryStreamExt, stream};
+    use futures::{StreamExt, TryStreamExt, stream};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
 
@@ -245,6 +230,43 @@ mod tests {
             let stream = stream::iter(self.entries.clone().into_iter().map(Ok));
             Ok(Box::pin(stream))
         }
+    }
+
+    #[tokio::test]
+    async fn test_delivers_complete_entry_while_channel_is_alive() {
+        let provider = Provider::kafka_provider("my_topic".to_string());
+        let region_id = RegionId::new(1024, 1);
+        let wal_entry = WalEntry {
+            mutations: vec![Mutation {
+                op_type: OpType::Put as i32,
+                sequence: 1,
+                rows: None,
+                write_hint: None,
+            }],
+            bulk_entries: vec![],
+        };
+        let (sender, receiver) = mpsc::channel(1);
+        let (arg_sender, arg_receiver) = oneshot::channel();
+        let mut receiver = WalEntryReceiver::new(receiver, arg_sender);
+        let mut stream = receiver.read(&provider, 0).unwrap();
+        assert_eq!(arg_receiver.await.unwrap(), 0);
+        sender
+            .send(Entry::Naive(NaiveEntry {
+                provider,
+                region_id,
+                entry_id: 1,
+                data: wal_entry.encode_to_vec(),
+            }))
+            .await
+            .unwrap();
+
+        let entry = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry, (1, wal_entry));
+        drop(sender);
     }
 
     #[tokio::test]
