@@ -24,16 +24,17 @@ use snafu::{ResultExt, ensure};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{
-    ArrowComputeSnafu, Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu,
+    ArrowComputeSnafu, Result, TryFromValueSnafu, UnexpectedSnafu, UnimplementedSnafu,
+    UnsupportedOperationSnafu,
 };
 use crate::extension::json::JSON2_REMAINDER_FIELD_NAME;
-use crate::json::value::{JsonNumber, JsonVariant, encode_json_variant};
+use crate::json::value::{JsonNumber, JsonVariant, JsonVariantRef, encode_json_variant};
 use crate::json::{JSON2_MAX_STRUCTURED_DEPTH, JsonSettings};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
 use crate::types::json_type::{JsonNativeType, is_include};
 use crate::value::{ListValue, StructValue, StructValueRef, Value};
-use crate::vectors::json::variant::{append_json_variant, variant_field};
+use crate::vectors::json::variant::{append_json_variant, append_json_variant_ref, variant_field};
 use crate::vectors::{Helper, MutableVector, StructVectorBuilder};
 
 type JsonObjectValue = BTreeMap<String, JsonVariant>;
@@ -44,16 +45,24 @@ type JsonObjectValue = BTreeMap<String, JsonVariant>;
 /// Auto-expanding mode always materializes type-hinted paths, selects up to
 /// `max_auto_expanded_paths` compatible unhinted leaf paths by frequency, and stores
 /// conflicting or unselected paths in the Variant remainder field.
-#[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
     state: JsonVectorBuilderState,
 }
 
-#[derive(Clone)]
 enum JsonVectorBuilderState {
     Legacy {
         merged_type: JsonNativeType,
         values: Vec<JsonVariant>,
+    },
+    ExplicitOnly {
+        /// Paths declared by type hints and stored as dedicated Struct fields.
+        explicit_type: JsonNativeType,
+        /// Concrete Struct type used to append explicit values without buffering rows.
+        struct_type: StructType,
+        /// Builder for values selected by the explicit type hints.
+        explicit: StructVectorBuilder,
+        /// Builder for all values outside the explicit type hints.
+        remainder: VariantArrayBuilder,
     },
     AutoExpanding {
         /// Paths declared by type hints and always stored as dedicated Struct fields.
@@ -69,6 +78,7 @@ impl JsonVectorBuilderState {
     fn native_type(&self) -> JsonNativeType {
         match self {
             Self::Legacy { merged_type, .. } => merged_type.clone(),
+            Self::ExplicitOnly { explicit_type, .. } => explicit_type.clone(),
             Self::AutoExpanding {
                 explicit_type,
                 max_auto_expanded_paths,
@@ -80,6 +90,7 @@ impl JsonVectorBuilderState {
     fn len(&self) -> usize {
         match self {
             Self::Legacy { values, .. } | Self::AutoExpanding { values, .. } => values.len(),
+            Self::ExplicitOnly { explicit, .. } => explicit.len(),
         }
     }
 
@@ -89,6 +100,14 @@ impl JsonVectorBuilderState {
                 merged_type,
                 values,
             } => build_legacy(values, merged_type),
+            Self::ExplicitOnly {
+                explicit,
+                remainder,
+                ..
+            } => {
+                let remainder = std::mem::replace(remainder, VariantArrayBuilder::new(0)).build();
+                finish_vector(explicit.to_vector(), ArrayRef::from(remainder))
+            }
             Self::AutoExpanding {
                 explicit_type,
                 max_auto_expanded_paths,
@@ -99,6 +118,38 @@ impl JsonVectorBuilderState {
                 build_with_remainder(values, &expanded_type)
             }
         }
+    }
+
+    fn try_build_cloned(&self) -> Result<VectorRef> {
+        let mut state = match self {
+            Self::Legacy {
+                merged_type,
+                values,
+            } => Self::Legacy {
+                merged_type: merged_type.clone(),
+                values: values.clone(),
+            },
+            Self::AutoExpanding {
+                explicit_type,
+                max_auto_expanded_paths,
+                values,
+            } => Self::AutoExpanding {
+                explicit_type: explicit_type.clone(),
+                max_auto_expanded_paths: *max_auto_expanded_paths,
+                values: values.clone(),
+            },
+            // Only TimeSeriesMemtable requires a non-consuming snapshot, while JSON2 targets
+            // BulkMemtable. We've tried our best to support it above, but if this match arm does
+            // not, it's OK. The only reason it doesn't is because of `VariantArrayBuilder`. We'll
+            // track the upstream and see.
+            Self::ExplicitOnly { .. } => {
+                return UnimplementedSnafu {
+                    feat: "no auto expanded JSON2 array builder",
+                }
+                .fail();
+            }
+        };
+        state.try_build()
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
@@ -125,6 +176,22 @@ impl JsonVectorBuilderState {
                 }
                 values.push(JsonVariant::from(value.variant()));
             }
+            Self::ExplicitOnly {
+                explicit_type,
+                struct_type,
+                explicit,
+                remainder,
+            } => {
+                if value.is_null() {
+                    explicit.push_null();
+                    remainder.append_null();
+                } else {
+                    let (value, rest) =
+                        split_to_explicit_ref(value.variant(), explicit_type, struct_type.clone())?;
+                    explicit.push_struct_value_ref(value)?;
+                    append_json_variant_ref(remainder, &rest).context(ArrowComputeSnafu)?;
+                }
+            }
             Self::AutoExpanding { values, .. } => {
                 values.push(JsonVariant::from(value.variant()));
             }
@@ -136,6 +203,14 @@ impl JsonVectorBuilderState {
         match self {
             Self::Legacy { values, .. } | Self::AutoExpanding { values, .. } => {
                 values.push(JsonVariant::Null)
+            }
+            Self::ExplicitOnly {
+                explicit,
+                remainder,
+                ..
+            } => {
+                explicit.push_null();
+                remainder.append_null();
             }
         }
     }
@@ -163,13 +238,28 @@ impl JsonVectorBuilder {
         for hint in settings.type_hints() {
             insert_dynamic_type(&mut explicit_type, &hint.path, (&hint.data_type).into());
         }
-        Self {
-            state: JsonVectorBuilderState::AutoExpanding {
+        let state = if settings.max_auto_expanded_paths() == Some(0) {
+            let DataType::Struct(fields) = explicit_type.as_arrow_type() else {
+                unreachable!("JSON2 explicit type must map to Arrow Struct")
+            };
+            let struct_type = StructType::from(&fields);
+            JsonVectorBuilderState::ExplicitOnly {
+                explicit_type,
+                explicit: StructVectorBuilder::with_type_and_capacity(
+                    struct_type.clone(),
+                    capacity,
+                ),
+                struct_type,
+                remainder: VariantArrayBuilder::new(capacity),
+            }
+        } else {
+            JsonVectorBuilderState::AutoExpanding {
                 explicit_type,
                 max_auto_expanded_paths: settings.max_auto_expanded_paths().unwrap_or(u32::MAX),
                 values: Vec::with_capacity(capacity),
-            },
-        }
+            }
+        };
+        Self { state }
     }
 
     fn try_build(&mut self) -> Result<VectorRef> {
@@ -451,6 +541,135 @@ fn insert_dynamic_type<S: AsRef<str>>(
     )
 }
 
+fn split_to_explicit_ref<'a>(
+    value: &JsonVariantRef<'a>,
+    explicit_type: &JsonNativeType,
+    struct_type: StructType,
+) -> Result<(StructValueRef<'a>, JsonVariantRef<'a>)> {
+    let JsonVariantRef::Object(object) = value else {
+        return TryFromValueSnafu {
+            reason: "expected json object value".to_string(),
+        }
+        .fail();
+    };
+    let explicit = json_object_ref_into_struct_value_ref(object, struct_type)?;
+    let remainder = remainder_ref(object, explicit_type)?;
+    Ok((explicit, JsonVariantRef::Object(remainder)))
+}
+
+fn json_object_ref_into_struct_value_ref<'a>(
+    object: &BTreeMap<&'a str, JsonVariantRef<'a>>,
+    struct_type: StructType,
+) -> Result<StructValueRef<'a>> {
+    let mut values = Vec::with_capacity(struct_type.fields().len());
+    for field in struct_type.fields().iter() {
+        let value = match object.get(field.name()) {
+            Some(value) => json_variant_ref_into_value_ref(value, field.data_type())?,
+            None => ValueRef::Null,
+        };
+        values.push(value);
+    }
+    Ok(StructValueRef::RefList {
+        val: values,
+        fields: struct_type,
+    })
+}
+
+fn json_variant_ref_into_value_ref<'a>(
+    value: &JsonVariantRef<'a>,
+    expected_type: &ConcreteDataType,
+) -> Result<ValueRef<'a>> {
+    let value = match (value, expected_type) {
+        (JsonVariantRef::Null, _) | (_, ConcreteDataType::Null(_)) => ValueRef::Null,
+        (JsonVariantRef::Object(object), ConcreteDataType::Struct(struct_type)) => {
+            ValueRef::Struct(json_object_ref_into_struct_value_ref(
+                object,
+                struct_type.clone(),
+            )?)
+        }
+        (JsonVariantRef::Bool(x), ConcreteDataType::Boolean(_)) => ValueRef::Boolean(*x),
+        (JsonVariantRef::Number(x), ConcreteDataType::UInt64(_)) => {
+            let Some(x) = x.as_u64() else {
+                return TryFromValueSnafu {
+                    reason: format!("unable to convert {x:?} to UInt64"),
+                }
+                .fail();
+            };
+            ValueRef::UInt64(x)
+        }
+        (JsonVariantRef::Number(x), ConcreteDataType::Int64(_)) => {
+            let x = match x {
+                JsonNumber::PosInt(x) => i64::try_from(*x).ok(),
+                JsonNumber::NegInt(x) => Some(*x),
+                JsonNumber::Float(_) => None,
+            };
+            let Some(x) = x else {
+                return TryFromValueSnafu {
+                    reason: format!("unable to convert {x:?} to Int64"),
+                }
+                .fail();
+            };
+            ValueRef::Int64(x)
+        }
+        (JsonVariantRef::Number(JsonNumber::PosInt(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64((*x as f64).into())
+        }
+        (JsonVariantRef::Number(JsonNumber::NegInt(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64((*x as f64).into())
+        }
+        (JsonVariantRef::Number(JsonNumber::Float(x)), ConcreteDataType::Float64(_)) => {
+            ValueRef::Float64(*x)
+        }
+        (JsonVariantRef::String(x), ConcreteDataType::String(_)) => ValueRef::String(x),
+        (value, expected_type) => {
+            return TryFromValueSnafu {
+                reason: format!("unable to convert json value {value:?} to {expected_type}"),
+            }
+            .fail();
+        }
+    };
+    Ok(value)
+}
+
+fn remainder_ref<'a>(
+    object: &BTreeMap<&'a str, JsonVariantRef<'a>>,
+    explicit_type: &JsonNativeType,
+) -> Result<BTreeMap<&'a str, JsonVariantRef<'a>>> {
+    let JsonNativeType::Object(fields) = explicit_type else {
+        return UnexpectedSnafu {
+            reason: "JSON2 explicit type must be an object",
+        }
+        .fail();
+    };
+    let mut remainder = BTreeMap::new();
+    for (&name, value) in object {
+        match fields.get(name) {
+            Some(data_type @ JsonNativeType::Object(_)) => match value {
+                JsonVariantRef::Null => {}
+                JsonVariantRef::Object(object) => {
+                    let child = remainder_ref(object, data_type)?;
+                    if !child.is_empty() {
+                        remainder.insert(name, JsonVariantRef::Object(child));
+                    }
+                }
+                _ => {
+                    return TryFromValueSnafu {
+                        reason: "expected json object value".to_string(),
+                    }
+                    .fail();
+                }
+            },
+            // A non-object entry in the explicit type tree is an explicit leaf and is
+            // already written to the Struct builder. So here does nothing.
+            Some(_) => {}
+            None => {
+                remainder.insert(name, value.clone());
+            }
+        }
+    }
+    Ok(remainder)
+}
+
 fn split_to_explicit(
     value: JsonVariant,
     explicit_type: &JsonNativeType,
@@ -615,7 +834,9 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
-        self.clone().to_vector()
+        self.state
+            .try_build_cloned()
+            .unwrap_or_else(|e| panic!("{:?}", e))
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
@@ -772,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_budget_builder_uses_fixed_schema_and_remainder() -> Result<()> {
+    fn test_zero_budget_builder_uses_explicit_only_schema_and_remainder() -> Result<()> {
         let settings = JsonSettings::try_new(
             vec![
                 JsonTypeHint {
@@ -800,6 +1021,10 @@ mod tests {
             Some(0),
         )?;
         let mut builder = JsonVectorBuilder::with_settings(&settings, 2);
+        assert!(matches!(
+            &builder.state,
+            JsonVectorBuilderState::ExplicitOnly { .. }
+        ));
         let values = [
             json!({
                 "kind": "record",

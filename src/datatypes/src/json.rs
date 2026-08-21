@@ -140,6 +140,16 @@ impl JsonSettings {
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
+        if let Json::Object(object) = &json
+            && object.contains_key(JSON2_REMAINDER_FIELD_NAME)
+        {
+            return error::InvalidJsonSnafu {
+                value: format!(
+                    "root object cannot contain reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
+                ),
+            }
+            .fail();
+        }
         let mut context = JsonContext {
             path: Vec::new(),
             settings: self,
@@ -775,6 +785,21 @@ mod tests {
                 "{name}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_encode_rejects_reserved_remainder_field() -> Result<()> {
+        let settings = JsonSettings::default();
+        let err = settings
+            .encode(json!({"!__remainder__!": "user-value"}))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("root object cannot contain reserved field")
+        );
+
+        settings.encode(json!({"nested": {"!__remainder__!": "user-value"}}))?;
+        Ok(())
     }
 
     #[test]
