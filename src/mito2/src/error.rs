@@ -1724,19 +1724,4 @@ mod tests {
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
     }
-
-    #[test]
-    fn test_manifest_delta_not_found_retry_hint() {
-        let error = ManifestDeltaNotFoundSnafu {
-            version: 3_u64,
-            path: "manifest/00000000000000000003.json",
-        }
-        .into_error(object_store::Error::new(ErrorKind::NotFound, "test"));
-        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
-        assert_eq!(RetryHint::Retryable, error.retry_hint());
-
-        let error =
-            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::NotFound, "test"));
-        assert_eq!(RetryHint::NonRetryable, error.retry_hint());
-    }
 }

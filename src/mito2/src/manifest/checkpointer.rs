@@ -34,7 +34,7 @@ use crate::metrics::MANIFEST_OP_ELAPSED;
 pub(crate) struct Checkpointer {
     manifest_options: RegionManifestOptions,
     inner: Arc<Inner>,
-    pending_checkpoint: Option<JoinHandle<()>>,
+    checkpoint_task: Option<JoinHandle<()>>,
     #[cfg(test)]
     pending_checkpoint_wait_started: Arc<Notify>,
 }
@@ -107,7 +107,7 @@ impl Checkpointer {
                 manifest_store,
                 last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
             }),
-            pending_checkpoint: None,
+            checkpoint_task: None,
             #[cfg(test)]
             pending_checkpoint_wait_started: Arc::new(Notify::new()),
         }
@@ -137,7 +137,7 @@ impl Checkpointer {
     /// task running in the background.
     pub(crate) async fn maybe_do_checkpoint(&mut self, manifest: &RegionManifest) {
         if self
-            .pending_checkpoint
+            .checkpoint_task
             .as_ref()
             .is_some_and(|handle| !handle.is_finished())
         {
@@ -184,7 +184,7 @@ impl Checkpointer {
 
     fn do_checkpoint(&mut self, checkpoint: RegionCheckpoint) {
         let inner = self.inner.clone();
-        self.pending_checkpoint = Some(common_runtime::spawn_global(async move {
+        self.checkpoint_task = Some(common_runtime::spawn_global(async move {
             inner.do_checkpoint(checkpoint).await;
         }));
     }
@@ -194,7 +194,7 @@ impl Checkpointer {
     /// Keeping the handle in `self` while awaiting is important. If the caller is
     /// cancelled, another lifecycle transition can still wait for the same task.
     pub(crate) async fn wait_for_pending_checkpoint(&mut self) {
-        let Some(handle) = self.pending_checkpoint.as_mut() else {
+        let Some(handle) = self.checkpoint_task.as_mut() else {
             return;
         };
 
@@ -204,7 +204,7 @@ impl Checkpointer {
         let result = (&mut *handle).await;
         // There is no cancellation point between observing completion and
         // clearing the handle.
-        self.pending_checkpoint = None;
+        self.checkpoint_task = None;
 
         if let Err(e) = result {
             warn!(e; "Failed to join checkpoint task for region {}", self.inner.region_id());
@@ -213,7 +213,7 @@ impl Checkpointer {
 
     #[cfg(test)]
     pub(crate) fn is_doing_checkpoint(&self) -> bool {
-        self.pending_checkpoint
+        self.checkpoint_task
             .as_ref()
             .is_some_and(|handle| !handle.is_finished())
     }
