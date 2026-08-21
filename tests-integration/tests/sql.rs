@@ -89,6 +89,7 @@ macro_rules! sql_tests {
                 test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
+                test_mysql_prepare_stmt_timezone,
                 test_mysql_federated_prepare_stmt,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
@@ -1774,6 +1775,77 @@ pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
 
     let x: DateTime<Utc> = rows[2].get("ts");
     assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
+
+    let _ = server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_prepare_stmt_timezone(store_type: StorageType) {
+    let (mut guard, server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_stmt_timezone").await;
+    let addr = server.bind_addr().unwrap().to_string();
+
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    conn.execute("create table demo(i bigint, ts timestamp time index)")
+        .await
+        .unwrap();
+    conn.execute("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+
+    // Server-side prepared statement: the binary DATETIME parameter must be
+    // interpreted in the session timezone.
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(1)
+        .bind(
+            NaiveDate::from_ymd_opt(2026, 8, 13)
+                .and_then(|x| x.and_hms_opt(8, 0, 0))
+                .unwrap(),
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    // Text protocol with an equivalent timezone-less literal one hour later.
+    sqlx::query("insert into demo values(2, '2026-08-13 09:00:00')")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    // Timestamps are read back in the session timezone, and sqlx parses the
+    // timezone-less wire representation as UTC.
+    let rows = sqlx::query("select i, ts from demo order by i")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let ts: DateTime<Utc> = rows[0].get("ts");
+    assert_eq!(ts.to_string(), "2026-08-13 08:00:00 UTC");
+    let ts: DateTime<Utc> = rows[1].get("ts");
+    assert_eq!(ts.to_string(), "2026-08-13 09:00:00 UTC");
+
+    // The prepared predicate compares the same instant as the text literal.
+    let rows = sqlx::query("select i from demo where ts = ? order by i")
+        .bind(
+            NaiveDate::from_ymd_opt(2026, 8, 13)
+                .and_then(|x| x.and_hms_opt(8, 0, 0))
+                .unwrap(),
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<i64, _>("i"), 1);
+
+    let rows = sqlx::query("select i from demo where ts = '2026-08-13 08:00:00'")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<i64, _>("i"), 1);
 
     let _ = server.shutdown().await;
     guard.remove_all().await;
