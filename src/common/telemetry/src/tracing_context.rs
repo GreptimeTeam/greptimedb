@@ -16,8 +16,9 @@
 use std::collections::HashMap;
 
 use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_opentelemetry::{OpenTelemetrySpanExt, get_otel_context};
 
 // An wrapper for `Futures` that provides tracing instrument adapters.
 pub trait FutureExt: std::future::Future + Sized {
@@ -46,6 +47,36 @@ impl<T: std::future::Future> FutureExt for T {
 pub struct TracingContext(opentelemetry::Context);
 
 pub type W3cTrace = HashMap<String, String>;
+
+/// Returns valid identifiers for the current OpenTelemetry span, if one exists.
+/// An absent or invalid context is deliberately represented as `None` so ordinary
+/// logs never manufacture correlation identifiers.
+pub fn current_trace_ids() -> Option<(String, String)> {
+    current_trace_ids_for_span(tracing::Span::current().id().as_ref())
+}
+
+/// Returns identifiers for a span known by the active subscriber. This variant
+/// is used by formatting layers while they are rendering an event.
+pub fn current_trace_ids_for_span(id: Option<&tracing::span::Id>) -> Option<(String, String)> {
+    let current = opentelemetry::Context::current();
+    let span_context = if current.span().span_context().is_valid() {
+        current.span().span_context().clone()
+    } else {
+        id.and_then(|id| {
+            tracing::dispatcher::get_default(|dispatch| get_otel_context(id, dispatch))
+        })
+        .unwrap_or_else(|| tracing::Span::current().context())
+        .span()
+        .span_context()
+        .clone()
+    };
+    span_context.is_valid().then(|| {
+        (
+            span_context.trace_id().to_string(),
+            span_context.span_id().to_string(),
+        )
+    })
+}
 
 impl Default for TracingContext {
     fn default() -> Self {
