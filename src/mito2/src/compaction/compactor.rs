@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZero;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -404,6 +404,37 @@ pub trait SstMerger: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DefaultSstMerger;
 
+/// Computes the maximum sequence bound of the output of merging `inputs`.
+///
+/// Returns `None` for empty inputs or if any input's sequence bound is unknown:
+/// a partial max over the known inputs would launder the unknown file's rows into a
+/// trusted sequence bound, letting exact sequence-range scans silently skip or
+/// wrongly filter rows from that file. Only when every input bound is known is
+/// the `max` computed.
+fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.meta_ref().sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
+/// Returns whether a compaction output may retain its inputs' per-row sequence
+/// trust. Inputs from another region are treated as untrusted rather than
+/// laundering their marker into the current region's output metadata.
+fn can_preserve_row_sequence(
+    region_id: RegionId,
+    preserve_row_sequence: bool,
+    inputs: &[FileHandle],
+) -> bool {
+    preserve_row_sequence
+        && inputs.iter().all(|f| {
+            let meta = f.meta_ref();
+            meta.region_id == region_id && meta.preserve_row_sequence
+        })
+}
+
 #[async_trait::async_trait]
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
@@ -439,12 +470,50 @@ impl SstMerger for DefaultSstMerger {
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let max_sequence = output
-            .inputs
-            .iter()
-            .map(|f| f.meta_ref().sequence)
-            .max()
-            .flatten();
+        let input_max_sequence = known_max_input_sequence(&output.inputs);
+        // The compaction output can only preserve per-row sequences when the
+        // region option is enabled AND every input file belongs to this region
+        // and carries the preserved-sequence marker. Otherwise, rewrite the
+        // untrusted input as a sequence-less file. `committed_sequence + 1` is
+        // the region-local admission barrier for this compacted SST: once
+        // Flow's cursor reaches it, the input rows (which were all flushed in
+        // this snapshot) have already been consumed.
+        let output_preserves_sequence = can_preserve_row_sequence(
+            compaction_region.region_id,
+            compaction_region.region_options.preserve_row_sequence,
+            &output.inputs,
+        );
+        let output_sequence = if output_preserves_sequence {
+            input_max_sequence
+        } else {
+            // The manifest records the region's latest accepted sequence for
+            // edit paths and its flushed frontier otherwise. Compaction only
+            // rewrites the immutable SST snapshot, so this is the same
+            // region-local admission barrier used when accepting files.
+            let manifest = compaction_region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .manifest();
+            NonZeroU64::new(
+                manifest
+                    .committed_sequence
+                    .unwrap_or(manifest.flushed_sequence)
+                    + 1,
+            )
+        };
+        // The flat/primary-key parquet formats require their three internal
+        // columns. For a sequence-less output, write the sequence column as
+        // zero instead of its file barrier. The reader recognizes all-zero
+        // sequence columns and overrides them from FileMeta for legacy reads;
+        // exact reads skip this file at file level before row filtering.
+        let write_max_sequence = if output_preserves_sequence {
+            input_max_sequence.map(NonZeroU64::get)
+        } else {
+            Some(0)
+        };
+
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -468,12 +537,13 @@ impl SstMerger for DefaultSstMerger {
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
                     storage,
-                    max_sequence: max_sequence.map(NonZero::get),
+                    max_sequence: write_max_sequence,
                     sst_write_format: if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey
                     },
+                    preserve_row_sequence: output_preserves_sequence,
                     index_options,
                     index_config,
                     inverted_index_config,
@@ -522,11 +592,12 @@ impl SstMerger for DefaultSstMerger {
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
-                    sequence: max_sequence,
+                    sequence: output_sequence,
                     partition_expr: partition_expr.clone(),
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,
+                    preserve_row_sequence: output_preserves_sequence,
                 }
             })
             .collect::<Vec<_>>();
@@ -789,6 +860,45 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[test]
+    fn test_foreign_region_input_cannot_preserve_row_sequence() {
+        let region_id = RegionId::new(1, 1);
+        let foreign_input = new_file_handle(FileMeta {
+            region_id: RegionId::new(2, 1),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+
+        assert!(!can_preserve_row_sequence(
+            region_id,
+            true,
+            &[foreign_input]
+        ));
+    }
+
+    #[test]
+    fn test_known_max_input_sequence() {
+        let meta_with = |sequence| FileMeta {
+            sequence,
+            ..dummy_file_meta()
+        };
+
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(3))),
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(NonZeroU64::new(5))),
+        ];
+        assert_eq!(NonZeroU64::new(9), known_max_input_sequence(&inputs));
+
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(None)),
+        ];
+        assert_eq!(None, known_max_input_sequence(&inputs));
+
+        assert_eq!(None, known_max_input_sequence(&[]));
     }
 
     /// Build a minimal [`CompactionRegion`] suitable for tests where the
