@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use common_procedure::error::FromJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,9 @@ use crate::key::TableMetadataManagerRef;
 use crate::lock_key::CatalogLock;
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
+use crate::reconciliation::event::{
+    RECONCILE_CATALOG_EVENT_TYPE, ReconciliationEvent, ReconciliationLocator,
+};
 use crate::reconciliation::reconcile_catalog::start::ReconcileCatalogStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
@@ -72,9 +75,55 @@ impl ReconcileCatalogContext {
                 self.persistent_ctx.fast_fail,
             )
             .await?;
-            self.volatile_ctx.metrics += result.into();
+            let metrics: ReconcileCatalogMetrics = result.into();
+            self.persistent_ctx.result_summary.record(&metrics);
+            self.volatile_ctx.metrics += metrics;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogPhase {
+    Start,
+    Databases,
+}
+
+impl CatalogPhase {
+    const fn as_event_value(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Databases => "databases",
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ReconcileCatalogResultSummary {
+    succeeded_database_count: usize,
+    failed_database_count: usize,
+    last_completed_phase: Option<CatalogPhase>,
+}
+
+impl ReconcileCatalogResultSummary {
+    fn record(&mut self, metrics: &ReconcileCatalogMetrics) {
+        self.succeeded_database_count += metrics.succeeded_databases;
+        self.failed_database_count += metrics.failed_databases;
+    }
+
+    fn mark_phase_completed(&mut self, phase: CatalogPhase) {
+        self.last_completed_phase = Some(phase);
+    }
+
+    fn reset_replayed_databases(&mut self) {
+        self.succeeded_database_count = 0;
+        self.failed_database_count = 0;
+        self.last_completed_phase = Some(CatalogPhase::Start);
+    }
+
+    fn last_completed_phase(&self) -> Option<&'static str> {
+        self.last_completed_phase.map(CatalogPhase::as_event_value)
     }
 }
 
@@ -84,6 +133,8 @@ pub(crate) struct PersistentContext {
     fast_fail: bool,
     resolve_strategy: ResolveStrategy,
     parallelism: usize,
+    #[serde(default)]
+    result_summary: ReconcileCatalogResultSummary,
 }
 
 impl PersistentContext {
@@ -98,6 +149,7 @@ impl PersistentContext {
             fast_fail,
             resolve_strategy,
             parallelism,
+            result_summary: ReconcileCatalogResultSummary::default(),
         }
     }
 }
@@ -211,10 +263,64 @@ impl Procedure for ReconcileCatalogProcedure {
         serde_json::to_string(&data).context(FromJsonSnafu)
     }
 
+    fn recover(&mut self) -> ProcedureResult<()> {
+        use crate::reconciliation::reconcile_catalog::reconcile_databases::ReconcileDatabases;
+
+        if self.state.as_any().is::<ReconcileCatalogStart>() {
+            self.context.persistent_ctx.result_summary = Default::default();
+        } else if self.state.as_any().is::<ReconcileDatabases>() {
+            self.context
+                .persistent_ctx
+                .result_summary
+                .reset_replayed_databases();
+        }
+        Ok(())
+    }
+
     fn lock_key(&self) -> LockKey {
         let catalog = &self.context.persistent_ctx.catalog;
 
         LockKey::new(vec![CatalogLock::Write(catalog).into()])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(RECONCILE_CATALOG_EVENT_TYPE) {
+            return None;
+        }
+
+        let persistent_ctx = &self.context.persistent_ctx;
+        let locator = ReconciliationLocator::catalog(&persistent_ctx.catalog);
+        let event = match ctx.trigger {
+            EventTrigger::Submitted => ReconciliationEvent::catalog_submitted(
+                locator,
+                persistent_ctx.resolve_strategy,
+                persistent_ctx.fast_fail,
+                persistent_ctx.parallelism,
+            ),
+            EventTrigger::Succeeded => Self::result_event(locator, persistent_ctx, true),
+            EventTrigger::Failed | EventTrigger::Poisoned => {
+                Self::result_event(locator, persistent_ctx, false)
+            }
+            _ => ReconciliationEvent::catalog_lifecycle(locator),
+        };
+        Some(Box::new(event))
+    }
+}
+
+impl ReconcileCatalogProcedure {
+    fn result_event(
+        locator: ReconciliationLocator,
+        persistent_ctx: &PersistentContext,
+        complete: bool,
+    ) -> ReconciliationEvent {
+        let summary = &persistent_ctx.result_summary;
+        ReconciliationEvent::catalog_result(
+            locator,
+            complete,
+            summary.succeeded_database_count,
+            summary.failed_database_count,
+            summary.last_completed_phase(),
+        )
     }
 }
 
@@ -234,4 +340,216 @@ pub(crate) trait State: Sync + Send + Debug {
     ) -> Result<(Box<dyn State>, Status)>;
 
     fn as_any(&self) -> &dyn Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use common_event_recorder::{EventTypeFilter, EventTypeFilterRef};
+    use common_procedure::{
+        ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+        RetryPhase,
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::reconciliation::event::RECONCILE_DATABASE_EVENT_TYPE;
+    use crate::reconciliation::reconcile_catalog::reconcile_databases::ReconcileDatabases;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[test]
+    fn catalog_event_hook_covers_filters_and_lifecycle_payloads() {
+        let mut procedure = test_procedure();
+        procedure.context.persistent_ctx.result_summary = ReconcileCatalogResultSummary {
+            succeeded_database_count: 2,
+            failed_database_count: 1,
+            last_completed_phase: Some(CatalogPhase::Databases),
+        };
+        let running = ProcedureState::Running;
+
+        let submitted =
+            event_for(&procedure, EventTrigger::Submitted, all_events(), &running).unwrap();
+        assert_eq!(submitted.event_type(), RECONCILE_CATALOG_EVENT_TYPE);
+        assert_eq!(
+            submitted.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "resolve_strategy": "use_latest",
+                "fail_fast": false,
+                "parallelism": 8,
+            })
+        );
+
+        for trigger in [
+            EventTrigger::Recovered,
+            EventTrigger::ChildSubmitted {
+                procedure_id: ProcedureId::random(),
+                outcome: ChildSubmissionOutcome::Accepted,
+            },
+            EventTrigger::Retrying {
+                phase: RetryPhase::Execute,
+                attempt: 1,
+            },
+            EventTrigger::RollingBack,
+        ] {
+            assert_eq!(
+                event_for(&procedure, trigger, all_events(), &running)
+                    .unwrap()
+                    .json_payload()
+                    .unwrap(),
+                Value::Null
+            );
+        }
+
+        for (trigger, complete) in [
+            (EventTrigger::Succeeded, true),
+            (EventTrigger::Failed, false),
+            (EventTrigger::Poisoned, false),
+        ] {
+            assert_eq!(
+                event_for(&procedure, trigger, all_events(), &running)
+                    .unwrap()
+                    .json_payload()
+                    .unwrap(),
+                json!({
+                    "version": 1,
+                    "complete": complete,
+                    "processed_database_count": 3,
+                    "succeeded_database_count": 2,
+                    "failed_database_count": 1,
+                    "last_completed_phase": "databases",
+                })
+            );
+        }
+
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                selected_events(RECONCILE_CATALOG_EVENT_TYPE),
+                &running,
+            )
+            .is_some()
+        );
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                selected_events(RECONCILE_DATABASE_EVENT_TYPE),
+                &running,
+            )
+            .is_none()
+        );
+        assert!(
+            event_for(
+                &procedure,
+                EventTrigger::Submitted,
+                Arc::new(EventTypeFilter::Only(HashSet::new())),
+                &running,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn catalog_old_json_without_result_summary_still_deserializes() {
+        let procedure = test_procedure();
+        let mut value: Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+        value["persistent_ctx"]
+            .as_object_mut()
+            .unwrap()
+            .remove("result_summary");
+
+        let loaded = ReconcileCatalogProcedure::from_json(
+            test_context(),
+            &serde_json::to_string(&value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            event_for(
+                &loaded,
+                EventTrigger::Succeeded,
+                all_events(),
+                &ProcedureState::Running,
+            )
+            .unwrap()
+            .json_payload()
+            .unwrap(),
+            json!({
+                "version": 1,
+                "complete": true,
+                "processed_database_count": 0,
+                "succeeded_database_count": 0,
+                "failed_database_count": 0,
+                "last_completed_phase": null,
+            })
+        );
+    }
+
+    #[test]
+    fn catalog_recovery_resets_the_replayed_database_phase() {
+        let mut procedure = test_procedure();
+        procedure.state = Box::new(ReconcileDatabases);
+        procedure.context.persistent_ctx.result_summary = ReconcileCatalogResultSummary {
+            succeeded_database_count: 4,
+            failed_database_count: 1,
+            last_completed_phase: Some(CatalogPhase::Databases),
+        };
+
+        procedure.recover().unwrap();
+
+        let summary = &procedure.context.persistent_ctx.result_summary;
+        assert_eq!(summary.succeeded_database_count, 0);
+        assert_eq!(summary.failed_database_count, 0);
+        assert!(matches!(
+            summary.last_completed_phase,
+            Some(CatalogPhase::Start)
+        ));
+    }
+
+    fn test_procedure() -> ReconcileCatalogProcedure {
+        ReconcileCatalogProcedure::new(
+            test_context(),
+            "greptime".to_string(),
+            false,
+            ResolveStrategy::UseLatest,
+            8,
+        )
+    }
+
+    fn test_context() -> Context {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        }
+    }
+
+    fn event_for(
+        procedure: &dyn Procedure,
+        trigger: EventTrigger,
+        event_type_filter: EventTypeFilterRef,
+        lifecycle_state: &ProcedureState,
+    ) -> Option<Box<dyn common_event_recorder::Event>> {
+        procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state,
+            trigger,
+            event_type_filter,
+            event_context: None,
+        })
+    }
+
+    fn all_events() -> EventTypeFilterRef {
+        Arc::new(EventTypeFilter::All)
+    }
+
+    fn selected_events(event_type: &str) -> EventTypeFilterRef {
+        Arc::new(EventTypeFilter::Only(HashSet::from([
+            event_type.to_string()
+        ])))
+    }
 }
