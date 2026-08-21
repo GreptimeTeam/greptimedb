@@ -683,26 +683,34 @@ async fn test_mysql_prepared_timestamp_uses_session_timezone() -> Result<()> {
     mysql_server.start(listening).await.unwrap();
 
     let server_addr = mysql_server.bind_addr().unwrap();
-    let mut connection = create_connection_default_db_name(server_addr.port(), false).await?;
-    connection.query_drop("SET time_zone = '+08:00'").await?;
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    connection
+        .query_drop("SET time_zone = '+08:00'")
+        .await
+        .unwrap();
 
     let text_result: Option<i32> = connection
         .query_first(
             "SELECT id FROM prepared_timestamp_with_session_timezone \
              WHERE ts = '2024-12-26 12:00:00'",
         )
-        .await?;
+        .await
+        .unwrap();
     assert_eq!(Some(7), text_result);
 
     let statement = connection
         .prep("SELECT id FROM prepared_timestamp_with_session_timezone WHERE ts = ?")
-        .await?;
+        .await
+        .unwrap();
     let binary_result: Option<i32> = connection
         .exec_first(
             statement,
             vec![mysql_async::Value::Date(2024, 12, 26, 12, 0, 0, 0)],
         )
-        .await?;
+        .await
+        .unwrap();
     assert_eq!(Some(7), binary_result);
 
     mysql_server.shutdown().await.unwrap();
