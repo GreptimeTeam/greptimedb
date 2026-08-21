@@ -166,6 +166,7 @@ servers = { workspace = true, features = ["testing"] }
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
+tokio = { workspace = true, features = ["test-util"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
 
