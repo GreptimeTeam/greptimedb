@@ -187,7 +187,7 @@ impl JsonVectorBuilderState {
                     remainder.append_null();
                 } else {
                     let (value, rest) =
-                        split_to_explicit_ref(value.variant(), explicit_type, struct_type.clone())?;
+                        split_to_explicit_ref(value.variant(), explicit_type, struct_type)?;
                     explicit.push_struct_value_ref(value)?;
                     append_json_variant_ref(remainder, &rest).context(ArrowComputeSnafu)?;
                 }
@@ -544,7 +544,7 @@ fn insert_dynamic_type<S: AsRef<str>>(
 fn split_to_explicit_ref<'a>(
     value: &JsonVariantRef<'a>,
     explicit_type: &JsonNativeType,
-    struct_type: StructType,
+    struct_type: &StructType,
 ) -> Result<(StructValueRef<'a>, JsonVariantRef<'a>)> {
     let JsonVariantRef::Object(object) = value else {
         return TryFromValueSnafu {
@@ -559,7 +559,7 @@ fn split_to_explicit_ref<'a>(
 
 fn json_object_ref_into_struct_value_ref<'a>(
     object: &BTreeMap<&'a str, JsonVariantRef<'a>>,
-    struct_type: StructType,
+    struct_type: &StructType,
 ) -> Result<StructValueRef<'a>> {
     let mut values = Vec::with_capacity(struct_type.fields().len());
     for field in struct_type.fields().iter() {
@@ -571,7 +571,7 @@ fn json_object_ref_into_struct_value_ref<'a>(
     }
     Ok(StructValueRef::RefList {
         val: values,
-        fields: struct_type,
+        fields: struct_type.clone(),
     })
 }
 
@@ -582,10 +582,7 @@ fn json_variant_ref_into_value_ref<'a>(
     let value = match (value, expected_type) {
         (JsonVariantRef::Null, _) | (_, ConcreteDataType::Null(_)) => ValueRef::Null,
         (JsonVariantRef::Object(object), ConcreteDataType::Struct(struct_type)) => {
-            ValueRef::Struct(json_object_ref_into_struct_value_ref(
-                object,
-                struct_type.clone(),
-            )?)
+            ValueRef::Struct(json_object_ref_into_struct_value_ref(object, struct_type)?)
         }
         (JsonVariantRef::Bool(x), ConcreteDataType::Boolean(_)) => ValueRef::Boolean(*x),
         (JsonVariantRef::Number(x), ConcreteDataType::UInt64(_)) => {
