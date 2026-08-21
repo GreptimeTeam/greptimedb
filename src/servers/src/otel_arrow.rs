@@ -24,6 +24,7 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_serv
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
     BatchArrowRecords, BatchStatus, StatusCode as ArrowStatusCode,
 };
+use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
 use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 use tonic::metadata::{Entry, MetadataValue};
 use tonic::service::Interceptor;
@@ -49,22 +50,23 @@ impl<T> OtelArrowServiceHandler<T> {
     }
 }
 
-fn batch_status(batch_id: i64, outcome: MetricsIngestOutcome) -> BatchStatus {
+fn batch_status(
+    batch_id: i64,
+    outcome: MetricsIngestOutcome,
+    has_exponential_histogram_data_points: bool,
+) -> BatchStatus {
     let status_code = if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
         ArrowStatusCode::InvalidArgument
     } else {
         ArrowStatusCode::Ok
     };
-    let status_message = outcome
-        .error_message
-        .map(|message| {
-            if message.contains("otlp.experimental_enable_exponential_histogram") {
-                EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
-            } else {
-                message
-            }
-        })
-        .unwrap_or_default();
+    let status_message = match outcome.error_message {
+        Some(_) if has_exponential_histogram_data_points => {
+            EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
+        }
+        Some(message) => message,
+        None => String::new(),
+    };
     BatchStatus {
         batch_id,
         status_code: status_code as i32,
@@ -129,6 +131,18 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
+                let has_exponential_histogram_data_points = request
+                    .resource_metrics
+                    .iter()
+                    .flat_map(|resource| &resource.scope_metrics)
+                    .flat_map(|scope| &scope.metrics)
+                    .any(|item| {
+                        matches!(
+                            item.data.as_ref(),
+                            Some(metric::Data::ExponentialHistogram(histogram))
+                                if !histogram.data_points.is_empty()
+                        )
+                    });
                 let outcome = match handler.metrics(request, query_ctx.clone()).await {
                     Ok(outcome) => outcome,
                     Err(e) => {
@@ -142,7 +156,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                let batch_status = batch_status(batch_id, outcome);
+                let batch_status =
+                    batch_status(batch_id, outcome, has_exponential_histogram_data_points);
                 let _ = sender.send(Ok(batch_status)).await;
             }
         });
@@ -176,11 +191,10 @@ mod tests {
             7,
             MetricsIngestOutcome {
                 rejected_data_points: 1,
-                error_message: Some(
-                    "set otlp.experimental_enable_exponential_histogram = true".to_string(),
-                ),
+                error_message: Some("internal OTLP rejection detail".to_string()),
                 ..Default::default()
             },
+            true,
         );
 
         assert_eq!(7, status.batch_id);

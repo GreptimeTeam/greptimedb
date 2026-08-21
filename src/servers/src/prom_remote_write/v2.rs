@@ -1885,6 +1885,25 @@ mod tests {
     }
 
     #[test]
+    fn test_into_context_req_preserves_exponential_zero_threshold() {
+        for zero_threshold in [-1.0, f64::NAN] {
+            let ctx_req = decode_test_request(request_with_histogram(Histogram {
+                zero_threshold,
+                ..Default::default()
+            }))
+            .unwrap();
+            let rows = ctx_req.histograms.all_req().next().unwrap().rows.unwrap();
+            let Some(ValueData::F64Value(actual)) =
+                histogram_field_value(&rows, 0, ZERO_THRESHOLD_FIELD)
+            else {
+                panic!("expected zero threshold");
+            };
+
+            assert_eq!(zero_threshold.to_bits(), actual.to_bits());
+        }
+    }
+
+    #[test]
     fn test_into_context_req_rejects_internal_histogram_labels() {
         let mut request = test_util::request_with_labels_and_samples(
             vec![
