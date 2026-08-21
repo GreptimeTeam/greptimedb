@@ -1051,17 +1051,17 @@ fn encode_histogram(
     let count_table_name = format!("{}{}", normalized_name, COUNT_TABLE_SUFFIX);
 
     let data_points_len = hist.data_points.len();
-    // Note that the row and columns number here is approximate
-    let mut bucket_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len * 3);
-    let mut sum_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len);
-    let mut count_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len);
-
     for data_point in &hist.data_points {
+        let bucket_table = table_writer.get_or_default_table_data(
+            &bucket_table_name,
+            APPROXIMATE_COLUMN_COUNT,
+            data_points_len * 3,
+        );
         let mut accumulated_count = 0;
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
             let mut bucket_row = bucket_table.alloc_one_row();
             write_tags_and_timestamp(
-                &mut bucket_table,
+                bucket_table,
                 &mut bucket_row,
                 resource_attrs,
                 scope_attrs,
@@ -1072,7 +1072,7 @@ fn encode_histogram(
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
                 row_writer::write_tag(
-                    &mut bucket_table,
+                    bucket_table,
                     HISTOGRAM_LE_COLUMN,
                     upper_bounds,
                     &mut bucket_row,
@@ -1080,7 +1080,7 @@ fn encode_histogram(
             } else if idx == data_point.explicit_bounds.len() {
                 // The last bucket
                 row_writer::write_tag(
-                    &mut bucket_table,
+                    bucket_table,
                     HISTOGRAM_LE_COLUMN,
                     f64::INFINITY,
                     &mut bucket_row,
@@ -1089,7 +1089,7 @@ fn encode_histogram(
 
             accumulated_count += count;
             row_writer::write_f64(
-                &mut bucket_table,
+                bucket_table,
                 greptime_value(),
                 accumulated_count as f64,
                 &mut bucket_row,
@@ -1099,9 +1099,14 @@ fn encode_histogram(
         }
 
         if let Some(sum) = data_point.sum {
+            let sum_table = table_writer.get_or_default_table_data(
+                &sum_table_name,
+                APPROXIMATE_COLUMN_COUNT,
+                data_points_len,
+            );
             let mut sum_row = sum_table.alloc_one_row();
             write_tags_and_timestamp(
-                &mut sum_table,
+                sum_table,
                 &mut sum_row,
                 resource_attrs,
                 scope_attrs,
@@ -1110,13 +1115,18 @@ fn encode_histogram(
                 metric_ctx,
             )?;
 
-            row_writer::write_f64(&mut sum_table, greptime_value(), sum, &mut sum_row)?;
+            row_writer::write_f64(sum_table, greptime_value(), sum, &mut sum_row)?;
             sum_table.add_row(sum_row);
         }
 
+        let count_table = table_writer.get_or_default_table_data(
+            &count_table_name,
+            APPROXIMATE_COLUMN_COUNT,
+            data_points_len,
+        );
         let mut count_row = count_table.alloc_one_row();
         write_tags_and_timestamp(
-            &mut count_table,
+            count_table,
             &mut count_row,
             resource_attrs,
             scope_attrs,
@@ -1126,17 +1136,13 @@ fn encode_histogram(
         )?;
 
         row_writer::write_f64(
-            &mut count_table,
+            count_table,
             greptime_value(),
             data_point.count as f64,
             &mut count_row,
         )?;
         count_table.add_row(count_row);
     }
-
-    table_writer.add_table_data(bucket_table_name, bucket_table);
-    table_writer.add_table_data(sum_table_name, sum_table);
-    table_writer.add_table_data(count_table_name, count_table);
 
     Ok(())
 }
@@ -1282,6 +1288,7 @@ mod tests {
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
         AggregationTemporality, HistogramDataPoint, NumberDataPoint, SummaryDataPoint,
     };
+    use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
 
     use super::*;
 
@@ -2069,6 +2076,24 @@ mod tests {
         }
     }
 
+    fn histogram_metric(name: impl Into<String>) -> Metric {
+        Metric {
+            name: name.into(),
+            data: Some(metric::Data::Histogram(Histogram {
+                data_points: vec![HistogramDataPoint {
+                    start_time_unix_nano: 1_000_000,
+                    time_unix_nano: 2_000_000,
+                    count: 1,
+                    sum: Some(1.0),
+                    bucket_counts: vec![1],
+                    ..Default::default()
+                }],
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+            })),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_exponential_histogram_gate_and_partial_outcome() {
         let request = metrics_request(vec![
@@ -2144,6 +2169,65 @@ mod tests {
                 .to_string()
                 .contains("cannot mix native histogram and float sample fields")
         );
+    }
+
+    #[test]
+    fn test_histogram_cannot_replace_exponential_histogram_table() {
+        let request = metrics_request(vec![
+            exponential_metric(
+                "latency_bucket",
+                vec![exponential_point()],
+                AggregationTemporality::Cumulative,
+            ),
+            histogram_metric("latency"),
+        ]);
+        let mut ctx = OtlpMetricCtx {
+            experimental_enable_exponential_histogram: true,
+            ..Default::default()
+        };
+
+        let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mix native histogram and float sample fields")
+        );
+    }
+
+    #[test]
+    fn test_histograms_with_same_name_across_resources_are_merged() {
+        let metric = histogram_metric("latency");
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: ["service-a", "service-b"]
+                .into_iter()
+                .map(|service| ResourceMetrics {
+                    resource: Some(Resource {
+                        attributes: vec![keyvalue("service.name", service)],
+                        ..Default::default()
+                    }),
+                    scope_metrics: vec![ScopeMetrics {
+                        metrics: vec![metric.clone()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+        };
+
+        let (requests, rows, _, outcome) =
+            to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+
+        assert_eq!(outcome.accepted_data_points, 2);
+        assert_eq!(rows, 6);
+        assert_eq!(requests.inserts.len(), 3);
+        for request in requests.inserts {
+            assert_eq!(
+                request.rows.unwrap().rows.len(),
+                2,
+                "{}",
+                request.table_name
+            );
+        }
     }
 
     #[test]
