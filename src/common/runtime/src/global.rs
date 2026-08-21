@@ -19,6 +19,7 @@ use std::sync::{Mutex, Once};
 use common_telemetry::info;
 use once_cell::sync::Lazy;
 use paste::paste;
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::{BuilderBuild, RuntimeTrait};
@@ -42,9 +43,23 @@ pub struct RuntimeOptions {
     /// The maximum number of blocking threads for compact operations.
     pub compact_rt_max_blocking_threads: usize,
     /// The number of threads to execute datanode query operations.
+    #[serde(deserialize_with = "deserialize_query_rt_size")]
     pub query_rt_size: usize,
     /// The number of threads to execute datanode ingestion operations.
     pub ingest_rt_size: usize,
+}
+
+fn deserialize_query_rt_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let query_rt_size = usize::deserialize(deserializer)?;
+    if query_rt_size < MIN_RUNTIME_THREADS {
+        return Err(serde::de::Error::custom(format!(
+            "query_rt_size must be at least {MIN_RUNTIME_THREADS}, got {query_rt_size}"
+        )));
+    }
+    Ok(query_rt_size)
 }
 
 impl RuntimeOptions {
@@ -76,6 +91,10 @@ pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usi
         .worker_threads(worker_threads)
         .build()
         .expect("Fail to create runtime")
+}
+
+fn create_query_runtime(thread_name: &str, worker_threads: usize) -> Runtime {
+    create_runtime("query", thread_name, worker_threads)
 }
 
 fn create_compact_runtime(
@@ -231,11 +250,7 @@ pub fn init_datanode_runtimes(options: &RuntimeOptions) {
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
-        c.query_runtime = Some(create_runtime(
-            "query",
-            "query-worker",
-            options.query_rt_size,
-        ));
+        c.query_runtime = Some(create_query_runtime("query-worker", options.query_rt_size));
         c.ingest_runtime = Some(create_runtime(
             "ingest",
             "ingest-worker",
@@ -342,6 +357,22 @@ mod tests {
                 options.ingest_rt_size >= MIN_RUNTIME_THREADS,
                 "ingest_rt_size {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
                 options.ingest_rt_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_runtime_rejects_too_few_threads_in_deserialization() {
+        for query_rt_size in [0, 1] {
+            let result = serde_json::from_value::<RuntimeOptions>(serde_json::json!({
+                "query_rt_size": query_rt_size,
+            }));
+            let error = result.unwrap_err().to_string();
+            assert_eq!(
+                format!(
+                    "query_rt_size must be at least {MIN_RUNTIME_THREADS}, got {query_rt_size}"
+                ),
+                error
             );
         }
     }
