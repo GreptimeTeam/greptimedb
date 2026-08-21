@@ -634,7 +634,7 @@ async fn test_region_migration_by_sql_inner(
             offline_region_id.as_u64(),
             offline_from_peer_id,
             from_peer_id,
-            None,
+            Some("greptime"),
         )
         .await;
 
