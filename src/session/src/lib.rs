@@ -22,7 +22,7 @@ pub mod table_name;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
@@ -59,6 +59,13 @@ pub(crate) struct MutableInner {
     user_info: UserInfoRef,
     timezone: Timezone,
     query_timeout: Option<Duration>,
+    /// Request-level deadline imposed by the serving endpoint (e.g. the HTTP
+    /// server request timeout). Unlike `query_timeout` which is set via
+    /// session variables, this is injected by the protocol layer. Stored as
+    /// an absolute deadline so the remaining budget can be computed at the
+    /// moment statement execution starts, keeping the derived query timeout
+    /// aligned with the endpoint's own request deadline.
+    request_deadline: Option<Instant>,
     read_preference: ReadPreference,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
@@ -73,6 +80,7 @@ impl Default for MutableInner {
             user_info: auth::userinfo_by_name(None),
             timezone: get_timezone(None).clone(),
             query_timeout: None,
+            request_deadline: None,
             read_preference: ReadPreference::Leader,
             cursors: HashMap::with_capacity(0),
             warnings: VecDeque::new(),
