@@ -65,7 +65,7 @@ impl State for ReconcileRegions {
         let table_meta = ctx.build_table_meta(&self.column_metadatas)?;
         ctx.volatile_ctx.table_meta = Some(table_meta);
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name();
+        let table_name = ctx.table_name().clone();
 
         let primary_keys = self
             .column_metadatas
@@ -126,6 +126,7 @@ impl State for ReconcileRegions {
             }
         }
 
+        let updated_region_count = sync_column_tsks.len();
         let mut results = future::join_all(sync_column_tsks)
             .await
             .into_iter()
@@ -142,6 +143,10 @@ impl State for ReconcileRegions {
                     ),
                 },
             )?;
+
+        ctx.persistent_ctx
+            .result_summary
+            .mark_regions_reconciled(updated_region_count);
 
         // Checks all column metadatas are consistent, and updates the table info if needed.
         if column_metadatas != self.column_metadatas {

@@ -114,6 +114,10 @@ impl State for ReconciliationStart {
             }
         });
 
+        ctx.persistent_ctx
+            .result_summary
+            .mark_start_completed(region_metadatas.len());
+
         // Persist the physical table route.
         // TODO(weny): refetch the physical table route if repair is needed.
         ctx.persistent_ctx.physical_table_route = Some(physical_table_route);

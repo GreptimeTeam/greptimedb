@@ -926,7 +926,7 @@ ttl = "90d"
 ## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
 ## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
 ## `create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,
-## `reconcile_database`.
+## `reconcile_database`, `reconcile_table`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["create_database"]

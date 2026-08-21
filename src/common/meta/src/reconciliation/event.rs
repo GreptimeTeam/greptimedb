@@ -30,12 +30,14 @@ use crate::reconciliation::ResolveStrategy;
 
 pub(crate) const RECONCILE_CATALOG_EVENT_TYPE: &str = "reconcile_catalog";
 pub(crate) const RECONCILE_DATABASE_EVENT_TYPE: &str = "reconcile_database";
+pub(crate) const RECONCILE_TABLE_EVENT_TYPE: &str = "reconcile_table";
 const PAYLOAD_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy)]
 enum ReconciliationEventType {
     Catalog,
     Database,
+    Table,
 }
 
 impl ReconciliationEventType {
@@ -43,6 +45,7 @@ impl ReconciliationEventType {
         match self {
             Self::Catalog => RECONCILE_CATALOG_EVENT_TYPE,
             Self::Database => RECONCILE_DATABASE_EVENT_TYPE,
+            Self::Table => RECONCILE_TABLE_EVENT_TYPE,
         }
     }
 }
@@ -72,6 +75,21 @@ impl ReconciliationLocator {
             ..Default::default()
         }
     }
+
+    pub(crate) fn physical_table(
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        table_id: TableId,
+    ) -> Self {
+        Self {
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
+            table_name: Some(table_name.to_string()),
+            table_id: Some(table_id),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +99,8 @@ enum ReconciliationPayload {
     CatalogResult(CatalogResultPayload),
     DatabaseSubmitted(DatabaseSubmittedPayload),
     DatabaseResult(DatabaseResultPayload),
+    TableSubmitted(TableSubmittedPayload),
+    TableResult(TableResultPayload),
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +139,26 @@ struct DatabaseResultPayload {
     failed_table_count: usize,
     succeeded_subprocedure_count: usize,
     failed_subprocedure_count: usize,
+    last_completed_phase: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct TableSubmittedPayload {
+    version: u8,
+    resolve_strategy: &'static str,
+    is_subprocedure: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TableResultPayload {
+    version: u8,
+    complete: bool,
+    metadata_state: Option<&'static str>,
+    resolution_strategy_applied: Option<&'static str>,
+    resolved_column_count: Option<usize>,
+    scanned_region_count: usize,
+    updated_region_count: usize,
+    table_info_updated: bool,
     last_completed_phase: Option<&'static str>,
 }
 
@@ -228,6 +268,57 @@ impl ReconciliationEvent {
 
     pub(crate) fn database_lifecycle(locator: ReconciliationLocator) -> Self {
         Self::lifecycle(ReconciliationEventType::Database, locator)
+    }
+
+    pub(crate) fn table_submitted(
+        locator: ReconciliationLocator,
+        resolve_strategy: ResolveStrategy,
+        is_subprocedure: bool,
+    ) -> Self {
+        Self {
+            event_type: ReconciliationEventType::Table,
+            locator,
+            payload: Some(ReconciliationPayload::TableSubmitted(
+                TableSubmittedPayload {
+                    version: PAYLOAD_VERSION,
+                    resolve_strategy: resolve_strategy_name(resolve_strategy),
+                    is_subprocedure,
+                },
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn table_result(
+        locator: ReconciliationLocator,
+        complete: bool,
+        metadata_state: Option<&'static str>,
+        resolution_strategy_applied: Option<ResolveStrategy>,
+        resolved_column_count: Option<usize>,
+        scanned_region_count: usize,
+        updated_region_count: usize,
+        table_info_updated: bool,
+        last_completed_phase: Option<&'static str>,
+    ) -> Self {
+        Self {
+            event_type: ReconciliationEventType::Table,
+            locator,
+            payload: Some(ReconciliationPayload::TableResult(TableResultPayload {
+                version: PAYLOAD_VERSION,
+                complete,
+                metadata_state,
+                resolution_strategy_applied: resolution_strategy_applied.map(resolve_strategy_name),
+                resolved_column_count,
+                scanned_region_count,
+                updated_region_count,
+                table_info_updated,
+                last_completed_phase,
+            })),
+        }
+    }
+
+    pub(crate) fn table_lifecycle(locator: ReconciliationLocator) -> Self {
+        Self::lifecycle(ReconciliationEventType::Table, locator)
     }
 
     fn lifecycle(event_type: ReconciliationEventType, locator: ReconciliationLocator) -> Self {
@@ -383,6 +474,25 @@ mod tests {
             }]
         );
         assert_eq!(database.json_payload().unwrap(), serde_json::Value::Null);
+
+        let table = ReconciliationEvent::table_lifecycle(ReconciliationLocator::physical_table(
+            "greptime", "public", "metrics", 42,
+        ));
+        assert_eq!(table.event_type(), RECONCILE_TABLE_EVENT_TYPE);
+        assert_eq!(table.extra_schema(), catalog.extra_schema());
+        assert_eq!(
+            table.extra_rows().unwrap(),
+            vec![Row {
+                values: vec![
+                    ValueData::StringValue("greptime".to_string()).into(),
+                    ValueData::StringValue("public".to_string()).into(),
+                    ValueData::StringValue("metrics".to_string()).into(),
+                    ValueData::U32Value(42).into(),
+                    Value::default(),
+                ],
+            }]
+        );
+        assert_eq!(table.json_payload().unwrap(), serde_json::Value::Null);
     }
 
     #[test]
@@ -423,6 +533,20 @@ mod tests {
                 "resolve_strategy": "use_metasrv",
                 "fail_fast": false,
                 "parallelism": 64,
+                "is_subprocedure": true,
+            })
+        );
+
+        let table = ReconciliationEvent::table_submitted(
+            ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
+            ResolveStrategy::AbortOnConflict,
+            true,
+        );
+        assert_eq!(
+            table.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "resolve_strategy": "abort_on_conflict",
                 "is_subprocedure": true,
             })
         );
@@ -469,6 +593,32 @@ mod tests {
                 "succeeded_subprocedure_count": 4,
                 "failed_subprocedure_count": 1,
                 "last_completed_phase": "physical_tables",
+            })
+        );
+
+        let table = ReconciliationEvent::table_result(
+            ReconciliationLocator::physical_table("greptime", "public", "metrics", 42),
+            false,
+            Some("inconsistent"),
+            Some(ResolveStrategy::UseMetasrv),
+            Some(4),
+            3,
+            2,
+            true,
+            Some("update_table_info"),
+        );
+        assert_eq!(
+            table.json_payload().unwrap(),
+            json!({
+                "version": 1,
+                "complete": false,
+                "metadata_state": "inconsistent",
+                "resolution_strategy_applied": "use_metasrv",
+                "resolved_column_count": 4,
+                "scanned_region_count": 3,
+                "updated_region_count": 2,
+                "table_info_updated": true,
+                "last_completed_phase": "update_table_info",
             })
         );
     }

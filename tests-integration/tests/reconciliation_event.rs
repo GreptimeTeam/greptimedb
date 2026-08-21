@@ -27,10 +27,10 @@ const CATALOG: &str = "greptime";
 const DATABASE: &str = "reconciliation_event_database";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_catalog_and_database_reconciliation_events() {
+async fn test_catalog_database_and_table_reconciliation_events() {
     common_telemetry::init_default_ut_logging();
 
-    let cluster = GreptimeDbClusterBuilder::new("catalog_database_reconciliation_events")
+    let cluster = GreptimeDbClusterBuilder::new("catalog_database_table_reconciliation_events")
         .await
         .with_datanodes(1)
         .build(true)
@@ -181,6 +181,108 @@ async fn test_catalog_and_database_reconciliation_events() {
 +---------+
 | true    |
 +---------+",
+    )
+    .await;
+
+    let table_procedure_id = find_eventually_string(
+        &frontend,
+        &format!(
+            "SELECT procedure_id FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_table' AND catalog_name = '{CATALOG}' \
+             AND schema_name = '{DATABASE}' AND table_name = 'metrics' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' LIMIT 1"
+        ),
+        "procedure_id",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) = 1 AS matches FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_database' AND procedure_id = '{database_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'ChildSubmitted' \
+             AND json_get_string(procedure_trigger, 'procedure_id') = '{table_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'outcome') = 'Accepted' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name IS NULL AND table_id IS NULL AND physical_table_id IS NULL \
+             AND json_is_null(payload)"
+        ),
+        "\
++---------+
+| matches |
++---------+
+| true    |
++---------+",
+    )
+    .await;
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) = 1 AS matches FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_table' AND procedure_id = '{table_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Submitted' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name = 'metrics' AND table_id IS NOT NULL \
+             AND physical_table_id IS NULL \
+             AND json_get_int(payload, 'version') = 1 \
+             AND json_get_string(payload, 'resolve_strategy') = 'use_latest' \
+             AND json_get_bool(payload, 'is_subprocedure') = true"
+        ),
+        "\
++---------+
+| matches |
++---------+
+| true    |
++---------+",
+    )
+    .await;
+
+    let table_result_payload = find_eventually_string(
+        &frontend,
+        &format!(
+            "SELECT json_to_string(payload) AS payload FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_table' AND procedure_id = '{table_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name = 'metrics' AND table_id IS NOT NULL \
+             AND physical_table_id IS NULL LIMIT 1"
+        ),
+        "payload",
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&table_result_payload).unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "complete": true,
+            "metadata_state": "consistent",
+            "resolution_strategy_applied": null,
+            "resolved_column_count": 1,
+            "scanned_region_count": 1,
+            "updated_region_count": 0,
+            "table_info_updated": true,
+            "last_completed_phase": "update_table_info",
+        })
+    );
+
+    assert_eventually_eq(
+        &frontend,
+        &format!(
+            "SELECT count(*) AS terminal_event_count FROM {EVENTS_TABLE} \
+             WHERE type = 'reconcile_table' AND procedure_id = '{table_procedure_id}' \
+             AND json_get_string(procedure_trigger, 'type') = 'Succeeded' \
+             AND catalog_name = '{CATALOG}' AND schema_name = '{DATABASE}' \
+             AND table_name = 'metrics' AND table_id IS NOT NULL \
+             AND physical_table_id IS NULL"
+        ),
+        "\
++----------------------+
+| terminal_event_count |
++----------------------+
+| 1                    |
++----------------------+",
     )
     .await;
 }
