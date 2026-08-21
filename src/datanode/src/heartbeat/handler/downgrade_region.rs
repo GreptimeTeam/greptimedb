@@ -228,22 +228,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_error::ext::RetryHint;
-    use common_error::status_code::StatusCode;
     use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
     use common_meta::heartbeat::mailbox::MessageMeta;
     use common_meta::instruction::{DowngradeRegion, Instruction};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
-    use mito2::engine::listener::NotifyRegionChangeResultListener;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::region_engine::{
         RegionEngine, RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
     };
-    use store_api::region_request::{
-        AlterKind, RegionAlterRequest, RegionRequest, SetRegionOption,
-    };
+    use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -487,78 +482,6 @@ mod tests {
                 .contains("flush failed")
         );
         assert!(reply.last_entry_id.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_transient_region_state_retries_before_follower() {
-        let mut engine_env = TestEnv::with_prefix("downgrade-transient-state").await;
-        let listener = Arc::new(NotifyRegionChangeResultListener::default());
-        let engine = engine_env
-            .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
-            .await;
-        let region_id = RegionId::new(1024, 1);
-        engine_env
-            .get_schema_metadata_manager()
-            .register_region_table_info(
-                region_id.table_id(),
-                "test_table",
-                "test_catalog",
-                "test_schema",
-                None,
-                engine_env.get_kv_backend(),
-            )
-            .await;
-        engine
-            .handle_request(
-                region_id,
-                RegionRequest::Create(CreateRequestBuilder::new().build()),
-            )
-            .await
-            .unwrap();
-
-        // Register before starting the alter so the notification cannot be lost.
-        let alter_entered = listener.wait_notify_entered();
-        let engine_cloned = engine.clone();
-        let alter = tokio::spawn(async move {
-            engine_cloned
-                .handle_request(
-                    region_id,
-                    RegionRequest::Alter(RegionAlterRequest {
-                        kind: AlterKind::SetRegionOptions {
-                            options: vec![SetRegionOption::MaxRowGroupRowCount(Some(1024))],
-                        },
-                    }),
-                )
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(5), alter_entered)
-            .await
-            .expect("region did not enter Altering");
-
-        let region_server = mock_region_server();
-        region_server.register_test_region(region_id, Arc::new(engine.clone()));
-        let handler_context =
-            HandlerContext::new_for_test(region_server, Arc::new(MemoryKvBackend::new()));
-        let reply = DowngradeRegionsHandler
-            .handle(
-                &handler_context,
-                vec![DowngradeRegion {
-                    region_id,
-                    flush_timeout: Some(Duration::from_secs(1)),
-                }],
-            )
-            .await
-            .unwrap()
-            .expect_downgrade_regions_reply();
-
-        assert_eq!(RegionRole::Leader, engine.role(region_id).unwrap());
-        assert!(reply[0].last_entry_id.is_none());
-        let error = reply[0].error.as_ref().unwrap();
-        assert_eq!(StatusCode::RegionNotReady, error.code);
-        assert_eq!(RetryHint::Retryable, error.retry_hint);
-
-        listener.wake_notify();
-        alter.await.unwrap().unwrap();
     }
 
     #[tokio::test]

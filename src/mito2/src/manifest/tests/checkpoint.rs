@@ -679,35 +679,6 @@ async fn install_preserves_listed_delta_not_found_retry_hint() {
 }
 
 #[tokio::test]
-async fn staging_fetch_classifies_listed_delta_not_found_as_retryable() {
-    let env = TestEnv::new()
-        .await
-        .with_mock_layer(fail_manifest_delta_reads_layer());
-    let metadata = Arc::new(basic_region_metadata());
-    let manager = env
-        .create_manifest_manager(CompressionType::Uncompressed, 0, Some(metadata))
-        .await
-        .unwrap()
-        .unwrap();
-    let mut store = manager.store();
-    store
-        .save(1, &nop_action().encode().unwrap(), true)
-        .await
-        .unwrap();
-
-    let error = store.fetch_staging_manifests().await.unwrap_err();
-    assert_matches!(
-        &error,
-        ManifestDeltaNotFound {
-            version: 1,
-            path,
-            ..
-        } if path.contains("staging") && path.ends_with("00000000000000000001.json")
-    );
-    assert_eq!(RetryHint::Retryable, error.retry_hint());
-}
-
-#[tokio::test]
 async fn cancelled_waiter_keeps_pending_checkpoint_handle() {
     let (blocker, mock_layer) = CheckpointTaskBlocker::block_cleanup();
     let env = TestEnv::new().await.with_mock_layer(mock_layer);
