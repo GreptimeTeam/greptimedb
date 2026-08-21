@@ -115,7 +115,7 @@ impl ReconcileTables {
         ctx.volatile_ctx.inflight_subprocedures.extend(meta);
         Ok((
             Box::new(ReconcileTables),
-            Status::suspended(procedures, true),
+            Status::suspended(procedures, false),
         ))
     }
 
@@ -166,5 +166,48 @@ impl ReconcileTables {
         if table_route.is_physical() {
             tables.push((table_id, table_ref.into()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::reconciliation::ResolveStrategy;
+    use crate::reconciliation::reconcile_database::ReconcileDatabaseProcedure;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[test]
+    fn scheduling_children_does_not_persist_partially_mutated_parent() {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let context = Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        };
+        let mut procedure = ReconcileDatabaseProcedure::new(
+            context,
+            "greptime".to_string(),
+            "public".to_string(),
+            false,
+            1,
+            ResolveStrategy::UseLatest,
+            false,
+        );
+        procedure
+            .context
+            .volatile_ctx
+            .pending_tables
+            .push((42, TableName::new("greptime", "public", "metrics")));
+
+        let (_, status) =
+            ReconcileTables::schedule_reconcile_tables(&mut procedure.context).unwrap();
+
+        assert!(!status.need_persist());
+        assert_eq!(
+            procedure.context.volatile_ctx.inflight_subprocedures.len(),
+            1
+        );
     }
 }

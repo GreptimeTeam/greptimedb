@@ -101,7 +101,49 @@ impl ReconcileDatabases {
 
         Ok((
             Box::new(ReconcileDatabases),
-            Status::suspended(vec![procedure_with_id], true),
+            Status::suspended(vec![procedure_with_id], false),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::reconciliation::ResolveStrategy;
+    use crate::reconciliation::reconcile_catalog::ReconcileCatalogProcedure;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    #[test]
+    fn scheduling_child_does_not_persist_partially_mutated_parent() {
+        let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let context = Context {
+            node_manager: ddl_context.node_manager,
+            table_metadata_manager: ddl_context.table_metadata_manager,
+            cache_invalidator: ddl_context.cache_invalidator,
+        };
+        let mut procedure = ReconcileCatalogProcedure::new(
+            context,
+            "greptime".to_string(),
+            false,
+            ResolveStrategy::UseLatest,
+            1,
+        );
+
+        let (_, status) = ReconcileDatabases::schedule_reconcile_database(
+            &mut procedure.context,
+            "public".to_string(),
+        )
+        .unwrap();
+
+        assert!(!status.need_persist());
+        assert!(
+            procedure
+                .context
+                .volatile_ctx
+                .inflight_subprocedure
+                .is_some()
+        );
     }
 }
