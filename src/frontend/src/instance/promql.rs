@@ -44,6 +44,7 @@ impl Instance {
         schema: &str,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>> {
+        ctx.set_explain_verbose(false);
         let _timer = crate::metrics::PROMQL_QUERY_METRICS_ELAPSED
             .with_label_values(&[ctx.get_db_string().as_str()])
             .start_timer();
@@ -111,6 +112,7 @@ impl Instance {
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>> {
+        ctx.set_explain_verbose(false);
         let full_table_name =
             format_full_table_name(&target.catalog, &target.schema, &target.table);
         let table = self

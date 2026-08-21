@@ -31,6 +31,7 @@ use crate::instance::{Instance, map_query_output};
 #[async_trait]
 impl LogQueryHandler for Instance {
     async fn query(&self, mut request: LogQuery, ctx: QueryContextRef) -> ServerResult<Output> {
+        ctx.set_explain_verbose(false);
         let interceptor = self
             .plugins
             .get::<LogQueryInterceptorRef<server_error::Error>>();

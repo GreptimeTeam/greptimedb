@@ -548,6 +548,7 @@ impl PromStoreProtocolHandler for Instance {
         request: ReadRequest,
         ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
+        ctx.set_explain_verbose(false);
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
