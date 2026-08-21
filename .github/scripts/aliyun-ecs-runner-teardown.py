@@ -90,10 +90,18 @@ def make_ecs_client(region_id: str):
     from alibabacloud_ecs20140526.client import Client as EcsClient
     from alibabacloud_tea_openapi.models import Config as OpenApiConfig
 
+    access_key_id = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
+    access_key_secret = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
+    if not access_key_id or not access_key_secret:
+        raise SystemExit(
+            "ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET are empty; in CI they come from the "
+            "ALICLOUD_ECS_ACCESS_KEY_ID/SECRET repository secrets (a missing or "
+            "misnamed secret expands to an empty string)."
+        )
     return EcsClient(
         OpenApiConfig(
-            access_key_id=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
-            access_key_secret=os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
             region_id=region_id,
             endpoint=f"ecs.{region_id}.aliyuncs.com",
         )
