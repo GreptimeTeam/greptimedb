@@ -20,6 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_macro::ToMetaBuilder;
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
+use datatypes::error::time_index_not_widening_error;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
     ColumnSchema, FulltextOptions, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
@@ -1045,20 +1046,50 @@ impl TableMeta {
                 }
             );
 
-            if let Some(ts_index) = timestamp_index {
-                // Not allowed to change column datatype in timestamp index.
+            let is_time_index = timestamp_index == Some(index);
+            if is_time_index {
+                // The time index column is NOT NULL by construction and its unit
+                // only supports lossless widening changes (e.g. millisecond ->
+                // microsecond). Historical data in SSTs is cast to the new unit
+                // on read, so no backfill is needed.
                 ensure!(
-                    index != ts_index,
+                    column
+                        .data_type
+                        .is_timestamp_unit_widening_to(&col_to_change.target_type),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: time_index_not_widening_error(
+                            &column.name,
+                            &column.data_type,
+                            &col_to_change.target_type,
+                        ),
+                    }
+                );
+            } else {
+                ensure!(
+                    column
+                        .data_type
+                        .can_arrow_type_cast_to(&col_to_change.target_type),
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
-                            "Not allowed to change timestamp index column '{}' datatype",
-                            column.name
-                        )
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            col_to_change.column_name, col_to_change.target_type,
+                        ),
+                    }
+                );
+
+                ensure!(
+                    column.is_nullable(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column '{}' must be nullable to ensure safe conversion.",
+                            col_to_change.column_name,
+                        ),
                     }
                 );
             }
-
             ensure!(
                 modify_column_types
                     .insert(&col_to_change.column_name, col_to_change)
@@ -1068,30 +1099,6 @@ impl TableMeta {
                     err: format!(
                         "change column datatype {} more than once",
                         col_to_change.column_name
-                    ),
-                }
-            );
-
-            ensure!(
-                column
-                    .data_type
-                    .can_arrow_type_cast_to(&col_to_change.target_type),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "column '{}' cannot be cast automatically to type '{}'",
-                        col_to_change.column_name, col_to_change.target_type,
-                    ),
-                }
-            );
-
-            ensure!(
-                column.is_nullable(),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "column '{}' must be nullable to ensure safe conversion.",
-                        col_to_change.column_name,
                     ),
                 }
             );
@@ -1665,6 +1672,82 @@ mod tests {
             .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_modify_time_index_column_type() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Widening the time index unit is allowed.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        let ts_column = new_meta.schema.column_schema_by_name("ts").unwrap();
+        assert_eq!(
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ts_column.data_type
+        );
+        assert!(ts_column.is_time_index());
+        assert!(!ts_column.is_nullable());
+        assert_eq!(new_meta.schema.version(), 124);
+        assert_eq!(&[0], &new_meta.primary_key_indices[..]);
+
+        // Narrowing is rejected.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_second_datatype(),
+            }],
+        };
+        let err = {
+            let res = meta.builder_with_alter_kind("my_table", &alter_kind);
+            assert!(res.is_err());
+            // `TableMetaBuilder` doesn't implement `Debug` so we can't use `unwrap_err()`.
+            match res {
+                Err(e) => e,
+                Ok(_) => unreachable!(),
+            }
+        };
+        assert!(err.to_string().contains("only supports widening"), "{err}");
+
+        // Changing to the same type is rejected.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        };
+        assert!(
+            meta.builder_with_alter_kind("my_table", &alter_kind)
+                .is_err()
+        );
+
+        // Changing to a non-timestamp type is rejected.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+        assert!(
+            meta.builder_with_alter_kind("my_table", &alter_kind)
+                .is_err()
+        );
     }
 
     #[test]

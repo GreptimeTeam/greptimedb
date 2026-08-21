@@ -22,6 +22,7 @@ use api::v1::SemanticType;
 use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use datatypes::data_type::DataType;
 use parquet::file::metadata::RowGroupMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -78,6 +79,42 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
         Some(col.column_id)
     }
 
+    /// Casts stats values to the expected data type when the SST stores the
+    /// column with a different type (e.g. after `MODIFY COLUMN` changed the
+    /// column type, including widening the time index unit).
+    ///
+    /// The pruning predicate is built against the expected (current) schema,
+    /// so comparing raw file-typed stats against it can prune wrongly (e.g.
+    /// `4_000` milliseconds max vs a `2_500_000` microseconds literal).
+    ///
+    /// Parquet statistics of a timestamp column are raw integers, so the cast
+    /// is done in two steps: first interpret them in the file's type (a plain
+    /// reinterpret, e.g. `Int64 -> Timestamp(ms)`), then convert to the
+    /// expected type (a unit-aware conversion, e.g. `ms -> us`). A single-step
+    /// `Int64 -> Timestamp(us)` would reinterpret the value as microseconds
+    /// instead of scaling it. Returns `None` when either cast fails, so the
+    /// row group is kept (conservative).
+    fn cast_stats_to_expected(&self, column_id: ColumnId, values: ArrayRef) -> Option<ArrayRef> {
+        // Without expected metadata the file metadata is the expected one,
+        // so there is nothing to cast toward.
+        let Some(expected_metadata) = self.expected_metadata.as_ref() else {
+            return Some(values);
+        };
+        let expected_col = expected_metadata.column_by_id(column_id)?;
+        let file_col = self.read_format.metadata().column_by_id(column_id)?;
+        if expected_col.column_schema.data_type == file_col.column_schema.data_type {
+            return Some(values);
+        }
+        let file_arrow_type = file_col.column_schema.data_type.as_arrow_type();
+        let expected_arrow_type = expected_col.column_schema.data_type.as_arrow_type();
+        let values = if values.data_type() == &file_arrow_type {
+            values
+        } else {
+            datatypes::arrow::compute::cast(&values, &file_arrow_type).ok()?
+        };
+        datatypes::arrow::compute::cast(&values, &expected_arrow_type).ok()
+    }
+
     /// Returns the default value of all row groups for `column` according to the metadata.
     fn compat_default_value(&self, column: &str) -> Option<ArrayRef> {
         let metadata = self.expected_metadata.as_ref()?;
@@ -114,7 +151,7 @@ impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_,
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         match self.read_format.min_values(self.row_groups, column_id) {
-            StatValues::Values(values) => Some(values),
+            StatValues::Values(values) => self.cast_stats_to_expected(column_id, values),
             StatValues::NoColumn => self.compat_default_value(&column.name),
             StatValues::NoStats => None,
         }
@@ -123,7 +160,7 @@ impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_,
     fn max_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         match self.read_format.max_values(self.row_groups, column_id) {
-            StatValues::Values(values) => Some(values),
+            StatValues::Values(values) => self.cast_stats_to_expected(column_id, values),
             StatValues::NoColumn => self.compat_default_value(&column.name),
             StatValues::NoStats => None,
         }

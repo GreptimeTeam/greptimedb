@@ -38,6 +38,7 @@ use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
 use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
+use datatypes::error::time_index_not_widening_error;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
@@ -778,7 +779,10 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
-    /// Change columns datatype form the region, only fields are allowed to change.
+    /// Change columns datatype of the region. Field columns can change to any
+    /// Arrow-castable type; the time index column only supports widening its
+    /// timestamp unit (e.g. `TimestampMillisecond -> TimestampMicrosecond`),
+    /// which is lossless for values that fit the target unit's `i64` range.
     ModifyColumnTypes {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
@@ -1394,34 +1398,73 @@ impl ModifyColumnType {
                 err: format!("column {} not found", self.column_name),
             })?;
 
-        ensure!(
-            matches!(column_meta.semantic_type, SemanticType::Field),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: "'timestamp' or 'tag' column cannot change type".to_string()
+        match column_meta.semantic_type {
+            SemanticType::Field => {
+                ensure!(
+                    column_meta
+                        .column_schema
+                        .data_type
+                        .can_arrow_type_cast_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: format!(
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            self.column_name, self.target_type
+                        ),
+                    }
+                );
             }
-        );
-        ensure!(
-            column_meta
-                .column_schema
-                .data_type
-                .can_arrow_type_cast_to(&self.target_type),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "column '{}' cannot be cast automatically to type '{}'",
-                    self.column_name, self.target_type
-                ),
+            // The time index column only supports widening timestamp unit changes
+            // (e.g. `TimestampMillisecond -> TimestampMicrosecond`), which are
+            // lossless. Readers cast historical data in old SSTs to the new unit
+            // on the fly. Narrowing changes truncate values and are rejected.
+            //
+            // A same-type change is accepted here so that a retried alter
+            // procedure (region already altered before a previous attempt
+            // failed) validates and is skipped as a no-op by `need_alter`,
+            // instead of failing the retry forever.
+            SemanticType::Timestamp => {
+                ensure!(
+                    column_meta.column_schema.data_type == self.target_type
+                        || column_meta
+                            .column_schema
+                            .data_type
+                            .is_timestamp_unit_widening_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: time_index_not_widening_error(
+                            &column_meta.column_schema.name,
+                            &column_meta.column_schema.data_type,
+                            &self.target_type,
+                        ),
+                    }
+                );
             }
-        );
+            SemanticType::Tag => {
+                return InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "tag column '{}' cannot change type, it is part of the primary key",
+                        self.column_name
+                    ),
+                }
+                .fail();
+            }
+        }
 
         Ok(())
     }
 
     /// Returns true if no column's datatype to change to the region.
+    ///
+    /// A column whose data type already equals the target type needs no
+    /// alteration. This keeps a retried alter (e.g. a procedure resubmitting
+    /// after the region was already altered) a successful no-op.
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
-        metadata.column_by_name(&self.column_name).is_some()
+        metadata
+            .column_by_name(&self.column_name)
+            .is_some_and(|column| column.column_schema.data_type != self.target_type)
     }
 }
 
@@ -2330,6 +2373,57 @@ mod tests {
             columns: vec![ModifyColumnType {
                 column_name: "ts".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        // Time index unit widening is allowed.
+        let kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+
+        // Narrowing the time index unit is rejected.
+        let metadata_nano = {
+            let mut metadata = new_metadata();
+            for col in metadata.column_metadatas.iter_mut() {
+                if col.column_schema.name == "ts" {
+                    col.column_schema.data_type = ConcreteDataType::timestamp_nanosecond_datatype();
+                }
+            }
+            metadata
+        };
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        }
+        .validate(&metadata_nano)
+        .unwrap_err();
+
+        // Changing the time index to the same type is a validated no-op, so a
+        // retried alter procedure (region already altered) succeeds and is
+        // skipped by `need_alter`.
+        let same_type = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        };
+        same_type.validate(&metadata).unwrap();
+        assert!(!same_type.need_alter(&metadata));
+
+        // Changing the time index to a non-timestamp type is rejected.
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
             }],
         }
         .validate(&metadata)

@@ -162,6 +162,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
             region_id, version.metadata, version.options, request,
         );
+        if let Err(e) = check_time_index_widening_overflow(region.region_id, &version, &request) {
+            sender.send(Err(e));
+            return;
+        }
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
@@ -456,6 +460,58 @@ fn log_option_update<T: std::fmt::Debug>(
         "Update region {}: {}, previous: {:?}, new: {:?}",
         option_name, region_id, prev_value, cur_value
     );
+}
+
+/// Checks that widening the time index unit does not overflow existing data.
+///
+/// The region's memtables are empty when this runs (they are flushed before an
+/// alter), so all data lives in SSTs and each file's time range bounds the
+/// values it stores. Widening casts multiply values by the unit factor, and
+/// values that no longer fit `i64` would be cast to NULL by Arrow — while the
+/// time index column is NOT NULL. So reject the alter if any file's time
+/// range overflows the target unit.
+fn check_time_index_widening_overflow(
+    region_id: RegionId,
+    version: &VersionRef,
+    request: &RegionAlterRequest,
+) -> Result<()> {
+    let AlterKind::ModifyColumnTypes { columns } = &request.kind else {
+        return Ok(());
+    };
+    let time_index = version.metadata.time_index_column();
+    for column in columns {
+        if column.column_name != time_index.column_schema.name {
+            continue;
+        }
+        // Non-timestamp targets and narrowing changes are rejected by
+        // `RegionAlterRequest::validate` before the request reaches here.
+        let Some(target_unit) = column.target_type.as_timestamp().map(|t| t.unit()) else {
+            continue;
+        };
+        for level in version.ssts.levels() {
+            for file in level.files.values() {
+                let (start, end) = file.time_range();
+                if start.convert_to(target_unit).is_none() || end.convert_to(target_unit).is_none()
+                {
+                    return store_api::metadata::InvalidRegionRequestSnafu {
+                        region_id,
+                        err: format!(
+                            "cannot widen time index column '{}' to {:?}: data in file {} \
+                             spans [{}, {}] which overflows the target unit's i64 range",
+                            column.column_name,
+                            target_unit,
+                            file.file_id(),
+                            start.to_iso8601_string(),
+                            end.to_iso8601_string(),
+                        ),
+                    }
+                    .fail()
+                    .context(InvalidRegionRequestSnafu);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Used to determine whether we can build index directly after schema change.
