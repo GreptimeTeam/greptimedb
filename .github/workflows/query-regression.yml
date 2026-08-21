@@ -193,6 +193,37 @@ jobs:
               "${{ vars.ALIYUN_ECS_REGION_ID }}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Start machine telemetry sampler
+        shell: bash
+        # The ECS instance is deleted when the run ends, so machine state must
+        # be captured while the job runs. A background sampler appends load,
+        # memory, disk, and top-memory processes to a log every 30s; the
+        # "Dump machine telemetry" step (if: always()) prints and uploads it.
+        # Note: when the job is *cancelled*, even always() steps are killed —
+        # telemetry covers failures, not cancellations.
+        run: |
+          set -euo pipefail
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          {
+            echo "== baseline $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+            nproc
+            free -h
+            df -h / /home/runner
+          } >> "${log}"
+          nohup bash -c "
+            while true; do
+              {
+                date -u '+== %Y-%m-%dT%H:%M:%SZ =='
+                uptime
+                free -m
+                df -h / /home/runner
+                ps -eo pid,comm,%mem,%cpu --sort=-%mem | head -6
+              } >> '${log}' 2>&1
+              sleep 30
+            done
+          " >/dev/null 2>&1 &
+          echo "Telemetry sampler started (pid $!), logging to ${log}"
+
       - name: Checkout base source
         uses: actions/checkout@v4
         with:
@@ -722,6 +753,7 @@ jobs:
             query-regression-work/**/logs/**
             query-regression-work/**/otelgen/**
             query-regression-summary.md
+            machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
 
@@ -775,6 +807,23 @@ jobs:
           else
             printf 'sccache is unavailable (report only)\n' >&2
           fi
+
+      - name: Dump machine telemetry
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          if [[ -f "${log}" ]]; then
+            echo "::group::Machine telemetry (last 200 lines)"
+            tail -n 200 "${log}"
+            echo "::endgroup::"
+          else
+            echo "No telemetry log found (sampler never started?)"
+          fi
+          echo "::group::dmesg tail (OOM killer records)"
+          sudo dmesg -T 2>/dev/null | tail -n 50 || dmesg -T 2>/dev/null | tail -n 50 || \
+            echo "dmesg unavailable without root"
+          echo "::endgroup::"
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}
