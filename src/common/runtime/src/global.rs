@@ -27,6 +27,9 @@ use crate::{Builder, JoinHandle, Runtime};
 const GLOBAL_WORKERS: usize = 8;
 const COMPACT_WORKERS: usize = 4;
 const HB_WORKERS: usize = 2;
+/// The minimum number of worker threads for runtimes sized by CPU count.
+/// A single-threaded runtime can easily deadlock in async code.
+const MIN_RUNTIME_THREADS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -44,16 +47,22 @@ pub struct RuntimeOptions {
     pub ingest_rt_size: usize,
 }
 
-impl Default for RuntimeOptions {
-    fn default() -> Self {
-        let cpus = num_cpus::get();
+impl RuntimeOptions {
+    fn with_num_cpus(cpus: usize) -> Self {
+        let cpus = usize::max(cpus, MIN_RUNTIME_THREADS);
         Self {
             global_rt_size: cpus,
-            compact_rt_size: usize::max(cpus / 2, 1),
-            compact_rt_max_blocking_threads: usize::max(cpus / 2, 1),
-            query_rt_size: usize::max(cpus.saturating_sub(1), 1),
+            compact_rt_size: usize::max(cpus / 2, MIN_RUNTIME_THREADS),
+            compact_rt_max_blocking_threads: usize::max(cpus / 2, MIN_RUNTIME_THREADS),
+            query_rt_size: usize::max(cpus.saturating_sub(1), MIN_RUNTIME_THREADS),
             ingest_rt_size: cpus,
         }
+    }
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self::with_num_cpus(num_cpus::get())
     }
 }
 
@@ -287,16 +296,54 @@ mod tests {
     #[test]
     fn test_datanode_runtime_options_default() {
         let options = RuntimeOptions::default();
-        let cpus = num_cpus::get();
+        let cpus = usize::max(num_cpus::get(), MIN_RUNTIME_THREADS);
 
         assert_eq!(cpus, options.global_rt_size);
-        assert_eq!(usize::max(cpus / 2, 1), options.compact_rt_size);
         assert_eq!(
-            usize::max(cpus / 2, 1),
+            usize::max(cpus / 2, MIN_RUNTIME_THREADS),
+            options.compact_rt_size
+        );
+        assert_eq!(
+            usize::max(cpus / 2, MIN_RUNTIME_THREADS),
             options.compact_rt_max_blocking_threads
         );
-        assert_eq!(usize::max(cpus.saturating_sub(1), 1), options.query_rt_size);
+        assert_eq!(
+            usize::max(cpus.saturating_sub(1), MIN_RUNTIME_THREADS),
+            options.query_rt_size
+        );
         assert_eq!(cpus, options.ingest_rt_size);
+    }
+
+    #[test]
+    fn test_runtime_options_min_threads() {
+        for cpus in [0, 1, 2] {
+            let options = RuntimeOptions::with_num_cpus(cpus);
+            assert!(
+                options.global_rt_size >= MIN_RUNTIME_THREADS,
+                "global_rt_size {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
+                options.global_rt_size
+            );
+            assert!(
+                options.compact_rt_size >= MIN_RUNTIME_THREADS,
+                "compact_rt_size {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
+                options.compact_rt_size
+            );
+            assert!(
+                options.compact_rt_max_blocking_threads >= MIN_RUNTIME_THREADS,
+                "compact_rt_max_blocking_threads {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
+                options.compact_rt_max_blocking_threads
+            );
+            assert!(
+                options.query_rt_size >= MIN_RUNTIME_THREADS,
+                "query_rt_size {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
+                options.query_rt_size
+            );
+            assert!(
+                options.ingest_rt_size >= MIN_RUNTIME_THREADS,
+                "ingest_rt_size {} < {MIN_RUNTIME_THREADS} with {cpus} cpus",
+                options.ingest_rt_size
+            );
+        }
     }
 
     #[test]

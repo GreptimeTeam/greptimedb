@@ -8004,6 +8004,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         ),
         "unexpected partial success body: {body:?}"
     );
+    // The rejection must name the column, the failing value and the target type,
+    // otherwise locating the bad attribute needs a collector-side capture.
+    assert!(
+        partial_success.error_message.contains(
+            "failed to coerce trace column 'span_attributes.attr_int' in table \
+             'trace_type_abort' from String(\"not_a_number\") to Int64"
+        ),
+        "unexpected partial success body: {body:?}"
+    );
 
     validate_data(
         "otlp_traces_v1_type_abort_rows",

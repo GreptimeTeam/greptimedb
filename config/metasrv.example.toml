@@ -92,7 +92,7 @@ node_max_idle_time = "24hours"
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
 ## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)

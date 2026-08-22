@@ -770,7 +770,6 @@ mod tests {
 
     use super::*;
     use crate::prom_remote_write::validation::PromValidationMode;
-    use crate::prom_store::Metrics;
     use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
@@ -966,10 +965,6 @@ mod tests {
         ) -> Result<PromStoreResponse> {
             unimplemented!()
         }
-
-        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
-            unimplemented!()
-        }
     }
 
     #[tokio::test]
@@ -1065,10 +1060,6 @@ mod tests {
             _request: ReadRequest,
             _ctx: QueryContextRef,
         ) -> Result<PromStoreResponse> {
-            unimplemented!()
-        }
-
-        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
             unimplemented!()
         }
     }

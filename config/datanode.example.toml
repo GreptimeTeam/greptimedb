@@ -84,10 +84,10 @@ watch = false
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 ## The number of threads to execute datanode query operations.
-## Defaults to max(num_cpus - 1, 1).
+## Defaults to max(num_cpus - 1, 2).
 #+ query_rt_size = 7
 ## The number of threads to execute datanode ingestion operations.
 #+ ingest_rt_size = 8

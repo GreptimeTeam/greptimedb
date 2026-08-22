@@ -248,8 +248,6 @@ impl StartCommand {
     }
 
     async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -257,6 +255,8 @@ impl StartCommand {
             opts.component.node_id.map(|x| x.to_string()),
             None,
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
