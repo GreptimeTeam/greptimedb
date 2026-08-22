@@ -28,8 +28,8 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{ResourceMetrics, metric};
 
-use super::{INSTANCE_KEY, JOB_KEY, scalar_value_string, service_identity};
 use crate::error::Result;
+use crate::otlp::metrics::{INSTANCE_KEY, JOB_KEY, scalar_value_string, service_identity};
 use crate::otlp::trace::{KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
 use crate::row_writer::{self, MultiTableData};
 
