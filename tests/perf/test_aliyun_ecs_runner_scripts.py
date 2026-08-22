@@ -97,6 +97,23 @@ class ProvisionUserDataTest(unittest.TestCase):
             self.assertIn(f'"{destination}"', script)
         self.assertIn("systemctl start ephemeral-github-runner.service", script)
 
+    def test_user_data_enables_swap_and_masks_oomd(self) -> None:
+        for cache_disk_id in ("d-bp1abc-def", None):
+            script = provision.render_user_data(
+                cache_disk_id=cache_disk_id,
+                runner_name="qreg-ecs-12345",
+                runner_label="query-regression-ecs-12345",
+                runner_token="TOKEN",
+                repo="GreptimeTeam/greptimedb",
+            )
+            with self.subTest(cache_disk_id=cache_disk_id):
+                self.assertIn("systemctl mask systemd-oomd.socket systemd-oomd.service", script)
+                self.assertIn(f'fallocate --length {provision.SWAP_SIZE_GIB}G "{provision.SWAP_FILE}"', script)
+                self.assertIn(f'swapon "{provision.SWAP_FILE}"', script)
+                self.assertIn("sysctl --write vm.swappiness=10", script)
+                self.assertIn("OOMScoreAdjust=-500", script)
+                self.assertLess(script.index("swapon"), script.index("systemctl start ephemeral-github-runner.service"))
+
 
 class TeardownExpiryTest(unittest.TestCase):
     NOW = datetime(2026, 8, 17, 6, 0, tzinfo=timezone.utc)

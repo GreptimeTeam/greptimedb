@@ -37,7 +37,7 @@ Configuration lives in repository variables/secrets:
 | secret | `ALICLOUD_ECS_ACCESS_KEY_ID` / `ALICLOUD_ECS_ACCESS_KEY_SECRET` | RAM user scoped to ECS RunInstances/DeleteInstances/AttachDisk/Describe*/CreateImage/RunCommand. Used only by provision/teardown jobs on `ubuntu-latest`; never reaches the ECS instance. |
 | secret | `GH_PERSONAL_ACCESS_TOKEN` | Creates the short-lived runner registration token (shared with the jsonbench EC2 path). |
 | vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone, which must match the cache disk's zone. |
-| vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family, e.g. `ecs.g8i.2xlarge`. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
+| vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family. Prefer 32 GiB (e.g. `ecs.g8i.2xlarge`); `ecs.c9i.2xlarge` is 8c16g and nightly thin-LTO of greptime peaks above that. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
 | vars | `QUERY_REGRESSION_CACHE_DISK_ID` | Optional. Unset/empty: no retained disk, caches are cold every run. Set to a retained ESSD disk id (~40Gi is enough from observed usage) for warm cross-run caches. ESSD cannot be shrunk, only recreated — update this variable with the new disk id afterwards. |
 
@@ -49,6 +49,16 @@ the system disk. The instance is created with `DeleteWithInstance=false` for
 the data disk, so deleting the instance detaches and retains it. To rebuild
 the cache from scratch, delete or reformat the disk; the next provision
 formats an unformatted disk automatically.
+
+The system disk is 50 GiB, which covers the image, a 16 GiB swapfile, and
+the checkout. Attach `QUERY_REGRESSION_CACHE_DISK_ID` for cold nightly
+builds; without it the target dir shares this disk and may ENOSPC.
+cloud-init masks `systemd-oomd`, creates `/swapfile`, and sets
+`OOMScoreAdjust=-500` on the runner unit: Ubuntu 24.04 otherwise
+SIGTERM-s the whole runner cgroup under memory pressure, which GitHub
+reports as `The operation was canceled` with no telemetry. Swap is a
+safety net for 16 GiB types, not a substitute for 32 GiB; linking on
+swap is slow.
 
 Trust model on the ECS path: the instance receives only the one-hour runner
 registration token via user data and holds no cloud credentials; the Aliyun

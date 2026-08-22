@@ -71,6 +71,15 @@ DISK_WAIT_TIMEOUT_SECONDS = 20 * 60
 RUNNER_ONLINE_TIMEOUT_SECONDS = 10 * 60
 POLL_INTERVAL_SECONDS = 5
 
+# Nightly thin-LTO of greptime peaks above ecs.c9i.2xlarge's 16 GiB. A swap
+# file plus masking systemd-oomd lets the kernel reclaim rustc pages instead
+# of SIGTERM-ing the runner service cgroup (GitHub then reports the step as
+# "The operation was canceled"). Sized to match that 16 GiB instance; a
+# 32 GiB type still benefits as a safety net. Lives on the system disk so it
+# does not contend with the retained cache disk's cargo target.
+SWAP_FILE = "/swapfile"
+SWAP_SIZE_GIB = 16
+
 
 @dataclass(frozen=True)
 class ProvisionConfig:
@@ -172,10 +181,25 @@ chown -R {runner_uid}:{runner_gid} /home/runner"""
 # deleted with the instance, and every run compiles cold.
 mkdir -p {destinations}
 chown -R {runner_uid}:{runner_gid} /home/runner"""
+    swap_setup = f"""# Mask systemd-oomd before enabling swap: Ubuntu 24.04 kills the whole
+# service cgroup on PSI pressure, and swap thrashing looks like pressure.
+systemctl disable --now systemd-oomd.socket systemd-oomd.service || true
+systemctl mask systemd-oomd.socket systemd-oomd.service || true
+if [[ ! -f "{SWAP_FILE}" ]]; then
+  fallocate --length {SWAP_SIZE_GIB}G "{SWAP_FILE}"
+  chmod 600 "{SWAP_FILE}"
+  mkswap "{SWAP_FILE}"
+fi
+swapon "{SWAP_FILE}"
+sysctl --write vm.swappiness=10
+swapon --show
+free --human"""
     return f"""#!/bin/bash
 set -euo pipefail
 
 {cache_setup}
+
+{swap_setup}
 
 cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
@@ -197,6 +221,13 @@ cat > /etc/systemd/system/ephemeral-github-runner.service.d/console.conf <<'CONF
 [Service]
 StandardOutput=journal+console
 StandardError=journal+console
+CONFEOF
+# If the kernel OOM killer still fires, prefer a rustc child over the
+# runner listener/worker so GitHub sees a compile failure instead of a
+# cancelled step with no telemetry.
+cat > /etc/systemd/system/ephemeral-github-runner.service.d/oom.conf <<'CONFEOF'
+[Service]
+OOMScoreAdjust=-500
 CONFEOF
 systemctl daemon-reload
 systemctl start ephemeral-github-runner.service
@@ -405,12 +436,13 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        # Holds the image (~12G), the source checkout, the base+candidate
-        # cluster data homes, AND — with no retained cache disk attached —
-        # the build caches themselves (target dir, cargo registry, sccache).
-        # 40G reflects observed usage; if a build ever dies with ENOSPC this
-        # is the knob to raise. Deleted with the instance.
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="40"),
+        # Holds the image (~12G), the 16G swapfile, the source checkout, the
+        # base+candidate cluster data homes, AND — with no retained cache
+        # disk attached — the build caches (target dir, cargo registry,
+        # sccache). 50G fits swap plus a warm/cached run; a cold nightly
+        # build without the cache disk may still ENOSPC — raise this or
+        # attach QUERY_REGRESSION_CACHE_DISK_ID. Deleted with the instance.
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="50"),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),
