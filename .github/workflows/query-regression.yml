@@ -511,7 +511,7 @@ jobs:
             printf 'Refusing unexpected RUSTC_WRAPPER: %s\n' "${RUSTC_WRAPPER}" >&2
             exit 1
           }
-          [[ "${SCCACHE_CACHE_SIZE}" == "40G" ]] || {
+          [[ "${SCCACHE_CACHE_SIZE}" == "10G" ]] || {
             printf 'Refusing unexpected SCCACHE_CACHE_SIZE: %s\n' "${SCCACHE_CACHE_SIZE}" >&2
             exit 1
           }
