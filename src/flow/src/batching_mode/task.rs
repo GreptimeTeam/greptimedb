@@ -177,7 +177,7 @@ pub struct PlanInfo {
     pub coverage: QueryCoverage,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum QueryCoverage {
     /// Explicit full-query snapshot coverage, e.g. TQL or evaluation-interval
     /// SQL flows whose plan shape cannot be safely dirty-window pruned. This
@@ -227,12 +227,26 @@ pub enum DirtyRestore {
 
 struct ExecuteOnceOutcome {
     new_query: Option<PlanInfo>,
+    /// Coverage of the generated query, when one was generated. The Phase 0
+    /// tick uses this to decide whether another child query may follow.
+    coverage: Option<QueryCoverage>,
     /// Execution result of the generated insert plan.
     ///
     /// `Ok(Some((affected_rows, elapsed)))` means a query was executed.
     /// `Ok(None)` means no query was generated because there was no dirty signal.
     /// `Err(_)` means plan generation or execution failed.
     result: Result<Option<(usize, Duration)>, Error>,
+}
+
+/// Whether a successful child query is scoped dirty-window work that a Phase 0
+/// tick may continue with. Unfiltered full snapshots and incremental delta
+/// queries execute at most once per tick: repeating them could re-run the same
+/// source range or advance checkpoints multiple times.
+fn coverage_allows_phase0_continuation(coverage: &QueryCoverage) -> bool {
+    matches!(
+        coverage,
+        QueryCoverage::ScopedBaseRepair | QueryCoverage::FencedRepairChunk { .. }
+    )
 }
 
 impl BatchingTask {
@@ -427,6 +441,158 @@ impl BatchingTask {
             .await
     }
 
+    /// Number of child queries allowed per tick in Phase 0 batching mode.
+    /// The default `3` enables the strategy; `1` is the official opt-out that
+    /// restores the legacy single-query-per-tick behavior; `0` is treated as
+    /// `1` defensively (a `1`-compatible alias).
+    fn max_queries_per_tick(&self) -> usize {
+        self.config
+            .batch_opts
+            .experimental_max_queries_per_tick
+            .max(1)
+    }
+
+    /// Executes one tick under `execution_lock` and keeps the generated query
+    /// context for the background loop's error logging/backoff.
+    ///
+    /// With Phase 0 batching enabled (`experimental_max_queries_per_tick > 1`,
+    /// the default is `3`) this serially drains up to N independent short-range
+    /// child queries, each generated with `max_window_cnt = Some(1)` so its
+    /// filter covers at most one `window_size`-sized dirty window, and each
+    /// consuming the newest dirty window first. It stops early on the first
+    /// no-dirty (`Ok(None)`) or error outcome, or when N children have run or a
+    /// shutdown signal arrives. Subsequent child queries continue only while the
+    /// previous successful child was scoped dirty-window work
+    /// (`ScopedBaseRepair`/`FencedRepairChunk`); unfiltered full snapshots and
+    /// incremental delta queries execute at most once per tick. Each successful
+    /// child applies its own query result/checkpoint via
+    /// `execute_logical_plan_unlocked`; a failed child is restored through the
+    /// existing `handle_executed_query_failure` only, and prior successful
+    /// children are never restored. The tick outcome aggregates affected rows
+    /// and elapsed durations across children.
+    ///
+    /// With `N == 1` (the official opt-out) this delegates to the existing
+    /// single-query execution, so the legacy behavior is exactly restored.
+    async fn execute_tick_serialized_with_outcome(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        fallback_max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        let _execution_guard = self.execution_lock.lock().await;
+        self.execute_tick_unlocked(engine, frontend_client, fallback_max_window_cnt)
+            .await
+    }
+
+    /// Serial multi-query tick execution. Caller must hold `execution_lock`.
+    async fn execute_tick_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        fallback_max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        let max_queries = self.max_queries_per_tick();
+        if max_queries == 1 {
+            return self
+                .execute_once_unlocked(engine, frontend_client, fallback_max_window_cnt)
+                .await;
+        }
+
+        let flow_id_str = self.config.flow_id.to_string();
+        let mut total_rows = 0usize;
+        let mut total_elapsed = Duration::default();
+        let mut child_index = 0usize;
+        loop {
+            if child_index >= max_queries || self.is_shutdown_signaled() {
+                break;
+            }
+            child_index += 1;
+            debug!(
+                "Flow {}: Phase 0 tick executing child query {child_index}/{max_queries}",
+                flow_id_str
+            );
+            let outcome = self
+                .execute_once_unlocked(engine, frontend_client, Some(1))
+                .await;
+            match outcome.result {
+                Ok(Some((rows, elapsed))) => {
+                    total_rows += rows;
+                    total_elapsed += elapsed;
+                    let can_continue = outcome
+                        .coverage
+                        .as_ref()
+                        .map(coverage_allows_phase0_continuation)
+                        .unwrap_or(false);
+                    if !can_continue {
+                        debug!(
+                            "Flow {}: Phase 0 tick stopped at child {child_index}/{max_queries}: child executed non-scoped work (coverage={:?}), which runs at most once per tick",
+                            flow_id_str, outcome.coverage
+                        );
+                        return ExecuteOnceOutcome {
+                            new_query: outcome.new_query,
+                            coverage: outcome.coverage,
+                            result: Ok(Some((total_rows, total_elapsed))),
+                        };
+                    }
+                }
+                Ok(None) => {
+                    debug!(
+                        "Flow {}: Phase 0 tick stopped at child {child_index}/{max_queries}: no dirty windows remain",
+                        flow_id_str
+                    );
+                    return if child_index == 1 {
+                        // No dirty signal at all: preserve the existing
+                        // no-query outcome for the caller.
+                        ExecuteOnceOutcome {
+                            new_query: None,
+                            coverage: None,
+                            result: Ok(None),
+                        }
+                    } else {
+                        // At least one child succeeded; report the drained part.
+                        ExecuteOnceOutcome {
+                            new_query: None,
+                            coverage: None,
+                            result: Ok(Some((total_rows, total_elapsed))),
+                        }
+                    };
+                }
+                Err(err) => {
+                    debug!(
+                        "Flow {}: Phase 0 tick stopped at child {child_index}/{max_queries}: error",
+                        flow_id_str
+                    );
+                    // The failing child's windows were restored by the existing
+                    // `handle_executed_query_failure` inside
+                    // `execute_once_unlocked`; prior successful children are
+                    // intentionally not restored.
+                    return ExecuteOnceOutcome {
+                        new_query: outcome.new_query,
+                        coverage: outcome.coverage,
+                        result: Err(err),
+                    };
+                }
+            }
+        }
+        debug!(
+            "Flow {}: Phase 0 tick finished after {child_index}/{max_queries} child queries",
+            flow_id_str
+        );
+        if child_index == 0 {
+            ExecuteOnceOutcome {
+                new_query: None,
+                coverage: None,
+                result: Ok(None),
+            }
+        } else {
+            ExecuteOnceOutcome {
+                new_query: None,
+                coverage: None,
+                result: Ok(Some((total_rows, total_elapsed))),
+            }
+        }
+    }
+
     /// Executes one flow evaluation. Caller must hold `execution_lock`.
     async fn execute_once_unlocked(
         &self,
@@ -439,6 +605,7 @@ impl BatchingTask {
             Err(err) => {
                 return ExecuteOnceOutcome {
                     new_query: None,
+                    coverage: None,
                     result: Err(err),
                 };
             }
@@ -446,6 +613,7 @@ impl BatchingTask {
 
         if let Some(new_query) = new_query {
             debug!("Generate new query: {}", new_query.plan);
+            let coverage = new_query.coverage.clone();
             let res = self
                 .execute_logical_plan_unlocked(
                     frontend_client,
@@ -459,12 +627,14 @@ impl BatchingTask {
             }
             ExecuteOnceOutcome {
                 new_query: Some(new_query),
+                coverage: Some(coverage),
                 result: res,
             }
         } else {
             debug!("Generate no query");
             ExecuteOnceOutcome {
                 new_query: None,
+                coverage: None,
                 result: Ok(None),
             }
         }
@@ -1158,15 +1328,47 @@ impl BatchingTask {
 
             let min_refresh = self.config.batch_opts.experimental_min_refresh_duration;
 
-            let outcome = self
-                .execute_once_serialized_with_outcome(&engine, &frontend_client, max_window_cnt)
-                .await;
+            // Phase 0 batching (N > 1) serially drains up to N short-range
+            // child queries under one `execution_lock` without sleeping between
+            // them; otherwise keep the existing single-query adaptive behavior.
+            let outcome = if self.max_queries_per_tick() > 1 {
+                self.execute_tick_serialized_with_outcome(&engine, &frontend_client, None)
+                    .await
+            } else {
+                self.execute_once_serialized_with_outcome(&engine, &frontend_client, max_window_cnt)
+                    .await
+            };
 
             match outcome.result {
                 Ok(Some(_)) => {
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
+
+                    // Phase 0 batching (N > 1): when scoped dirty work still
+                    // remains after a successful tick — live dirty windows or
+                    // pending fenced-repair windows — start the next tick
+                    // immediately instead of sleeping, so a backlog drains as
+                    // fast as the per-tick child budget allows. `Ok(None)` and
+                    // `Err` keep the existing sleep/backoff below. The EVAL
+                    // scheduled loop is unaffected (it never enters this
+                    // adaptive path).
+                    if self.max_queries_per_tick() > 1 {
+                        let has_backlog = {
+                            let state = self.state.read().unwrap();
+                            !state.dirty_time_windows.is_empty()
+                                || state
+                                    .pending_fenced_repair()
+                                    .is_some_and(|repair| !repair.pending_windows().is_empty())
+                        };
+                        if has_backlog {
+                            debug!(
+                                "Flow id = {:?}, Phase 0 backlog still present after tick, starting next tick immediately",
+                                self.config.flow_id
+                            );
+                            continue;
+                        }
+                    }
 
                     let sleep_until = {
                         let state = self.state.write().unwrap();
@@ -1243,6 +1445,18 @@ impl BatchingTask {
     ) -> ExecuteOnceOutcome {
         let _execution_guard = self.execution_lock.lock().await;
 
+        self.execute_at_scheduled_time_unlocked(engine, frontend_client, scheduled_time_secs)
+            .await
+    }
+
+    /// Caller must hold `execution_lock`. The scheduled time extension is
+    /// installed once and retained for all child queries in this tick.
+    async fn execute_at_scheduled_time_unlocked(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+        scheduled_time_secs: i64,
+    ) -> ExecuteOnceOutcome {
         struct QueryContextRestoreGuard {
             state: Arc<RwLock<TaskState>>,
             old_ctx: Option<QueryContextRef>,
@@ -1278,7 +1492,7 @@ impl BatchingTask {
         };
 
         let outcome = self
-            .execute_once_unlocked(engine, frontend_client, None)
+            .execute_tick_unlocked(engine, frontend_client, None)
             .await;
 
         // Restore while still holding `execution_lock` so no future manual

@@ -55,6 +55,25 @@ pub struct BatchingModeOptions {
     pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
     pub experimental_time_window_merge_threshold: usize,
+    /// Maximum number of independent short-range child queries executed
+    /// serially within one flow tick (Phase 0 batching scheduling).
+    ///
+    /// `3` (the default) enables the Phase 0 short-range strategy: one tick
+    /// splits into up to `N` child queries, each scoped by
+    /// `max_window_cnt = Some(1)` so its generated filter covers at most one
+    /// `window_size`-sized dirty window, executed serially under one
+    /// `execution_lock`. Child queries take the newest dirty windows first,
+    /// and when a backlog still remains after a successful tick the next tick
+    /// starts immediately (no sleep). Subsequent child queries continue only
+    /// for scoped dirty-window work (`ScopedBaseRepair`/`FencedRepairChunk`);
+    /// unfiltered full-snapshot and incremental-delta queries execute at most
+    /// once per tick.
+    ///
+    /// `1` is the official opt-out: it restores the legacy single-query-per-
+    /// tick behavior exactly (one query per tick using the existing
+    /// max_filter/merge behavior, oldest windows first). `0` is treated as `1`
+    /// defensively (a `1`-compatible alias).
+    pub experimental_max_queries_per_tick: usize,
     /// Whether to enable experimental flow incremental source reads.
     ///
     /// When disabled, batching flows always execute full-snapshot queries.
@@ -76,6 +95,7 @@ impl Default for BatchingModeOptions {
             experimental_frontend_scan_timeout: Duration::from_secs(30),
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
+            experimental_max_queries_per_tick: 3,
             experimental_enable_incremental_read: false,
             read_preference: Default::default(),
             frontend_tls: None,
