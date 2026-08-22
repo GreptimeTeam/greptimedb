@@ -19,7 +19,7 @@
 //! with the binary, not an operator-editable configuration surface; explicit
 //! `greptime.semantic.entity.*` declarations always override it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -49,9 +49,14 @@ pub struct VirtualDstCandidate {
 #[serde(deny_unknown_fields)]
 pub struct ImplicitEntity {
     pub entity: String,
-    /// Identifying label columns; every one must exist on the table for the
-    /// declaration to apply.
+    /// Identifying label columns, ordered broad to narrow; every one must
+    /// exist on the table for the declaration to apply.
     pub id: Vec<String>,
+    /// Column qualifying `id[0]` as `<qualifier>/<id[0]>`, so a source
+    /// carrying the parts separately matches one carrying them pre-composed.
+    /// Skipped when the column is absent or empty.
+    #[serde(default)]
+    pub qualified_by: Option<String>,
     /// Descriptive label columns, filtered to those present (kube-state-metrics
     /// label sets vary across versions).
     #[serde(default)]
@@ -212,6 +217,10 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
             "otlp traces",
             &conventions.otlp_trace_entities,
         )));
+    // An entity type declared with a different number of id columns by two
+    // sources yields ids that can never match, silently splitting one entity
+    // in two.
+    let mut arity = HashMap::new();
     for (table, entities) in per_table {
         let mut seen_types = HashSet::new();
         for implicit in entities {
@@ -233,12 +242,29 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
                     implicit.entity
                 ));
             }
+            if implicit.qualified_by.as_ref().is_some_and(String::is_empty) {
+                return Err(format!(
+                    "entity `{}` of info metric `{table}` has an empty qualified_by",
+                    implicit.entity
+                ));
+            }
             if implicit.descriptive_rest && !implicit.descriptive.is_empty() {
                 return Err(format!(
                     "entity `{}` of info metric `{table}` sets both descriptive and \
                      descriptive_rest",
                     implicit.entity
                 ));
+            }
+            match arity.insert(implicit.entity.as_str(), implicit.id.len()) {
+                Some(previous) if previous != implicit.id.len() => {
+                    return Err(format!(
+                        "entity `{}` is declared with {previous} id columns elsewhere but \
+                         {} for `{table}`",
+                        implicit.entity,
+                        implicit.id.len()
+                    ));
+                }
+                _ => {}
             }
         }
     }
@@ -292,6 +318,15 @@ mod tests {
         );
         // the otel map runs through the same per-table validation
         assert!(err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type"));
+        // ids of a different arity for one type can never match each other
+        assert!(
+            err(
+                "",
+                "a: [{entity: host, id: [x]}]",
+                "b: [{entity: host, id: [x, y]}]"
+            )
+            .contains("id columns")
+        );
         // Unknown YAML keys are rejected, catching typos in the embedded file.
         assert!(
             parse(&broken(

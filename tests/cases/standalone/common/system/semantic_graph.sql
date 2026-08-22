@@ -454,3 +454,55 @@ from greptime_private.semantic_entities
 order by entity_type, entity_id;
 
 drop table otel_resource_info;
+
+-- Cross-signal identity: the same service reaches the graph as trace spans and
+-- as an ingestion-synthesized descriptor. The two sources name their identity
+-- columns differently and only the metric side pre-composes the namespace into
+-- job, so this asserts one entity per service and per instance, sourced from
+-- both tables.
+create table graph_xsignal_traces (
+  "timestamp" timestamp(9) time index,
+  trace_id string,
+  span_id string,
+  parent_span_id string,
+  span_kind string,
+  span_status_code string,
+  service_name string,
+  duration_nano bigint unsigned,
+  "resource_attributes.service.namespace" string,
+  "resource_attributes.service.instance.id" string,
+  primary key (service_name, "resource_attributes.service.namespace",
+    "resource_attributes.service.instance.id")
+) with ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+create table otel_resource_info (
+  greptime_timestamp timestamp(3) time index,
+  job string,
+  instance string,
+  "service.name" string,
+  "service.namespace" string,
+  greptime_value double,
+  primary key (job, instance, "service.name", "service.namespace")
+) with (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.metric.type' = 'info'
+);
+
+insert into graph_xsignal_traces values
+  (now(), 't1', 's1', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'api', 100, 'shop', 'inst-1'),
+  (now(), 't2', 's2', NULL, 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'worker', 100, '', 'inst-2');
+
+insert into otel_resource_info values
+  (now(), 'shop/api', 'inst-1', 'api', 'shop', 1),
+  (now(), 'worker', 'inst-2', 'worker', '', 1);
+
+-- SQLNESS PROTOCOL MYSQL
+select entity_type, entity_id, source_tables
+from greptime_private.semantic_entities
+where entity_type in ('service', 'service.instance')
+order by entity_type, entity_id, source_tables;
+
+drop table graph_xsignal_traces;
+
+drop table otel_resource_info;

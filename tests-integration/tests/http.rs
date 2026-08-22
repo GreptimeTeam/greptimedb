@@ -7236,7 +7236,7 @@ pub async fn test_otlp_traces_v1_entity_graph(store_type: StorageType) {
     let res = send_trace_v1_req(&client, "graph_traces", req, false).await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","resource_attributes.service.instance.id=binst-1,service_name=batch","service","batch","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","service","frontend","part_of"],["service.instance","resource_attributes.service.instance.id=inst-1,service_name=frontend","k8s.pod","uid-9","runs_on"]]"#;
+    let expected = r#"[["service","frontend","service","cart","calls"],["service.instance","batch,binst-1","service","batch","part_of"],["service.instance","frontend,inst-1","service","frontend","part_of"],["service.instance","frontend,inst-1","k8s.pod","uid-9","runs_on"]]"#;
     validate_data(
         "otlp_traces_entity_graph",
         &client,

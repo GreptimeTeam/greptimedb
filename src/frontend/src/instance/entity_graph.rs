@@ -178,6 +178,7 @@ impl EntityGraphProviderImpl {
                         time_index: time_index.clone(),
                         entity_type,
                         id_columns,
+                        id_qualifier: None,
                         descriptive_columns,
                         scope_columns,
                     })
@@ -316,12 +317,19 @@ impl EntityGraphProviderImpl {
                     .cloned()
                     .collect()
             };
+            // A table predating the qualifier column keeps the unqualified
+            // identity rather than losing the declaration.
+            let id_qualifier = implicit
+                .qualified_by
+                .clone()
+                .filter(|c| schema.column_schema_by_name(c).is_some());
             declarations.push(EntityDeclaration {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
                 time_index: time_index.clone(),
                 entity_type: implicit.entity.clone(),
                 id_columns: implicit.id.clone(),
+                id_qualifier,
                 descriptive_columns,
                 scope_columns: vec![],
             });
@@ -852,6 +860,26 @@ mod tests {
             declarations[2].id_columns,
             vec!["service_name", "resource_attributes.service.instance.id"]
         );
+        // No namespace column here, so the identity stays unqualified rather
+        // than the declaration being dropped.
+        assert_eq!(declarations[1].id_qualifier, None);
+
+        let namespaced = table_info(
+            &[
+                "service_name",
+                "resource_attributes.service.namespace",
+                "resource_attributes.service.instance.id",
+            ],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        for declaration in sorted_declarations(&namespaced) {
+            assert_eq!(
+                declaration.id_qualifier.as_deref(),
+                Some("resource_attributes.service.namespace"),
+                "{} must qualify its identity like the metric side's job",
+                declaration.entity_type
+            );
+        }
 
         // Missing uid column: no pod entity synthesized, no name-based guess.
         let no_uid = table_info(

@@ -34,11 +34,15 @@ virtual_dst_candidates:
 # Implicit declarations for greptime_trace_v1 tables; the pod UID bridges
 # trace-side pods onto the kube-state-metrics entities below. host.name and
 # container.name vary by SDK and resource detector, so identity is the id.
+# qualified_by folds the namespace into the service identity the same way the
+# metric sources' `job` already carries it, so both signals name one entity.
 otlp_trace_entities:
   - entity: service
     id: [service_name]
+    qualified_by: resource_attributes.service.namespace
   - entity: service.instance
     id: [service_name, resource_attributes.service.instance.id]
+    qualified_by: resource_attributes.service.namespace
   - entity: host
     id: [resource_attributes.host.id]
     descriptive:
