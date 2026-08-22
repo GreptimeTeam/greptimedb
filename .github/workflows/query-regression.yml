@@ -166,7 +166,9 @@ jobs:
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
       RUSTC_WRAPPER: /usr/local/bin/sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 40G
+      # Must fit on the retained cache disk alongside the target dir and the
+      # cargo registry; 10G for a 40G disk.
+      SCCACHE_CACHE_SIZE: 10G
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"

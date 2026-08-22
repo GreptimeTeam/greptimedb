@@ -83,6 +83,20 @@ class ProvisionUserDataTest(unittest.TestCase):
             base64.b64decode(provision.encode_user_data(script)).decode("utf-8"), script
         )
 
+    def test_user_data_without_cache_disk_uses_plain_directories(self) -> None:
+        script = provision.render_user_data(
+            cache_disk_id=None,
+            runner_name="qreg-ecs-12345",
+            runner_label="query-regression-ecs-12345",
+            runner_token="TOKEN",
+            repo="GreptimeTeam/greptimedb",
+        )
+        self.assertNotIn("DISK_SERIAL", script)
+        self.assertNotIn("mount --bind", script)
+        for destination in provision.CACHE_SUBDIRS.values():
+            self.assertIn(f'"{destination}"', script)
+        self.assertIn("systemctl start ephemeral-github-runner.service", script)
+
 
 class TeardownExpiryTest(unittest.TestCase):
     NOW = datetime(2026, 8, 17, 6, 0, tzinfo=timezone.utc)

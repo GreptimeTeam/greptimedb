@@ -79,10 +79,12 @@ class ProvisionConfig:
     security_group_id: str
     image_id: str
     instance_type: str
-    cache_disk_id: str
     repo: str
     run_id: str
     github_token: str
+    # Optional retained cache disk; without it caches live on the system disk
+    # and every run compiles cold.
+    cache_disk_id: str | None = None
     # Optional resource group; required when the RAM grant is scoped to one.
     resource_group_id: str | None = None
     # Runner identity inside the image; the workflow asserts the same values.
@@ -99,7 +101,7 @@ def runner_label_for_run(run_id: str) -> str:
 
 
 def render_user_data(
-    cache_disk_id: str,
+    cache_disk_id: str | None,
     runner_name: str,
     runner_label: str,
     runner_token: str,
@@ -107,15 +109,19 @@ def render_user_data(
     runner_uid: str = "1001",
     runner_gid: str = "1001",
 ) -> str:
-    """Render the cloud-init shell script for the runner instance."""
-    bind_mounts = "\n".join(
-        f'bind_mount "{CACHE_MOUNT}/{sub}" "{dst}"' for sub, dst in CACHE_SUBDIRS.items()
-    )
-    mkdirs = " ".join(f'"{CACHE_MOUNT}/{sub}"' for sub in CACHE_SUBDIRS)
-    return f"""#!/bin/bash
-set -euo pipefail
+    """Render the cloud-init shell script for the runner instance.
 
-DISK_SERIAL="{cache_disk_id.replace("-", "")}"
+    With a cache disk id, waits for the retained disk, mounts it, and
+    bind-mounts its subdirectories over the runner cache paths. Without one,
+    the cache paths are plain directories on the system disk and every run
+    compiles cold.
+    """
+    if cache_disk_id is not None:
+        bind_mounts = "\n".join(
+            f'bind_mount "{CACHE_MOUNT}/{sub}" "{dst}"' for sub, dst in CACHE_SUBDIRS.items()
+        )
+        mkdirs = " ".join(f'"{CACHE_MOUNT}/{sub}"' for sub in CACHE_SUBDIRS)
+        cache_setup = f"""DISK_SERIAL="{cache_disk_id.replace("-", "")}"
 
 # Wait for the attached cache disk. The guest-visible serial derives from
 # the disk id without dashes, but the derivation differs by disk interface:
@@ -126,7 +132,7 @@ DISK_SERIAL="{cache_disk_id.replace("-", "")}"
 device=""
 echo "Waiting for cache disk with serial ${{DISK_SERIAL}} (guest serial may be truncated/derived)"
 for i in $(seq 1 150); do
-  device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \
+  device="$(lsblk -dpno NAME,SERIAL | awk -v serial="${{DISK_SERIAL}}" \\
     'length($2) > 0 && index(serial, $2) > 0 {{ print $1; exit }}')"
   [[ -n "${{device}}" ]] && break
   if (( i % 15 == 1 )); then
@@ -159,7 +165,17 @@ bind_mount() {{
   mount --bind "${{src}}" "${{dst}}"
 }}
 {bind_mounts}
-chown -R {runner_uid}:{runner_gid} /home/runner
+chown -R {runner_uid}:{runner_gid} /home/runner"""
+    else:
+        destinations = " ".join(f'"{dst}"' for dst in CACHE_SUBDIRS.values())
+        cache_setup = f"""# No retained cache disk configured: caches live on the system disk, are
+# deleted with the instance, and every run compiles cold.
+mkdir -p {destinations}
+chown -R {runner_uid}:{runner_gid} /home/runner"""
+    return f"""#!/bin/bash
+set -euo pipefail
+
+{cache_setup}
 
 cat > /etc/ephemeral-github-runner.env <<'ENVEOF'
 RUNNER_NAME={runner_name}
@@ -377,11 +393,12 @@ def run_instance(client, config: ProvisionConfig, user_data: str) -> str:
         spot_strategy="NoSpot",
         internet_charge_type="PayByTraffic",
         internet_max_bandwidth_out=100,
-        # Sized for the per-run data, not the caches (those live on the
-        # retained disk): the image (~12G), the source checkout, and the
-        # base+candidate cluster data homes (WAL + SSTs, tens of GB for the
-        # routine cases). Deleted with the instance.
-        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="100"),
+        # Holds the image (~12G), the source checkout, the base+candidate
+        # cluster data homes, AND — with no retained cache disk attached —
+        # the build caches themselves (target dir, cargo registry, sccache).
+        # 40G reflects observed usage; if a build ever dies with ENOSPC this
+        # is the knob to raise. Deleted with the instance.
+        system_disk=ecs_models.RunInstancesRequestSystemDisk(category="cloud_essd", size="40"),
         user_data=user_data,
         tag=[
             ecs_models.RunInstancesRequestTag(key=MANAGED_BY_TAG_KEY, value=MANAGED_BY_TAG_VALUE),
@@ -400,11 +417,17 @@ def provision(config: ProvisionConfig) -> int:
     runner_name = runner_name_for_run(config.run_id)
     runner_label = runner_label_for_run(config.run_id)
 
-    print("::group::Wait for cache disk", flush=True)
-    wait_for_disk_available(
-        client, config.region_id, config.cache_disk_id, time.monotonic() + DISK_WAIT_TIMEOUT_SECONDS
-    )
-    print("::endgroup::", flush=True)
+    if config.cache_disk_id is not None:
+        print("::group::Wait for cache disk", flush=True)
+        wait_for_disk_available(
+            client,
+            config.region_id,
+            config.cache_disk_id,
+            time.monotonic() + DISK_WAIT_TIMEOUT_SECONDS,
+        )
+        print("::endgroup::", flush=True)
+    else:
+        print("No cache disk configured; caches are cold on the system disk", flush=True)
 
     registration_token = create_registration_token(config.github_token, config.repo)
     user_data = encode_user_data(
@@ -423,11 +446,12 @@ def provision(config: ProvisionConfig) -> int:
     instance_id = run_instance(client, config, user_data)
     print(f"Instance id: {instance_id}", flush=True)
     wait_for_instance_status(client, config.region_id, instance_id, "Running", time.monotonic() + 5 * 60)
-    client.attach_disk(
-        ecs_models.AttachDiskRequest(
-            instance_id=instance_id, disk_id=config.cache_disk_id, delete_with_instance=False
+    if config.cache_disk_id is not None:
+        client.attach_disk(
+            ecs_models.AttachDiskRequest(
+                instance_id=instance_id, disk_id=config.cache_disk_id, delete_with_instance=False
+            )
         )
-    )
     print("::endgroup::", flush=True)
 
     # Record outputs early so the teardown job can clean up even when the
@@ -482,7 +506,8 @@ def main() -> int:
     missing = [
         name
         for name, value in vars(args).items()
-        if name != "resource_group_id" and (value is None or (isinstance(value, str) and not value))
+        if name not in ("resource_group_id", "cache_disk_id")
+        and (value is None or (isinstance(value, str) and not value))
     ]
     if missing:
         flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
@@ -494,11 +519,11 @@ def main() -> int:
         security_group_id=args.security_group_id,
         image_id=args.image_id,
         instance_type=args.instance_type,
-        cache_disk_id=args.cache_disk_id,
         repo=args.repo,
         run_id=args.run_id,
         github_token=args.github_token,
         resource_group_id=args.resource_group_id or None,
+        cache_disk_id=args.cache_disk_id or None,
         runner_uid=args.runner_uid,
         runner_gid=args.runner_gid,
     )

@@ -2,11 +2,18 @@
 
 The `Query Regression` workflow runs on **Aliyun ECS ephemeral runners**
 (`aliyun-ecs`, the default and only automated path): a `provision` job on
-`ubuntu-latest` creates one pay-as-you-go ECS instance per run, attaches the
-retained ESSD build-cache disk, and the instance registers itself as an
-ephemeral GitHub runner with a per-run label. A `teardown` job
-(`if: always()`) deletes the instance; `query-regression-janitor.yml` sweeps
-tagged leftovers older than 4 hours daily.
+`ubuntu-latest` creates one pay-as-you-go ECS instance per run, and the
+instance registers itself as an ephemeral GitHub runner with a per-run
+label. A `teardown` job (`if: always()`) deletes the instance;
+`query-regression-janitor.yml` sweeps tagged leftovers older than 4 hours
+daily.
+
+Build caches live on the instance's system disk by default, so **every run
+compiles cold**; only the within-run reuse (base build warms the candidate
+build through the shared target dir and sccache) applies. Setting
+`QUERY_REGRESSION_CACHE_DISK_ID` to a retained ESSD disk re-enables warm
+cross-run caches — the provision script then attaches the disk and
+bind-mounts its subdirectories over the runner cache paths.
 
 Dispatching with any other `runner` value uses it as a literal self-hosted
 runner label, which is how a manually prepared host (see
@@ -32,15 +39,16 @@ Configuration lives in repository variables/secrets:
 | vars | `ALIYUN_ECS_REGION_ID` / `ALIYUN_ECS_VSWITCH_ID` / `ALIYUN_ECS_SECURITY_GROUP_ID` | Network placement. The security group should allow egress only; no inbound rules are needed. The vSwitch pins the zone, which must match the cache disk's zone. |
 | vars | `ALIYUN_ECS_INSTANCE_TYPE` | Dedicated (non-burstable, non-shared) instance family, e.g. `ecs.g8i.2xlarge`. Both base and candidate clusters run on the same machine, so noisy neighbors break thresholds. |
 | vars | `QUERY_REGRESSION_ECS_IMAGE_ID` | Custom image built by `ecs-image/build-ecs-image.py`. |
-| vars | `QUERY_REGRESSION_CACHE_DISK_ID` | Retained ESSD data disk (>=600Gi) holding the build caches. |
+| vars | `QUERY_REGRESSION_CACHE_DISK_ID` | Optional. Unset/empty: no retained disk, caches are cold every run. Set to a retained ESSD disk id (~40Gi is enough from observed usage) for warm cross-run caches. ESSD cannot be shrunk, only recreated — update this variable with the new disk id afterwards. |
 
-The retained cache disk holds top-level directories `cargo-registry-v1`,
-`cargo-git-v1`, `query-regression-target-v1`, `meta-v1`, and `sccache-v1`,
-which cloud-init bind-mounts to the `/home/runner/...` paths the workflow
-uses. The instance is created with `DeleteWithInstance=false` for the data
-disk, so deleting the instance detaches and retains it. To rebuild the cache
-from scratch, delete or reformat the disk; the next provision formats an
-unformatted disk automatically.
+When a cache disk is configured, it holds top-level directories
+`cargo-registry-v1`, `cargo-git-v1`, `query-regression-target-v1`, `meta-v1`,
+and `sccache-v1`, which cloud-init bind-mounts to the `/home/runner/...`
+paths the workflow uses; without a disk those paths are plain directories on
+the system disk. The instance is created with `DeleteWithInstance=false` for
+the data disk, so deleting the instance detaches and retains it. To rebuild
+the cache from scratch, delete or reformat the disk; the next provision
+formats an unformatted disk automatically.
 
 Trust model on the ECS path: the instance receives only the one-hour runner
 registration token via user data and holds no cloud credentials; the Aliyun
@@ -151,9 +159,11 @@ and `git` mounts are persistent. `RUSTUP_HOME=/opt/rustup` and
 `/opt/cargo/bin` are image-owned immutable paths, while `CARGO_TARGET_DIR`,
 cache metadata, and `SCCACHE_DIR` are persistent absolute paths. The runner
 sets `RUSTC_WRAPPER=/usr/local/bin/sccache`,
-`SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=40G`, and
+`SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=10G`, and
 `CARGO_INCREMENTAL=0`. sccache uses its local disk backend and self-evicts at
-40G; do not add runtime downloads, object storage, or a shared backend.
+10G; do not add runtime downloads, object storage, or a shared backend. The
+sccache cap must fit on the retained cache disk together with the target dir
+and cargo registry — keep them in proportion when resizing the disk.
 
 The repository's `.cargo/config.toml` remains a trusted per-revision build
 input. In contrast, `$CARGO_HOME/config*`, credentials, installed bins, and
