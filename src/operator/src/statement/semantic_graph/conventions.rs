@@ -57,6 +57,12 @@ pub struct ImplicitEntity {
     /// Skipped when the column is absent or empty.
     #[serde(default)]
     pub qualified_by: Option<String>,
+    /// Columns whose presence on a row suppresses this declaration *for that
+    /// row*. The judgement has to be row-level: one descriptor table holds both
+    /// Kubernetes and bare-runtime rows, so a schema-level test cannot separate
+    /// them.
+    #[serde(default)]
+    pub suppressed_by: Vec<String>,
     /// Descriptive label columns, filtered to those present (kube-state-metrics
     /// label sets vary across versions).
     #[serde(default)]
@@ -243,6 +249,12 @@ fn validate(conventions: &Conventions) -> Result<(), String> {
                     implicit.entity
                 ));
             }
+            if implicit.suppressed_by.iter().any(String::is_empty) {
+                return Err(format!(
+                    "entity `{}` of info metric `{table}` has an empty suppressed_by column",
+                    implicit.entity
+                ));
+            }
             if implicit.qualified_by.as_ref().is_some_and(String::is_empty) {
                 return Err(format!(
                     "entity `{}` of info metric `{table}` has an empty qualified_by",
@@ -316,6 +328,10 @@ mod tests {
                 ""
             )
             .contains("descriptive_rest")
+        );
+        assert!(
+            err("", "t: [{entity: host, id: [x], suppressed_by: ['']}]", "")
+                .contains("suppressed_by")
         );
         // the otel map runs through the same per-table validation
         assert!(err("", "", "t: [{entity: hosts, id: [x]}]").contains("unknown entity type"));

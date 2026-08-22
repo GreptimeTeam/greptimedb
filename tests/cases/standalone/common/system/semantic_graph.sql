@@ -394,7 +394,9 @@ drop table http_requests_total;
 -- the stable ids only, so rows with an empty host.id / container.id link no
 -- infrastructure, and a row without an instance value declares no
 -- service.instance. The same table name stamped source=prometheus is not
--- whitelisted.
+-- whitelisted. The pod row shows the row-level suppression: a container inside
+-- a pod is the k8s.container entity, so the generic container (and every edge
+-- it would carry) yields on that row while the bare-runtime row keeps its own.
 create table greptime_otel_resource_info (
   greptime_timestamp timestamp(3) time index,
   job string,
@@ -405,9 +407,12 @@ create table greptime_otel_resource_info (
   "host.name" string,
   "container.id" string,
   "container.name" string,
+  "k8s.pod.uid" string,
+  "k8s.pod.name" string,
   greptime_value double,
   primary key (job, instance, "service.name", "service.namespace",
-    "host.id", "host.name", "container.id", "container.name")
+    "host.id", "host.name", "container.id", "container.name",
+    "k8s.pod.uid", "k8s.pod.name")
 ) with (
   'greptime.semantic.signal_type' = 'metric',
   'greptime.semantic.source' = 'opentelemetry',
@@ -415,9 +420,10 @@ create table greptime_otel_resource_info (
 );
 
 insert into greptime_otel_resource_info values
-  (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', 1),
-  (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', 1),
-  (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', 1);
+  (now(), 'shop/api', 'inst-1', 'api', 'shop', 'h-1', 'node-a', 'c-1', 'api-ctr', '', '', 1),
+  (now(), 'shop/api', 'inst-2', 'api', 'shop', '', 'laptop', '', '', '', '', 1),
+  (now(), 'worker', '', 'worker', '', 'h-1', 'node-a', '', '', '', '', 1),
+  (now(), 'shop/api', 'inst-3', 'api', 'shop', 'h-2', 'node-b', 'c-2', 'api-ctr', 'uid-1', 'api-pod', 1);
 
 -- SQLNESS PROTOCOL MYSQL
 select entity_type, entity_id, source_tables

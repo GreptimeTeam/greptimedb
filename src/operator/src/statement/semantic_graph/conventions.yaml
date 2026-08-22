@@ -51,8 +51,13 @@ otlp_trace_entities:
     id: [resource_attributes.host.id]
     descriptive:
       - resource_attributes.host.name
+  # A container inside a pod is already the k8s.container entity, identified by
+  # [pod uid, container name]; a generic container beside it would be a second
+  # node for one physical container. The generic type therefore yields whenever
+  # the row carries a pod uid.
   - entity: container
     id: [resource_attributes.container.id]
+    suppressed_by: [resource_attributes.k8s.pod.uid]
     descriptive:
       - resource_attributes.container.name
   - entity: k8s.pod
@@ -152,8 +157,12 @@ otel_info_metrics:
       id: [host.id]
       descriptive:
         - host.name
+    # Yields to k8s.container on pod rows, as on the trace side above. One
+    # descriptor table holds both pod rows and bare-runtime rows, so the test
+    # is per row, not per table.
     - entity: container
       id: [container.id]
+      suppressed_by: [k8s.pod.uid]
       descriptive:
         - container.name
     - entity: k8s.pod

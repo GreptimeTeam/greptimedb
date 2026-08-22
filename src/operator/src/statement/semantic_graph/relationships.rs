@@ -41,8 +41,8 @@ use crate::statement::semantic_graph::conventions::{
 };
 use crate::statement::semantic_graph::{
     DECLARED_EDGE_IDENTITY_COLUMNS, EntityDeclaration, GraphQueryWindow, bin_interval, bin_ms,
-    conventions, entity_id_expr, identifies, interval, null_json, parse_json_expr, qcol, union_all,
-    unnest_rows,
+    conventions, declaration_predicate, entity_id_expr, interval, null_json, parse_json_expr, qcol,
+    union_all, unnest_rows,
 };
 
 /// The embedded conventions, with a broken file surfaced as a plan error.
@@ -188,11 +188,7 @@ fn co_declared_branch(
             .map(|(src, dst, rel_type, provenance)| {
                 // Both endpoints must identify something on the row for the
                 // row to witness the edge.
-                let valid = src
-                    .id_columns
-                    .iter()
-                    .chain(&dst.id_columns)
-                    .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
+                let valid = declaration_predicate(src).and(declaration_predicate(dst));
                 vec![
                     valid,
                     bin.clone(),
@@ -484,7 +480,7 @@ fn virtual_attrs_expr() -> DfResult<Expr> {
 /// side's timestamp and cannot prune this side's scan on their own).
 fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict: bool) -> Expr {
     let ts = ident(TRACE_TIMESTAMP_COLUMN);
-    let mut predicate = if strict {
+    let window_predicate = if strict {
         ts.clone()
             .gt_eq(window.source_start())
             .and(ts.lt(window.source_end()))
@@ -494,10 +490,7 @@ fn span_predicate(service: &EntityDeclaration, window: &GraphQueryWindow, strict
             .and(ts.lt(window.source_end() + interval(CHILD_SPAN_LATE_NANOS)))
     };
     // An absent identity component identifies nothing, on either endpoint.
-    for id in &service.id_columns {
-        predicate = predicate.and(identifies(id));
-    }
-    predicate
+    window_predicate.and(declaration_predicate(service))
 }
 
 /// One trace table's client spans, normalized to
@@ -878,6 +871,7 @@ mod tests {
             entity_type: "service".to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
+            suppressed_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1331,6 +1325,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
+            suppressed_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }

@@ -61,7 +61,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
-use datafusion_expr::{Case, Expr, LogicalPlan, ScalarUDF, cast, ident, lit};
+use datafusion_expr::{Case, Expr, LogicalPlan, ScalarUDF, cast, ident, lit, not};
 pub use relationships::{
     CallsSource, CoDeclaredSource, DeclaredSource, RelationshipSources, build_relationships_plan,
 };
@@ -292,6 +292,11 @@ pub struct EntityDeclaration {
     /// carrying the parts separately (a trace table's `service.namespace`)
     /// yields the same id as one carrying them pre-composed (`job`).
     pub id_qualifier: Option<String>,
+    /// Columns whose presence on a row suppresses this declaration for that
+    /// row, so a more specific entity type can own it (a pod's container is
+    /// the `k8s.container`, not a generic `container`). Empty for explicit
+    /// declarations: a user who declares a type means it unconditionally.
+    pub suppressed_by_columns: Vec<String>,
     /// Descriptive columns snapshotted into the `descriptive` JSON (may be empty).
     pub descriptive_columns: Vec<String>,
     /// Scope columns (namespace/environment). One column → scope verbatim;
@@ -432,6 +437,20 @@ pub(crate) fn identifies(column: &str) -> Expr {
     ident(column)
         .is_not_null()
         .and(cast(ident(column), DataType::Utf8).not_eq(lit("")))
+}
+
+/// The row-level guard a declaration carries: every identity component present,
+/// and no suppressing column present. Every branch that turns a declaration
+/// into rows applies this, so the guard cannot drift between them.
+pub(crate) fn declaration_predicate(declaration: &EntityDeclaration) -> Expr {
+    let mut predicate = lit(true);
+    for column in &declaration.id_columns {
+        predicate = predicate.and(identifies(column));
+    }
+    for column in &declaration.suppressed_by_columns {
+        predicate = predicate.and(not(identifies(column)));
+    }
+    predicate
 }
 
 const ID_SEPARATOR: &str = ",";
@@ -694,10 +713,7 @@ fn registry_source(
 
         // Keep this predicate per declaration so an absent identity for one
         // entity does not remove other entities on the row.
-        let valid = decl
-            .id_columns
-            .iter()
-            .fold(lit(true), |predicate, id| predicate.and(identifies(id)));
+        let valid = declaration_predicate(decl);
 
         rows.push(vec![
             valid,
@@ -889,6 +905,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             id_qualifier: None,
+            suppressed_by_columns: vec![],
             descriptive_columns: vec![],
             scope_columns: vec![],
         }
@@ -1152,6 +1169,59 @@ mod tests {
         let batches = collect(&ctx, plan).await;
         let ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
         assert_eq!(ids, vec!["h2"]);
+    }
+
+    #[tokio::test]
+    async fn registry_suppression_is_per_row() {
+        // One descriptor table holds both pod rows and bare-runtime rows, so a
+        // schema-level test could only keep or drop the whole table; the
+        // generic container entity must yield on exactly the pod rows.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("container_id", DataType::Utf8, false),
+            Field::new("pod_uid", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 2_000, 3_000])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["c-pod", "c-docker", "c-empty"])),
+                Arc::new(StringArray::from(vec![Some("uid-1"), None, Some("")])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "descriptors",
+            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+
+        let mut declaration = decl("container", &["container_id"]);
+        declaration.table = "descriptors".to_string();
+        declaration.suppressed_by_columns = vec!["pod_uid".to_string()];
+        let plan = build_registry_plan(
+            vec![RegistrySource {
+                declarations: vec![declaration],
+                scan: ctx.table("descriptors").await.unwrap(),
+            }],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut ids: Vec<String> = collect(&ctx, plan)
+            .await
+            .iter()
+            .flat_map(|b| strings(b, 5))
+            .collect();
+        ids.sort();
+        // An empty uid is no uid: it suppresses nothing.
+        assert_eq!(ids, vec!["c-docker", "c-empty"]);
     }
 
     #[tokio::test]

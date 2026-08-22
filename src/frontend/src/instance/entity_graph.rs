@@ -179,6 +179,7 @@ impl EntityGraphProviderImpl {
                         entity_type,
                         id_columns,
                         id_qualifier: None,
+                        suppressed_by_columns: vec![],
                         descriptive_columns,
                         scope_columns,
                     })
@@ -323,6 +324,14 @@ impl EntityGraphProviderImpl {
                 .qualified_by
                 .clone()
                 .filter(|c| schema.column_schema_by_name(c).is_some());
+            // A column the table does not have suppresses nothing, and must
+            // not reach the derivation plan as an unresolvable reference.
+            let suppressed_by_columns = implicit
+                .suppressed_by
+                .iter()
+                .filter(|c| schema.column_schema_by_name(c).is_some())
+                .cloned()
+                .collect();
             declarations.push(EntityDeclaration {
                 schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
@@ -330,6 +339,7 @@ impl EntityGraphProviderImpl {
                 entity_type: implicit.entity.clone(),
                 id_columns: implicit.id.clone(),
                 id_qualifier,
+                suppressed_by_columns,
                 descriptive_columns,
                 scope_columns: vec![],
             });
@@ -1027,6 +1037,14 @@ mod tests {
                 "service.instance"
             ]
         );
+        // A pod's container belongs to k8s.container; the generic type yields
+        // on those rows instead of doubling the node.
+        assert_eq!(declarations[0].entity_type, "container");
+        assert_eq!(
+            declarations[0].suppressed_by_columns,
+            vec!["k8s.pod.uid"],
+            "the generic container must yield to k8s.container per row"
+        );
         assert_eq!(declarations[1].id_columns, vec!["host.id"]);
         assert_eq!(declarations[1].descriptive_columns, vec!["host.name"]);
         assert_eq!(declarations[3].id_columns, vec!["job"]);
@@ -1036,6 +1054,18 @@ mod tests {
         );
         assert_eq!(declarations[4].id_columns, vec!["job", "instance"]);
         assert!(declarations[4].descriptive_columns.is_empty());
+
+        // A deployment that never reports pods has no `k8s.pod.uid` column at
+        // all: the suppression drops out instead of reaching the derivation
+        // plan as an unresolvable column reference.
+        let no_k8s = prom_table_info(
+            "greptime_otel_resource_info",
+            &["job", "container.id"],
+            OTEL_STAMPS,
+        );
+        let declarations = sorted_declarations(&no_k8s);
+        assert_eq!(declarations[0].entity_type, "container");
+        assert!(declarations[0].suppressed_by_columns.is_empty());
 
         let partial = prom_table_info(
             "greptime_otel_resource_info",
